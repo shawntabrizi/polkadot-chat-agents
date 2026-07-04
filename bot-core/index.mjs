@@ -52,6 +52,9 @@ const bridgePort = Number(env.BOT_BRIDGE_PORT ?? 8799);
 const bridgeHost = env.BOT_BRIDGE_HOST ?? "0.0.0.0";
 const brain = (env.BOT_BRAIN ?? "bridge").trim().toLowerCase(); // bridge | hermes | echo | codex
 const ackText = env.BOT_ACK_TEXT ?? (brain === "bridge" || brain === "hermes" ? "Connecting you to the agent…" : "");
+// Sent immediately on each message a slow brain (codex) will answer, so the user
+// sees the bot is working instead of a silent ~10-30s gap. Set empty to disable.
+const thinkingText = env.BOT_THINKING_TEXT ?? "🤔 One moment — thinking…";
 const lookbackDays = Number(env.BOT_REQUEST_LOOKBACK_DAYS ?? 7);
 const futureDays = Number(env.BOT_REQUEST_FUTURE_DAYS ?? 2);
 const pollMs = Number(env.BOT_POLL_MS ?? 2000);
@@ -190,8 +193,15 @@ const handleInbound = async (peerHex, text, messageId) => {
     return;
   }
   if (brain === "codex") {
+    // Immediate "thinking" ack so the ~10-30s codex delay doesn't feel timed out.
+    if (thinkingText) { sendText(peerHex, thinkingText).catch((e) => log("BOT_THINKING_FAILED", { error: String(e?.message ?? e) })); }
     const reply = await runCodex(peerHex, text);
-    if (!reply) { log("BOT_AI_FAILED", { to: peerHex }); return; }
+    if (!reply) {
+      log("BOT_AI_FAILED", { to: peerHex });
+      // Don't leave the user hanging after the "thinking" ack.
+      await sendText(peerHex, "Sorry — I couldn't reach my AI just now. Please try again in a moment.").catch(() => {});
+      return;
+    }
     const h = aiHistory.get(peerHex) ?? [];
     h.push({ role: "user", text }, { role: "bot", text: reply });
     aiHistory.set(peerHex, h.slice(-AI_TURNS * 2));
