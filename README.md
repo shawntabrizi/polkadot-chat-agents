@@ -25,16 +25,18 @@ cd bot-core
 npm install                                                   # deps + descriptors
 cargo build --manifest-path ../tools/bandersnatch-cli/Cargo.toml   # one-time: identity tool
 
-# Create an AI bot — generates its identity and registers it on the network
-node cli.mjs create mycoolbot --brain codex
+# Create an AI bot — generates its identity, registers it, and locks it to you
+node cli.mjs create mycoolbot --brain codex --owner <your-polkadot-app-address>
 
 # Run it — now message "mycoolbot" from the Polkadot app and it replies
 node cli.mjs run mycoolbot
 ```
 
-`create` prints a link to message your bot; `node cli.mjs info mycoolbot` shows it
-again and whether the network has confirmed the bot yet (registration can take a
-few minutes). `node cli.mjs list` lists your bots. (Install as `pca` via the bin.)
+`--owner <address>` locks the bot so only your Polkadot app address can message it
+(recommended — a `codex`/`hermes` bot spends your quota, so it won't be left open
+unless you pass `--public`). `create` prints a link to message your bot;
+`node cli.mjs info mycoolbot` shows it again + whether the network has confirmed the
+bot (can take a few minutes). `node cli.mjs list` lists your bots. (Install as `pca`.)
 
 **Brains** (`--brain`): `codex` (answers via your local Codex CLI), `echo` (repeats
 you — a zero-config smoke test), or `hermes`/`bridge` (hands messages to an external

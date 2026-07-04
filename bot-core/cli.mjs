@@ -21,6 +21,7 @@ import {
   generateMnemonic,
   mnemonicToMiniSecret,
   ss58Address,
+  ss58Decode,
 } from "@polkadot-labs/hdkd-helpers";
 import { createClient as createPapiClient } from "polkadot-api";
 import { getWsProvider } from "polkadot-api/ws";
@@ -44,6 +45,18 @@ const DEFAULT_ENDPOINT = "wss://paseo-people-next-system-rpc.polkadot.io";
 const BRAINS = ["echo", "codex", "hermes"];
 
 const bytesToHex = (b) => `0x${Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("")}`;
+
+// Accept a Polkadot app address (SS58, e.g. "5Ggw…") or a raw 32-byte account
+// hex, and return the bare lowercase account-id hex used by the allowlist.
+function toAccountHex(addr) {
+  const s = String(addr).trim();
+  const hex = /^0x?([0-9a-fA-F]{64})$/.exec(s);
+  if (hex) return hex[1].toLowerCase();
+  try {
+    const [publicKey] = ss58Decode(s);
+    return Array.from(publicKey, (b) => b.toString(16).padStart(2, "0")).join("");
+  } catch { fail(`"${addr}" isn't a valid address — use your Polkadot app address (starts with 5…) or a 0x… account id.`); }
+}
 const c = (s, code) => (process.stdout.isTTY && !process.env.NO_COLOR ? `\x1b[${code}m${s}\x1b[0m` : s);
 const ok = (s) => console.log(`${c("✓", "32")} ${s}`);
 const step = (s) => console.log(`${c("→", "36")} ${s}`);
@@ -88,7 +101,16 @@ async function cmdCreate(name, flags) {
   if (!BRAINS.includes(brain)) fail(`--brain must be one of: ${BRAINS.join(", ")}`);
   const endpoint = flags.network == null || flags.network === "paseo" ? DEFAULT_ENDPOINT : String(flags.endpoint ?? flags.network);
   const backendUrl = flags.backend ? String(flags.backend) : DEFAULT_BACKENDS.paseo;
-  const allow = String(flags.allow ?? "").split(",").map((s) => s.trim().replace(/^0x/i, "").toLowerCase()).filter(Boolean);
+  const allowInputs = [
+    ...String(flags.allow ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+    ...(flags.owner ? [String(flags.owner)] : []),
+  ];
+  const allow = allowInputs.map(toAccountHex);
+  const isPublic = flags.public === true;
+  // Safety: a paid brain (codex/hermes) left open to everyone can burn your quota.
+  if (allow.length === 0 && !isPublic && (brain === "codex" || brain === "hermes")) {
+    fail(`The "${brain}" brain spends your quota, so this bot can't be left open by default.\n  Lock it to you:  --owner <your Polkadot app address>\n  Or open to all:  --public`);
+  }
   const register = flags["no-register"] !== true;
   // Network username must be >=6 lowercase letters; default to the bot name.
   const wantUsername = String(flags.username ?? name);
@@ -140,7 +162,9 @@ async function cmdCreate(name, flags) {
   }
 
   console.log();
-  say("Message your bot in the Polkadot app:");
+  console.log(allow.length ? `Locked to ${allow.length} allowlisted address${allow.length > 1 ? "es" : ""} — only they can message it.`
+                   : "Open — anyone can message it.");
+  console.log("Message your bot in the Polkadot app:");
   console.log(`  ${c(deeplink(accountIdHex), "36")}`);
   if (config.username) note(`or search: ${config.username}`);
   console.log();
@@ -174,6 +198,7 @@ async function cmdInfo(name) {
   console.log(`  brain:    ${cfg.brain}`);
   console.log(`  network:  ${cfg.endpoint}`);
   console.log(`  address:  ${cfg.address}`);
+  console.log(`  access:   ${(cfg.allow?.length) ? `locked to ${cfg.allow.length} address${cfg.allow.length > 1 ? "es" : ""}` : c("open to anyone", "33")}`);
   console.log(`  status:   ${messageable ? c("live — people can message it", "32") : c("registration pending (check again in a bit)", "33")}`);
   console.log();
   console.log(`  Message this bot in the Polkadot app:`);
@@ -202,10 +227,13 @@ function cmdRun(name) {
 function usage() {
   console.log(`pca — Polkadot Chat Agents
 
-  pca create <name> [--brain echo|codex|hermes] [--network paseo] [--allow 0x..,..] [--username name]
+  pca create <name> [--brain echo|codex|hermes] [--owner <your address>] [--public] [--network paseo] [--username name]
   pca run <name>       start the bot
   pca list             list your bots
   pca info <name>      show address + how to message it
+
+  --owner <addr>   lock the bot so only your Polkadot app address can message it (recommended)
+  --public         let anyone message it (required to leave a codex/hermes bot open)
 
 Bots live in ${BOTS_DIR} (override with PCA_BOTS_DIR).`);
 }
