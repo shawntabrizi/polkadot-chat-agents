@@ -180,11 +180,20 @@ const runCodex = (peerHex, userText) => new Promise((resolve) => {
   ].filter(Boolean).join("\n\n");
   // stdin MUST be ignored: a piped stdin makes codex block on "Reading additional input".
   const child = spawn("codex", ["exec", "--sandbox", "read-only", "--skip-git-repo-check", prompt], { stdio: ["ignore", "pipe", "pipe"] });
-  let out = "";
-  const timer = setTimeout(() => { child.kill("SIGKILL"); resolve(null); }, 90_000);
+  let out = "", err = "";
+  const timer = setTimeout(() => { child.kill("SIGKILL"); log("BOT_AI_TIMEOUT", { to: peerHex }); resolve(null); }, 90_000);
   child.stdout.on("data", (d) => { out += d; });
-  child.on("error", () => { clearTimeout(timer); resolve(null); });
-  child.on("close", (code) => { clearTimeout(timer); resolve(code === 0 ? out.trim() : null); });
+  child.stderr.on("data", (d) => { err += d; });
+  child.on("error", (e) => { clearTimeout(timer); log("BOT_AI_SPAWN_FAILED", { error: String(e?.message ?? e) }); resolve(null); });
+  child.on("close", (code) => {
+    clearTimeout(timer);
+    if (code === 0) return resolve(out.trim());
+    // Classify the failure so the operator knows the remedy (re-auth vs. retry).
+    // Token management belongs to the codex CLI; we only surface *which* failure it is.
+    const authRevoked = /401|unauthorized|refresh token|could not be refreshed|log ?out and sign in/i.test(err);
+    log(authRevoked ? "BOT_AI_AUTH_REVOKED" : "BOT_AI_FAILED", { to: peerHex, code, stderr: err.trim().slice(-500) });
+    resolve(null);
+  });
 });
 
 const handleInbound = async (peerHex, text, messageId) => {
@@ -195,9 +204,8 @@ const handleInbound = async (peerHex, text, messageId) => {
   if (brain === "codex") {
     // Immediate "thinking" ack so the ~10-30s codex delay doesn't feel timed out.
     if (thinkingText) { sendText(peerHex, thinkingText).catch((e) => log("BOT_THINKING_FAILED", { error: String(e?.message ?? e) })); }
-    const reply = await runCodex(peerHex, text);
+    const reply = await runCodex(peerHex, text);  // logs its own classified failure reason
     if (!reply) {
-      log("BOT_AI_FAILED", { to: peerHex });
       // Don't leave the user hanging after the "thinking" ack.
       await sendText(peerHex, "Sorry — I couldn't reach my AI just now. Please try again in a moment.").catch(() => {});
       return;
