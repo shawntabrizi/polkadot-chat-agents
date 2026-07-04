@@ -1,0 +1,20 @@
+{
+  "name": "openclaw-channel-polkadot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenClaw channel plugin: Polkadot app chat, via the bot-core HTTP bridge.",
+  "openclaw": {
+    "extensions": ["./index.ts"],
+    "channel": {
+      "id": "polkadot",
+      "label": "Polkadot",
+      "selectionLabel": "Polkadot (app chat)",
+      "docsPath": "/channels/polkadot",
+      "docsLabel": "polkadot",
+      "blurb": "Chat with your agent from the Polkadot mobile app, over the Statement Store.",
+      "order": 80
+    },
+    "compat": { "pluginApi": ">=2026.6.11" }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "id": "polkadot",
+  "name": "Polkadot",
+  "description": "Polkadot app chat channel — bridges the Polkadot mobile app's Statement Store chat to OpenClaw via a local bot-core HTTP bridge.",
+  "activation": { "onStartup": false },
+  "channels": ["polkadot"],
+  "channelConfigs": {
+    "polkadot": {
+      "label": "Polkadot",
+      "description": "Polkadot app chat via the bot-core bridge.",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "enabled": { "type": "boolean" },
+          "bridgeUrl": { "type": "string", "description": "Base URL of the bot-core bridge, e.g. http://127.0.0.1:8799" },
+          "dmPolicy": { "type": "string", "enum": ["open", "pairing", "closed"] },
+          "allowFrom": { "type": "array", "items": { "type": "string" }, "description": "Allowed peer chat ids (account-id hex)" },
+          "defaultAccount": { "type": "string" },
+          "accounts": { "type": "object", "additionalProperties": { "type": "object" } }
+        }
+      }
+    }
+  },
+  "channelEnvVars": { "polkadot": ["POLKADOT_BRIDGE_URL"] },
+  "configSchema": { "type": "object", "additionalProperties": false, "properties": {} }
+}

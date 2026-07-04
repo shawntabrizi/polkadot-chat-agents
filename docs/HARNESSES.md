@@ -81,9 +81,42 @@ plugin recreates its HTTP connection on error, so a bot-core restart won't wedge
 ## OpenClaw (openclaw/openclaw)
 
 OpenClaw is a TypeScript/Node multi-channel AI gateway with a channel-plugin SDK.
-The Polkadot channel plugin bridges the same way (long-poll `/inbound`, `POST /send`).
+The Polkadot channel plugin (`openclaw-plugin/polkadot/`) bridges the same way — a
+`gateway.startAccount` background loop long-polls `/inbound`, dispatches each
+message into the agent (`channelRuntime.inbound.run`), and the agent's reply flows
+back through `delivery.deliver` → `POST /send`.
 
-_Setup steps are filled in once the channel plugin lands — see `openclaw-plugin/`._
+**1. Run bot-core in bridge mode** (so it hands messages to OpenClaw):
+
+```bash
+pca create mybot --brain hermes --owner <your-address>   # "hermes" brain = external-agent bridge
+pca run mybot                                            # bridge on http://127.0.0.1:8799
+```
+
+**2. Install + enable the channel plugin:**
+
+```bash
+openclaw plugins install <path-or-npm-spec-to openclaw-plugin/polkadot>
+openclaw plugins enable polkadot
+```
+
+**3. Configure the channel** (`openclaw.json` → `channels.polkadot`, or env):
+
+```jsonc
+"channels": {
+  "polkadot": {
+    "enabled": true,
+    "bridgeUrl": "http://127.0.0.1:8799",   // or POLKADOT_BRIDGE_URL
+    "dmPolicy": "closed",                    // open | pairing | closed
+    "allowFrom": ["<peer account-id hex>"]
+  }
+}
+```
+
+**4. Start OpenClaw's gateway** and message your bot in the Polkadot app.
+
+See `openclaw-plugin/polkadot/README.md` for details and status (it's the reference
+implementation, pending validation on a live OpenClaw install).
 
 ---
 
