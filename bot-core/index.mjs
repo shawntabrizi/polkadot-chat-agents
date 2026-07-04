@@ -18,6 +18,7 @@
 //   BOT_REQUEST_LOOKBACK_DAYS (7), BOT_REQUEST_FUTURE_DAYS (2), BOT_POLL_MS (2000).
 
 import http from "node:http";
+import { spawn } from "node:child_process";
 import { createClient as createPapiClient } from "polkadot-api";
 import { getWsProvider } from "polkadot-api/ws";
 import { paseoPeopleNext } from "@polkadot-api/descriptors";
@@ -49,7 +50,8 @@ const endpoint = env.BOT_ENDPOINT ?? DEFAULT_ENDPOINT;
 const seedHex = (env.BOT_SEED_HEX ?? env.FAUCET_CHAT_SERVICE_SECRET ?? "").trim();
 const bridgePort = Number(env.BOT_BRIDGE_PORT ?? 8799);
 const bridgeHost = env.BOT_BRIDGE_HOST ?? "0.0.0.0";
-const ackText = env.BOT_ACK_TEXT ?? "Connecting you to the agent…";
+const brain = (env.BOT_BRAIN ?? "bridge").trim().toLowerCase(); // bridge | hermes | echo | codex
+const ackText = env.BOT_ACK_TEXT ?? (brain === "bridge" || brain === "hermes" ? "Connecting you to the agent…" : "");
 const lookbackDays = Number(env.BOT_REQUEST_LOOKBACK_DAYS ?? 7);
 const futureDays = Number(env.BOT_REQUEST_FUTURE_DAYS ?? 2);
 const pollMs = Number(env.BOT_POLL_MS ?? 2000);
@@ -162,6 +164,44 @@ const sendText = async (peerHex, text) => {
   return result?.priority ?? String(Date.now());
 };
 
+// ---------- brain: decide what to do with an inbound message ----------
+const aiHistory = new Map(); // peerHex -> [{role, text}]
+const AI_TURNS = 8;
+const runCodex = (peerHex, userText) => new Promise((resolve) => {
+  const hist = (aiHistory.get(peerHex) ?? []).slice(-AI_TURNS * 2)
+    .map((t) => `${t.role === "user" ? "User" : "You"}: ${t.text}`).join("\n");
+  const prompt = [
+    "You are a warm, concise assistant chatting inside the Polkadot app. Reply in 1-3 short sentences. Output only your reply.",
+    hist ? `Conversation so far:\n${hist}` : "",
+    `User: ${userText}`, "You:",
+  ].filter(Boolean).join("\n\n");
+  // stdin MUST be ignored: a piped stdin makes codex block on "Reading additional input".
+  const child = spawn("codex", ["exec", "--sandbox", "read-only", "--skip-git-repo-check", prompt], { stdio: ["ignore", "pipe", "pipe"] });
+  let out = "";
+  const timer = setTimeout(() => { child.kill("SIGKILL"); resolve(null); }, 90_000);
+  child.stdout.on("data", (d) => { out += d; });
+  child.on("error", () => { clearTimeout(timer); resolve(null); });
+  child.on("close", (code) => { clearTimeout(timer); resolve(code === 0 ? out.trim() : null); });
+});
+
+const handleInbound = async (peerHex, text, messageId) => {
+  if (brain === "echo") {
+    await sendText(peerHex, `Echo: ${text}`).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
+    return;
+  }
+  if (brain === "codex") {
+    const reply = await runCodex(peerHex, text);
+    if (!reply) { log("BOT_AI_FAILED", { to: peerHex }); return; }
+    const h = aiHistory.get(peerHex) ?? [];
+    h.push({ role: "user", text }, { role: "bot", text: reply });
+    aiHistory.set(peerHex, h.slice(-AI_TURNS * 2));
+    await sendText(peerHex, reply).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
+    return;
+  }
+  // bridge / hermes / unknown: hand off to an external agent via the HTTP bridge
+  enqueueInbound({ chat_id: peerHex, text, message_id: messageId });
+};
+
 // ---------- receive: dedup + handlers ----------
 const seenStatements = new Set();
 const seenRequests = new Set();
@@ -193,10 +233,10 @@ const handleOpener = async (data) => {
     await submitAppStatement(requestRpc, { walletPair: wallet, channel: session.requestChannel, topics: [session.ownSessionId], scaleEncodedPayload: ackPayload, expiryFactory });
   } catch (error) { log("BOT_ACK_FAILED", { to: senderHex, error: error instanceof Error ? error.message : String(error) }); }
   log("BOT_RECEIVED_OPENER", { from: senderHex, requestId: decoded.messageId, text: decoded.text });
-  enqueueInbound({ chat_id: senderHex, text: decoded.text ?? "", message_id: decoded.messageId });
+  await handleInbound(senderHex, decoded.text ?? "", decoded.messageId);
 };
 
-const handleSessionStatement = (data, peerHex, session) => {
+const handleSessionStatement = async (data, peerHex, session) => {
   let decoded;
   try { decoded = decodeSessionStatementPayload(data, session, hexToBytes(peerHex)); } catch { return; }
   if (decoded?.kind !== "request") return;
@@ -206,7 +246,7 @@ const handleSessionStatement = (data, peerHex, session) => {
       if (seenRequests.has(id)) continue;
       seenRequests.add(id);
       log("BOT_RECEIVED_TEXT", { from: peerHex, text: m.text });
-      enqueueInbound({ chat_id: peerHex, text: m.text, message_id: decoded.requestId });
+      await handleInbound(peerHex, m.text, decoded.requestId);
     }
   }
 };
@@ -249,7 +289,7 @@ const pollOnce = async () => {
       const key = fp(data);
       if (seenStatements.has(key)) continue;
       seenStatements.add(key);
-      handleSessionStatement(data, peerHex, entry.session);
+      await handleSessionStatement(data, peerHex, entry.session);
     }
   }
 };
@@ -298,7 +338,7 @@ const startBridge = () => {
 };
 
 // ---------- main ----------
-log("BOT_STARTING", { endpoint, account: `0x${accountIdHex}`, username, allowlist: allowedPeers.size });
+log("BOT_STARTING", { endpoint, account: `0x${accountIdHex}`, username, brain, allowlist: allowedPeers.size });
 startBridge();
 log("BOT_LISTENING", { account: `0x${accountIdHex}`, identifierKey: `0x${norm(bytesToHex(identifierKey))}` });
 for (;;) {
