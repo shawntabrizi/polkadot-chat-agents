@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Standalone transport bridge: Polkadot app chat <-> local HTTP API for AI agent harnesses.",
-  "bin": { "polkadot-bot-core": "index.mjs" },
+  "bin": {
+    "pca": "cli.mjs"
+  },
   "scripts": {
     "start": "node index.mjs",
     "postinstall": "papi generate"
