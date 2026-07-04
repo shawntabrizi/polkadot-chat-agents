@@ -6,17 +6,16 @@
 // are handled for you; you just pick a name and a brain.
 //
 //   pca create <name> [--brain echo|codex|claude|gemini|grok|hermes] [--network paseo] [--allow 0x..,0x..]
-//   pca run <name>              start the bot (foreground)
-//   pca list                    list your bots
-//   pca info <name>             show a bot's address + how to message it
-//
-// Registration on the network is added in the next step; `create` currently
-// provisions the identity + config locally.
+//   pca run <name>                  start the bot locally (foreground)
+//   pca deploy <name> --host <ssh>  ship it to a server and run it in Docker
+//   pca list                        list your bots
+//   pca info <name>                 show a bot's address + how to message it
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   generateMnemonic,
   mnemonicToMiniSecret,
@@ -226,16 +225,117 @@ function cmdRun(name) {
   child.on("exit", (code) => process.exit(code ?? 0));
 }
 
+// Run a local command (ssh/rsync/scp), streaming progress; optionally capture stdout.
+function runLocal(cmd, args, { capture = false } = {}) {
+  return spawnSync(cmd, args, { encoding: "utf8", stdio: capture ? ["ignore", "pipe", "inherit"] : "inherit" });
+}
+
+// Brains deploy can stand up as a single self-contained container. echo needs no
+// model CLI; claude installs Claude Code and authenticates via ANTHROPIC_API_KEY.
+// (codex/gemini/grok/hermes need an interactive login or a second container — not
+// yet automated; see docs/HARNESSES.md.)
+const DEPLOY_BRAINS = { echo: { install: null }, claude: { install: "npm i -g @anthropic-ai/claude-code" } };
+
+async function cmdDeploy(name, flags) {
+  if (!name) fail("Usage: pca deploy <name> --host <ssh-target> [--anthropic-key <key>] [--model <m>] [--dry-run]");
+  const host = flags.host ? String(flags.host) : null;
+  if (!host) fail(`--host <ssh-target> is required, e.g.  pca deploy ${name} --host root@1.2.3.4`);
+  const cfg = readConfig(name);
+  if (!fs.existsSync(secretPath(name))) fail(`No secret found for "${name}".`);
+  const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
+  const spec = DEPLOY_BRAINS[cfg.brain];
+  if (!spec) fail(`deploy currently supports the "echo" and "claude" brains (direct, single-container).\nFor "${cfg.brain}", set it up manually — see docs/HARNESSES.md.`);
+  if (!fs.existsSync(path.join(HERE, "node_modules")) || !fs.existsSync(path.join(HERE, ".papi"))) {
+    fail(`bot-core dependencies missing. Run:  (cd ${HERE} && npm ci)  then retry.`);
+  }
+  const key = flags["anthropic-key"] ? String(flags["anthropic-key"]) : process.env.ANTHROPIC_API_KEY;
+  if (cfg.brain === "claude" && !key) warn("No Anthropic key (--anthropic-key or ANTHROPIC_API_KEY) — the bot will start but can't answer until the container has one.");
+  if (!cfg.registered) warn(`"${name}" isn't confirmed on the network yet — people can't message it until it is (pca info ${name}).`);
+
+  const cn = `pca-${name}`;
+  const base = flags["remote-dir"] ? String(flags["remote-dir"]) : `pca-bots/${name}`;
+  const sshOpts = ["-o", "ConnectTimeout=10", "-o", "BatchMode=yes"];
+
+  // Generate env + compose locally, then (unless dry-run) ship and launch.
+  const envLines = [
+    `BOT_SEED_HEX=${secret.seedHex}`,
+    `BOT_ENDPOINT=${cfg.endpoint}`,
+    `BOT_BRAIN=${cfg.brain}`,
+    `BOT_ALLOWED_PEERS=${(cfg.allow ?? []).join(",")}`,
+    `BOT_USERNAME=${cfg.username ?? ""}`,
+  ];
+  if (flags.model) envLines.push(`BOT_AI_MODEL=${String(flags.model)}`);
+  if (cfg.brain === "claude" && key) envLines.push(`ANTHROPIC_API_KEY=${key}`);
+  const command = spec.install
+    ? JSON.stringify(["sh", "-lc", `${spec.install} && exec node index.mjs`])
+    : JSON.stringify(["node", "index.mjs"]);
+  const compose = `services:\n  bot:\n    image: node:22-slim\n    container_name: ${cn}\n    restart: unless-stopped\n    working_dir: /app\n    volumes:\n      - ./app:/app\n    env_file:\n      - ./bot.env\n    command: ${command}\n`;
+
+  if (flags["dry-run"] === true) {
+    console.log(`\n--- ${base}/docker-compose.yml ---\n${compose}`);
+    console.log(`--- ${base}/bot.env (secrets hidden) ---\n${envLines.map((l) => l.replace(/((?:SEED_HEX|ANTHROPIC_API_KEY)=).*/, "$1<hidden>")).join("\n")}`);
+    note(`\nDry run — nothing deployed.`);
+    return;
+  }
+
+  step(`Checking ${host}…`);
+  const pf = runLocal("ssh", [...sshOpts, host, "docker version --format '{{.Server.Version}}' && docker compose version --short"], { capture: true });
+  if (pf.status !== 0) fail(`Can't reach ${host} or Docker isn't available there.\n${(pf.stderr || "").trim()}`);
+  ok(`Connected — Docker ${(pf.stdout || "").trim().replace(/\n/g, " / ")}`);
+
+  runLocal("ssh", [...sshOpts, host, `mkdir -p ${base}/app`]);
+  step("Uploading bot-core (code + dependencies)…");
+  const rs = runLocal("rsync", ["-az", "--delete",
+    "--exclude", "bots/", "--exclude", "*.log", "--exclude", "*.bak*", "--exclude", ".git",
+    "-e", `ssh ${sshOpts.join(" ")}`, `${HERE}/`, `${host}:${base}/app/`]);
+  if (rs.status !== 0) fail("Upload (rsync) failed.");
+  ok("Uploaded");
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pca-deploy-"));
+  fs.writeFileSync(path.join(tmp, "bot.env"), `${envLines.join("\n")}\n`, { mode: 0o600 });
+  fs.writeFileSync(path.join(tmp, "docker-compose.yml"), compose);
+  const cp = runLocal("scp", [...sshOpts, path.join(tmp, "bot.env"), path.join(tmp, "docker-compose.yml"), `${host}:${base}/`]);
+  fs.rmSync(tmp, { recursive: true, force: true });
+  if (cp.status !== 0) fail("Copying config (scp) failed.");
+
+  step("Starting the container…");
+  const up = runLocal("ssh", [...sshOpts, host, `cd ${base} && docker compose -p ${cn} up -d`]);
+  if (up.status !== 0) fail("docker compose up failed.");
+
+  step("Waiting for the bot to come online…");
+  const wait = runLocal("ssh", [...sshOpts, host,
+    `for i in $(seq 1 20); do docker logs ${cn} 2>&1 | grep -q BOT_LISTENING && break; sleep 2; done; docker logs --tail 30 ${cn} 2>&1`], { capture: true });
+  const logs = wait.stdout || "";
+  if (/BOT_LISTENING/.test(logs)) {
+    ok(`"${name}" is live on ${host} (container ${cn}).`);
+    console.log();
+    console.log("Message it in the Polkadot app:");
+    console.log(`  ${c(deeplink(cfg.account), "36")}`);
+    if (cfg.username) note(`or search: ${cfg.username}`);
+    console.log();
+    note(`Logs:  ssh ${host} 'docker logs -f ${cn}'`);
+    note(`Stop:  ssh ${host} 'docker rm -f ${cn}'`);
+  } else {
+    warn("Container started, but I didn't see BOT_LISTENING. Recent logs:");
+    console.log(logs.split("\n").slice(-15).join("\n"));
+    note(`Check:  ssh ${host} 'docker logs -f ${cn}'`);
+  }
+}
+
 function usage() {
   console.log(`pca — Polkadot Chat Agents
 
   pca create <name> [--brain echo|codex|claude|gemini|grok|hermes] [--owner <your address>] [--public] [--network paseo] [--username name]
-  pca run <name>       start the bot
-  pca list             list your bots
-  pca info <name>      show address + how to message it
+  pca run <name>                       start the bot locally (foreground)
+  pca deploy <name> --host <ssh>       ship it to a server and run it in Docker
+  pca list                             list your bots
+  pca info <name>                      show address + how to message it
 
   --owner <addr>   lock the bot so only your Polkadot app address can message it (recommended)
   --public         let anyone message it (required to leave an AI/hermes bot open)
+
+deploy flags:  --host root@1.2.3.4 (required)  ·  --anthropic-key <key> (claude brain)  ·  --model <m> (low-cost model)  ·  --dry-run
+  Needs Docker on the server + SSH access. Supports the echo and claude brains today.
 
 Brains:  echo (test)  ·  codex/claude/gemini/grok (direct — shells to that CLI, which owns its own auth)  ·  hermes (hand off to an external agent harness)
 
@@ -248,6 +348,7 @@ try {
   switch (command) {
     case "create": await cmdCreate(arg, flags); break;
     case "run": cmdRun(arg); break;
+    case "deploy": await cmdDeploy(arg, flags); break;
     case "list": cmdList(); break;
     case "info": await cmdInfo(arg); break;
     default: usage(); if (command != null) process.exit(1);

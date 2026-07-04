@@ -32,6 +32,22 @@ node cli.mjs create mycoolbot --brain codex --owner <your-polkadot-app-address>
 node cli.mjs run mycoolbot
 ```
 
+**Keep it running on a server** — `pca deploy` ships the bot to any box with Docker
++ SSH and starts it in a container (survives logout/reboot):
+
+```bash
+# claude bot, fully headless — pin a low-cost model to keep tokens cheap
+node cli.mjs deploy mycoolbot --host root@1.2.3.4 \
+  --anthropic-key sk-ant-… --model claude-haiku-4-5-20251001
+
+node cli.mjs deploy mycoolbot --host root@1.2.3.4 --dry-run   # preview compose+env first
+```
+
+It uploads bot-core, generates the compose + env, brings the container up, and waits
+for it to come online. Supports the `echo` and `claude` brains today (single
+container); `codex`/`gemini`/`grok` need an interactive login and `hermes` needs a
+second container — set those up per `docs/HARNESSES.md`.
+
 `--owner <address>` locks the bot so only your Polkadot app address can message it
 (recommended — an AI/`hermes` bot spends your quota, so it won't be left open
 unless you pass `--public`). `create` prints a link to message your bot;
