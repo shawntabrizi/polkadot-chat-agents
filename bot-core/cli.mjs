@@ -5,7 +5,7 @@
 // (override with PCA_BOTS_DIR). Blockchain details (keys, addresses, topics)
 // are handled for you; you just pick a name and a brain.
 //
-//   pca create <name> [--brain echo|codex|hermes] [--network paseo] [--allow 0x..,0x..]
+//   pca create <name> [--brain echo|codex|claude|gemini|grok|hermes] [--network paseo] [--allow 0x..,0x..]
 //   pca run <name>              start the bot (foreground)
 //   pca list                    list your bots
 //   pca info <name>             show a bot's address + how to message it
@@ -42,7 +42,9 @@ async function withPeopleApi(endpoint, fn) {
 
 const BOTS_DIR = process.env.PCA_BOTS_DIR ?? path.resolve(process.cwd(), "bots");
 const DEFAULT_ENDPOINT = "wss://paseo-people-next-system-rpc.polkadot.io";
-const BRAINS = ["echo", "codex", "hermes"];
+const BRAINS = ["echo", "codex", "claude", "gemini", "grok", "hermes"];
+// Brains that call a model and therefore spend your quota — never left open by default.
+const PAID_BRAINS = new Set(["codex", "claude", "gemini", "grok", "hermes"]);
 
 const bytesToHex = (b) => `0x${Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("")}`;
 
@@ -107,8 +109,8 @@ async function cmdCreate(name, flags) {
   ];
   const allow = allowInputs.map(toAccountHex);
   const isPublic = flags.public === true;
-  // Safety: a paid brain (codex/hermes) left open to everyone can burn your quota.
-  if (allow.length === 0 && !isPublic && (brain === "codex" || brain === "hermes")) {
+  // Safety: a paid brain (codex/claude/gemini/grok/hermes) left open to everyone can burn your quota.
+  if (allow.length === 0 && !isPublic && PAID_BRAINS.has(brain)) {
     fail(`The "${brain}" brain spends your quota, so this bot can't be left open by default.\n  Lock it to you:  --owner <your Polkadot app address>\n  Or open to all:  --public`);
   }
   const register = flags["no-register"] !== true;
@@ -227,13 +229,15 @@ function cmdRun(name) {
 function usage() {
   console.log(`pca — Polkadot Chat Agents
 
-  pca create <name> [--brain echo|codex|hermes] [--owner <your address>] [--public] [--network paseo] [--username name]
+  pca create <name> [--brain echo|codex|claude|gemini|grok|hermes] [--owner <your address>] [--public] [--network paseo] [--username name]
   pca run <name>       start the bot
   pca list             list your bots
   pca info <name>      show address + how to message it
 
   --owner <addr>   lock the bot so only your Polkadot app address can message it (recommended)
-  --public         let anyone message it (required to leave a codex/hermes bot open)
+  --public         let anyone message it (required to leave an AI/hermes bot open)
+
+Brains:  echo (test)  ·  codex/claude/gemini/grok (direct — shells to that CLI, which owns its own auth)  ·  hermes (hand off to an external agent harness)
 
 Bots live in ${BOTS_DIR} (override with PCA_BOTS_DIR).`);
 }

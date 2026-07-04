@@ -50,11 +50,37 @@ const endpoint = env.BOT_ENDPOINT ?? DEFAULT_ENDPOINT;
 const seedHex = (env.BOT_SEED_HEX ?? env.FAUCET_CHAT_SERVICE_SECRET ?? "").trim();
 const bridgePort = Number(env.BOT_BRIDGE_PORT ?? 8799);
 const bridgeHost = env.BOT_BRIDGE_HOST ?? "0.0.0.0";
-const brain = (env.BOT_BRAIN ?? "bridge").trim().toLowerCase(); // bridge | hermes | echo | codex
+const brain = (env.BOT_BRAIN ?? "bridge").trim().toLowerCase(); // bridge | hermes | echo | codex | claude | gemini | grok
 const ackText = env.BOT_ACK_TEXT ?? (brain === "bridge" || brain === "hermes" ? "Connecting you to the agent…" : "");
-// Sent immediately on each message a slow brain (codex) will answer, so the user
-// sees the bot is working instead of a silent ~10-30s gap. Set empty to disable.
+// Sent immediately on each message a slow AI brain will answer, so the user sees
+// the bot is working instead of a silent ~10-30s gap. Set empty to disable.
 const thinkingText = env.BOT_THINKING_TEXT ?? "🤔 One moment — thinking…";
+
+// Direct AI-CLI "brains": bot-core shells out to an agent CLI that owns its own
+// auth/token. The transport core stays model-agnostic — these are just hooks that
+// turn a prompt into argv. Each CLI must print its reply to stdout and exit 0.
+const AI_BRAINS = {
+  codex:  { cmd: "codex",  args: (p) => ["exec", "--sandbox", "read-only", "--skip-git-repo-check", p] },
+  claude: { cmd: "claude", args: (p) => ["-p", p] },   // Claude Code print mode
+  gemini: { cmd: "gemini", args: (p) => ["-p", p] },   // gemini-cli non-interactive
+  grok:   { cmd: "grok",   args: (p) => ["-p", p] },   // grok CLI (may need the generic override below)
+};
+// Escape hatch for any other/custom CLI (incl. a grok CLI with a different flag):
+// BOT_AI_CMD=<bin> and optional BOT_AI_ARGS=<JSON array> where the token
+// "__PROMPT__" is replaced by the built prompt (if absent, prompt is the sole arg).
+// Takes precedence over the presets so a preset can be overridden without code.
+const aiSpec = (() => {
+  const custom = (env.BOT_AI_CMD ?? "").trim();
+  if (custom) {
+    let tmpl = null;
+    if (env.BOT_AI_ARGS) {
+      try { tmpl = JSON.parse(env.BOT_AI_ARGS); } catch { console.error("BOT_AI_ARGS must be a JSON array"); process.exit(2); }
+      if (!Array.isArray(tmpl)) { console.error("BOT_AI_ARGS must be a JSON array"); process.exit(2); }
+    }
+    return { cmd: custom, args: (p) => (tmpl ? tmpl.map((a) => (a === "__PROMPT__" ? p : a)) : [p]) };
+  }
+  return AI_BRAINS[brain] ?? null;
+})();
 const lookbackDays = Number(env.BOT_REQUEST_LOOKBACK_DAYS ?? 7);
 const futureDays = Number(env.BOT_REQUEST_FUTURE_DAYS ?? 2);
 const pollMs = Number(env.BOT_POLL_MS ?? 2000);
@@ -170,7 +196,7 @@ const sendText = async (peerHex, text) => {
 // ---------- brain: decide what to do with an inbound message ----------
 const aiHistory = new Map(); // peerHex -> [{role, text}]
 const AI_TURNS = 8;
-const runCodex = (peerHex, userText) => new Promise((resolve) => {
+const runAgentCli = (peerHex, userText) => new Promise((resolve) => {
   const hist = (aiHistory.get(peerHex) ?? []).slice(-AI_TURNS * 2)
     .map((t) => `${t.role === "user" ? "User" : "You"}: ${t.text}`).join("\n");
   const prompt = [
@@ -178,8 +204,8 @@ const runCodex = (peerHex, userText) => new Promise((resolve) => {
     hist ? `Conversation so far:\n${hist}` : "",
     `User: ${userText}`, "You:",
   ].filter(Boolean).join("\n\n");
-  // stdin MUST be ignored: a piped stdin makes codex block on "Reading additional input".
-  const child = spawn("codex", ["exec", "--sandbox", "read-only", "--skip-git-repo-check", prompt], { stdio: ["ignore", "pipe", "pipe"] });
+  // stdin MUST be ignored: a piped stdin makes some CLIs (e.g. codex) block on "Reading additional input".
+  const child = spawn(aiSpec.cmd, aiSpec.args(prompt), { stdio: ["ignore", "pipe", "pipe"] });
   let out = "", err = "";
   const timer = setTimeout(() => { child.kill("SIGKILL"); log("BOT_AI_TIMEOUT", { to: peerHex }); resolve(null); }, 90_000);
   child.stdout.on("data", (d) => { out += d; });
@@ -201,10 +227,10 @@ const handleInbound = async (peerHex, text, messageId) => {
     await sendText(peerHex, `Echo: ${text}`).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
     return;
   }
-  if (brain === "codex") {
-    // Immediate "thinking" ack so the ~10-30s codex delay doesn't feel timed out.
+  if (aiSpec) {
+    // Immediate "thinking" ack so the ~10-30s model delay doesn't feel timed out.
     if (thinkingText) { sendText(peerHex, thinkingText).catch((e) => log("BOT_THINKING_FAILED", { error: String(e?.message ?? e) })); }
-    const reply = await runCodex(peerHex, text);  // logs its own classified failure reason
+    const reply = await runAgentCli(peerHex, text);  // logs its own classified failure reason
     if (!reply) {
       // Don't leave the user hanging after the "thinking" ack.
       await sendText(peerHex, "Sorry — I couldn't reach my AI just now. Please try again in a moment.").catch(() => {});
