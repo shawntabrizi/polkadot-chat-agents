@@ -41,6 +41,7 @@ import {
   encodeOpaqueChatAcceptedMessage,
   encodeOpaqueMultiChatAcceptedMessage,
   encodeSessionRequestPayload,
+  encodeSessionResponsePayload,
   submitAppStatement,
   makeAppUuid,
 } from "./vendor/app-chat-codec.mjs";
@@ -161,10 +162,12 @@ const sessions = new Map(); // peerHex -> { session, identifierKeyHex }
 const buildSession = (peerHex, identifierKeyHex, extraDevices = []) => {
   const existing = sessions.get(norm(peerHex))?.session?.peerDevices ?? [];
   const peerDevices = [...existing];
+  // A device is the (statement account, encryption key) PAIR: the app reuses the
+  // identity account as statement account, so keying on the account alone would
+  // drop any additional/rotated device key for the same account.
+  const deviceKey = (d) => `${bytesToHex(d.statementAccountId)}:${bytesToHex(d.encryptionPublicKey)}`;
   for (const d of extraDevices) {
-    if (!peerDevices.some((e) => bytesToHex(e.statementAccountId ?? e.encryptionPublicKey) === bytesToHex(d.statementAccountId ?? d.encryptionPublicKey))) {
-      peerDevices.push(d);
-    }
+    if (!peerDevices.some((e) => deviceKey(e) === deviceKey(d))) peerDevices.push(d);
   }
   const session = makePeerSession({
     ownAccountId: accountId,
@@ -312,23 +315,45 @@ const handleOpener = async (data) => {
   await handleInbound(senderHex, decoded.text ?? "", decoded.messageId);
 };
 
-const handleSessionStatement = async (data, peerHex, session) => {
+// ACK a session request (mirrors the app: response goes on our own session
+// topic under the response channel). Without it the app treats every message
+// as undelivered and resends its whole backlog forever.
+const sendSessionAck = async (peerHex, requestId) => {
+  const entry = sessions.get(norm(peerHex));
+  if (entry == null) return;
+  const payload = encodeSessionResponsePayload(entry.session, requestId);
+  await submitAppStatement(requestRpc, {
+    walletPair: wallet,
+    channel: entry.session.responseChannel,
+    topics: [entry.session.ownSessionId],
+    scaleEncodedPayload: payload,
+    expiryFactory,
+  });
+};
+
+const handleSessionStatement = async (data, peerHex, session, senderAccountId = hexToBytes(peerHex)) => {
   let decoded;
   // A follow-up we can't decrypt used to vanish silently here — log it so a
   // broken/stale session is diagnosable instead of looking like "no message".
-  try { decoded = decodeSessionStatementPayload(data, session, hexToBytes(peerHex)); }
+  try { decoded = decodeSessionStatementPayload(data, session, senderAccountId); }
   catch (e) { log("BOT_SESSION_DECODE_FAILED", { from: peerHex, error: String(e?.message ?? e) }); return; }
   if (decoded?.kind !== "request") return;
   for (const m of decoded.messages ?? []) {
     if (typeof m.text === "string" && m.text.length > 0) {
-      const id = `${decoded.requestId}:${m.text}`;
-      if (seenRequests.has(id)) continue;
-      seenRequests.add(id);
+      // Dedup by the stable per-message id (the app resends its unacked backlog
+      // under fresh request ids) plus the legacy requestId:text key so entries
+      // persisted before this change still count as seen.
+      const ids = [m.messageId, `${decoded.requestId}:${m.text}`].filter(Boolean);
+      const alreadySeen = ids.some((id) => seenRequests.has(id));
+      for (const id of ids) seenRequests.add(id);
+      if (alreadySeen) continue;
       persist();
       log("BOT_RECEIVED_TEXT", { from: peerHex, text: m.text });
       await handleInbound(peerHex, m.text, decoded.requestId);
     }
   }
+  try { await sendSessionAck(peerHex, decoded.requestId); }
+  catch (e) { log("BOT_SESSION_ACK_FAILED", { to: peerHex, error: String(e?.message ?? e) }); }
 };
 
 // ---------- polling ----------
@@ -360,16 +385,28 @@ const pollOnce = async () => {
       await handleOpener(data);
     }
   }
-  // session topics -> follow-ups (read peer's ownSessionId == our peerSessionId)
+  // session topics -> follow-ups (read peer's ownSessionId == our peerSessionId).
+  // The app's devices publish on per-device session topics derived from their
+  // own encryption keys, NOT the identity topic, so poll each incoming device
+  // session too — identity-only polling silently misses app follow-ups.
   for (const peerHex of watchedSessionPeers) {
     const entry = sessions.get(peerHex);
     if (entry == null) continue;
-    for (const st of await queryTopic(entry.session.peerSessionId)) {
-      const data = typeof st.data === "string" ? hexToBytes(st.data) : st.data;
-      const key = fp(data);
-      if (seenStatements.has(key)) continue;
-      seenStatements.add(key);
-      await handleSessionStatement(data, peerHex, entry.session);
+    const identityTopicHex = bytesToHex(entry.session.peerSessionId);
+    const inbound = [
+      { topic: entry.session.peerSessionId, session: entry.session, sender: hexToBytes(peerHex) },
+      ...(entry.session.incomingDeviceSessions ?? [])
+        .filter((ds) => bytesToHex(ds.peerSessionId) !== identityTopicHex)
+        .map((ds) => ({ topic: ds.peerSessionId, session: ds, sender: ds.peerStatementAccountId })),
+    ];
+    for (const { topic, session, sender } of inbound) {
+      for (const st of await queryTopic(topic)) {
+        const data = typeof st.data === "string" ? hexToBytes(st.data) : st.data;
+        const key = fp(data);
+        if (seenStatements.has(key)) continue;
+        seenStatements.add(key);
+        await handleSessionStatement(data, peerHex, session, sender);
+      }
     }
   }
 };

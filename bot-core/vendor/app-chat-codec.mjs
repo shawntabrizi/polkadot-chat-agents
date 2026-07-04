@@ -968,7 +968,15 @@ function decodeMessageExchangeResponseAt(bytes, offset) {
 
 function decodeOpaqueMessageAt(bytes, offset) {
   const opaque = scaleDecodeBytesAt(bytes, offset);
-  const decoded = decodeRemoteMessage(opaque.value);
+  // Each opaque message is length-prefixed, so one undecodable message (e.g. a
+  // rich-text image attachment) must not abort the rest of the batch — the app
+  // resends its whole unacked backlog as a single request.
+  let decoded;
+  try {
+    decoded = decodeRemoteMessage(opaque.value);
+  } catch (error) {
+    decoded = { kind: "undecodable", error: error instanceof Error ? error.message : String(error) };
+  }
   return { value: decoded, offset: opaque.offset };
 }
 
