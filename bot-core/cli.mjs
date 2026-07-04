@@ -22,10 +22,23 @@ import {
   mnemonicToMiniSecret,
   ss58Address,
 } from "@polkadot-labs/hdkd-helpers";
+import { createClient as createPapiClient } from "polkadot-api";
+import { getWsProvider } from "polkadot-api/ws";
+import { paseoPeopleNext } from "@polkadot-api/descriptors";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
 import { deriveP256PrivateKey, p256PublicKeyFromPrivateKey } from "./vendor/app-chat-codec.mjs";
+import { registerIdentity, waitForAttestation, DEFAULT_BACKENDS } from "./lib/register.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+const BANDERSNATCH_BIN = process.env.PCA_BANDERSNATCH_CLI
+  ?? path.join(HERE, "..", "tools", "bandersnatch-cli", "target", "debug", "summit-bandersnatch-cli");
+
+async function withPeopleApi(endpoint, fn) {
+  const client = createPapiClient(getWsProvider(endpoint));
+  try { return await fn(client.getTypedApi(paseoPeopleNext)); }
+  finally { client.destroy(); }
+}
+
 const BOTS_DIR = process.env.PCA_BOTS_DIR ?? path.resolve(process.cwd(), "bots");
 const DEFAULT_ENDPOINT = "wss://paseo-people-next-system-rpc.polkadot.io";
 const BRAINS = ["echo", "codex", "hermes"];
@@ -35,6 +48,7 @@ const c = (s, code) => (process.stdout.isTTY && !process.env.NO_COLOR ? `\x1b[${
 const ok = (s) => console.log(`${c("✓", "32")} ${s}`);
 const step = (s) => console.log(`${c("→", "36")} ${s}`);
 const note = (s) => console.log(`  ${c(s, "90")}`);
+const warn = (s) => console.log(`${c("⚠", "33")} ${s}`);
 const fail = (s) => { console.error(`${c("✗", "31")} ${s}`); process.exit(1); };
 
 function parseFlags(argv) {
@@ -66,14 +80,21 @@ const deeplink = (accountIdHex) => {
   return `polkadotapp://chat?id=0:0x${id}&force=false&chatId=${id}`;
 };
 
-function cmdCreate(name, flags) {
+async function cmdCreate(name, flags) {
   if (!name) fail("Usage: pca create <name>");
   if (!/^[a-z][a-z0-9-]{1,30}$/.test(name)) fail("Name must be lowercase letters/digits/hyphens, starting with a letter.");
-  if (fs.existsSync(botDir(name))) fail(`Bot "${name}" already exists (${botDir(name)}).`);
+  if (fs.existsSync(botDir(name))) fail(`Bot "${name}" already exists (${botDir(name)}). Use a different name.`);
   const brain = String(flags.brain ?? "echo").toLowerCase();
   if (!BRAINS.includes(brain)) fail(`--brain must be one of: ${BRAINS.join(", ")}`);
-  const endpoint = flags.network === "paseo" || flags.network == null ? DEFAULT_ENDPOINT : String(flags.endpoint ?? flags.network);
+  const endpoint = flags.network == null || flags.network === "paseo" ? DEFAULT_ENDPOINT : String(flags.endpoint ?? flags.network);
+  const backendUrl = flags.backend ? String(flags.backend) : DEFAULT_BACKENDS.paseo;
   const allow = String(flags.allow ?? "").split(",").map((s) => s.trim().replace(/^0x/i, "").toLowerCase()).filter(Boolean);
+  const register = flags["no-register"] !== true;
+  // Network username must be >=6 lowercase letters; default to the bot name.
+  const wantUsername = String(flags.username ?? name);
+  if (register && !/^[a-z]{6,}(\.\d{2})?$/.test(wantUsername)) {
+    fail(`To register, the name/username must be 6+ lowercase letters. Pass --username <letters> (or --no-register).`);
+  }
 
   step(`Creating bot "${name}"…`);
   const mnemonic = generateMnemonic(128);
@@ -81,28 +102,49 @@ function cmdCreate(name, flags) {
   const wallet = deriveSr25519PairFromSeed(seed, "//wallet");
   const p256 = p256PublicKeyFromPrivateKey(deriveP256PrivateKey(deriveSr25519PairFromSeed(seed, "//wallet//chat")));
   const accountIdHex = bytesToHex(wallet.publicKey);
+  const address = ss58Address(wallet.publicKey, 42);
   ok("Generated your bot's identity");
 
   fs.mkdirSync(botDir(name), { recursive: true, mode: 0o700 });
   fs.writeFileSync(secretPath(name), `${JSON.stringify({ mnemonic, seedHex: bytesToHex(seed) }, null, 2)}\n`, { mode: 0o600 });
   const config = {
-    name,
-    endpoint,
-    brain,
-    allow,
+    name, endpoint, backendUrl, brain, allow,
     bridgePort: Number(flags.port ?? 8799),
-    account: accountIdHex,
-    address: ss58Address(wallet.publicKey, 42),
-    identifierKey: bytesToHex(p256),
-    username: flags.username ? String(flags.username) : null,
-    registered: false,
-    createdAt: new Date().toISOString(),
+    account: accountIdHex, address, identifierKey: bytesToHex(p256),
+    username: null, registered: false, createdAt: new Date().toISOString(),
   };
-  fs.writeFileSync(configPath(name), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-  ok(`Saved to ${botDir(name)}`);
+  const save = () => fs.writeFileSync(configPath(name), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  save();
+
+  if (register) {
+    if (!fs.existsSync(BANDERSNATCH_BIN)) {
+      fail(`Identity tool not built. Run:\n  cargo build --manifest-path ${path.relative(process.cwd(), path.join(HERE, "..", "tools", "bandersnatch-cli", "Cargo.toml"))}\nThen: pca create ${name}  (or pass --no-register to skip)`);
+    }
+    step("Registering your bot on the network…");
+    let result;
+    try {
+      result = await registerIdentity({ mnemonic, username: wantUsername, digits: flags.digits ? String(flags.digits) : null, backendUrl, bandersnatchBin: BANDERSNATCH_BIN });
+    } catch (e) { fail(`Registration failed: ${e instanceof Error ? e.message : String(e)}`); }
+    config.username = result.username;
+    save();
+    ok(`Registered as ${result.username}`);
+    const waitMs = Number(flags.wait ?? 180) * 1000;
+    step(`Waiting for the network to confirm (up to ${Math.round(waitMs / 1000)}s)…`);
+    const attested = await withPeopleApi(endpoint, (api) =>
+      waitForAttestation(api, address, { timeoutMs: waitMs, onTick: () => process.stdout.write(".") }));
+    process.stdout.write("\n");
+    if (attested) { config.registered = true; save(); ok("Confirmed — your bot is live and people can message it!"); }
+    else { warn(`Not confirmed yet — this can take a few minutes. Check later:  pca info ${name}`); }
+  } else {
+    note("Skipped registration (--no-register); the bot won't be messageable until registered.");
+  }
+
   console.log();
-  note("Network registration (so people can message it) is the next step — coming shortly.");
-  note(`Then: pca run ${name}`);
+  say("Message your bot in the Polkadot app:");
+  console.log(`  ${c(deeplink(accountIdHex), "36")}`);
+  if (config.username) note(`or search: ${config.username}`);
+  console.log();
+  note(`Start it:  pca run ${name}`);
 }
 
 function cmdList() {
@@ -115,13 +157,24 @@ function cmdList() {
   }
 }
 
-function cmdInfo(name) {
+async function cmdInfo(name) {
   const cfg = readConfig(name);
+  // Live re-check: has the network confirmed (attested) the bot yet?
+  let messageable = cfg.registered;
+  if (cfg.username && !cfg.registered) {
+    try {
+      messageable = await withPeopleApi(cfg.endpoint, async (api) => {
+        const consumer = await api.query.Resources.Consumers.getValue(cfg.address);
+        return consumer?.identifier_key != null;
+      });
+      if (messageable) { cfg.registered = true; fs.writeFileSync(configPath(name), `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 }); }
+    } catch { /* offline; fall back to stored status */ }
+  }
   console.log(`${c(name, "1")}${cfg.username ? ` (${cfg.username})` : ""}`);
   console.log(`  brain:    ${cfg.brain}`);
   console.log(`  network:  ${cfg.endpoint}`);
   console.log(`  address:  ${cfg.address}`);
-  console.log(`  status:   ${cfg.registered ? c("registered — messageable", "32") : c("not registered yet", "33")}`);
+  console.log(`  status:   ${messageable ? c("live — people can message it", "32") : c("registration pending (check again in a bit)", "33")}`);
   console.log();
   console.log(`  Message this bot in the Polkadot app:`);
   console.log(`    ${c(deeplink(cfg.account), "36")}`);
@@ -159,10 +212,12 @@ Bots live in ${BOTS_DIR} (override with PCA_BOTS_DIR).`);
 
 const { flags, positional } = parseFlags(process.argv.slice(2));
 const [command, arg] = positional;
-switch (command) {
-  case "create": cmdCreate(arg, flags); break;
-  case "run": cmdRun(arg); break;
-  case "list": cmdList(); break;
-  case "info": cmdInfo(arg); break;
-  default: usage(); if (command != null) process.exit(1);
-}
+try {
+  switch (command) {
+    case "create": await cmdCreate(arg, flags); break;
+    case "run": cmdRun(arg); break;
+    case "list": cmdList(); break;
+    case "info": await cmdInfo(arg); break;
+    default: usage(); if (command != null) process.exit(1);
+  }
+} catch (e) { fail(e instanceof Error ? e.message : String(e)); }
