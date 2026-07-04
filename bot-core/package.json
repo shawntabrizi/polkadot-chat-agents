@@ -1,0 +1,22 @@
+{
+  "name": "polkadot-chat-bot-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone transport bridge: Polkadot app chat <-> local HTTP API for AI agent harnesses.",
+  "bin": { "polkadot-bot-core": "index.mjs" },
+  "scripts": {
+    "start": "node index.mjs",
+    "postinstall": "papi generate"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
+    "@novasamatech/statement-store": "^0.7.9",
+    "@novasamatech/substrate-slot-sr25519-wasm": "^0.8.2",
+    "@polkadot-api/descriptors": "file:.papi/descriptors",
+    "@polkadot-labs/hdkd-helpers": "^0.0.30",
+    "@scure/sr25519": "^2.2.0",
+    "polkadot-api": "^2.1.1"
+  }
+}

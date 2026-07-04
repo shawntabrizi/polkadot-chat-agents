@@ -1,9 +1,35 @@
 # polkadot-chat-agents
 
-Framework for running AI chat bots (openclaw / hermes / takopi, or direct AI API)
-as participants in the Polkadot app chat, over the Statement Store.
+Framework for running AI chat bots (Hermes, etc.) as participants in the Polkadot
+app's built-in chat, over the Statement Store — **no chat server required**.
 
-**Status: design / pre-MVP.** No code yet — a decision gates the first build step.
+**Status: working & deployed.** A Hermes agent backed by a Codex subscription holds
+conversations over Polkadot app chat, running on a VPS. Confirmed end-to-end.
+
+## Layout
+
+- **`bot-core/`** — standalone Node transport (no faucet dependency). Loads a bot
+  identity, connects to a Polkadot RPC, receives chat requests + session messages,
+  resolves peers' chat keys on-chain, ACKs, and exposes a local HTTP bridge:
+  - `GET /health`, `GET /inbound?wait=` (long-poll), `POST /send {chat_id,text}`.
+  - Reuses only the generic chat codec + transport (`bot-core/vendor/`).
+  - `bot-core/test-client.mjs` — headless tester (send from an attested seed, read replies).
+- **`hermes-plugin/polkadot/`** — Hermes `BasePlatformAdapter` that relays Polkadot
+  app chat to/from the bot-core bridge (drops into `~/.hermes/plugins/`).
+- **`docs/`** — architecture (`DESIGN.md`) and the round-trip test guide.
+
+## Run
+
+```bash
+cd bot-core && npm install
+BOT_SEED_HEX=0x<root-seed> BOT_ALLOWED_PEERS=<hex,hex> node index.mjs
+```
+Then point a Hermes instance (with the `polkadot` plugin, `POLKADOT_BRIDGE_URL`) at it,
+or drive it directly with `test-client.mjs`. See `docs/DESIGN.md`.
+
+---
+_History: the first working version reused the faucet chat listener in "bridge mode";
+`bot-core` is the clean, faucet-free extraction that replaced it._
 
 ## Start here
 

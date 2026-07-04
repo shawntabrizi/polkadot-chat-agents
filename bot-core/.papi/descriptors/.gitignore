@@ -1,0 +1,7 @@
+# Keep the descriptor package metadata committed for fresh installs and CI.
+node_modules/
+dist/
+# generated.json is papi's build-cache marker, not metadata. If it is committed
+# while dist/ is not, `papi generate` sees "no changes needed" on a fresh
+# checkout and skips emitting dist/, breaking `npm test`/`npm run build` in CI.
+generated.json
