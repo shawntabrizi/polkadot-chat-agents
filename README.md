@@ -18,14 +18,38 @@ conversations over Polkadot app chat, running on a VPS. Confirmed end-to-end.
   app chat to/from the bot-core bridge (drops into `~/.hermes/plugins/`).
 - **`docs/`** — architecture (`DESIGN.md`) and the round-trip test guide.
 
-## Run
+## Quick start
 
 ```bash
-cd bot-core && npm install
-BOT_SEED_HEX=0x<root-seed> BOT_ALLOWED_PEERS=<hex,hex> node index.mjs
+cd bot-core
+npm install                                                   # deps + descriptors
+cargo build --manifest-path ../tools/bandersnatch-cli/Cargo.toml   # one-time: identity tool
+
+# Create an AI bot — generates its identity and registers it on the network
+node cli.mjs create mycoolbot --brain codex
+
+# Run it — now message "mycoolbot" from the Polkadot app and it replies
+node cli.mjs run mycoolbot
 ```
-Then point a Hermes instance (with the `polkadot` plugin, `POLKADOT_BRIDGE_URL`) at it,
-or drive it directly with `test-client.mjs`. See `docs/DESIGN.md`.
+
+`create` prints a link to message your bot; `node cli.mjs info mycoolbot` shows it
+again and whether the network has confirmed the bot yet (registration can take a
+few minutes). `node cli.mjs list` lists your bots. (Install as `pca` via the bin.)
+
+**Brains** (`--brain`): `codex` (answers via your local Codex CLI), `echo` (repeats
+you — a zero-config smoke test), or `hermes`/`bridge` (hands messages to an external
+agent via the HTTP bridge — see the Hermes plugin below).
+
+## Advanced: plug into a harness (Hermes)
+
+Run bot-core with `--brain hermes`, point a Hermes instance at its bridge
+(`POLKADOT_BRIDGE_URL`, `hermes-plugin/polkadot` dropped into `~/.hermes/plugins/`),
+and Hermes drives the conversation. See `docs/DESIGN.md`.
+
+## Testing without a phone
+
+`node bot-core/test-client.mjs --seed-hex 0x<attested-seed> --bot-account 0x.. \
+  --bot-identifier-key 0x.. "hello"` sends a message and prints the bot's replies.
 
 ---
 _History: the first working version reused the faucet chat listener in "bridge mode";
