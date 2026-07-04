@@ -58,12 +58,16 @@ const thinkingText = env.BOT_THINKING_TEXT ?? "🤔 One moment — thinking…";
 
 // Direct AI-CLI "brains": bot-core shells out to an agent CLI that owns its own
 // auth/token. The transport core stays model-agnostic — these are just hooks that
-// turn a prompt into argv. Each CLI must print its reply to stdout and exit 0.
+// turn a (prompt, model) into argv. Each CLI must print its reply to stdout and exit 0.
+// BOT_AI_MODEL optionally pins a specific (e.g. low-cost) model per brain via its
+// own --model flag; leave unset to use the CLI's default model.
+const aiModel = (env.BOT_AI_MODEL ?? "").trim();
+const m = (flag, model) => (model ? [flag, model] : []);
 const AI_BRAINS = {
-  codex:  { cmd: "codex",  args: (p) => ["exec", "--sandbox", "read-only", "--skip-git-repo-check", p] },
-  claude: { cmd: "claude", args: (p) => ["-p", p] },   // Claude Code print mode
-  gemini: { cmd: "gemini", args: (p) => ["-p", p] },   // gemini-cli non-interactive
-  grok:   { cmd: "grok",   args: (p) => ["-p", p] },   // grok CLI (may need the generic override below)
+  codex:  { cmd: "codex",  args: (p, mo) => ["exec", "--sandbox", "read-only", "--skip-git-repo-check", ...m("-m", mo), p] },
+  claude: { cmd: "claude", args: (p, mo) => ["-p", ...m("--model", mo), p] },   // Claude Code print mode
+  gemini: { cmd: "gemini", args: (p, mo) => [...m("-m", mo), "-p", p] },        // gemini-cli non-interactive
+  grok:   { cmd: "grok",   args: (p, mo) => [...m("-m", mo), "-p", p] },        // grok CLI (may need the generic override below)
 };
 // Escape hatch for any other/custom CLI (incl. a grok CLI with a different flag):
 // BOT_AI_CMD=<bin> and optional BOT_AI_ARGS=<JSON array> where the token
@@ -205,7 +209,7 @@ const runAgentCli = (peerHex, userText) => new Promise((resolve) => {
     `User: ${userText}`, "You:",
   ].filter(Boolean).join("\n\n");
   // stdin MUST be ignored: a piped stdin makes some CLIs (e.g. codex) block on "Reading additional input".
-  const child = spawn(aiSpec.cmd, aiSpec.args(prompt), { stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(aiSpec.cmd, aiSpec.args(prompt, aiModel), { stdio: ["ignore", "pipe", "pipe"] });
   let out = "", err = "";
   const timer = setTimeout(() => { child.kill("SIGKILL"); log("BOT_AI_TIMEOUT", { to: peerHex }); resolve(null); }, 90_000);
   child.stdout.on("data", (d) => { out += d; });

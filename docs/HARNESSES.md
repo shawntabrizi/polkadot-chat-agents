@@ -152,3 +152,7 @@ An AI brain spends your quota, so `pca` refuses to leave one open unless you pas
 `--public`. Any other CLI works without code via the escape hatch — set
 `BOT_AI_CMD=<bin>` and optional `BOT_AI_ARGS='["-x","__PROMPT__"]'` (the
 `__PROMPT__` token is replaced by the built prompt).
+
+**Pick a low-cost model** with `BOT_AI_MODEL` — it's passed to the brain's own
+`--model`/`-m` flag (e.g. `BOT_AI_MODEL=claude-haiku-4-5-20251001` for the `claude`
+brain). Leave it unset to use the CLI's default model.
