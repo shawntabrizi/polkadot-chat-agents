@@ -264,13 +264,14 @@ async function cmdDeploy(name, flags) {
     `BOT_BRAIN=${cfg.brain}`,
     `BOT_ALLOWED_PEERS=${(cfg.allow ?? []).join(",")}`,
     `BOT_USERNAME=${cfg.username ?? ""}`,
+    `BOT_STATE_DIR=/app/state`,   // persist sessions to the state volume (survives redeploys)
   ];
   if (flags.model) envLines.push(`BOT_AI_MODEL=${String(flags.model)}`);
   if (cfg.brain === "claude" && key) envLines.push(`ANTHROPIC_API_KEY=${key}`);
   const command = spec.install
     ? JSON.stringify(["sh", "-lc", `${spec.install} && exec node index.mjs`])
     : JSON.stringify(["node", "index.mjs"]);
-  const compose = `services:\n  bot:\n    image: node:22-slim\n    container_name: ${cn}\n    restart: unless-stopped\n    working_dir: /app\n    volumes:\n      - ./app:/app\n    env_file:\n      - ./bot.env\n    command: ${command}\n`;
+  const compose = `services:\n  bot:\n    image: node:22-slim\n    container_name: ${cn}\n    restart: unless-stopped\n    working_dir: /app\n    volumes:\n      - ./app:/app\n      - ./state:/app/state\n    env_file:\n      - ./bot.env\n    command: ${command}\n`;
 
   if (flags["dry-run"] === true) {
     console.log(`\n--- ${base}/docker-compose.yml ---\n${compose}`);
@@ -284,7 +285,7 @@ async function cmdDeploy(name, flags) {
   if (pf.status !== 0) fail(`Can't reach ${host} or Docker isn't available there.\n${(pf.stderr || "").trim()}`);
   ok(`Connected — Docker ${(pf.stdout || "").trim().replace(/\n/g, " / ")}`);
 
-  runLocal("ssh", [...sshOpts, host, `mkdir -p ${base}/app`]);
+  runLocal("ssh", [...sshOpts, host, `mkdir -p ${base}/app ${base}/state`]);
   step("Uploading bot-core (code + dependencies)…");
   const rs = runLocal("rsync", ["-az", "--delete",
     "--exclude", "bots/", "--exclude", "*.log", "--exclude", "*.bak*", "--exclude", ".git",
