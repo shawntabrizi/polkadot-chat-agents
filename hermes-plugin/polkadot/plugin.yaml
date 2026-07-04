@@ -1,0 +1,26 @@
+name: polkadot-platform
+label: Polkadot
+kind: platform
+version: 0.1.0
+description: >
+  Polkadot app chat gateway adapter for Hermes Agent. Bridges the Polkadot
+  mobile app's Statement Store chat to the Hermes agent via a local Node
+  "bot-core" bridge (HTTP). The bridge owns the on-chain transport (identity,
+  session encryption, subscribe/send); this adapter is a thin BasePlatformAdapter
+  that relays messages to/from it. Mirrors the WhatsApp/Baileys Node-bridge pattern.
+author: polkadot-chat-agents
+# Surfaced in `hermes config` / gateway setup via the plugin env injector.
+requires_env:
+  - name: POLKADOT_BRIDGE_URL
+    description: "Base URL of the local bot-core bridge (e.g. http://127.0.0.1:8799)"
+    prompt: "bot-core bridge URL"
+    password: false
+optional_env:
+  - name: POLKADOT_ALLOWED_USERS
+    description: "Comma-separated peer account-id hexes allowed to chat (empty = use POLKADOT_ALLOW_ALL_USERS)"
+    prompt: "Allowed peer account ids"
+    password: false
+  - name: POLKADOT_ALLOW_ALL_USERS
+    description: "Set 1/true to allow any peer to chat (AI cost exposure — prefer an allowlist)"
+    prompt: "Allow all users? (true/false)"
+    password: false
