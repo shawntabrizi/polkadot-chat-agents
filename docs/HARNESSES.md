@@ -123,6 +123,32 @@ implementation, pending validation on a live OpenClaw install).
 ## Other harnesses
 
 Any framework that can run a small loop (poll `/inbound`, call your agent, `POST
-/send`) can drive a Polkadot bot — the bridge contract above is all it needs. For
-frameworks with no plugin system, use bot-core's built-in brains instead
-(`--brain codex`, or add a direct-API brain) so bot-core calls the model itself.
+/send`) can drive a Polkadot bot — the bridge contract above is all it needs.
+
+---
+
+## Direct AI brains (no harness)
+
+If you just want a model to answer — no agent framework — bot-core can shell out
+to a model's own CLI. The transport core stays model-agnostic; each brain is just
+a `prompt → argv` hook, and **each CLI owns its own auth/token** (bot-core never
+touches your keys). Slow replies get an automatic "🤔 thinking…" ack, and a
+failed model call is logged with its cause (`BOT_AI_AUTH_REVOKED` → re-login vs.
+`BOT_AI_FAILED`/`BOT_AI_TIMEOUT`).
+
+| Brain | CLI it runs | Auth |
+|---|---|---|
+| `--brain codex` | `codex exec …` | `codex login` (ChatGPT/Codex sub) |
+| `--brain claude` | `claude -p …` | Claude Code login / API key |
+| `--brain gemini` | `gemini -p …` | `gemini` login |
+| `--brain grok` | `grok -p …` | grok CLI login |
+
+```bash
+pca create mybot --brain claude --owner <your-address>   # locked to you
+pca run mybot
+```
+
+An AI brain spends your quota, so `pca` refuses to leave one open unless you pass
+`--public`. Any other CLI works without code via the escape hatch — set
+`BOT_AI_CMD=<bin>` and optional `BOT_AI_ARGS='["-x","__PROMPT__"]'` (the
+`__PROMPT__` token is replaced by the built prompt).

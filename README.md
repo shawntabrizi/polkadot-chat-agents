@@ -33,14 +33,16 @@ node cli.mjs run mycoolbot
 ```
 
 `--owner <address>` locks the bot so only your Polkadot app address can message it
-(recommended — a `codex`/`hermes` bot spends your quota, so it won't be left open
+(recommended — an AI/`hermes` bot spends your quota, so it won't be left open
 unless you pass `--public`). `create` prints a link to message your bot;
 `node cli.mjs info mycoolbot` shows it again + whether the network has confirmed the
 bot (can take a few minutes). `node cli.mjs list` lists your bots. (Install as `pca`.)
 
-**Brains** (`--brain`): `codex` (answers via your local Codex CLI), `echo` (repeats
-you — a zero-config smoke test), or `hermes`/`bridge` (hands messages to an external
-agent via the HTTP bridge — see the Hermes plugin below).
+**Brains** (`--brain`): a **direct AI brain** answers by shelling out to that
+model's own CLI (which owns its own auth) — `codex`, `claude`, `gemini`, or `grok`.
+`echo` repeats you (a zero-config smoke test). `hermes`/`bridge` hands messages to
+an external agent framework via the HTTP bridge (see below). Any other CLI works
+via `BOT_AI_CMD`/`BOT_AI_ARGS`. See `docs/HARNESSES.md`.
 
 ## Advanced: plug into a harness (Hermes)
 
