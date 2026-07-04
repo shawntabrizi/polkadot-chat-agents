@@ -220,6 +220,7 @@ function cmdRun(name) {
     BOT_ALLOWED_PEERS: (cfg.allow ?? []).join(","),
     BOT_BRAIN: cfg.brain,
     BOT_USERNAME: cfg.username ?? "",
+    BOT_STATE_DIR: botDir(name),   // persist sessions so a restart keeps open threads
   };
   const child = spawn(process.execPath, [path.join(HERE, "index.mjs")], { env, stdio: "inherit" });
   child.on("exit", (code) => process.exit(code ?? 0));

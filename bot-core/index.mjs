@@ -18,7 +18,9 @@
 //   BOT_REQUEST_LOOKBACK_DAYS (7), BOT_REQUEST_FUTURE_DAYS (2), BOT_POLL_MS (2000).
 
 import http from "node:http";
+import path from "node:path";
 import { spawn } from "node:child_process";
+import { createStateStore } from "./lib/session-store.mjs";
 import { createClient as createPapiClient } from "polkadot-api";
 import { getWsProvider } from "polkadot-api/ws";
 import { paseoPeopleNext } from "@polkadot-api/descriptors";
@@ -88,6 +90,12 @@ const aiSpec = (() => {
 const lookbackDays = Number(env.BOT_REQUEST_LOOKBACK_DAYS ?? 7);
 const futureDays = Number(env.BOT_REQUEST_FUTURE_DAYS ?? 2);
 const pollMs = Number(env.BOT_POLL_MS ?? 2000);
+// Session persistence: without it, a restart wipes every open conversation
+// (the peer's session channels/keys live only in memory). Enabled when
+// BOT_STATE_DIR is set — Docker/`pca` provide it; raw `node index.mjs` runs go
+// stateless. The file holds key material, so session-store writes it mode 0600.
+const stateStore = env.BOT_STATE_DIR ? createStateStore(path.join(env.BOT_STATE_DIR, "session-state.json")) : null;
+const SEEN_CAP = 5000; // bound the persisted dedup set
 const allowedPeers = new Set(
   String(env.BOT_ALLOWED_PEERS ?? "").split(",").map((s) => s.trim().replace(/^0x/i, "").toLowerCase()).filter(Boolean),
 );
@@ -253,6 +261,25 @@ const handleInbound = async (peerHex, text, messageId) => {
 // ---------- receive: dedup + handlers ----------
 const seenStatements = new Set();
 const seenRequests = new Set();
+
+// Persist only what can't be re-derived: per-peer identifierKey + peerDevices.
+// makePeerSession is deterministic, so the channels/keys rebuild exactly from
+// these + the seed. Also persist the dedup set so a restart doesn't re-answer
+// old messages. (seenStatements stays in-memory — it only avoids redundant
+// decode work; seenRequests is the semantic "already replied" guard.)
+const snapshotState = () => ({
+  v: 1,
+  peers: [...sessions.entries()].map(([peerHex, { session, identifierKeyHex }]) => ({
+    peerHex,
+    identifierKeyHex,
+    devices: (session.peerDevices ?? []).map((d) => ({
+      s: norm(bytesToHex(d.statementAccountId)),
+      e: norm(bytesToHex(d.encryptionPublicKey)),
+    })),
+  })),
+  seen: [...seenRequests].slice(-SEEN_CAP),
+});
+const persist = () => { if (stateStore) stateStore.save(snapshotState()); };
 const fp = (data) => bytesToHex(data).slice(0, 64);
 
 const handleOpener = async (data) => {
@@ -272,6 +299,7 @@ const handleOpener = async (data) => {
     : [];
   const session = buildSession(senderHex, identifierKeyHex, devices);
   addSessionWatch(senderHex);
+  persist(); // remember this peer's session so it survives a restart
   // ACK / accept so the peer establishes the session (advertise our device).
   const accept = decoded.deviceEncPubKeyHex
     ? encodeOpaqueMultiChatAcceptedMessage({ acceptedRequestId: decoded.messageId, statementAccountId: accountId, encryptionPublicKey: identifierKey })
@@ -286,13 +314,17 @@ const handleOpener = async (data) => {
 
 const handleSessionStatement = async (data, peerHex, session) => {
   let decoded;
-  try { decoded = decodeSessionStatementPayload(data, session, hexToBytes(peerHex)); } catch { return; }
+  // A follow-up we can't decrypt used to vanish silently here — log it so a
+  // broken/stale session is diagnosable instead of looking like "no message".
+  try { decoded = decodeSessionStatementPayload(data, session, hexToBytes(peerHex)); }
+  catch (e) { log("BOT_SESSION_DECODE_FAILED", { from: peerHex, error: String(e?.message ?? e) }); return; }
   if (decoded?.kind !== "request") return;
   for (const m of decoded.messages ?? []) {
     if (typeof m.text === "string" && m.text.length > 0) {
       const id = `${decoded.requestId}:${m.text}`;
       if (seenRequests.has(id)) continue;
       seenRequests.add(id);
+      persist();
       log("BOT_RECEIVED_TEXT", { from: peerHex, text: m.text });
       await handleInbound(peerHex, m.text, decoded.requestId);
     }
@@ -389,6 +421,22 @@ const startBridge = () => {
 log("BOT_STARTING", { endpoint, account: `0x${accountIdHex}`, username, brain, allowlist: allowedPeers.size });
 startBridge();
 log("BOT_LISTENING", { account: `0x${accountIdHex}`, identifierKey: `0x${norm(bytesToHex(identifierKey))}` });
+
+// Restore saved sessions so open conversations continue across a restart —
+// rebuild each peer's (deterministic) session and resume watching its channel,
+// and reload the dedup set so we don't re-answer already-handled messages.
+const restored = stateStore?.load();
+if (restored?.peers?.length) {
+  for (const p of restored.peers) {
+    const devices = (p.devices ?? []).map((d) => ({ statementAccountId: hexToBytes(d.s), encryptionPublicKey: hexToBytes(d.e) }));
+    buildSession(p.peerHex, p.identifierKeyHex, devices);
+    addSessionWatch(p.peerHex);
+  }
+}
+for (const id of restored?.seen ?? []) seenRequests.add(id);
+if (restored) log("BOT_STATE_RESTORED", { peers: restored.peers?.length ?? 0, seen: restored.seen?.length ?? 0 });
+for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { stateStore?.flush(); process.exit(0); });
+
 for (;;) {
   try { await pollOnce(); } catch (error) { log("BOT_POLL_ERROR", { error: error instanceof Error ? error.message : String(error) }); }
   await delay(pollMs);

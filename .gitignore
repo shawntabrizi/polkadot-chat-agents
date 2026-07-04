@@ -3,4 +3,7 @@ __pycache__/
 .DS_Store
 node_modules/
 bots/
+state/
+session-state.json
+session-state.json.tmp
 tools/bandersnatch-cli/target/
