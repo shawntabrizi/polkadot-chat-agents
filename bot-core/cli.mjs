@@ -304,6 +304,10 @@ async function cmdDeploy(name, flags) {
   const up = runLocal("ssh", [...sshOpts, host, `cd ${base} && docker compose -p ${cn} up -d`]);
   if (up.status !== 0) fail("docker compose up failed.");
 
+  // Remember where this bot lives so `pca stop/logs/status` don't need --host.
+  cfg.deploy = { host, dir: base, container: cn, at: new Date().toISOString() };
+  fs.writeFileSync(configPath(name), `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 });
+
   step("Waiting for the bot to come online…");
   const wait = runLocal("ssh", [...sshOpts, host,
     `for i in $(seq 1 20); do docker logs ${cn} 2>&1 | grep -q BOT_LISTENING && break; sleep 2; done; docker logs --tail 30 ${cn} 2>&1`], { capture: true });
@@ -324,12 +328,64 @@ async function cmdDeploy(name, flags) {
   }
 }
 
+// Resolve the ssh target + container for a deployed bot: --host wins, else the
+// deploy metadata saved by `pca deploy`.
+function deployTarget(name, flags) {
+  const cfg = readConfig(name);
+  const host = flags.host ? String(flags.host) : cfg.deploy?.host;
+  const cn = cfg.deploy?.container ?? `pca-${name}`;
+  const dir = cfg.deploy?.dir;
+  if (!host) fail(`"${name}" hasn't been deployed (no saved host). Deploy it, or pass --host <ssh>.`);
+  return { cfg, host, cn, dir };
+}
+const SSH_OPTS = ["-o", "ConnectTimeout=10", "-o", "BatchMode=yes"];
+
+function cmdLogs(name, flags) {
+  const { host, cn } = deployTarget(name, flags);
+  const follow = flags.follow === true || flags.f === true;
+  const tail = String(flags.tail ?? 100);
+  step(`Logs for "${name}" on ${host}${follow ? " (following — Ctrl-C to stop)" : ""}…`);
+  // stdio inherit so -f streams live and Ctrl-C ends it.
+  spawnSync("ssh", [...SSH_OPTS, ...(follow ? ["-t"] : []), host,
+    `docker logs ${follow ? "-f " : ""}--tail ${tail} ${cn}`], { stdio: "inherit" });
+}
+
+function cmdStatus(name, flags) {
+  const { host, cn } = deployTarget(name, flags);
+  step(`Status of "${name}" on ${host}…`);
+  const r = runLocal("ssh", [...SSH_OPTS, host,
+    `docker ps --filter name=^/${cn}$ --format '{{.Status}}' | head -1; ` +
+    // Probe /health with node (curl isn't in node:22-slim); BOT_BRIDGE_PORT defaults to 8799.
+    `docker exec ${cn} node -e 'fetch("http://127.0.0.1:8799/health",{signal:AbortSignal.timeout(4000)}).then(r=>r.text()).then(t=>process.stdout.write(t)).catch(()=>process.stdout.write("NO_HEALTH"))' 2>/dev/null; echo; ` +
+    `docker logs --tail 1 ${cn} 2>&1 | grep -oE '"event":"[A-Z_]+"' | tail -1`], { capture: true });
+  const [statusLine = "", health = "", lastEvent = ""] = (r.stdout || "").trim().split("\n");
+  if (!statusLine) { warn(`Container ${cn} is not running on ${host}.`); return; }
+  ok(`${cn}: ${statusLine}`);
+  if (health.startsWith("{")) {
+    try { const h = JSON.parse(health); note(`bridge healthy · account ${h.account?.slice(0, 12)}… · ${h.username || "(no username)"}`); } catch { /* ignore */ }
+  } else if (health) note(`health: ${health}`);
+  if (lastEvent) note(`last event: ${lastEvent}`);
+}
+
+function cmdStop(name, flags) {
+  const { host, cn, dir } = deployTarget(name, flags);
+  step(`Stopping "${name}" (${cn}) on ${host}…`);
+  // Prefer `compose down` (removes the network too) when we know the dir; fall back to rm -f.
+  const cmd = dir ? `cd ${dir} && docker compose -p ${cn} down` : `docker rm -f ${cn}`;
+  const r = runLocal("ssh", [...SSH_OPTS, host, cmd], { capture: true });
+  if (r.status === 0) ok(`Stopped "${name}".`);
+  else fail(`Could not stop "${name}" (exit ${r.status}).`);
+}
+
 function usage() {
   console.log(`pca — Polkadot Chat Agents
 
   pca create <name> [--brain echo|codex|claude|gemini|grok|hermes] [--owner <your address>] [--public] [--network paseo] [--username name]
   pca run <name>                       start the bot locally (foreground)
   pca deploy <name> --host <ssh>       ship it to a server and run it in Docker
+  pca logs <name> [-f] [--tail N]      tail a deployed bot's logs
+  pca status <name>                    is a deployed bot running + healthy?
+  pca stop <name>                      stop a deployed bot
   pca list                             list your bots
   pca info <name>                      show address + how to message it
 
@@ -338,6 +394,7 @@ function usage() {
 
 deploy flags:  --host root@1.2.3.4 (required)  ·  --anthropic-key <key> (claude brain)  ·  --model <m> (low-cost model)  ·  --dry-run
   Needs Docker on the server + SSH access. Supports the echo and claude brains today.
+  logs/status/stop reuse the deploy host saved in the bot's config (override with --host).
 
 Brains:  echo (test)  ·  codex/claude/gemini/grok (direct — shells to that CLI, which owns its own auth)  ·  hermes (hand off to an external agent harness)
 
@@ -349,10 +406,16 @@ const [command, arg] = positional;
 try {
   switch (command) {
     case "create": await cmdCreate(arg, flags); break;
-    case "run": cmdRun(arg); break;
+    case "run": cmdRun(arg); break;                 // spawns a child; manages its own exit
     case "deploy": await cmdDeploy(arg, flags); break;
+    case "logs": cmdLogs(arg, flags); break;
+    case "status": cmdStatus(arg, flags); break;
+    case "stop": cmdStop(arg, flags); break;
     case "list": cmdList(); break;
     case "info": await cmdInfo(arg); break;
     default: usage(); if (command != null) process.exit(1);
   }
+  // Commands that open chain WS clients (create/info/deploy) keep the event loop
+  // alive after finishing; exit explicitly. `run` is the exception — it stays.
+  if (command !== "run") process.exit(0);
 } catch (e) { fail(e instanceof Error ? e.message : String(e)); }
