@@ -163,6 +163,13 @@ const trimMap = (map, cap) => { while (map.size > cap) map.delete(map.keys().nex
 
 const IDENTIFIER_CACHE_CAP = 5000;
 const identifierKeyCache = new Map(); // peerHex -> identifierKeyHex
+// Static peer->identifier-key pins: "peerhex=keyhex,..." — skips the on-chain
+// lookup for those peers. Used by the offline transport tests (no people chain)
+// and usable for fixed-fleet setups.
+for (const pair of String(env.BOT_PEER_IDENTIFIER_KEYS ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
+  const [peer, key] = pair.split("=");
+  if (peer && key) identifierKeyCache.set(norm(peer), norm(key));
+}
 const resolveIdentifierKey = async (peerHex) => {
   const key = norm(peerHex);
   if (identifierKeyCache.has(key)) return identifierKeyCache.get(key);
