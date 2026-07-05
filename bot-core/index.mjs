@@ -13,21 +13,24 @@
 // on-chain identifier-key lookup. No faucet-specific code (coinage/stripe/etc.).
 //
 // Env: BOT_SEED_HEX (root mini-secret; or FAUCET_CHAT_SERVICE_SECRET),
-//   BOT_ENDPOINT (default Paseo), BOT_BRIDGE_PORT (8799), BOT_BRIDGE_HOST (0.0.0.0),
+//   BOT_ENDPOINT (default Paseo), BOT_BRIDGE_PORT (8799), BOT_BRIDGE_HOST (127.0.0.1),
 //   BOT_ACK_TEXT, BOT_ALLOWED_PEERS (comma-sep peer account hexes; empty = allow all),
 //   BOT_REQUEST_LOOKBACK_DAYS (7), BOT_REQUEST_FUTURE_DAYS (2), BOT_POLL_MS (2000),
 //   BOT_THINKING_TEXT + BOT_THINKING_AFTER_MS (5000) — ack sent if no reply by then.
 
 import http from "node:http";
+import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { blake2b } from "@noble/hashes/blake2.js";
 import { createStateStore } from "./lib/session-store.mjs";
 import { createClient as createPapiClient } from "polkadot-api";
-import { getWsProvider } from "polkadot-api/ws";
+import { getWsProvider, WsEvent } from "polkadot-api/ws";
 import { paseoPeopleNext } from "@polkadot-api/descriptors";
 import { createLazyClient, createPapiStatementStoreAdapter } from "@novasamatech/statement-store";
 import { ss58Address } from "@polkadot-labs/hdkd-helpers";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
+import { withTimeout } from "./vendor/lib/async-utils.mjs";
 import {
   makePeerSession,
   deriveP256PrivateKey,
@@ -53,7 +56,10 @@ const DEFAULT_ENDPOINT = "wss://paseo-people-next-system-rpc.polkadot.io";
 const endpoint = env.BOT_ENDPOINT ?? DEFAULT_ENDPOINT;
 const seedHex = (env.BOT_SEED_HEX ?? env.FAUCET_CHAT_SERVICE_SECRET ?? "").trim();
 const bridgePort = Number(env.BOT_BRIDGE_PORT ?? 8799);
-const bridgeHost = env.BOT_BRIDGE_HOST ?? "0.0.0.0";
+// The bridge is unauthenticated (it can read decrypted inbound and publish as
+// the bot), so default to loopback. Container deploys that need cross-container
+// access set BOT_BRIDGE_HOST=0.0.0.0 explicitly (scoped to the compose network).
+const bridgeHost = env.BOT_BRIDGE_HOST ?? "127.0.0.1";
 const brain = (env.BOT_BRAIN ?? "bridge").trim().toLowerCase(); // bridge | hermes | echo | codex | claude | gemini | grok
 const ackText = env.BOT_ACK_TEXT ?? (brain === "bridge" || brain === "hermes" ? "Connecting you to the agent…" : "");
 // If a reply hasn't gone out within BOT_THINKING_AFTER_MS of receiving a message,
@@ -94,6 +100,10 @@ const aiSpec = (() => {
 const lookbackDays = Number(env.BOT_REQUEST_LOOKBACK_DAYS ?? 7);
 const futureDays = Number(env.BOT_REQUEST_FUTURE_DAYS ?? 2);
 const pollMs = Number(env.BOT_POLL_MS ?? 2000);
+// Deadline for every chain call (queries AND submits): papi requests never
+// reject on a dead socket — they're buffered and re-sent on reconnect — so an
+// unbounded await anywhere in the poll path wedges the bot forever.
+const queryTimeoutMs = Number(env.BOT_QUERY_TIMEOUT_MS ?? 15_000);
 // Session persistence: without it, a restart wipes every open conversation
 // (the peer's session channels/keys live only in memory). Enabled when
 // BOT_STATE_DIR is set — Docker/`pca` provide it; raw `node index.mjs` runs go
@@ -107,10 +117,12 @@ if (!seedHex) { console.error("BOT_SEED_HEX (or FAUCET_CHAT_SERVICE_SECRET) is r
 
 const hexToBytes = (hex) => {
   const clean = String(hex).trim().replace(/^0x/i, "");
-  if (!/^[0-9a-fA-F]*$/.test(clean) || clean.length % 2 !== 0) throw new Error(`bad hex: ${hex}`);
+  // Don't echo the value in the error: this path handles seeds and key material.
+  if (!/^[0-9a-fA-F]*$/.test(clean) || clean.length % 2 !== 0) throw new Error(`bad hex value (${clean.length} chars)`);
   return Uint8Array.from(clean.match(/../g)?.map((b) => Number.parseInt(b, 16)) ?? []);
 };
 const bytesToHex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+const enc = new TextEncoder();
 const norm = (hex) => String(hex).trim().replace(/^0x/i, "").toLowerCase();
 const log = (event, extra = {}) => console.log(JSON.stringify({ time: new Date().toISOString(), event, ...extra }));
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -126,11 +138,24 @@ const accountIdHex = norm(bytesToHex(accountId));
 const username = env.FAUCET_CHAT_SERVICE_USERNAME ?? env.BOT_USERNAME ?? "";
 
 // ---------- chain clients ----------
-const lazyClient = createLazyClient(getWsProvider(endpoint));
+// Keep handles on BOTH providers so /health can read real socket state: the
+// statement-store socket carries polling/submits, the papi socket carries
+// identifier-key lookups (a bot with only the papi socket down is deaf to new
+// peers). Note a disconnected socket does NOT fail requests — they're buffered
+// and re-sent on reconnect — so socket state and per-call timeouts are the two
+// outage signals; query success alone can't distinguish "empty" from "down".
+const wsProvider = getWsProvider(endpoint);
+const lazyClient = createLazyClient(wsProvider);
 const statementStore = createPapiStatementStoreAdapter(lazyClient);
+const papiProvider = getWsProvider(endpoint);
+const socketConnected = (p) => p.getStatus?.().type === WsEvent.CONNECTED;
+const chainConnected = () => socketConnected(wsProvider) && socketConnected(papiProvider);
 const requestRpc = lazyClient.getRequestFn();
-const papiClient = createPapiClient(getWsProvider(endpoint));
+const papiClient = createPapiClient(papiProvider);
 const peopleApi = papiClient.getTypedApi(paseoPeopleNext);
+// Every chain submit shares the query deadline: submitAppStatement retries
+// rejections, but a hung socket never rejects — it would await forever.
+const submitBounded = (args) => withTimeout(submitAppStatement(requestRpc, args), queryTimeoutMs, "statement submit");
 
 const identifierKeyCache = new Map(); // peerHex -> identifierKeyHex
 const resolveIdentifierKey = async (peerHex) => {
@@ -138,7 +163,9 @@ const resolveIdentifierKey = async (peerHex) => {
   if (identifierKeyCache.has(key)) return identifierKeyCache.get(key);
   let value = null;
   try {
-    const consumer = await peopleApi.query.Resources.Consumers.getValue(ss58Address(hexToBytes(key), 2));
+    const consumer = await withTimeout(
+      peopleApi.query.Resources.Consumers.getValue(ss58Address(hexToBytes(key), 2)),
+      queryTimeoutMs, "identifier lookup");
     value = consumer?.identifier_key == null ? null : norm(String(consumer.identifier_key));
   } catch (error) {
     log("BOT_IDENTIFIER_LOOKUP_FAILED", { peer: key, error: error instanceof Error ? error.message : String(error) });
@@ -185,10 +212,23 @@ const buildSession = (peerHex, identifierKeyHex, extraDevices = []) => {
 };
 
 // ---------- bridge inbound queue ----------
+const INBOUND_CAP = 1000;
+// True when handleInbound hands messages to the HTTP bridge queue (no direct
+// brain): backpressure must then watch inboundQueue, not the per-peer queues.
+const usesBridgeQueue = brain !== "echo" && !aiSpec;
 const inboundQueue = [];
 const waiters = [];
 const enqueueInbound = (item) => {
   inboundQueue.push(item);
+  // Backstop only — session statements are deferred un-ACKed upstream when the
+  // queue is at cap (see handleSessionStatement), so this should not trigger.
+  // If an opener burst still overflows it, dropping oldest loses messages that
+  // were already ACKed (the app won't resend them) — log the count loudly.
+  if (inboundQueue.length > INBOUND_CAP) {
+    const dropped = inboundQueue.length - INBOUND_CAP;
+    inboundQueue.splice(0, dropped);
+    log("BOT_INBOUND_QUEUE_TRIMMED", { cap: INBOUND_CAP, dropped });
+  }
   const w = waiters.shift();
   if (w) { clearTimeout(w.timer); w.resolve(inboundQueue.splice(0)); }
 };
@@ -218,7 +258,7 @@ const sendText = async (peerHex, text) => {
   const entry = sessions.get(norm(peerHex));
   if (entry == null) throw new Error("no active session for peer");
   const payload = encodeSessionRequestPayload(entry.session, makeAppUuid(), [encodeOpaqueTextMessage({ text })]);
-  const result = await submitAppStatement(requestRpc, {
+  const result = await submitBounded({
     walletPair: wallet,
     channel: entry.session.requestChannel,
     topics: [entry.session.ownSessionId],
@@ -284,8 +324,18 @@ const handleInbound = async (peerHex, text, messageId) => {
 };
 
 // ---------- receive: dedup + handlers ----------
+// Both sets are bounded (insertion-ordered, evict oldest) so a long-lived bot
+// doesn't grow them without limit. seenStatements holds statement fingerprints;
+// seenRequests holds message ids (never plaintext — see handleSessionStatement).
 const seenStatements = new Set();
 const seenRequests = new Set();
+const STMT_CAP = 20_000;
+const trimSet = (set, cap) => { while (set.size > cap) set.delete(set.values().next().value); };
+const noteSeenStatement = (key) => { seenStatements.add(key); trimSet(seenStatements, STMT_CAP); };
+// Stable dedup id for a session message: prefer the app's message id; fall back
+// to a hash of requestId:text so we never hold or persist conversation plaintext.
+const messageDedupId = (requestId, text, messageId) =>
+  messageId || `h:${bytesToHex(blake2b(enc.encode(`${requestId}:${text}`), { dkLen: 16 }))}`;
 
 // Persist only what can't be re-derived: per-peer identifierKey + peerDevices.
 // makePeerSession is deterministic, so the channels/keys rebuild exactly from
@@ -305,7 +355,7 @@ const snapshotState = () => ({
   seen: [...seenRequests].slice(-SEEN_CAP),
 });
 const persist = () => { if (stateStore) stateStore.save(snapshotState()); };
-const fp = (data) => bytesToHex(data).slice(0, 64);
+const fp = (data) => bytesToHex(data.subarray(0, 32)); // dedup key: first 32 bytes, no full-payload encode
 
 const handleOpener = async (data) => {
   let decoded;
@@ -331,10 +381,10 @@ const handleOpener = async (data) => {
     : encodeOpaqueChatAcceptedMessage({ acceptedRequestId: decoded.messageId });
   try {
     const ackPayload = encodeSessionRequestPayload(session, makeAppUuid(), [accept, encodeOpaqueTextMessage({ text: ackText })], { forceIdentity: true });
-    await submitAppStatement(requestRpc, { walletPair: wallet, channel: session.requestChannel, topics: [session.ownSessionId], scaleEncodedPayload: ackPayload, expiryFactory });
+    await submitBounded({ walletPair: wallet, channel: session.requestChannel, topics: [session.ownSessionId], scaleEncodedPayload: ackPayload, expiryFactory });
   } catch (error) { log("BOT_ACK_FAILED", { to: senderHex, error: error instanceof Error ? error.message : String(error) }); }
   log("BOT_RECEIVED_OPENER", { from: senderHex, requestId: decoded.messageId, text: decoded.text });
-  await handleInbound(senderHex, decoded.text ?? "", decoded.messageId);
+  enqueueWork(senderHex, () => handleInbound(senderHex, decoded.text ?? "", decoded.messageId));
 };
 
 // ACK a session request (mirrors the app: response goes on our own session
@@ -344,7 +394,7 @@ const sendSessionAck = async (peerHex, requestId) => {
   const entry = sessions.get(norm(peerHex));
   if (entry == null) return;
   const payload = encodeSessionResponsePayload(entry.session, requestId);
-  await submitAppStatement(requestRpc, {
+  await submitBounded({
     walletPair: wallet,
     channel: entry.session.responseChannel,
     topics: [entry.session.ownSessionId],
@@ -353,29 +403,62 @@ const sendSessionAck = async (peerHex, requestId) => {
   });
 };
 
+// Per-peer work queues: brain calls (up to 90s) must never block the poll loop
+// or delay ACKs — the app resends its whole backlog until it sees an ACK, so a
+// slow model would directly cause resend storms and head-of-line blocking for
+// every other peer. Work is serialized per peer (preserves reply order and
+// aiHistory consistency) and concurrent across peers. Depth is capped: queued
+// work is ACKed but held only in memory, so an unbounded queue would both leak
+// (stuck brain × chatty peer) and widen the crash-loss window without limit —
+// past the cap, new statements are deferred un-ACKed instead (see
+// handleSessionStatement) and the app's resend acts as the retry.
+const WORK_CAP = 20;
+const peerWork = new Map(); // peerHex -> { tail, depth }
+const workDepth = (peerHex) => peerWork.get(norm(peerHex))?.depth ?? 0;
+const enqueueWork = (peerHex, fn) => {
+  const k = norm(peerHex);
+  const entry = peerWork.get(k) ?? { tail: Promise.resolve(), depth: 0 };
+  entry.depth += 1;
+  entry.tail = entry.tail.then(fn)
+    .catch((e) => log("BOT_HANDLER_FAILED", { peer: k, error: String(e?.message ?? e) }))
+    .finally(() => { entry.depth -= 1; if (entry.depth === 0 && peerWork.get(k) === entry) peerWork.delete(k); });
+  peerWork.set(k, entry);
+};
+
 const handleSessionStatement = async (data, peerHex, session, senderAccountId = hexToBytes(peerHex)) => {
+  // Backpressure: once a message is marked seen and its request ACKed, it lives
+  // only in memory until answered — the app will never resend it. So when this
+  // peer's pipeline is full, leave the statement un-ACKed and un-seen instead;
+  // the app keeps resending until we have room. Nothing is ACKed then dropped.
+  if (workDepth(peerHex) >= WORK_CAP || (usesBridgeQueue && inboundQueue.length >= INBOUND_CAP)) return "deferred";
   let decoded;
   // A follow-up we can't decrypt used to vanish silently here — log it so a
   // broken/stale session is diagnosable instead of looking like "no message".
   try { decoded = decodeSessionStatementPayload(data, session, senderAccountId); }
   catch (e) { log("BOT_SESSION_DECODE_FAILED", { from: peerHex, error: String(e?.message ?? e) }); return; }
   if (decoded?.kind !== "request") return;
+  const fresh = [];
   for (const m of decoded.messages ?? []) {
     if (typeof m.text === "string" && m.text.length > 0) {
-      // Dedup by the stable per-message id (the app resends its unacked backlog
-      // under fresh request ids) plus the legacy requestId:text key so entries
-      // persisted before this change still count as seen.
-      const ids = [m.messageId, `${decoded.requestId}:${m.text}`].filter(Boolean);
-      const alreadySeen = ids.some((id) => seenRequests.has(id));
-      for (const id of ids) seenRequests.add(id);
-      if (alreadySeen) continue;
-      persist();
-      log("BOT_RECEIVED_TEXT", { from: peerHex, text: m.text });
-      await handleInbound(peerHex, m.text, decoded.requestId);
+      const id = messageDedupId(decoded.requestId, m.text, m.messageId);
+      // Also honor the legacy plaintext key so entries persisted before this
+      // change still count as seen — but never add new plaintext keys.
+      const legacyKey = `${decoded.requestId}:${m.text}`;
+      const alreadySeen = seenRequests.has(id) || seenRequests.has(legacyKey);
+      seenRequests.add(id);
+      trimSet(seenRequests, SEEN_CAP);
+      if (!alreadySeen) fresh.push(m.text);
     }
   }
+  if (fresh.length) persist();
+  // ACK means "delivered", not "answered" — send it before any brain work so
+  // the app stops resending even when the model is slow.
   try { await sendSessionAck(peerHex, decoded.requestId); }
   catch (e) { log("BOT_SESSION_ACK_FAILED", { to: peerHex, error: String(e?.message ?? e) }); }
+  for (const text of fresh) {
+    log("BOT_RECEIVED_TEXT", { from: peerHex, text });
+    enqueueWork(peerHex, () => handleInbound(peerHex, text, decoded.requestId));
+  }
 };
 
 // ---------- polling ----------
@@ -390,20 +473,39 @@ const requestDayTopics = () => {
 const watchedSessionPeers = new Set();
 const addSessionWatch = (peerHex) => { watchedSessionPeers.add(norm(peerHex)); };
 
+// Poll liveness: an RPC outage used to be swallowed here, so a dead bot polled
+// into the void while /health still said ok. Track outcomes instead — a query
+// error returns null (distinct from a successful empty []), and the tick result
+// drives BOT_POLL_DEGRADED/RECOVERED logs, /health, and backoff.
+let lastPollOkAt = Date.now();
+let pollFailStreak = 0;
+let lastPollError = null;
+let tickErrored = 0, tickOk = 0, tickDeferred = 0;
 const queryTopic = async (topic) => {
   try {
-    return await Promise.resolve(statementStore.queryStatements({ matchAll: [topic] }).match((v) => v, (e) => { throw new Error(String(e?.message ?? e)); }));
-  } catch { return []; }
+    const v = await withTimeout(
+      statementStore.queryStatements({ matchAll: [topic] }).match((x) => x, (e) => { throw new Error(String(e?.message ?? e)); }),
+      queryTimeoutMs, "statement query");
+    tickOk += 1;
+    return v;
+  } catch (e) { tickErrored += 1; lastPollError = String(e?.message ?? e); return null; }
 };
 
 const pollOnce = async () => {
+  tickErrored = 0; tickOk = 0; tickDeferred = 0;
+  // During a total outage every query burns the full timeout, so a tick with
+  // many peers would serialize minutes of doomed waits before the backoff even
+  // engages. A few straight failures with zero successes = give up this tick;
+  // backoff and the next tick take it from there.
+  const tickDead = () => tickOk === 0 && tickErrored >= 3;
   // request-day topics -> openers
   for (const topic of requestDayTopics()) {
-    for (const st of await queryTopic(topic)) {
+    if (tickDead()) break;
+    for (const st of (await queryTopic(topic)) ?? []) {
       const data = typeof st.data === "string" ? hexToBytes(st.data) : st.data;
       const key = fp(data);
       if (seenStatements.has(key)) continue;
-      seenStatements.add(key);
+      noteSeenStatement(key);
       await handleOpener(data);
     }
   }
@@ -412,6 +514,7 @@ const pollOnce = async () => {
   // own encryption keys, NOT the identity topic, so poll each incoming device
   // session too — identity-only polling silently misses app follow-ups.
   for (const peerHex of watchedSessionPeers) {
+    if (tickDead()) break;
     const entry = sessions.get(peerHex);
     if (entry == null) continue;
     const identityTopicHex = bytesToHex(entry.session.peerSessionId);
@@ -422,14 +525,29 @@ const pollOnce = async () => {
         .map((ds) => ({ topic: ds.peerSessionId, session: ds, sender: ds.peerStatementAccountId })),
     ];
     for (const { topic, session, sender } of inbound) {
-      for (const st of await queryTopic(topic)) {
+      if (tickDead()) break;
+      for (const st of (await queryTopic(topic)) ?? []) {
         const data = typeof st.data === "string" ? hexToBytes(st.data) : st.data;
         const key = fp(data);
         if (seenStatements.has(key)) continue;
-        seenStatements.add(key);
-        await handleSessionStatement(data, peerHex, session, sender);
+        noteSeenStatement(key);
+        // A deferred statement (pipeline full) must be re-examined next tick.
+        if ((await handleSessionStatement(data, peerHex, session, sender)) === "deferred") {
+          seenStatements.delete(key);
+          tickDeferred += 1;
+        }
       }
     }
+  }
+  if (tickDeferred > 0) log("BOT_BACKPRESSURE", { deferredStatements: tickDeferred });
+  // Tick outcome: any successful query means the chain is reachable. All-errors
+  // (and at least one attempt) means an outage — surface it, don't poll blindly.
+  if (tickOk > 0) {
+    if (pollFailStreak > 0) log("BOT_POLL_RECOVERED", { afterFailures: pollFailStreak });
+    pollFailStreak = 0; lastPollOkAt = Date.now();
+  } else if (tickErrored > 0) {
+    pollFailStreak += 1;
+    if (pollFailStreak === 1 || pollFailStreak % 10 === 0) log("BOT_POLL_DEGRADED", { failStreak: pollFailStreak, error: lastPollError });
   }
 };
 
@@ -446,7 +564,16 @@ const startBridge = () => {
     const json = (code, obj) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(obj)); };
     try {
       if (req.method === "GET" && url.pathname === "/health") {
-        return json(200, { ok: true, account: `0x${accountIdHex}`, identifierKey: `0x${norm(bytesToHex(identifierKey))}`, username });
+        // ok reflects real reachability, not just "the process is up": both RPC
+        // sockets must be connected. (A disconnected socket buffers requests
+        // instead of failing them, so socket state — not query success — is the
+        // reliable signal.)
+        const connected = chainConnected();
+        return json(connected ? 200 : 503, {
+          ok: connected, account: `0x${accountIdHex}`, identifierKey: `0x${norm(bytesToHex(identifierKey))}`, username,
+          chain: wsProvider.getStatus?.().type ?? "unknown", peopleChain: papiProvider.getStatus?.().type ?? "unknown",
+          pollFailStreak, lastPollAgoMs: Date.now() - lastPollOkAt,
+        });
       }
       if (req.method === "GET" && url.pathname === "/inbound") {
         const waitSecs = Math.min(60, Math.max(0, Number(url.searchParams.get("wait") ?? 25)));
@@ -473,11 +600,76 @@ const startBridge = () => {
       return json(500, { success: false, error: error instanceof Error ? error.message : String(error) });
     }
   });
+  server.on("error", (e) => {
+    if (e?.code === "EADDRINUSE") {
+      log("BOT_BRIDGE_PORT_IN_USE", { host: bridgeHost, port: bridgePort });
+      console.error(`Bridge port ${bridgePort} is already in use — another bot is likely running. Set BOT_BRIDGE_PORT to a free port.`);
+    } else {
+      log("BOT_BRIDGE_ERROR", { error: String(e?.message ?? e) });
+    }
+    stateStore?.flush();
+    process.exit(1);
+  });
   server.listen(bridgePort, bridgeHost, () => log("BOT_BRIDGE_LISTENING", { host: bridgeHost, port: bridgePort }));
 };
 
 // ---------- main ----------
 log("BOT_STARTING", { endpoint, account: `0x${accountIdHex}`, username, brain, allowlist: allowedPeers.size });
+if (!stateStore) log("BOT_STATE_DISABLED", { note: "BOT_STATE_DIR unset — open conversations won't survive a restart" });
+
+// Single-instance guard: exactly one process may serve a bot identity, or replies
+// double-send. An O_EXCL pidfile in the state dir enforces it (stale pidfiles from
+// a crashed process are taken over). Only when BOT_STATE_DIR is set.
+let pidfilePath = null;
+if (env.BOT_STATE_DIR) {
+  pidfilePath = path.join(env.BOT_STATE_DIR, "bot.pid");
+  const refuse = (holder) => {
+    console.error(`Another bot process (${holder}) already serves this identity (${pidfilePath}). Two would double-reply — stop it first (or delete the pidfile if you're sure nothing is running).`);
+    process.exit(1);
+  };
+  try {
+    fs.mkdirSync(env.BOT_STATE_DIR, { recursive: true });
+    let fd;
+    try { fd = fs.openSync(pidfilePath, "wx"); }
+    catch (e) {
+      if (e?.code !== "EEXIST") throw e;
+      const content = fs.readFileSync(pidfilePath, "utf8").trim();
+      // Only a positive integer counts as a holder. Empty/garbage content (a
+      // crash between create and write) must read as stale: Number("") is 0,
+      // and kill(0, 0) signals our own process group — it always succeeds, so
+      // without this guard an empty pidfile bricks startup forever.
+      const old = Number.parseInt(content, 10);
+      let alive = false;
+      if (Number.isInteger(old) && old > 0 && old !== process.pid) {
+        try { process.kill(old, 0); alive = true; } catch { alive = false; }
+      }
+      if (alive) refuse(`pid ${old}`);
+      // Stale — take it over via remove + exclusive re-create so concurrent
+      // starters race for one wx winner instead of both opening with "w".
+      // Re-read first: if the content changed since the staleness check,
+      // another starter just claimed it. (A microsecond interleaving window
+      // remains — nothing in node's fs gives an atomic stale-lock swap — but
+      // it now takes two starts within the same few instructions to collide.)
+      if (fs.readFileSync(pidfilePath, "utf8").trim() !== content) refuse("just started");
+      fs.rmSync(pidfilePath, { force: true });
+      try { fd = fs.openSync(pidfilePath, "wx"); }
+      catch (e2) { if (e2?.code === "EEXIST") refuse("just started"); else throw e2; }
+    }
+    fs.writeSync(fd, String(process.pid));
+    fs.closeSync(fd);
+  } catch (e) { log("BOT_PIDFILE_WARN", { error: String(e?.message ?? e) }); pidfilePath = null; }
+}
+// Remove the pidfile only if it still holds OUR pid — a dying process that lost
+// the identity to a newer one must not disarm the winner's guard by deleting a
+// pidfile it no longer owns.
+const cleanupPidfile = () => {
+  if (!pidfilePath) return;
+  try {
+    if (fs.readFileSync(pidfilePath, "utf8").trim() === String(process.pid)) fs.rmSync(pidfilePath, { force: true });
+  } catch { /* ignore */ }
+};
+process.on("exit", cleanupPidfile);
+
 startBridge();
 log("BOT_LISTENING", { account: `0x${accountIdHex}`, identifierKey: `0x${norm(bytesToHex(identifierKey))}` });
 
@@ -485,18 +677,25 @@ log("BOT_LISTENING", { account: `0x${accountIdHex}`, identifierKey: `0x${norm(by
 // rebuild each peer's (deterministic) session and resume watching its channel,
 // and reload the dedup set so we don't re-answer already-handled messages.
 const restored = stateStore?.load();
-if (restored?.peers?.length) {
-  for (const p of restored.peers) {
+let restoredPeers = 0;
+for (const p of restored?.peers ?? []) {
+  // Per-peer guard: one malformed persisted entry must not crash startup and
+  // trip a Docker restart loop — skip it and keep the rest of the sessions.
+  try {
     const devices = (p.devices ?? []).map((d) => ({ statementAccountId: hexToBytes(d.s), encryptionPublicKey: hexToBytes(d.e) }));
     buildSession(p.peerHex, p.identifierKeyHex, devices);
     addSessionWatch(p.peerHex);
-  }
+    restoredPeers += 1;
+  } catch (e) { log("BOT_STATE_PEER_SKIPPED", { peer: p?.peerHex, error: String(e?.message ?? e) }); }
 }
 for (const id of restored?.seen ?? []) seenRequests.add(id);
-if (restored) log("BOT_STATE_RESTORED", { peers: restored.peers?.length ?? 0, seen: restored.seen?.length ?? 0 });
+if (restored) log("BOT_STATE_RESTORED", { peers: restoredPeers, seen: restored.seen?.length ?? 0 });
 for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { stateStore?.flush(); process.exit(0); });
 
 for (;;) {
   try { await pollOnce(); } catch (error) { log("BOT_POLL_ERROR", { error: error instanceof Error ? error.message : String(error) }); }
-  await delay(pollMs);
+  // Back off on a sustained outage so we don't hammer a recovering node with the
+  // full topic fan-out every tick; normal cadence resumes on the first success.
+  const wait = pollFailStreak > 0 ? Math.min(30_000, pollMs * 2 ** Math.min(pollFailStreak, 5)) : pollMs;
+  await delay(wait);
 }

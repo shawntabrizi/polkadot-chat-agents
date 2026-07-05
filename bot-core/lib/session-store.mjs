@@ -7,6 +7,7 @@ import path from "node:path";
 export function createStateStore(filePath, { debounceMs = 1000 } = {}) {
   let timer = null;
   let pending = null;
+  let warned = false;
 
   const flush = () => {
     if (timer) { clearTimeout(timer); timer = null; }
@@ -17,7 +18,13 @@ export function createStateStore(filePath, { debounceMs = 1000 } = {}) {
       const tmp = `${filePath}.tmp`;
       fs.writeFileSync(tmp, JSON.stringify(data), { mode: 0o600 });
       fs.renameSync(tmp, filePath);
-    } catch { /* best-effort: don't let a disk error take the bot down */ }
+    } catch (e) {
+      // Best-effort: a disk error must not take the bot down. But surface it once
+      // so a persistently-failing save (full disk, bad perms) isn't invisible —
+      // otherwise "state persists" silently becomes false. Emit on stdout like
+      // every other JSON event, or log pipelines (pca status) never see it.
+      if (!warned) { warned = true; console.log(JSON.stringify({ time: new Date().toISOString(), event: "BOT_STATE_SAVE_FAILED", error: String(e?.message ?? e) })); }
+    }
   };
 
   return {

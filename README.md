@@ -24,17 +24,22 @@ production: one on Hermes with Codex, one on OpenClaw with Claude.
   other toolchain is needed.
 - The Polkadot app on a phone, with an account.
 - For an AI brain: the model's CLI installed and logged in on the machine the bot
-  runs on. bot-core invokes the CLI; it never handles your API credentials.
+  runs on. bot-core invokes the CLI and never sees your model credentials — with
+  one exception: `pca deploy --anthropic-key` writes the key you pass into the
+  container's env so a headless `claude` bot can authenticate there.
 
 ## Create and run a bot
 
 ```bash
 cd bot-core
 npm install
+npm link        # optional: installs the `pca` command used below (or just use `node cli.mjs`)
 
-node cli.mjs create mycoolbot --brain claude --owner yourname.42
-node cli.mjs run mycoolbot
+pca create mycoolbot --brain claude --owner yourname.42
+pca run mycoolbot
 ```
+
+Every `pca` below is interchangeable with `node cli.mjs` if you skip `npm link`.
 
 `create` generates the bot's identity, registers a username on the network, and
 restricts the bot so only the `--owner` account can message it. The owner can be
@@ -42,7 +47,7 @@ given as an app username, an SS58 address, or a 32-byte account id in hex.
 
 The command prints a link and a username (for example `mycoolbot.07`). Open the
 link, or search for the username in the Polkadot app, and send a message.
-Registration is usually confirmed within a few minutes; `node cli.mjs info
+Registration is usually confirmed within a few minutes; `pca info
 mycoolbot` re-checks.
 
 The number suffix is a network-assigned discriminator, since base names are not
@@ -58,11 +63,11 @@ persisted per bot, so conversations continue across restarts.
 `deploy` targets any machine reachable over SSH that has Docker installed:
 
 ```bash
-node cli.mjs deploy mycoolbot --host root@your-server --anthropic-key sk-ant-...
+pca deploy mycoolbot --host root@your-server --anthropic-key sk-ant-...
 
-node cli.mjs status mycoolbot
-node cli.mjs logs mycoolbot -f
-node cli.mjs stop mycoolbot
+pca status mycoolbot
+pca logs mycoolbot -f
+pca stop mycoolbot
 ```
 
 `deploy` uploads bot-core, generates a compose file and environment, starts the
@@ -117,10 +122,11 @@ is how the mobile app actually sends. See [docs/TESTING.md](docs/TESTING.md).
 
 ## Files to protect
 
-`bots/<name>/secret.json` holds the bot's root seed; whoever has it controls the
-bot. `bots/<name>/session-state.json` and the server-side `state/` volume hold
-session keys for open conversations. All are created with mode 0600 and are
-gitignored. Back them up; do not commit them.
+`~/.pca/bots/<name>/secret.json` holds the bot's root seed; whoever has it
+controls the bot. `~/.pca/bots/<name>/session-state.json` and the server-side
+`state/` volume hold session keys for open conversations. A deployed bot's
+`bot.env` holds the seed and any `--anthropic-key`. All are created with mode
+0600. Back them up; do not commit them.
 
 ## Repository layout
 

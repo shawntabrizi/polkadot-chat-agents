@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // pca — Polkadot Chat Agents CLI.
 //
-// Headless, flag-driven onboarding. One bot = one folder under ./bots/<name>/
+// Headless, flag-driven onboarding. One bot = one folder under ~/.pca/bots/<name>/
 // (override with PCA_BOTS_DIR). Blockchain details (keys, addresses, topics)
 // are handled for you; you just pick a name and a brain.
 //
@@ -28,7 +28,7 @@ import { getWsProvider } from "polkadot-api/ws";
 import { paseoPeopleNext } from "@polkadot-api/descriptors";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
 import { deriveP256PrivateKey, p256PublicKeyFromPrivateKey } from "./vendor/app-chat-codec.mjs";
-import { registerIdentity, waitForAttestation, DEFAULT_BACKENDS } from "./lib/register.mjs";
+import { registerIdentity, waitForAttestation, withTimeout, DEFAULT_BACKENDS } from "./lib/register.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // Proofs run via the vendored wasm build by default (no Rust toolchain needed);
@@ -41,8 +41,12 @@ async function withPeopleApi(endpoint, fn) {
   finally { client.destroy(); }
 }
 
-const BOTS_DIR = process.env.PCA_BOTS_DIR ?? path.resolve(process.cwd(), "bots");
+// Bots live in a stable per-user location so `pca list` finds them regardless of
+// the working directory. Override with PCA_BOTS_DIR.
+const BOTS_DIR = process.env.PCA_BOTS_DIR ?? path.join(os.homedir(), ".pca", "bots");
 const DEFAULT_ENDPOINT = "wss://paseo-people-next-system-rpc.polkadot.io";
+// Cap container log growth on a VPS (json-file grows unbounded by default).
+const LOG_OPTS = `    logging:\n      driver: json-file\n      options: { max-size: "10m", max-file: "3" }\n`;
 const BRAINS = ["echo", "codex", "claude", "gemini", "grok", "hermes"];
 // Brains that call a model and therefore spend your quota — never left open by default.
 const PAID_BRAINS = new Set(["codex", "claude", "gemini", "grok", "hermes"]);
@@ -86,15 +90,22 @@ const note = (s) => console.log(`  ${c(s, "90")}`);
 const warn = (s) => console.log(`${c("⚠", "33")} ${s}`);
 const fail = (s) => { console.error(`${c("✗", "31")} ${s}`); process.exit(1); };
 
+// Flags that are always boolean — they must never consume the following token,
+// or `pca create --public mybot` would swallow the bot name into --public.
+const BOOLEAN_FLAGS = new Set(["public", "dry-run", "no-register", "follow"]);
+const SHORT_FLAGS = { "-f": "follow" };
 function parseFlags(argv) {
   const flags = {};
   const positional = [];
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
+    if (SHORT_FLAGS[a]) { flags[SHORT_FLAGS[a]] = true; continue; }
     if (a.startsWith("--")) {
       const key = a.slice(2);
       const next = argv[i + 1];
-      if (next == null || next.startsWith("--")) flags[key] = true;
+      // Boolean flags take no value; otherwise consume the next token unless it's
+      // itself a flag (values here are addresses/hex/usernames, never start with -).
+      if (BOOLEAN_FLAGS.has(key) || next == null || next.startsWith("-")) flags[key] = true;
       else { flags[key] = next; i += 1; }
     } else positional.push(a);
   }
@@ -104,11 +115,32 @@ function parseFlags(argv) {
 const botDir = (name) => path.join(BOTS_DIR, name);
 const configPath = (name) => path.join(botDir(name), "config.json");
 const secretPath = (name) => path.join(botDir(name), "secret.json");
+const saveConfig = (name, cfg) => fs.writeFileSync(configPath(name), `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 });
 const readConfig = (name) => {
+  if (!name) fail("Which bot? Usage: pca <command> <botname>   (list yours with: pca list)");
   if (!fs.existsSync(configPath(name))) fail(`No bot named "${name}". Create it: pca create ${name}`);
   return JSON.parse(fs.readFileSync(configPath(name), "utf8"));
 };
 const listBots = () => (fs.existsSync(BOTS_DIR) ? fs.readdirSync(BOTS_DIR).filter((n) => fs.existsSync(configPath(n))) : []);
+
+// Older versions kept bots in ./bots relative to the working directory. A user
+// upgrading with bots there would see "No bots yet" — and following the
+// suggested `pca create` would mint a SECOND identity while the original
+// (possibly deployed) one sits stranded. Point them at the move instead.
+function warnLegacyBotsDir() {
+  if (process.env.PCA_BOTS_DIR) return;
+  const legacy = path.resolve(process.cwd(), "bots");
+  if (legacy === BOTS_DIR) return;
+  try {
+    const legacyHasBots = fs.existsSync(legacy)
+      && fs.readdirSync(legacy).some((n) => fs.existsSync(path.join(legacy, n, "config.json")));
+    if (legacyHasBots && listBots().length === 0) {
+      warn(`Found bots in ${legacy} from an older pca version — bots now live in ${BOTS_DIR}.`);
+      note(`Move them:  mkdir -p ${path.dirname(BOTS_DIR)} && mv "${legacy}" "${BOTS_DIR}"`);
+      note(`Or keep the old location:  export PCA_BOTS_DIR="${legacy}"`);
+    }
+  } catch { /* best-effort hint only */ }
+}
 
 const deeplink = (accountIdHex) => {
   const id = accountIdHex.replace(/^0x/, "");
@@ -171,30 +203,26 @@ async function cmdCreate(name, flags) {
     account: accountIdHex, address, identifierKey: bytesToHex(p256),
     username: null, registered: false, createdAt: new Date().toISOString(),
   };
-  const save = () => fs.writeFileSync(configPath(name), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-  save();
+  saveConfig(name, config);
 
+  let reg = "skipped";
   if (register) {
-    if (BANDERSNATCH_BIN && !fs.existsSync(BANDERSNATCH_BIN)) {
-      fail(`PCA_BANDERSNATCH_CLI points at ${BANDERSNATCH_BIN}, which doesn't exist.`);
-    }
-    step("Registering your bot on the network…");
-    let result;
-    try {
-      result = await registerIdentity({ mnemonic, username: wantUsername, digits: flags.digits ? String(flags.digits) : null, backendUrl, bandersnatchBin: BANDERSNATCH_BIN });
-    } catch (e) { fail(`Registration failed: ${e instanceof Error ? e.message : String(e)}`); }
-    config.username = result.username;
-    save();
-    ok(`Registered as ${result.username}`);
-    const waitMs = Number(flags.wait ?? 180) * 1000;
-    step(`Waiting for the network to confirm (up to ${Math.round(waitMs / 1000)}s)…`);
-    const attested = await withPeopleApi(endpoint, (api) =>
-      waitForAttestation(api, address, { timeoutMs: waitMs, onTick: () => process.stdout.write(".") }));
-    process.stdout.write("\n");
-    if (attested) { config.registered = true; save(); ok("Confirmed — your bot is live and people can message it!"); }
-    else { warn(`Not confirmed yet — this can take a few minutes. Check later:  pca info ${name}`); }
+    // Registration can fail or stay unconfirmed; the bot dir already exists, so
+    // don't hard-exit — leave it resumable via `pca register`.
+    reg = await runRegistration(name, config, { mnemonic, wantUsername, digits: wantDigits, wait: flags.wait });
   } else {
-    note("Skipped registration (--no-register); the bot won't be messageable until registered.");
+    note("Skipped registration (--no-register). Register later:  pca register " + name);
+  }
+
+  // A hard registration failure means nobody can message the bot yet — don't
+  // print the success epilogue (deeplink + "Start it"), and exit non-zero so a
+  // scripted `pca create … && pca deploy …` stops instead of deploying it.
+  if (reg === "failed") {
+    console.log();
+    warn(`"${name}" was created but isn't registered, so people can't message it yet.`);
+    note(`Finish registration:  pca register ${name}`);
+    process.exitCode = 1;
+    return;
   }
 
   console.log();
@@ -205,6 +233,61 @@ async function cmdCreate(name, flags) {
   if (config.username) note(`or search: ${config.username}`);
   console.log();
   note(`Start it:  pca run ${name}`);
+}
+
+// Register a bot on the network and wait for confirmation. Idempotent and
+// resumable: claims the username only if not already claimed (re-POSTing a
+// claimed name risks a conflict), then waits for attestation. Never throws —
+// on failure it explains how to retry, so a bot dir is never a dead end.
+// Returns "registered" | "pending" (claim ok, confirmation outstanding) |
+// "failed" (no claim happened) so callers can set an honest exit code.
+async function runRegistration(name, config, { mnemonic, wantUsername, digits, wait }) {
+  if (BANDERSNATCH_BIN && !fs.existsSync(BANDERSNATCH_BIN)) {
+    fail(`PCA_BANDERSNATCH_CLI points at ${BANDERSNATCH_BIN}, which doesn't exist.`);
+  }
+  const save = () => saveConfig(name, config);
+  if (!config.username) {
+    if (!mnemonic) { warn(`No mnemonic stored for "${name}" (imported bot?), so it can't be registered here.`); return "failed"; }
+    step("Registering your bot on the network…");
+    let result;
+    try {
+      result = await registerIdentity({ mnemonic, username: wantUsername, digits: digits ?? null, backendUrl: config.backendUrl, bandersnatchBin: BANDERSNATCH_BIN });
+    } catch (e) {
+      warn(`Registration didn't complete: ${e instanceof Error ? e.message : String(e)}`);
+      note(`Retry when ready:  pca register ${name}`);
+      return "failed";
+    }
+    config.username = result.username;
+    save();
+    ok(`Registered as ${result.username}`);
+  } else if (config.registered) {
+    ok(`Already registered as ${config.username}.`); return "registered";
+  } else {
+    step(`Username ${config.username} already claimed; waiting for the network to confirm…`);
+  }
+  const waitMs = Number(wait ?? 180) * 1000;
+  step(`Waiting for the network to confirm (up to ${Math.round(waitMs / 1000)}s)…`);
+  let attested = false;
+  try {
+    attested = await withPeopleApi(config.endpoint, (api) =>
+      waitForAttestation(api, config.address, { timeoutMs: waitMs, onTick: () => process.stdout.write(".") }));
+    process.stdout.write("\n");
+  } catch (e) { process.stdout.write("\n"); warn(`Couldn't reach the network: ${e instanceof Error ? e.message : String(e)}`); }
+  if (attested) { config.registered = true; save(); ok("Confirmed — your bot is live and people can message it!"); return "registered"; }
+  warn(`Not confirmed yet — this can take a few minutes. Check or retry:  pca register ${name}`);
+  return "pending";
+}
+
+async function cmdRegister(name, flags) {
+  if (!name) fail("Usage: pca register <botname>");
+  const cfg = readConfig(name);
+  if (cfg.registered) { ok(`"${name}" is already registered as ${cfg.username}.`); return; }
+  if (!fs.existsSync(secretPath(name))) fail(`No secret found for "${name}".`);
+  const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
+  const wantUsername = String(flags.username ?? cfg.username ?? name);
+  const wantDigits = flags.digits ? String(flags.digits) : (/\.(\d{2})$/.exec(wantUsername)?.[1] ?? null);
+  const reg = await runRegistration(name, cfg, { mnemonic: secret.mnemonic, wantUsername, digits: wantDigits, wait: flags.wait });
+  if (reg === "failed") process.exitCode = 1;
 }
 
 function cmdList() {
@@ -221,21 +304,26 @@ async function cmdInfo(name) {
   const cfg = readConfig(name);
   // Live re-check: has the network confirmed (attested) the bot yet?
   let messageable = cfg.registered;
+  let reachedNetwork = true;
   if (cfg.username && !cfg.registered) {
     try {
-      messageable = await withPeopleApi(cfg.endpoint, async (api) => {
-        const consumer = await api.query.Resources.Consumers.getValue(cfg.address);
-        return consumer?.identifier_key != null;
-      });
-      if (messageable) { cfg.registered = true; fs.writeFileSync(configPath(name), `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 }); }
-    } catch { /* offline; fall back to stored status */ }
+      messageable = await withPeopleApi(cfg.endpoint, async (api) =>
+        withTimeout(api.query.Resources.Consumers.getValue(cfg.address), 12_000, "network check")
+          .then((consumer) => consumer?.identifier_key != null));
+      if (messageable) { cfg.registered = true; saveConfig(name, cfg); }
+    } catch { reachedNetwork = false; }
   }
+  // Distinguish never-registered from claimed-but-pending from confirmed.
+  const status = messageable ? c("live — people can message it", "32")
+    : !reachedNetwork ? c("can't reach the network right now (try again)", "31")
+    : !cfg.username ? c(`not registered — run: pca register ${name}`, "33")
+    : c(`username claimed, confirmation pending — check again or run: pca register ${name}`, "33");
   console.log(`${c(name, "1")}${cfg.username ? ` (${cfg.username})` : ""}`);
   console.log(`  brain:    ${cfg.brain}`);
   console.log(`  network:  ${cfg.endpoint}`);
   console.log(`  address:  ${cfg.address}`);
   console.log(`  access:   ${(cfg.allow?.length) ? `locked to ${cfg.allow.length} address${cfg.allow.length > 1 ? "es" : ""}` : c("open to anyone", "33")}`);
-  console.log(`  status:   ${messageable ? c("live — people can message it", "32") : c("registration pending (check again in a bit)", "33")}`);
+  console.log(`  status:   ${status}`);
   console.log();
   console.log(`  Message this bot in the Polkadot app:`);
   console.log(`    ${c(deeplink(cfg.account), "36")}`);
@@ -244,8 +332,10 @@ async function cmdInfo(name) {
 
 function cmdRun(name) {
   const cfg = readConfig(name);
+  if (!fs.existsSync(secretPath(name))) fail(`"${name}" has no secret.json — its identity is missing. Recreate it: pca create ${name}`);
   const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
   if (!cfg.registered) note("Warning: this bot isn't registered on the network yet, so people can't message it.");
+  if (cfg.deploy?.host) warn(`Heads up: "${name}" is also deployed on ${cfg.deploy.host}. Running it here too = two processes on one identity (they will double-reply). Stop one first.`);
   step(`Starting "${name}" (${cfg.brain})…`);
   const env = {
     ...process.env,
@@ -313,7 +403,7 @@ async function cmdDeploy(name, flags) {
   const command = spec.install
     ? JSON.stringify(["sh", "-lc", `${spec.install} && exec node index.mjs`])
     : JSON.stringify(["node", "index.mjs"]);
-  const compose = `services:\n  bot:\n    image: node:22-slim\n    container_name: ${cn}\n    restart: unless-stopped\n    working_dir: /app\n    volumes:\n      - ./app:/app\n      - ./state:/app/state\n    env_file:\n      - ./bot.env\n    command: ${command}\n`;
+  const compose = `services:\n  bot:\n    image: node:22-slim\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    volumes:\n      - ./app:/app\n      - ./state:/app/state\n    env_file:\n      - ./bot.env\n    command: ${command}\n`;
 
   if (flags["dry-run"] === true) {
     console.log(`\n--- ${base}/docker-compose.yml ---\n${compose}`);
@@ -341,6 +431,8 @@ async function cmdDeploy(name, flags) {
   const cp = runLocal("scp", [...sshOpts, path.join(tmp, "bot.env"), path.join(tmp, "docker-compose.yml"), `${host}:${base}/`]);
   fs.rmSync(tmp, { recursive: true, force: true });
   if (cp.status !== 0) fail("Copying config (scp) failed.");
+  // scp applies the remote umask, so restore 0600 on the env (it holds the seed).
+  runLocal("ssh", [...sshOpts, host, `chmod 600 ${base}/bot.env`]);
 
   step("Starting the container…");
   const up = runLocal("ssh", [...sshOpts, host, `cd ${base} && docker compose -p ${cn} up -d`]);
@@ -348,7 +440,7 @@ async function cmdDeploy(name, flags) {
 
   // Remember where this bot lives so `pca stop/logs/status` don't need --host.
   cfg.deploy = { host, dir: base, container: cn, at: new Date().toISOString() };
-  fs.writeFileSync(configPath(name), `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 });
+  saveConfig(name, cfg);
 
   step("Waiting for the bot to come online…");
   const wait = runLocal("ssh", [...sshOpts, host,
@@ -396,13 +488,16 @@ async function deployHarnessStack(name, cfg, secret, flags, host, harness) {
     `BOT_ALLOWED_PEERS=${allow.join(",")}`,
     `BOT_USERNAME=${cfg.username ?? ""}`,
     `BOT_STATE_DIR=/app/state`,
+    // The harness container reaches the bridge over the compose network, so the
+    // bridge must bind beyond loopback here (no ports are published to the host).
+    `BOT_BRIDGE_HOST=0.0.0.0`,
   ].join("\n");
-  const botService = `  bot:\n    image: node:22-slim\n    container_name: ${cn}\n    restart: unless-stopped\n    working_dir: /app\n    volumes:\n      - ./app:/app\n      - ./state:/app/state\n    env_file:\n      - ./bot.env\n    command: ["node", "index.mjs"]\n`;
+  const botService = `  bot:\n    image: node:22-slim\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    volumes:\n      - ./app:/app\n      - ./state:/app/state\n    env_file:\n      - ./bot.env\n    command: ["node", "index.mjs"]\n`;
 
   const files = { "bot.env": `${botEnv}\n` };  // path (relative to base) -> content
   let compose, setup, afterUp;
   if (harness === "openclaw") {
-    compose = `services:\n${botService}\n  openclaw:\n    build: ./image\n    container_name: ${hn}\n    restart: unless-stopped\n    env_file:\n      - ./gateway.env\n    volumes:\n      - ./openclaw-home:/home/node\n      - ./plugin:/plugin:ro\n    depends_on: [bot]\n    command: ["openclaw", "gateway"]\n`;
+    compose = `services:\n${botService}\n  openclaw:\n    build: ./image\n    container_name: ${hn}\n    restart: unless-stopped\n${LOG_OPTS}    env_file:\n      - ./gateway.env\n    volumes:\n      - ./openclaw-home:/home/node\n      - ./plugin:/plugin:ro\n    depends_on: [bot]\n    command: ["openclaw", "gateway"]\n`;
     files["image/Dockerfile"] = `FROM node:22-slim\nRUN npm i -g openclaw @anthropic-ai/claude-code && npm cache clean --force\nENV HOME=/home/node\nWORKDIR /home/node\nUSER node\nCMD ["openclaw", "gateway"]\n`;
     files["gateway.env"] = `OPENCLAW_GATEWAY_TOKEN=${randomBytes(24).toString("hex")}\n`;
     // Runs inside the one-off setup container (home volume mounted) after `models set`
@@ -441,7 +536,7 @@ docker compose -p ${cn} run --rm openclaw sh -lc 'openclaw plugins install --lin
       }
     };
   } else {
-    compose = `services:\n${botService}\n  hermes:\n    image: nousresearch/hermes-agent:latest\n    container_name: ${hn}\n    restart: unless-stopped\n    command: ["gateway", "run"]\n    environment:\n      - HERMES_UID=0\n      - HERMES_GID=0\n      - POLKADOT_BRIDGE_URL=http://bot:8799\n      - POLKADOT_ALLOWED_USERS=${allow.join(",")}\n    volumes:\n      - hermes-data:/opt/data\n      - ./plugin:/opt/data/plugins/polkadot:ro\n    depends_on: [bot]\n\nvolumes:\n  hermes-data:\n`;
+    compose = `services:\n${botService}\n  hermes:\n    image: nousresearch/hermes-agent:latest\n    container_name: ${hn}\n    restart: unless-stopped\n${LOG_OPTS}    command: ["gateway", "run"]\n    environment:\n      - HERMES_UID=0\n      - HERMES_GID=0\n      - POLKADOT_BRIDGE_URL=http://bot:8799\n      - POLKADOT_ALLOWED_USERS=${allow.join(",")}\n    volumes:\n      - hermes-data:/opt/data\n      - ./plugin:/opt/data/plugins/polkadot:ro\n    depends_on: [bot]\n\nvolumes:\n  hermes-data:\n`;
     setup = `cd ${base}\nchown -R root:root plugin 2>/dev/null || true\necho SETUP_OK`;
     afterUp = () => {
       console.log();
@@ -496,7 +591,7 @@ docker compose -p ${cn} run --rm openclaw sh -lc 'openclaw plugins install --lin
   const up = runLocal("ssh", [...sshOpts, host, `cd ${base} && docker compose -p ${cn} up -d`]);
   if (up.status !== 0) fail("docker compose up failed.");
   cfg.deploy = { host, dir: base, container: cn, harness, at: new Date().toISOString() };
-  fs.writeFileSync(configPath(name), `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 });
+  saveConfig(name, cfg);
 
   step("Waiting for the bot to come online…");
   const wait = runLocal("ssh", [...sshOpts, host,
@@ -551,7 +646,11 @@ function cmdStatus(name, flags) {
   if (!statusLine) { warn(`Container ${cn} is not running on ${host}.`); return; }
   ok(`${cn}: ${statusLine}`);
   if (health.startsWith("{")) {
-    try { const h = JSON.parse(health); note(`bridge healthy · account ${h.account?.slice(0, 12)}… · ${h.username || "(no username)"}`); } catch { /* ignore */ }
+    try {
+      const h = JSON.parse(health);
+      const chain = h.ok ? c("reaching the network", "32") : c(`not reaching the network (last ok ${Math.round((h.lastPollAgoMs ?? 0) / 1000)}s ago)`, "31");
+      note(`${h.username || "(no username)"} · ${chain}`);
+    } catch { /* ignore */ }
   } else if (health) note(`health: ${health}`);
   if (lastEvent) note(`last event: ${lastEvent}`);
 }
@@ -570,6 +669,7 @@ function usage() {
   console.log(`pca — Polkadot Chat Agents
 
   pca create <botname> [--brain echo|codex|claude|gemini|grok|hermes] [--owner <your username or address>] [--public] [--network paseo] [--username name]
+  pca register <name>                  finish/retry registration for an existing bot
   pca run <name>                       start the bot locally (foreground)
   pca deploy <name> --host <ssh>       ship it to a server and run it in Docker
   pca logs <name> [-f] [--tail N]      tail a deployed bot's logs
@@ -578,10 +678,15 @@ function usage() {
   pca list                             list your bots
   pca info <name>                      show address + how to message it
 
+create flags:
   --owner <who>    lock the bot to you — your app username (myname.42), address, or 0x hex (recommended)
+  --allow a,b      allowlist several owners (usernames/addresses/hex, comma-separated)
   --public         let anyone message it (required to leave an AI/hermes bot open)
   --username <u>   network username base if different from the bot name (6+ lowercase letters)
   --digits <NN>    request a specific username number (mybot.NN); omit to auto-assign a free one
+  --no-register    create the identity locally without registering (finish later with pca register)
+  --wait <secs>    how long to wait for on-chain confirmation (default 180)
+  --network <ep>   target network: paseo (default) or a full wss:// endpoint
 
 deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --anthropic-key <key> (claude brain)  ·  --model <m>  ·  --dry-run
   Needs Docker on the server + SSH access. Direct brains (echo/claude) deploy as one
@@ -597,8 +702,10 @@ Bots live in ${BOTS_DIR} (override with PCA_BOTS_DIR).`);
 const { flags, positional } = parseFlags(process.argv.slice(2));
 const [command, arg] = positional;
 try {
+  warnLegacyBotsDir();
   switch (command) {
     case "create": await cmdCreate(arg, flags); break;
+    case "register": await cmdRegister(arg, flags); break;
     case "run": cmdRun(arg); break;                 // spawns a child; manages its own exit
     case "deploy": await cmdDeploy(arg, flags); break;
     case "logs": cmdLogs(arg, flags); break;
@@ -609,6 +716,7 @@ try {
     default: usage(); if (command != null) process.exit(1);
   }
   // Commands that open chain WS clients (create/info/deploy) keep the event loop
-  // alive after finishing; exit explicitly. `run` is the exception — it stays.
-  if (command !== "run") process.exit(0);
+  // alive after finishing; exit explicitly (honoring any failure exit code set
+  // by the command). `run` is the exception — it stays.
+  if (command !== "run") process.exit(process.exitCode ?? 0);
 } catch (e) { fail(e instanceof Error ? e.message : String(e)); }

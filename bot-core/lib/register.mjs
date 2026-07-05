@@ -11,6 +11,12 @@ import { blake2b } from "@noble/hashes/blake2.js";
 import { mnemonicToEntropy, mnemonicToMiniSecret, ss58Address } from "@polkadot-labs/hdkd-helpers";
 import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
 import { deriveP256PrivateKey, p256PublicKeyFromPrivateKey } from "../vendor/app-chat-codec.mjs";
+import { withTimeout } from "../vendor/lib/async-utils.mjs";
+
+// Re-export the shared timeout helper (cli.mjs uses it for chain queries): papi
+// requests never reject on a dead socket — they're buffered and re-sent on
+// reconnect — so every chain call must be raced against a deadline.
+export { withTimeout };
 
 const MSG_PREFIX = "pop:people-lite:register using";
 
@@ -22,7 +28,8 @@ export const DEFAULT_BACKENDS = {
 const enc = new TextEncoder();
 const hexToBytes = (hex) => {
   const clean = String(hex).trim().replace(/^0x/i, "");
-  if (!/^[0-9a-fA-F]*$/.test(clean) || clean.length % 2 !== 0) throw new Error(`bad hex: ${hex}`);
+  // Don't echo the value: some callers pass key material through this path.
+  if (!/^[0-9a-fA-F]*$/.test(clean) || clean.length % 2 !== 0) throw new Error(`bad hex value (${clean.length} chars)`);
   return Uint8Array.from(clean.match(/../g)?.map((b) => Number.parseInt(b, 16)) ?? []);
 };
 const bytesToHex = (b) => `0x${Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("")}`;
@@ -63,7 +70,7 @@ async function runLitePersonWasm(entropyHex, messageHex) {
   const path = await import("node:path");
   wasmModule ??= await WebAssembly.compile(fs.readFileSync(WASM_PATH));
   const tmp = path.join(os.tmpdir(), `bandersnatch-${process.pid}-${Date.now()}.out`);
-  const fd = fs.openSync(tmp, "w+");
+  const fd = fs.openSync(tmp, "w+", 0o600); // not world-readable while the proof is written
   try {
     const wasi = new WASI({
       version: "preview1",
@@ -73,7 +80,7 @@ async function runLitePersonWasm(entropyHex, messageHex) {
     });
     const code = wasi.start(await WebAssembly.instantiate(wasmModule, wasi.getImportObject()));
     const out = fs.readFileSync(tmp, "utf8").trim();
-    if (code !== 0) throw new Error(`bandersnatch helper failed (exit ${code}): ${out}`);
+    if (code !== 0) throw new Error(`identity proof helper failed (exit ${code}): ${out}`);
     return JSON.parse(out);
   } finally {
     fs.closeSync(fd);
@@ -84,7 +91,7 @@ async function runLitePersonWasm(entropyHex, messageHex) {
 async function runLitePerson(bin, entropyHex, messageHex) {
   if (!bin) return runLitePersonWasm(entropyHex, messageHex);
   const r = spawnSync(bin, ["lite-person", entropyHex, messageHex], { encoding: "utf8" });
-  if (r.status !== 0) throw new Error(`bandersnatch helper failed: ${r.stderr || r.stdout || r.error?.message}`);
+  if (r.status !== 0) throw new Error(`identity proof helper failed: ${r.stderr || r.stdout || r.error?.message}`);
   return JSON.parse(r.stdout.trim());
 }
 
@@ -158,7 +165,7 @@ export async function waitForAttestation(peopleApi, addressSs58, { timeoutMs = 1
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     let consumer = null;
-    try { consumer = await peopleApi.query.Resources.Consumers.getValue(addressSs58); } catch { /* transient */ }
+    try { consumer = await withTimeout(peopleApi.query.Resources.Consumers.getValue(addressSs58), pollMs, "attestation check"); } catch { /* transient or timed out */ }
     if (consumer?.identifier_key != null) return true;
     if (Date.now() >= deadline) return false;
     onTick?.();
