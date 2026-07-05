@@ -493,8 +493,14 @@ const queryTopic = async (topic) => {
 
 const pollOnce = async () => {
   tickErrored = 0; tickOk = 0; tickDeferred = 0;
+  // During a total outage every query burns the full timeout, so a tick with
+  // many peers would serialize minutes of doomed waits before the backoff even
+  // engages. A few straight failures with zero successes = give up this tick;
+  // backoff and the next tick take it from there.
+  const tickDead = () => tickOk === 0 && tickErrored >= 3;
   // request-day topics -> openers
   for (const topic of requestDayTopics()) {
+    if (tickDead()) break;
     for (const st of (await queryTopic(topic)) ?? []) {
       const data = typeof st.data === "string" ? hexToBytes(st.data) : st.data;
       const key = fp(data);
@@ -508,6 +514,7 @@ const pollOnce = async () => {
   // own encryption keys, NOT the identity topic, so poll each incoming device
   // session too — identity-only polling silently misses app follow-ups.
   for (const peerHex of watchedSessionPeers) {
+    if (tickDead()) break;
     const entry = sessions.get(peerHex);
     if (entry == null) continue;
     const identityTopicHex = bytesToHex(entry.session.peerSessionId);
@@ -518,6 +525,7 @@ const pollOnce = async () => {
         .map((ds) => ({ topic: ds.peerSessionId, session: ds, sender: ds.peerStatementAccountId })),
     ];
     for (const { topic, session, sender } of inbound) {
+      if (tickDead()) break;
       for (const st of (await queryTopic(topic)) ?? []) {
         const data = typeof st.data === "string" ? hexToBytes(st.data) : st.data;
         const key = fp(data);
@@ -669,22 +677,19 @@ log("BOT_LISTENING", { account: `0x${accountIdHex}`, identifierKey: `0x${norm(by
 // rebuild each peer's (deterministic) session and resume watching its channel,
 // and reload the dedup set so we don't re-answer already-handled messages.
 const restored = stateStore?.load();
-if (restored?.peers?.length) {
-  let restoredCount = 0;
-  for (const p of restored.peers) {
-    // Per-peer guard: one malformed persisted entry must not crash startup and
-    // trip a Docker restart loop — skip it and keep the rest of the sessions.
-    try {
-      const devices = (p.devices ?? []).map((d) => ({ statementAccountId: hexToBytes(d.s), encryptionPublicKey: hexToBytes(d.e) }));
-      buildSession(p.peerHex, p.identifierKeyHex, devices);
-      addSessionWatch(p.peerHex);
-      restoredCount += 1;
-    } catch (e) { log("BOT_STATE_PEER_SKIPPED", { peer: p?.peerHex, error: String(e?.message ?? e) }); }
-  }
-  restored.peers = restored.peers.slice(0, restoredCount); // for the log line below
+let restoredPeers = 0;
+for (const p of restored?.peers ?? []) {
+  // Per-peer guard: one malformed persisted entry must not crash startup and
+  // trip a Docker restart loop — skip it and keep the rest of the sessions.
+  try {
+    const devices = (p.devices ?? []).map((d) => ({ statementAccountId: hexToBytes(d.s), encryptionPublicKey: hexToBytes(d.e) }));
+    buildSession(p.peerHex, p.identifierKeyHex, devices);
+    addSessionWatch(p.peerHex);
+    restoredPeers += 1;
+  } catch (e) { log("BOT_STATE_PEER_SKIPPED", { peer: p?.peerHex, error: String(e?.message ?? e) }); }
 }
 for (const id of restored?.seen ?? []) seenRequests.add(id);
-if (restored) log("BOT_STATE_RESTORED", { peers: restored.peers?.length ?? 0, seen: restored.seen?.length ?? 0 });
+if (restored) log("BOT_STATE_RESTORED", { peers: restoredPeers, seen: restored.seen?.length ?? 0 });
 for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { stateStore?.flush(); process.exit(0); });
 
 for (;;) {
