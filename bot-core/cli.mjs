@@ -205,12 +205,24 @@ async function cmdCreate(name, flags) {
   const save = () => fs.writeFileSync(configPath(name), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
   save();
 
+  let reg = "skipped";
   if (register) {
     // Registration can fail or stay unconfirmed; the bot dir already exists, so
     // don't hard-exit — leave it resumable via `pca register`.
-    await runRegistration(name, config, { mnemonic, wantUsername, digits: wantDigits, wait: flags.wait });
+    reg = await runRegistration(name, config, { mnemonic, wantUsername, digits: wantDigits, wait: flags.wait });
   } else {
     note("Skipped registration (--no-register). Register later:  pca register " + name);
+  }
+
+  // A hard registration failure means nobody can message the bot yet — don't
+  // print the success epilogue (deeplink + "Start it"), and exit non-zero so a
+  // scripted `pca create … && pca deploy …` stops instead of deploying it.
+  if (reg === "failed") {
+    console.log();
+    warn(`"${name}" was created but isn't registered, so people can't message it yet.`);
+    note(`Finish registration:  pca register ${name}`);
+    process.exitCode = 1;
+    return;
   }
 
   console.log();
@@ -227,13 +239,15 @@ async function cmdCreate(name, flags) {
 // resumable: claims the username only if not already claimed (re-POSTing a
 // claimed name risks a conflict), then waits for attestation. Never throws —
 // on failure it explains how to retry, so a bot dir is never a dead end.
+// Returns "registered" | "pending" (claim ok, confirmation outstanding) |
+// "failed" (no claim happened) so callers can set an honest exit code.
 async function runRegistration(name, config, { mnemonic, wantUsername, digits, wait }) {
   if (BANDERSNATCH_BIN && !fs.existsSync(BANDERSNATCH_BIN)) {
     fail(`PCA_BANDERSNATCH_CLI points at ${BANDERSNATCH_BIN}, which doesn't exist.`);
   }
   const save = () => fs.writeFileSync(configPath(name), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
   if (!config.username) {
-    if (!mnemonic) { warn(`No mnemonic stored for "${name}" (imported bot?), so it can't be registered here.`); return; }
+    if (!mnemonic) { warn(`No mnemonic stored for "${name}" (imported bot?), so it can't be registered here.`); return "failed"; }
     step("Registering your bot on the network…");
     let result;
     try {
@@ -241,13 +255,13 @@ async function runRegistration(name, config, { mnemonic, wantUsername, digits, w
     } catch (e) {
       warn(`Registration didn't complete: ${e instanceof Error ? e.message : String(e)}`);
       note(`Retry when ready:  pca register ${name}`);
-      return;
+      return "failed";
     }
     config.username = result.username;
     save();
     ok(`Registered as ${result.username}`);
   } else if (config.registered) {
-    ok(`Already registered as ${config.username}.`); return;
+    ok(`Already registered as ${config.username}.`); return "registered";
   } else {
     step(`Username ${config.username} already claimed; waiting for the network to confirm…`);
   }
@@ -259,8 +273,9 @@ async function runRegistration(name, config, { mnemonic, wantUsername, digits, w
       waitForAttestation(api, config.address, { timeoutMs: waitMs, onTick: () => process.stdout.write(".") }));
     process.stdout.write("\n");
   } catch (e) { process.stdout.write("\n"); warn(`Couldn't reach the network: ${e instanceof Error ? e.message : String(e)}`); }
-  if (attested) { config.registered = true; save(); ok("Confirmed — your bot is live and people can message it!"); }
-  else { warn(`Not confirmed yet — this can take a few minutes. Check or retry:  pca register ${name}`); }
+  if (attested) { config.registered = true; save(); ok("Confirmed — your bot is live and people can message it!"); return "registered"; }
+  warn(`Not confirmed yet — this can take a few minutes. Check or retry:  pca register ${name}`);
+  return "pending";
 }
 
 async function cmdRegister(name, flags) {
@@ -271,7 +286,8 @@ async function cmdRegister(name, flags) {
   const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
   const wantUsername = String(flags.username ?? cfg.username ?? name);
   const wantDigits = flags.digits ? String(flags.digits) : (/\.(\d{2})$/.exec(wantUsername)?.[1] ?? null);
-  await runRegistration(name, cfg, { mnemonic: secret.mnemonic, wantUsername, digits: wantDigits, wait: flags.wait });
+  const reg = await runRegistration(name, cfg, { mnemonic: secret.mnemonic, wantUsername, digits: wantDigits, wait: flags.wait });
+  if (reg === "failed") process.exitCode = 1;
 }
 
 function cmdList() {
@@ -700,6 +716,7 @@ try {
     default: usage(); if (command != null) process.exit(1);
   }
   // Commands that open chain WS clients (create/info/deploy) keep the event loop
-  // alive after finishing; exit explicitly. `run` is the exception — it stays.
-  if (command !== "run") process.exit(0);
+  // alive after finishing; exit explicitly (honoring any failure exit code set
+  // by the command). `run` is the exception — it stays.
+  if (command !== "run") process.exit(process.exitCode ?? 0);
 } catch (e) { fail(e instanceof Error ? e.message : String(e)); }
