@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  bot-core:
+    runs-on: ubuntu-latest
+    defaults:
+      run: { working-directory: bot-core }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: bot-core/package-lock.json }
+      - name: Install (runs papi generate from committed metadata)
+        run: npm ci
+      - name: Descriptors resolve
+        run: node -e 'import("@polkadot-api/descriptors").then(()=>console.log("descriptors OK"))'
+      - name: Syntax check
+        run: for f in index.mjs cli.mjs test-client.mjs test-client-device.mjs lib/*.mjs; do node --check "$f"; done
+      - name: CLI smoke (create a bot offline)
+        run: |
+          node cli.mjs
+          PCA_BOTS_DIR="$RUNNER_TEMP/bots" node cli.mjs create cismoke --brain echo --no-register
+          test -f "$RUNNER_TEMP/bots/cismoke/config.json"
+
+  openclaw-plugin:
+    runs-on: ubuntu-latest
+    defaults:
+      run: { working-directory: openclaw-plugin/polkadot }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Build bundle
+        run: npm install --no-audit --no-fund && npm run build
+      - name: Committed dist is current
+        run: git diff --exit-code dist/
+
+  bandersnatch-cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: tools/bandersnatch-cli }
+      - name: Build identity tool
+        run: cargo build --manifest-path tools/bandersnatch-cli/Cargo.toml
