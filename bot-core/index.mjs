@@ -30,6 +30,7 @@ import { paseoPeopleNext } from "@polkadot-api/descriptors";
 import { createLazyClient, createPapiStatementStoreAdapter } from "@novasamatech/statement-store";
 import { ss58Address } from "@polkadot-labs/hdkd-helpers";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
+import { withTimeout } from "./vendor/lib/async-utils.mjs";
 import {
   makePeerSession,
   deriveP256PrivateKey,
@@ -99,6 +100,10 @@ const aiSpec = (() => {
 const lookbackDays = Number(env.BOT_REQUEST_LOOKBACK_DAYS ?? 7);
 const futureDays = Number(env.BOT_REQUEST_FUTURE_DAYS ?? 2);
 const pollMs = Number(env.BOT_POLL_MS ?? 2000);
+// Deadline for every chain call (queries AND submits): papi requests never
+// reject on a dead socket — they're buffered and re-sent on reconnect — so an
+// unbounded await anywhere in the poll path wedges the bot forever.
+const queryTimeoutMs = Number(env.BOT_QUERY_TIMEOUT_MS ?? 15_000);
 // Session persistence: without it, a restart wipes every open conversation
 // (the peer's session channels/keys live only in memory). Enabled when
 // BOT_STATE_DIR is set — Docker/`pca` provide it; raw `node index.mjs` runs go
@@ -133,16 +138,24 @@ const accountIdHex = norm(bytesToHex(accountId));
 const username = env.FAUCET_CHAT_SERVICE_USERNAME ?? env.BOT_USERNAME ?? "";
 
 // ---------- chain clients ----------
-// Keep a handle on the transport provider so /health can read the real socket
-// state — this adapter resolves queries to empty when disconnected rather than
-// erroring, so connection status is the only reliable outage signal.
+// Keep handles on BOTH providers so /health can read real socket state: the
+// statement-store socket carries polling/submits, the papi socket carries
+// identifier-key lookups (a bot with only the papi socket down is deaf to new
+// peers). Note a disconnected socket does NOT fail requests — they're buffered
+// and re-sent on reconnect — so socket state and per-call timeouts are the two
+// outage signals; query success alone can't distinguish "empty" from "down".
 const wsProvider = getWsProvider(endpoint);
 const lazyClient = createLazyClient(wsProvider);
 const statementStore = createPapiStatementStoreAdapter(lazyClient);
-const chainConnected = () => wsProvider.getStatus?.().type === WsEvent.CONNECTED;
+const papiProvider = getWsProvider(endpoint);
+const socketConnected = (p) => p.getStatus?.().type === WsEvent.CONNECTED;
+const chainConnected = () => socketConnected(wsProvider) && socketConnected(papiProvider);
 const requestRpc = lazyClient.getRequestFn();
-const papiClient = createPapiClient(getWsProvider(endpoint));
+const papiClient = createPapiClient(papiProvider);
 const peopleApi = papiClient.getTypedApi(paseoPeopleNext);
+// Every chain submit shares the query deadline: submitAppStatement retries
+// rejections, but a hung socket never rejects — it would await forever.
+const submitBounded = (args) => withTimeout(submitAppStatement(requestRpc, args), queryTimeoutMs, "statement submit");
 
 const identifierKeyCache = new Map(); // peerHex -> identifierKeyHex
 const resolveIdentifierKey = async (peerHex) => {
@@ -150,7 +163,9 @@ const resolveIdentifierKey = async (peerHex) => {
   if (identifierKeyCache.has(key)) return identifierKeyCache.get(key);
   let value = null;
   try {
-    const consumer = await peopleApi.query.Resources.Consumers.getValue(ss58Address(hexToBytes(key), 2));
+    const consumer = await withTimeout(
+      peopleApi.query.Resources.Consumers.getValue(ss58Address(hexToBytes(key), 2)),
+      queryTimeoutMs, "identifier lookup");
     value = consumer?.identifier_key == null ? null : norm(String(consumer.identifier_key));
   } catch (error) {
     log("BOT_IDENTIFIER_LOOKUP_FAILED", { peer: key, error: error instanceof Error ? error.message : String(error) });
@@ -237,7 +252,7 @@ const sendText = async (peerHex, text) => {
   const entry = sessions.get(norm(peerHex));
   if (entry == null) throw new Error("no active session for peer");
   const payload = encodeSessionRequestPayload(entry.session, makeAppUuid(), [encodeOpaqueTextMessage({ text })]);
-  const result = await submitAppStatement(requestRpc, {
+  const result = await submitBounded({
     walletPair: wallet,
     channel: entry.session.requestChannel,
     topics: [entry.session.ownSessionId],
@@ -360,7 +375,7 @@ const handleOpener = async (data) => {
     : encodeOpaqueChatAcceptedMessage({ acceptedRequestId: decoded.messageId });
   try {
     const ackPayload = encodeSessionRequestPayload(session, makeAppUuid(), [accept, encodeOpaqueTextMessage({ text: ackText })], { forceIdentity: true });
-    await submitAppStatement(requestRpc, { walletPair: wallet, channel: session.requestChannel, topics: [session.ownSessionId], scaleEncodedPayload: ackPayload, expiryFactory });
+    await submitBounded({ walletPair: wallet, channel: session.requestChannel, topics: [session.ownSessionId], scaleEncodedPayload: ackPayload, expiryFactory });
   } catch (error) { log("BOT_ACK_FAILED", { to: senderHex, error: error instanceof Error ? error.message : String(error) }); }
   log("BOT_RECEIVED_OPENER", { from: senderHex, requestId: decoded.messageId, text: decoded.text });
   enqueueWork(senderHex, () => handleInbound(senderHex, decoded.text ?? "", decoded.messageId));
@@ -373,7 +388,7 @@ const sendSessionAck = async (peerHex, requestId) => {
   const entry = sessions.get(norm(peerHex));
   if (entry == null) return;
   const payload = encodeSessionResponsePayload(entry.session, requestId);
-  await submitAppStatement(requestRpc, {
+  await submitBounded({
     walletPair: wallet,
     channel: entry.session.responseChannel,
     topics: [entry.session.ownSessionId],
@@ -447,17 +462,6 @@ let lastPollOkAt = Date.now();
 let pollFailStreak = 0;
 let lastPollError = null;
 let tickErrored = 0, tickOk = 0;
-const queryTimeoutMs = Number(env.BOT_QUERY_TIMEOUT_MS ?? 15_000);
-// A query against a dead RPC endpoint can hang indefinitely (never resolves or
-// rejects), which would freeze the poll loop forever. Race it against a timeout
-// so an outage becomes a countable error, not a hang.
-const withTimeout = (promise, ms, label) => {
-  let t;
-  return Promise.race([
-    Promise.resolve(promise).finally(() => clearTimeout(t)),
-    new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`${label} timed out after ${ms}ms`)), ms); }),
-  ]);
-};
 const queryTopic = async (topic) => {
   try {
     const v = await withTimeout(
@@ -528,13 +532,15 @@ const startBridge = () => {
     const json = (code, obj) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(obj)); };
     try {
       if (req.method === "GET" && url.pathname === "/health") {
-        // ok reflects real reachability, not just "the process is up": the RPC
-        // socket must be connected. (Queries resolve to empty when disconnected,
-        // so the socket state — not query success — is the reliable signal.)
+        // ok reflects real reachability, not just "the process is up": both RPC
+        // sockets must be connected. (A disconnected socket buffers requests
+        // instead of failing them, so socket state — not query success — is the
+        // reliable signal.)
         const connected = chainConnected();
         return json(connected ? 200 : 503, {
           ok: connected, account: `0x${accountIdHex}`, identifierKey: `0x${norm(bytesToHex(identifierKey))}`, username,
-          chain: wsProvider.getStatus?.().type ?? "unknown", pollFailStreak, lastPollAgoMs: Date.now() - lastPollOkAt,
+          chain: wsProvider.getStatus?.().type ?? "unknown", peopleChain: papiProvider.getStatus?.().type ?? "unknown",
+          pollFailStreak, lastPollAgoMs: Date.now() - lastPollOkAt,
         });
       }
       if (req.method === "GET" && url.pathname === "/inbound") {

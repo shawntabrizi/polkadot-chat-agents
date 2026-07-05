@@ -11,6 +11,12 @@ import { blake2b } from "@noble/hashes/blake2.js";
 import { mnemonicToEntropy, mnemonicToMiniSecret, ss58Address } from "@polkadot-labs/hdkd-helpers";
 import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
 import { deriveP256PrivateKey, p256PublicKeyFromPrivateKey } from "../vendor/app-chat-codec.mjs";
+import { withTimeout } from "../vendor/lib/async-utils.mjs";
+
+// Re-export the shared timeout helper (cli.mjs uses it for chain queries): papi
+// requests never reject on a dead socket — they're buffered and re-sent on
+// reconnect — so every chain call must be raced against a deadline.
+export { withTimeout };
 
 const MSG_PREFIX = "pop:people-lite:register using";
 
@@ -22,7 +28,8 @@ export const DEFAULT_BACKENDS = {
 const enc = new TextEncoder();
 const hexToBytes = (hex) => {
   const clean = String(hex).trim().replace(/^0x/i, "");
-  if (!/^[0-9a-fA-F]*$/.test(clean) || clean.length % 2 !== 0) throw new Error(`bad hex: ${hex}`);
+  // Don't echo the value: some callers pass key material through this path.
+  if (!/^[0-9a-fA-F]*$/.test(clean) || clean.length % 2 !== 0) throw new Error(`bad hex value (${clean.length} chars)`);
   return Uint8Array.from(clean.match(/../g)?.map((b) => Number.parseInt(b, 16)) ?? []);
 };
 const bytesToHex = (b) => `0x${Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("")}`;
@@ -154,16 +161,6 @@ export async function registerIdentity({ mnemonic, username, digits = null, back
 }
 
 // Poll Resources.Consumers until the bot's identifier_key is on-chain (attested).
-// Race a promise against a timeout so a hung chain query (papi's getValue never
-// settles against an unreachable endpoint) can't defeat the overall deadline.
-export const withTimeout = (promise, ms, label = "chain query") => {
-  let t;
-  return Promise.race([
-    Promise.resolve(promise).finally(() => clearTimeout(t)),
-    new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`${label} timed out after ${ms}ms`)), ms); }),
-  ]);
-};
-
 export async function waitForAttestation(peopleApi, addressSs58, { timeoutMs = 180_000, pollMs = 5_000, onTick } = {}) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
