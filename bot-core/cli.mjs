@@ -41,7 +41,9 @@ async function withPeopleApi(endpoint, fn) {
   finally { client.destroy(); }
 }
 
-const BOTS_DIR = process.env.PCA_BOTS_DIR ?? path.resolve(process.cwd(), "bots");
+// Bots live in a stable per-user location so `pca list` finds them regardless of
+// the working directory. Override with PCA_BOTS_DIR.
+const BOTS_DIR = process.env.PCA_BOTS_DIR ?? path.join(os.homedir(), ".pca", "bots");
 const DEFAULT_ENDPOINT = "wss://paseo-people-next-system-rpc.polkadot.io";
 const BRAINS = ["echo", "codex", "claude", "gemini", "grok", "hermes"];
 // Brains that call a model and therefore spend your quota — never left open by default.
@@ -86,15 +88,22 @@ const note = (s) => console.log(`  ${c(s, "90")}`);
 const warn = (s) => console.log(`${c("⚠", "33")} ${s}`);
 const fail = (s) => { console.error(`${c("✗", "31")} ${s}`); process.exit(1); };
 
+// Flags that are always boolean — they must never consume the following token,
+// or `pca create --public mybot` would swallow the bot name into --public.
+const BOOLEAN_FLAGS = new Set(["public", "dry-run", "no-register", "follow"]);
+const SHORT_FLAGS = { "-f": "follow" };
 function parseFlags(argv) {
   const flags = {};
   const positional = [];
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
+    if (SHORT_FLAGS[a]) { flags[SHORT_FLAGS[a]] = true; continue; }
     if (a.startsWith("--")) {
       const key = a.slice(2);
       const next = argv[i + 1];
-      if (next == null || next.startsWith("--")) flags[key] = true;
+      // Boolean flags take no value; otherwise consume the next token unless it's
+      // itself a flag (values here are addresses/hex/usernames, never start with -).
+      if (BOOLEAN_FLAGS.has(key) || next == null || next.startsWith("-")) flags[key] = true;
       else { flags[key] = next; i += 1; }
     } else positional.push(a);
   }
@@ -105,6 +114,7 @@ const botDir = (name) => path.join(BOTS_DIR, name);
 const configPath = (name) => path.join(botDir(name), "config.json");
 const secretPath = (name) => path.join(botDir(name), "secret.json");
 const readConfig = (name) => {
+  if (!name) fail("Which bot? Usage: pca <command> <botname>   (list yours with: pca list)");
   if (!fs.existsSync(configPath(name))) fail(`No bot named "${name}". Create it: pca create ${name}`);
   return JSON.parse(fs.readFileSync(configPath(name), "utf8"));
 };
@@ -285,8 +295,10 @@ async function cmdInfo(name) {
 
 function cmdRun(name) {
   const cfg = readConfig(name);
+  if (!fs.existsSync(secretPath(name))) fail(`"${name}" has no secret.json — its identity is missing. Recreate it: pca create ${name}`);
   const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
   if (!cfg.registered) note("Warning: this bot isn't registered on the network yet, so people can't message it.");
+  if (cfg.deploy?.host) warn(`Heads up: "${name}" is also deployed on ${cfg.deploy.host}. Running it here too = two processes on one identity (they will double-reply). Stop one first.`);
   step(`Starting "${name}" (${cfg.brain})…`);
   const env = {
     ...process.env,
@@ -629,10 +641,15 @@ function usage() {
   pca list                             list your bots
   pca info <name>                      show address + how to message it
 
+create flags:
   --owner <who>    lock the bot to you — your app username (myname.42), address, or 0x hex (recommended)
+  --allow a,b      allowlist several owners (usernames/addresses/hex, comma-separated)
   --public         let anyone message it (required to leave an AI/hermes bot open)
   --username <u>   network username base if different from the bot name (6+ lowercase letters)
   --digits <NN>    request a specific username number (mybot.NN); omit to auto-assign a free one
+  --no-register    create the identity locally without registering (finish later with pca register)
+  --wait <secs>    how long to wait for on-chain confirmation (default 180)
+  --network <ep>   target network: paseo (default) or a full wss:// endpoint
 
 deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --anthropic-key <key> (claude brain)  ·  --model <m>  ·  --dry-run
   Needs Docker on the server + SSH access. Direct brains (echo/claude) deploy as one
