@@ -535,7 +535,11 @@ console.log("openclaw config ok");
 cd ${base}
 chown -R root:root plugin 2>/dev/null || true
 mkdir -p openclaw-home/.claude
-if [ -f "$HOME/.claude/.credentials.json" ]; then
+if [ -f openclaw-home/.claude/.credentials.json ]; then
+  # Keep the container's own (possibly OAuth-refreshed) token — re-copying the
+  # host's original would clobber a rotated token and break auth on redeploy.
+  echo CREDS_KEPT
+elif [ -f "$HOME/.claude/.credentials.json" ]; then
   cp "$HOME/.claude/.credentials.json" openclaw-home/.claude/
   [ -f "$HOME/.claude.json" ] && cp "$HOME/.claude.json" openclaw-home/.claude.json
   chmod 700 openclaw-home/.claude
@@ -602,7 +606,7 @@ docker compose -p ${cn} run --rm openclaw sh -lc 'openclaw plugins install --lin
   const su = runLocal("ssh", [...sshOpts, host, `bash ${base}/setup.sh`], { capture: true });
   const setupOut = (su.stdout || "").trim();
   if (su.status !== 0) fail(`Remote setup failed:\n${setupOut.split("\n").slice(-5).join("\n")}`);
-  const credsSeeded = /CREDS_SEEDED/.test(setupOut);
+  const credsSeeded = /CREDS_SEEDED|CREDS_KEPT/.test(setupOut);
   ok(`Setup done${/IMAGE_BUILT/.test(setupOut) ? " (image built)" : ""}`);
 
   step("Starting the stack…");
