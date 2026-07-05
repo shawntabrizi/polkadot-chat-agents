@@ -125,6 +125,10 @@ for (const [mode, extraEnv] of [
     const stateDir = tmpState();
     const bot = await startBot({ endpoint: node.url, stateDir, extraEnv });
     try {
+      // In subscribe mode the sweep only runs every 30s, so replies inside the
+      // client's 8s windows can only have arrived by subscription — but assert
+      // the mode explicitly too.
+      if (extraEnv.BOT_SUBSCRIBE === "1") await bot.waitFor((e) => e.event === "BOT_SUBSCRIBED", { label: "BOT_SUBSCRIBED" });
       const r = await runClient(node.url, [], ["hello opener", "follow-one", "follow-two"]);
       assert.equal(r.code, 0, `client failed:\n${r.out}`);
       assert.match(r.out, /Echo: hello opener/);
@@ -132,6 +136,12 @@ for (const [mode, extraEnv] of [
       assert.match(r.out, /Echo: follow-two/);
       // Every follow-up request must be ACKed despite the poison message.
       assert.equal((r.out.match(/\[ACK\]/g) ?? []).length >= 2, true, `missing ACKs:\n${r.out}`);
+      if (extraEnv.BOT_SUBSCRIBE === "1") {
+        // The startup heartbeat has fired by now; a malformed heartbeat would
+        // show up as a submit failure and a recovery loop.
+        const hbFailures = bot.events.filter((e) => e.event === "BOT_STATEMENT_INGRESS_HEARTBEAT_SUBMIT_FAILED");
+        assert.deepEqual(hbFailures, [], "heartbeat submissions failed");
+      }
     } finally {
       await bot.stop();
       await node.close();

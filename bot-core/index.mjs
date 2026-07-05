@@ -16,7 +16,10 @@
 //   BOT_ENDPOINT (default Paseo), BOT_BRIDGE_PORT (8799), BOT_BRIDGE_HOST (127.0.0.1),
 //   BOT_ACK_TEXT, BOT_ALLOWED_PEERS (comma-sep peer account hexes; empty = allow all),
 //   BOT_REQUEST_LOOKBACK_DAYS (7), BOT_REQUEST_FUTURE_DAYS (2), BOT_POLL_MS (2000),
-//   BOT_THINKING_TEXT + BOT_THINKING_AFTER_MS (5000) — ack sent if no reply by then.
+//   BOT_THINKING_TEXT + BOT_THINKING_AFTER_MS (5000) — ack sent if no reply by then,
+//   BOT_SUBSCRIBE (1; 0 = poll-only), BOT_SWEEP_MS (30000, sweep cadence while the
+//   subscription is healthy), BOT_HEARTBEAT_MS (30000), BOT_PEER_IDENTIFIER_KEYS
+//   ("peerhex=keyhex,..." — pin identifier keys, skipping the on-chain lookup).
 
 import http from "node:http";
 import fs from "node:fs";
@@ -47,6 +50,7 @@ import {
   encodeSessionRequestPayload,
   encodeSessionResponsePayload,
   submitAppStatement,
+  scaleEncodeBytes,
   makeAppUuid,
 } from "./vendor/app-chat-codec.mjs";
 
@@ -422,6 +426,7 @@ const handleOpener = async (data) => {
     : [];
   const session = buildSession(senderHex, identifierKeyHex, devices);
   addSessionWatch(senderHex);
+  ingress?.resubscribe(); // watch this peer's session topics by push, not just sweep
   oweReply(decoded.messageId, senderHex, decoded.text ?? "", decoded.messageId);
   persist(); // remember this peer's session (and the owed reply) across restarts
   stateStore?.flush(); // owed must be on disk before the ACK suppresses resends
@@ -528,6 +533,7 @@ const requestDayTopics = () => {
 };
 const watchedSessionPeers = new Set();
 const addSessionWatch = (peerHex) => { watchedSessionPeers.add(norm(peerHex)); };
+let ingress = null; // set at startup when subscription ingress is enabled
 
 // Poll liveness: an RPC outage used to be swallowed here, so a dead bot polled
 // into the void while /health still said ok. Track outcomes instead — a query
@@ -556,17 +562,12 @@ const queryTopics = async (topics) => {
 // path; normalize to the bare-hex key used by the watch map.
 const topicHex = (t) => norm(typeof t === "string" ? t : bytesToHex(t));
 
-const pollOnce = async () => {
-  tickErrored = 0; tickOk = 0; tickDeferred = 0;
-  // During a total outage every query burns the full timeout — a few straight
-  // failures with zero successes = give up this tick; backoff and the next
-  // tick take it from there.
-  const tickDead = () => tickOk === 0 && tickErrored >= 3;
-  // Watch map for this tick: every topic we poll -> how to dispatch a
-  // statement that carries it. Openers arrive on the request-day topics;
-  // follow-ups on the peer's identity session topic AND each per-device
-  // session topic (the app's devices publish on device topics, NOT the
-  // identity topic — identity-only polling silently misses app follow-ups).
+// Watch map: every topic we ingest -> how to dispatch a statement that
+// carries it. Openers arrive on the request-day topics; follow-ups on the
+// peer's identity session topic AND each per-device session topic (the app's
+// devices publish on device topics, NOT the identity topic — identity-only
+// ingestion silently misses app follow-ups).
+const buildWatch = () => {
   const watch = new Map(); // bare-hex topic -> {kind:"opener"} | {kind:"session", peerHex, session, sender}
   for (const topic of requestDayTopics()) watch.set(topicHex(topic), { kind: "opener", topic });
   for (const peerHex of watchedSessionPeers) {
@@ -581,6 +582,43 @@ const pollOnce = async () => {
       watch.set(th, { kind: "session", topic: ds.peerSessionId, peerHex, session: ds, sender: ds.peerStatementAccountId });
     }
   }
+  return watch;
+};
+
+// Route one statement, attributing it by the watched topic it carries
+// (statements hold their topics; batched filters lose the per-query 1:1).
+const dispatchStatement = async (st, watch) => {
+  const data = typeof st.data === "string" ? hexToBytes(st.data) : st.data;
+  const key = fp(data);
+  if (seenStatements.has(key)) return;
+  const target = (st.topics ?? []).map((t) => watch.get(topicHex(t))).find(Boolean);
+  if (!target) return;
+  noteSeenStatement(key);
+  if (target.kind === "opener") {
+    await handleOpener(data);
+  } else if ((await handleSessionStatement(data, target.peerHex, target.session, target.sender)) === "deferred") {
+    // A deferred statement (pipeline full) must be re-examined on a later
+    // sweep — the app's resend covers the subscription path too.
+    seenStatements.delete(key);
+    tickDeferred += 1;
+  }
+};
+
+// All dispatch — sweep results and subscription pages — runs through one
+// serial chain so per-session handling order can never interleave.
+let dispatchTail = Promise.resolve();
+const dispatchSerial = (fn) => {
+  dispatchTail = dispatchTail.then(fn).catch((e) => log("BOT_DISPATCH_FAILED", { error: String(e?.message ?? e) }));
+  return dispatchTail;
+};
+
+const pollOnce = async () => {
+  tickErrored = 0; tickOk = 0; tickDeferred = 0;
+  // During a total outage every query burns the full timeout — a few straight
+  // failures with zero successes = give up this tick; backoff and the next
+  // tick take it from there.
+  const tickDead = () => tickOk === 0 && tickErrored >= 3;
+  const watch = buildWatch();
   // Query all watched topics in bounded-concurrency matchAny batches.
   const allTopics = [...watch.values()].map((w) => w.topic);
   const batches = [];
@@ -589,25 +627,11 @@ const pollOnce = async () => {
   await runWithConcurrency(batches, QUERY_CONCURRENCY, async (batch, i) => {
     results[i] = tickDead() ? null : await queryTopics(batch);
   });
-  // Dispatch serially, attributing each statement by the watched topic it
-  // carries (statements hold their topics; matchAny loses the per-query 1:1).
-  for (const sts of results) {
-    for (const st of sts ?? []) {
-      const data = typeof st.data === "string" ? hexToBytes(st.data) : st.data;
-      const key = fp(data);
-      if (seenStatements.has(key)) continue;
-      const target = (st.topics ?? []).map((t) => watch.get(topicHex(t))).find(Boolean);
-      if (!target) continue;
-      noteSeenStatement(key);
-      if (target.kind === "opener") {
-        await handleOpener(data);
-      } else if ((await handleSessionStatement(data, target.peerHex, target.session, target.sender)) === "deferred") {
-        // A deferred statement (pipeline full) must be re-examined next tick.
-        seenStatements.delete(key);
-        tickDeferred += 1;
-      }
+  await dispatchSerial(async () => {
+    for (const sts of results) {
+      for (const st of sts ?? []) await dispatchStatement(st, watch);
     }
-  }
+  });
   if (tickDeferred > 0) log("BOT_BACKPRESSURE", { deferredStatements: tickDeferred });
   // Tick outcome: any successful query means the chain is reachable. All-errors
   // (and at least one attempt) means an outage — surface it, don't poll blindly.
@@ -638,10 +662,12 @@ const startBridge = () => {
         // instead of failing them, so socket state — not query success — is the
         // reliable signal.)
         const connected = chainConnected();
+        const ing = ingress?.supervisor.snapshot();
         return json(connected ? 200 : 503, {
           ok: connected, account: `0x${accountIdHex}`, identifierKey: `0x${norm(bytesToHex(identifierKey))}`, username,
           chain: wsProvider.getStatus?.().type ?? "unknown", peopleChain: papiProvider.getStatus?.().type ?? "unknown",
           pollFailStreak, lastPollAgoMs: Date.now() - lastPollOkAt,
+          ingress: ing ? { healthy: ing.sinceOkMs < ing.staleMs, sinceOkMs: ing.sinceOkMs, recoveries: ing.consecutiveRecoveries } : null,
         });
       }
       if (req.method === "GET" && url.pathname === "/inbound") {
@@ -772,10 +798,89 @@ for (const o of restored?.owed ?? []) {
 if (restored) log("BOT_STATE_RESTORED", { peers: restoredPeers, seen: restored.seen?.length ?? 0, owed: restoredOwed });
 for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { stateStore?.flush(); process.exit(0); });
 
+// ---------- subscription ingress (push) ----------
+// Statements arrive by subscription; the poll loop drops to a slow
+// reconciliation sweep while the subscription is healthy. Liveness is proven
+// end-to-end: the supervisor submits a heartbeat statement on a private
+// health channel (channel replacement = one slot, ever) and expects to see it
+// come back through its own subscription; a miss triggers resubscription and
+// the sweep falls back to full poll cadence. BOT_SUBSCRIBE=0 disables.
+if ((env.BOT_SUBSCRIBE ?? "1") !== "0") {
+  const { createStatementIngressSupervisor, createRawStatementPageSubscriber } =
+    await import("./vendor/lib/statement-ingress-supervisor.mjs");
+  const healthTopic = blake2b(enc.encode(`pca-heartbeat:${accountIdHex}`), { dkLen: 32 });
+  const healthChannel = blake2b(enc.encode(`pca-heartbeat-channel:${accountIdHex}`), { dkLen: 32 });
+  const healthTopicHex = topicHex(healthTopic);
+  const subscribePages = createRawStatementPageSubscriber({ getClient: () => lazyClient.getClient() });
+  const groupKeys = new Map(); // groupId -> sorted topic key currently subscribed
+  const supervisor = createStatementIngressSupervisor({
+    subscribePages,
+    handleStatements: (statements) => dispatchSerial(async () => {
+      const watch = buildWatch();
+      for (const st of statements) await dispatchStatement(st, watch);
+    }),
+    // The statement data field must arrive SCALE-framed (compact length +
+    // bytes) — the node rejects a bare payload as undecodable.
+    submitHeartbeat: ({ id }) => submitBounded({
+      walletPair: wallet, channel: healthChannel, topics: [healthTopic],
+      scaleEncodedPayload: scaleEncodeBytes(enc.encode(id)), expiryFactory,
+    }),
+    healthFilter: { matchAll: [healthTopic] },
+    isHealthStatement: (st) => (st.topics ?? []).some((t) => topicHex(t) === healthTopicHex),
+    isCurrentHeartbeatStatement: (st, hb) => {
+      const data = typeof st.data === "string" ? hexToBytes(st.data) : st.data;
+      return bytesToHex(data).includes(bytesToHex(enc.encode(hb.id)));
+    },
+    recover: () => resubscribe(true),
+    emit: ({ event, ...extra }) => log(event, extra),
+    heartbeatIntervalMs: Number(env.BOT_HEARTBEAT_MS ?? 30_000),
+  });
+  // Keep subscription groups aligned with the current watch set (day rollover,
+  // new peers/devices): chunked matchAny groups, replaced only when their
+  // topic membership actually changes.
+  const resubscribe = (force = false) => {
+    const desired = new Map(); // groupId -> topics
+    const openerTopics = requestDayTopics();
+    for (let i = 0; i < openerTopics.length; i += TOPIC_BATCH) {
+      desired.set(`openers-${i / TOPIC_BATCH}`, openerTopics.slice(i, i + TOPIC_BATCH));
+    }
+    const sessionTopics = [...buildWatch().values()].filter((w) => w.kind === "session").map((w) => w.topic);
+    for (let i = 0; i < sessionTopics.length; i += TOPIC_BATCH) {
+      desired.set(`sessions-${i / TOPIC_BATCH}`, sessionTopics.slice(i, i + TOPIC_BATCH));
+    }
+    for (const id of [...groupKeys.keys()]) {
+      if (!desired.has(id)) { supervisor.unsubscribeGroup(id); groupKeys.delete(id); }
+    }
+    for (const [id, topics] of desired) {
+      const key = topics.map(topicHex).sort().join(",");
+      if (!force && groupKeys.get(id) === key) continue;
+      groupKeys.set(id, key);
+      try { supervisor.subscribeGroup({ id, filter: { matchAny: topics }, label: id, topicCount: topics.length }); }
+      catch (e) { log("BOT_SUBSCRIBE_GROUP_FAILED", { group: id, error: String(e?.message ?? e) }); }
+    }
+  };
+  supervisor.start();
+  resubscribe(true);
+  ingress = { supervisor, resubscribe };
+  log("BOT_SUBSCRIBED", { heartbeatMs: Number(env.BOT_HEARTBEAT_MS ?? 30_000) });
+}
+
+// While the subscription proves live, the poll loop is only a reconciliation
+// sweep (it re-examines deferred statements and anything a page missed); when
+// the subscription is down or disabled, it is the sole ingress at full cadence.
+const sweepMs = Number(env.BOT_SWEEP_MS ?? 30_000);
+const ingressHealthy = () => {
+  if (!ingress) return false;
+  const s = ingress.supervisor.snapshot();
+  return s.sinceOkMs < s.staleMs;
+};
+
 for (;;) {
   try { await pollOnce(); } catch (error) { log("BOT_POLL_ERROR", { error: error instanceof Error ? error.message : String(error) }); }
+  ingress?.resubscribe(); // day rollover / watch-set changes
   // Back off on a sustained outage so we don't hammer a recovering node with the
   // full topic fan-out every tick; normal cadence resumes on the first success.
-  const wait = pollFailStreak > 0 ? Math.min(30_000, pollMs * 2 ** Math.min(pollFailStreak, 5)) : pollMs;
+  const base = ingressHealthy() ? sweepMs : pollMs;
+  const wait = pollFailStreak > 0 ? Math.min(30_000, pollMs * 2 ** Math.min(pollFailStreak, 5)) : base;
   await delay(wait);
 }

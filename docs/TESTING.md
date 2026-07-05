@@ -1,5 +1,16 @@
 # Testing a bot without a phone
 
+## Offline, automated (no network at all)
+
+`npm test` in `bot-core/` runs the transport end-to-end against an in-memory
+statement node (`test/mock-statement-node.mjs`): round trips with poison
+batches, restart survival with dedup, and owed-reply crash recovery — each in
+both ingress modes (poll-only and subscription). CI runs this on every push.
+`BOT_PEER_IDENTIFIER_KEYS` pins peer identifier keys so no people chain is
+needed.
+
+## Live network
+
 Both test clients send real messages over the Statement Store from an attested
 identity and print the bot's replies. You need the sender's root seed and the
 target bot's account id and identifier key (`pca info <name>` prints the bot's

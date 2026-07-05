@@ -49,10 +49,18 @@ These were all learned by debugging against the real mobile app:
   set, and the owed-replies journal to `BOT_STATE_DIR/session-state.json` and
   rebuilds sessions on startup (`makePeerSession` is deterministic), so restarts
   do not orphan open conversations or drop ACKed-but-unanswered messages.
-- **Polling scale.** Watched topics are queried in `matchAny` batches (16 topics
-  per request, 4 concurrent), so per-tick RPC count stays roughly constant as
-  peers accumulate. Statements are attributed back to their session by the
-  topics they carry; handling stays serial per session.
+- **Ingress.** Statements arrive by subscription (`statement_subscribeStatement`
+  via the vendored ingress supervisor): chunked `matchAny` groups for openers
+  and session topics, resubscribed when the watch set changes. Liveness is
+  proven end-to-end — the bot submits a heartbeat statement on a private
+  channel (channel replacement = one slot, ever) and expects it back through
+  its own subscription; a miss resubscribes. The poll loop remains as a slow
+  reconciliation sweep (`BOT_SWEEP_MS`, 30s) that re-examines deferred
+  statements, and falls back to full cadence (`BOT_POLL_MS`) whenever the
+  subscription is unhealthy or disabled (`BOT_SUBSCRIBE=0`). Sweep queries use
+  the same chunked `matchAny` batches, so RPC count stays roughly constant as
+  peers accumulate. All dispatch — pages and sweep results — runs through one
+  serial chain, so per-session handling order never interleaves.
 
 ## Identity: being messageable requires personhood
 
