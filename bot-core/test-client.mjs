@@ -9,8 +9,7 @@
 //     [--endpoint wss://...] [--wait-secs 25] "message" ["follow up" ...]
 //
 // NOTE: follow-ups are sent on the identity session channel; the app itself
-// uses the device channel, so multi-turn from this client is best-effort. The
-// opener path is a reliable end-to-end check.
+// uses the device channel — use test-client-device.mjs to exercise that path.
 
 import { createLazyClient, createPapiStatementStoreAdapter } from "@novasamatech/statement-store";
 import { getWsProvider } from "polkadot-api/ws";
