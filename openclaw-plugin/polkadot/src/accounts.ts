@@ -10,7 +10,7 @@ export type ResolvedPolkadotAccount = {
   enabled: boolean;
   configured: boolean;
   bridgeUrl: string;
-  dmPolicy: "open" | "pairing" | "closed";
+  dmPolicy: "open" | "pairing" | "allowlist" | "closed";
   allowFrom: string[];
 };
 
