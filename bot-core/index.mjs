@@ -213,15 +213,21 @@ const buildSession = (peerHex, identifierKeyHex, extraDevices = []) => {
 
 // ---------- bridge inbound queue ----------
 const INBOUND_CAP = 1000;
+// True when handleInbound hands messages to the HTTP bridge queue (no direct
+// brain): backpressure must then watch inboundQueue, not the per-peer queues.
+const usesBridgeQueue = brain !== "echo" && !aiSpec;
 const inboundQueue = [];
 const waiters = [];
 const enqueueInbound = (item) => {
   inboundQueue.push(item);
-  // Bound the backlog if no harness is polling /inbound (e.g. it's down), so a
-  // misconfigured bridge bot doesn't grow this without limit; drop oldest.
+  // Backstop only — session statements are deferred un-ACKed upstream when the
+  // queue is at cap (see handleSessionStatement), so this should not trigger.
+  // If an opener burst still overflows it, dropping oldest loses messages that
+  // were already ACKed (the app won't resend them) — log the count loudly.
   if (inboundQueue.length > INBOUND_CAP) {
-    inboundQueue.splice(0, inboundQueue.length - INBOUND_CAP);
-    log("BOT_INBOUND_QUEUE_TRIMMED", { cap: INBOUND_CAP });
+    const dropped = inboundQueue.length - INBOUND_CAP;
+    inboundQueue.splice(0, dropped);
+    log("BOT_INBOUND_QUEUE_TRIMMED", { cap: INBOUND_CAP, dropped });
   }
   const w = waiters.shift();
   if (w) { clearTimeout(w.timer); w.resolve(inboundQueue.splice(0)); }
@@ -401,17 +407,30 @@ const sendSessionAck = async (peerHex, requestId) => {
 // or delay ACKs — the app resends its whole backlog until it sees an ACK, so a
 // slow model would directly cause resend storms and head-of-line blocking for
 // every other peer. Work is serialized per peer (preserves reply order and
-// aiHistory consistency) and concurrent across peers.
-const peerWork = new Map(); // peerHex -> tail promise
+// aiHistory consistency) and concurrent across peers. Depth is capped: queued
+// work is ACKed but held only in memory, so an unbounded queue would both leak
+// (stuck brain × chatty peer) and widen the crash-loss window without limit —
+// past the cap, new statements are deferred un-ACKed instead (see
+// handleSessionStatement) and the app's resend acts as the retry.
+const WORK_CAP = 20;
+const peerWork = new Map(); // peerHex -> { tail, depth }
+const workDepth = (peerHex) => peerWork.get(norm(peerHex))?.depth ?? 0;
 const enqueueWork = (peerHex, fn) => {
   const k = norm(peerHex);
-  const tail = (peerWork.get(k) ?? Promise.resolve()).then(fn)
-    .catch((e) => log("BOT_HANDLER_FAILED", { peer: k, error: String(e?.message ?? e) }));
-  peerWork.set(k, tail);
-  tail.finally(() => { if (peerWork.get(k) === tail) peerWork.delete(k); });
+  const entry = peerWork.get(k) ?? { tail: Promise.resolve(), depth: 0 };
+  entry.depth += 1;
+  entry.tail = entry.tail.then(fn)
+    .catch((e) => log("BOT_HANDLER_FAILED", { peer: k, error: String(e?.message ?? e) }))
+    .finally(() => { entry.depth -= 1; if (entry.depth === 0 && peerWork.get(k) === entry) peerWork.delete(k); });
+  peerWork.set(k, entry);
 };
 
 const handleSessionStatement = async (data, peerHex, session, senderAccountId = hexToBytes(peerHex)) => {
+  // Backpressure: once a message is marked seen and its request ACKed, it lives
+  // only in memory until answered — the app will never resend it. So when this
+  // peer's pipeline is full, leave the statement un-ACKed and un-seen instead;
+  // the app keeps resending until we have room. Nothing is ACKed then dropped.
+  if (workDepth(peerHex) >= WORK_CAP || (usesBridgeQueue && inboundQueue.length >= INBOUND_CAP)) return "deferred";
   let decoded;
   // A follow-up we can't decrypt used to vanish silently here — log it so a
   // broken/stale session is diagnosable instead of looking like "no message".
@@ -461,7 +480,7 @@ const addSessionWatch = (peerHex) => { watchedSessionPeers.add(norm(peerHex)); }
 let lastPollOkAt = Date.now();
 let pollFailStreak = 0;
 let lastPollError = null;
-let tickErrored = 0, tickOk = 0;
+let tickErrored = 0, tickOk = 0, tickDeferred = 0;
 const queryTopic = async (topic) => {
   try {
     const v = await withTimeout(
@@ -473,7 +492,7 @@ const queryTopic = async (topic) => {
 };
 
 const pollOnce = async () => {
-  tickErrored = 0; tickOk = 0;
+  tickErrored = 0; tickOk = 0; tickDeferred = 0;
   // request-day topics -> openers
   for (const topic of requestDayTopics()) {
     for (const st of (await queryTopic(topic)) ?? []) {
@@ -504,10 +523,15 @@ const pollOnce = async () => {
         const key = fp(data);
         if (seenStatements.has(key)) continue;
         noteSeenStatement(key);
-        await handleSessionStatement(data, peerHex, session, sender);
+        // A deferred statement (pipeline full) must be re-examined next tick.
+        if ((await handleSessionStatement(data, peerHex, session, sender)) === "deferred") {
+          seenStatements.delete(key);
+          tickDeferred += 1;
+        }
       }
     }
   }
+  if (tickDeferred > 0) log("BOT_BACKPRESSURE", { deferredStatements: tickDeferred });
   // Tick outcome: any successful query means the chain is reachable. All-errors
   // (and at least one attempt) means an outage — surface it, don't poll blindly.
   if (tickOk > 0) {
