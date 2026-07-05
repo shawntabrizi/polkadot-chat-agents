@@ -137,8 +137,11 @@ Any framework that can run a small loop (poll `/inbound`, call your agent, `POST
 If you just want a model to answer — no agent framework — bot-core can shell out
 to a model's own CLI. The transport core stays model-agnostic; each brain is just
 a `prompt → argv` hook, and **each CLI owns its own auth/token** (bot-core never
-touches your keys). Slow replies get an automatic "🤔 thinking…" ack, and a
-failed model call is logged with its cause (`BOT_AI_AUTH_REVOKED` → re-login vs.
+touches your keys). Slow replies get an automatic "🤔 thinking…" ack (any brain,
+including the bridge): if no reply has gone out within **`BOT_THINKING_AFTER_MS`**
+(default 5000) the ack is sent — tune it up if it feels chatty, customize the text
+with `BOT_THINKING_TEXT`, or set the text empty to disable. A failed model call is
+logged with its cause (`BOT_AI_AUTH_REVOKED` → re-login vs.
 `BOT_AI_FAILED`/`BOT_AI_TIMEOUT`).
 
 | Brain | CLI it runs | Auth |

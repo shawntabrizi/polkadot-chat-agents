@@ -16,7 +16,7 @@
 //   BOT_ENDPOINT (default Paseo), BOT_BRIDGE_PORT (8799), BOT_BRIDGE_HOST (0.0.0.0),
 //   BOT_ACK_TEXT, BOT_ALLOWED_PEERS (comma-sep peer account hexes; empty = allow all),
 //   BOT_REQUEST_LOOKBACK_DAYS (7), BOT_REQUEST_FUTURE_DAYS (2), BOT_POLL_MS (2000),
-//   BOT_THINKING_TEXT + BOT_THINKING_AFTER_MS (3000) — ack sent if no reply by then.
+//   BOT_THINKING_TEXT + BOT_THINKING_AFTER_MS (5000) — ack sent if no reply by then.
 
 import http from "node:http";
 import path from "node:path";
@@ -60,7 +60,7 @@ const ackText = env.BOT_ACK_TEXT ?? (brain === "bridge" || brain === "hermes" ? 
 // send a "thinking" ack so a slow answer (AI call, Hermes round-trip) doesn't feel
 // like the message was lost. Fast replies cancel it. Empty text disables it.
 const thinkingText = env.BOT_THINKING_TEXT ?? "🤔 One moment — thinking…";
-const thinkingAfterMs = Number(env.BOT_THINKING_AFTER_MS ?? 3000);
+const thinkingAfterMs = Number(env.BOT_THINKING_AFTER_MS ?? 5000);
 
 // Direct AI-CLI "brains": bot-core shells out to an agent CLI that owns its own
 // auth/token. The transport core stays model-agnostic — these are just hooks that
