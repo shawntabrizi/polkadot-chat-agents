@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // pca — Polkadot Chat Agents CLI.
 //
-// Headless, flag-driven onboarding. One bot = one folder under ./bots/<name>/
+// Headless, flag-driven onboarding. One bot = one folder under ~/.pca/bots/<name>/
 // (override with PCA_BOTS_DIR). Blockchain details (keys, addresses, topics)
 // are handled for you; you just pick a name and a brain.
 //

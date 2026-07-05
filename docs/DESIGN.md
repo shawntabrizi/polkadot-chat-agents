@@ -119,7 +119,10 @@ app username) or an explicit `--public` for any brain that costs money.
 
 - `secret.json` (the bot's root seed) and `session-state.json` (session keys) are
   written mode 0600 and gitignored. Whoever holds the seed is the bot.
-- Model credentials never pass through bot-core: direct brains call the model's
-  own CLI, and frameworks hold their own auth.
+- The bot-core transport never handles model credentials: direct brains call the
+  model's own CLI, and frameworks hold their own auth. The one exception is the
+  deploy CLI — `pca deploy --anthropic-key` writes the key you pass into the
+  container's `bot.env` so a headless `claude` bot can authenticate; treat that
+  file as a secret (it also holds the seed; mode 0600, gitignored).
 - Deployed harness stacks run the agent CLI as a non-root container user, so no
   permission-bypass flags are needed.
