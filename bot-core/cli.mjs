@@ -140,6 +140,19 @@ async function cmdCreate(name, flags) {
   if (register && !/^[a-z]{6,}(\.\d{2})?$/.test(wantUsername)) {
     fail(`To register, the name/username must be 6+ lowercase letters. Pass --username <letters> (or --no-register).`);
   }
+  // If a specific .NN was requested, check it's free BEFORE any crypto or
+  // registration — a taken number should fail fast and friendly, not as a raw
+  // backend error. (No request = the network auto-assigns a free number.)
+  const wantDigits = flags.digits ? String(flags.digits) : (/\.(\d{2})$/.exec(wantUsername)?.[1] ?? null);
+  if (register && wantDigits) {
+    const full = `${wantUsername.replace(/\.\d{2}$/, "")}.${wantDigits}`;
+    let taken = false;
+    try {
+      const res = await fetch(new URL(`/api/v1/usernames/${full}`, backendUrl));
+      taken = res.ok;
+    } catch { /* backend unreachable here — let registration surface it */ }
+    if (taken) fail(`The username ${full} is already taken.\n  Pick another number:  --digits <NN>\n  Or drop --digits and the network assigns a free one automatically.`);
+  }
 
   step(`Creating bot "${name}"…`);
   const mnemonic = generateMnemonic(128);
@@ -567,6 +580,8 @@ function usage() {
 
   --owner <who>    lock the bot to you — your app username (myname.42), address, or 0x hex (recommended)
   --public         let anyone message it (required to leave an AI/hermes bot open)
+  --username <u>   network username base if different from the bot name (6+ lowercase letters)
+  --digits <NN>    request a specific username number (mybot.NN); omit to auto-assign a free one
 
 deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --anthropic-key <key> (claude brain)  ·  --model <m>  ·  --dry-run
   Needs Docker on the server + SSH access. Direct brains (echo/claude) deploy as one
