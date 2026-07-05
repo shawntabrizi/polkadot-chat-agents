@@ -30,7 +30,7 @@ import { paseoPeopleNext } from "@polkadot-api/descriptors";
 import { createLazyClient, createPapiStatementStoreAdapter } from "@novasamatech/statement-store";
 import { ss58Address } from "@polkadot-labs/hdkd-helpers";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
-import { withTimeout } from "./vendor/lib/async-utils.mjs";
+import { withTimeout, runWithConcurrency } from "./vendor/lib/async-utils.mjs";
 import {
   makePeerSession,
   deriveP256PrivateKey,
@@ -226,12 +226,20 @@ const enqueueInbound = (item) => {
   // were already ACKed (the app won't resend them) — log the count loudly.
   if (inboundQueue.length > INBOUND_CAP) {
     const dropped = inboundQueue.length - INBOUND_CAP;
+    // Not settled: trimmed items stay in the owed journal, so a restart
+    // re-runs them instead of losing them outright.
     inboundQueue.splice(0, dropped);
     log("BOT_INBOUND_QUEUE_TRIMMED", { cap: INBOUND_CAP, dropped });
   }
   const w = waiters.shift();
-  if (w) { clearTimeout(w.timer); w.resolve(inboundQueue.splice(0)); }
+  if (w) { clearTimeout(w.timer); w.resolve(drainInbound()); }
 };
+// Hand the queued items to the harness: custody transfers here, so settle each
+// item's owed-journal entry and strip the internal owedId from the payload.
+const drainInbound = () => inboundQueue.splice(0).map(({ owedId, ...item }) => {
+  if (owedId) settleOwed(owedId);
+  return item;
+});
 
 const isAllowed = (peerHex) => allowedPeers.size === 0 || allowedPeers.has(norm(peerHex));
 
@@ -298,7 +306,7 @@ const runAgentCli = (peerHex, userText) => new Promise((resolve) => {
   });
 });
 
-const handleInbound = async (peerHex, text, messageId) => {
+const handleInbound = async (peerHex, text, messageId, owedId = null) => {
   if (brain === "echo") {
     await sendText(peerHex, `Echo: ${text}`).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
     return;
@@ -320,7 +328,16 @@ const handleInbound = async (peerHex, text, messageId) => {
   // bridge / hermes / unknown: hand off to an external agent via the HTTP bridge.
   // The agent replies via POST /send -> sendText, which disarms the ack.
   armThinking(peerHex);
-  enqueueInbound({ chat_id: peerHex, text, message_id: messageId });
+  enqueueInbound({ chat_id: peerHex, text, message_id: messageId, owedId });
+};
+
+// Queue one owed message for the brain, settling the journal entry when the
+// pipeline takes custody (bridge items settle later, on /inbound drain).
+const enqueueOwed = (peerHex, owedId, text, requestId) => {
+  enqueueWork(peerHex, async () => {
+    try { await handleInbound(peerHex, text, requestId, owedId); }
+    finally { if (!usesBridgeQueue) settleOwed(owedId); }
+  });
 };
 
 // ---------- receive: dedup + handlers ----------
@@ -336,6 +353,20 @@ const noteSeenStatement = (key) => { seenStatements.add(key); trimSet(seenStatem
 // to a hash of requestId:text so we never hold or persist conversation plaintext.
 const messageDedupId = (requestId, text, messageId) =>
   messageId || `h:${bytesToHex(blake2b(enc.encode(`${requestId}:${text}`), { dkLen: 16 }))}`;
+
+// ---------- owed replies (crash-durable at-least-once) ----------
+// A message is deduped and ACKed as soon as it's queued (ACK = delivered), so
+// the pending reply exists only in memory — a crash before the brain ran would
+// silently never answer it. Journal owed replies in the state snapshot and
+// flush BEFORE the ACK goes out; a restart re-runs the brain for anything
+// still owed. Settled when the reply pipeline takes custody: direct brains
+// when handleInbound returns (reply or apology sent), bridge brains when the
+// harness drains the item from /inbound. Bounded by the same backpressure
+// caps as the queues it mirrors. Holds message text until answered — transient
+// by design, in a file that is 0600 and already holds key material.
+const owedReplies = new Map(); // owedId -> { peerHex, text, requestId }
+const oweReply = (owedId, peerHex, text, requestId) => owedReplies.set(owedId, { peerHex, text, requestId });
+const settleOwed = (owedId) => { if (owedReplies.delete(owedId)) persist(); };
 
 // Persist only what can't be re-derived: per-peer identifierKey + peerDevices.
 // makePeerSession is deterministic, so the channels/keys rebuild exactly from
@@ -353,6 +384,7 @@ const snapshotState = () => ({
     })),
   })),
   seen: [...seenRequests].slice(-SEEN_CAP),
+  owed: [...owedReplies.entries()].map(([id, o]) => ({ id, p: o.peerHex, t: o.text, r: o.requestId })),
 });
 const persist = () => { if (stateStore) stateStore.save(snapshotState()); };
 const fp = (data) => bytesToHex(data.subarray(0, 32)); // dedup key: first 32 bytes, no full-payload encode
@@ -374,7 +406,9 @@ const handleOpener = async (data) => {
     : [];
   const session = buildSession(senderHex, identifierKeyHex, devices);
   addSessionWatch(senderHex);
-  persist(); // remember this peer's session so it survives a restart
+  oweReply(decoded.messageId, senderHex, decoded.text ?? "", decoded.messageId);
+  persist(); // remember this peer's session (and the owed reply) across restarts
+  stateStore?.flush(); // owed must be on disk before the ACK suppresses resends
   // ACK / accept so the peer establishes the session (advertise our device).
   const accept = decoded.deviceEncPubKeyHex
     ? encodeOpaqueMultiChatAcceptedMessage({ acceptedRequestId: decoded.messageId, statementAccountId: accountId, encryptionPublicKey: identifierKey })
@@ -384,7 +418,7 @@ const handleOpener = async (data) => {
     await submitBounded({ walletPair: wallet, channel: session.requestChannel, topics: [session.ownSessionId], scaleEncodedPayload: ackPayload, expiryFactory });
   } catch (error) { log("BOT_ACK_FAILED", { to: senderHex, error: error instanceof Error ? error.message : String(error) }); }
   log("BOT_RECEIVED_OPENER", { from: senderHex, requestId: decoded.messageId, text: decoded.text });
-  enqueueWork(senderHex, () => handleInbound(senderHex, decoded.text ?? "", decoded.messageId));
+  enqueueOwed(senderHex, decoded.messageId, decoded.text ?? "", decoded.messageId);
 };
 
 // ACK a session request (mirrors the app: response goes on our own session
@@ -447,17 +481,23 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
       const alreadySeen = seenRequests.has(id) || seenRequests.has(legacyKey);
       seenRequests.add(id);
       trimSet(seenRequests, SEEN_CAP);
-      if (!alreadySeen) fresh.push(m.text);
+      if (!alreadySeen) fresh.push({ id, text: m.text });
     }
   }
-  if (fresh.length) persist();
+  if (fresh.length) {
+    // Journal before the ACK goes out: seen + owed land in one snapshot, so a
+    // crash after the ACK can't leave a message deduped but never answered.
+    for (const f of fresh) oweReply(f.id, peerHex, f.text, decoded.requestId);
+    persist();
+    stateStore?.flush();
+  }
   // ACK means "delivered", not "answered" — send it before any brain work so
   // the app stops resending even when the model is slow.
   try { await sendSessionAck(peerHex, decoded.requestId); }
   catch (e) { log("BOT_SESSION_ACK_FAILED", { to: peerHex, error: String(e?.message ?? e) }); }
-  for (const text of fresh) {
-    log("BOT_RECEIVED_TEXT", { from: peerHex, text });
-    enqueueWork(peerHex, () => handleInbound(peerHex, text, decoded.requestId));
+  for (const f of fresh) {
+    log("BOT_RECEIVED_TEXT", { from: peerHex, text: f.text });
+    enqueueOwed(peerHex, f.id, f.text, decoded.requestId);
   }
 };
 
@@ -481,61 +521,74 @@ let lastPollOkAt = Date.now();
 let pollFailStreak = 0;
 let lastPollError = null;
 let tickErrored = 0, tickOk = 0, tickDeferred = 0;
-const queryTopic = async (topic) => {
+// Topics are queried in matchAny batches so per-tick RPC count stays ~constant
+// as peers accumulate (one query per TOPIC_BATCH topics, not one per topic),
+// and batches run concurrently. Reads are independent — only per-session
+// HANDLING order matters, and handling stays serial below.
+const TOPIC_BATCH = Number(env.BOT_TOPIC_BATCH ?? 16);
+const QUERY_CONCURRENCY = 4;
+const queryTopics = async (topics) => {
   try {
     const v = await withTimeout(
-      statementStore.queryStatements({ matchAll: [topic] }).match((x) => x, (e) => { throw new Error(String(e?.message ?? e)); }),
+      statementStore.queryStatements({ matchAny: topics }).match((x) => x, (e) => { throw new Error(String(e?.message ?? e)); }),
       queryTimeoutMs, "statement query");
     tickOk += 1;
     return v;
   } catch (e) { tickErrored += 1; lastPollError = String(e?.message ?? e); return null; }
 };
+// A decoded statement's topics may be raw bytes or hex depending on the codec
+// path; normalize to the bare-hex key used by the watch map.
+const topicHex = (t) => norm(typeof t === "string" ? t : bytesToHex(t));
 
 const pollOnce = async () => {
   tickErrored = 0; tickOk = 0; tickDeferred = 0;
-  // During a total outage every query burns the full timeout, so a tick with
-  // many peers would serialize minutes of doomed waits before the backoff even
-  // engages. A few straight failures with zero successes = give up this tick;
-  // backoff and the next tick take it from there.
+  // During a total outage every query burns the full timeout — a few straight
+  // failures with zero successes = give up this tick; backoff and the next
+  // tick take it from there.
   const tickDead = () => tickOk === 0 && tickErrored >= 3;
-  // request-day topics -> openers
-  for (const topic of requestDayTopics()) {
-    if (tickDead()) break;
-    for (const st of (await queryTopic(topic)) ?? []) {
+  // Watch map for this tick: every topic we poll -> how to dispatch a
+  // statement that carries it. Openers arrive on the request-day topics;
+  // follow-ups on the peer's identity session topic AND each per-device
+  // session topic (the app's devices publish on device topics, NOT the
+  // identity topic — identity-only polling silently misses app follow-ups).
+  const watch = new Map(); // bare-hex topic -> {kind:"opener"} | {kind:"session", peerHex, session, sender}
+  for (const topic of requestDayTopics()) watch.set(topicHex(topic), { kind: "opener", topic });
+  for (const peerHex of watchedSessionPeers) {
+    const entry = sessions.get(peerHex);
+    if (entry == null) continue;
+    watch.set(topicHex(entry.session.peerSessionId), {
+      kind: "session", topic: entry.session.peerSessionId, peerHex, session: entry.session, sender: hexToBytes(peerHex),
+    });
+    for (const ds of entry.session.incomingDeviceSessions ?? []) {
+      const th = topicHex(ds.peerSessionId);
+      if (watch.has(th)) continue;
+      watch.set(th, { kind: "session", topic: ds.peerSessionId, peerHex, session: ds, sender: ds.peerStatementAccountId });
+    }
+  }
+  // Query all watched topics in bounded-concurrency matchAny batches.
+  const allTopics = [...watch.values()].map((w) => w.topic);
+  const batches = [];
+  for (let i = 0; i < allTopics.length; i += TOPIC_BATCH) batches.push(allTopics.slice(i, i + TOPIC_BATCH));
+  const results = new Array(batches.length);
+  await runWithConcurrency(batches, QUERY_CONCURRENCY, async (batch, i) => {
+    results[i] = tickDead() ? null : await queryTopics(batch);
+  });
+  // Dispatch serially, attributing each statement by the watched topic it
+  // carries (statements hold their topics; matchAny loses the per-query 1:1).
+  for (const sts of results) {
+    for (const st of sts ?? []) {
       const data = typeof st.data === "string" ? hexToBytes(st.data) : st.data;
       const key = fp(data);
       if (seenStatements.has(key)) continue;
+      const target = (st.topics ?? []).map((t) => watch.get(topicHex(t))).find(Boolean);
+      if (!target) continue;
       noteSeenStatement(key);
-      await handleOpener(data);
-    }
-  }
-  // session topics -> follow-ups (read peer's ownSessionId == our peerSessionId).
-  // The app's devices publish on per-device session topics derived from their
-  // own encryption keys, NOT the identity topic, so poll each incoming device
-  // session too — identity-only polling silently misses app follow-ups.
-  for (const peerHex of watchedSessionPeers) {
-    if (tickDead()) break;
-    const entry = sessions.get(peerHex);
-    if (entry == null) continue;
-    const identityTopicHex = bytesToHex(entry.session.peerSessionId);
-    const inbound = [
-      { topic: entry.session.peerSessionId, session: entry.session, sender: hexToBytes(peerHex) },
-      ...(entry.session.incomingDeviceSessions ?? [])
-        .filter((ds) => bytesToHex(ds.peerSessionId) !== identityTopicHex)
-        .map((ds) => ({ topic: ds.peerSessionId, session: ds, sender: ds.peerStatementAccountId })),
-    ];
-    for (const { topic, session, sender } of inbound) {
-      if (tickDead()) break;
-      for (const st of (await queryTopic(topic)) ?? []) {
-        const data = typeof st.data === "string" ? hexToBytes(st.data) : st.data;
-        const key = fp(data);
-        if (seenStatements.has(key)) continue;
-        noteSeenStatement(key);
+      if (target.kind === "opener") {
+        await handleOpener(data);
+      } else if ((await handleSessionStatement(data, target.peerHex, target.session, target.sender)) === "deferred") {
         // A deferred statement (pipeline full) must be re-examined next tick.
-        if ((await handleSessionStatement(data, peerHex, session, sender)) === "deferred") {
-          seenStatements.delete(key);
-          tickDeferred += 1;
-        }
+        seenStatements.delete(key);
+        tickDeferred += 1;
       }
     }
   }
@@ -577,7 +630,7 @@ const startBridge = () => {
       }
       if (req.method === "GET" && url.pathname === "/inbound") {
         const waitSecs = Math.min(60, Math.max(0, Number(url.searchParams.get("wait") ?? 25)));
-        if (inboundQueue.length > 0) return json(200, inboundQueue.splice(0));
+        if (inboundQueue.length > 0) return json(200, drainInbound());
         const drained = await new Promise((resolve) => {
           const timer = setTimeout(() => {
             const i = waiters.findIndex((w) => w.resolve === resolve);
@@ -689,7 +742,18 @@ for (const p of restored?.peers ?? []) {
   } catch (e) { log("BOT_STATE_PEER_SKIPPED", { peer: p?.peerHex, error: String(e?.message ?? e) }); }
 }
 for (const id of restored?.seen ?? []) seenRequests.add(id);
-if (restored) log("BOT_STATE_RESTORED", { peers: restoredPeers, seen: restored.seen?.length ?? 0 });
+// Re-run anything that was ACKed but not yet answered when the last process
+// died — the app will never resend these, the journal is their only way back.
+let restoredOwed = 0;
+for (const o of restored?.owed ?? []) {
+  try {
+    if (!o?.id || !o?.p || typeof o?.t !== "string") continue;
+    oweReply(o.id, o.p, o.t, o.r);
+    enqueueOwed(o.p, o.id, o.t, o.r);
+    restoredOwed += 1;
+  } catch (e) { log("BOT_STATE_OWED_SKIPPED", { error: String(e?.message ?? e) }); }
+}
+if (restored) log("BOT_STATE_RESTORED", { peers: restoredPeers, seen: restored.seen?.length ?? 0, owed: restoredOwed });
 for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { stateStore?.flush(); process.exit(0); });
 
 for (;;) {
