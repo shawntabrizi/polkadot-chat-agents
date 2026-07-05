@@ -450,7 +450,7 @@ async function cmdDeploy(name, flags) {
   runLocal("ssh", [...sshOpts, host, `chmod 600 ${base}/bot.env`]);
 
   step("Starting the container…");
-  const up = runLocal("ssh", [...sshOpts, host, `cd ${base} && docker compose -p ${cn} up -d`]);
+  const up = runLocal("ssh", [...sshOpts, host, `cd ${base} && docker compose -p ${cn} up -d --force-recreate`]);
   if (up.status !== 0) fail("docker compose up failed.");
 
   // Remember where this bot lives so `pca stop/logs/status` don't need --host.
@@ -610,7 +610,7 @@ docker compose -p ${cn} run --rm openclaw sh -lc 'openclaw plugins install --lin
   ok(`Setup done${/IMAGE_BUILT/.test(setupOut) ? " (image built)" : ""}`);
 
   step("Starting the stack…");
-  const up = runLocal("ssh", [...sshOpts, host, `cd ${base} && docker compose -p ${cn} up -d`]);
+  const up = runLocal("ssh", [...sshOpts, host, `cd ${base} && docker compose -p ${cn} up -d --force-recreate`]);
   if (up.status !== 0) fail("docker compose up failed.");
   cfg.deploy = { host, dir: base, container: cn, harness, at: new Date().toISOString() };
   saveConfig(name, cfg);
