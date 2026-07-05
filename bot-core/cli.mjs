@@ -350,6 +350,7 @@ function cmdRun(name) {
   warnMissingBrainCli(cfg.brain);
   if (cfg.deploy?.host) warn(`Heads up: "${name}" is also deployed on ${cfg.deploy.host}. Running it here too = two processes on one identity (they will double-reply). Stop one first.`);
   step(`Starting "${name}" (${cfg.brain})…`);
+  note(`Check health from another terminal:  pca status ${name}   (Ctrl-C here stops the bot)`);
   const env = {
     ...process.env,
     BOT_SEED_HEX: secret.seedHex,
@@ -410,6 +411,7 @@ async function cmdDeploy(name, flags) {
     `BOT_ALLOWED_PEERS=${(cfg.allow ?? []).join(",")}`,
     `BOT_USERNAME=${cfg.username ?? ""}`,
     `BOT_STATE_DIR=/app/state`,   // persist sessions to the state volume (survives redeploys)
+    `BOT_BRIDGE_PORT=${cfg.bridgePort ?? 8799}`,   // keep in sync with the pca status probe
   ];
   if (flags.model) envLines.push(`BOT_AI_MODEL=${String(flags.model)}`);
   if (cfg.brain === "claude" && key) envLines.push(`ANTHROPIC_API_KEY=${key}`);
@@ -493,6 +495,8 @@ async function deployHarnessStack(name, cfg, secret, flags, host, harness) {
   const sshOpts = ["-o", "ConnectTimeout=10", "-o", "BatchMode=yes"];
   const allow = cfg.allow ?? [];
   const model = flags.model ? String(flags.model) : "claude-cli/claude-sonnet-4-6";
+  const bridgePort = cfg.bridgePort ?? 8799;
+  const bridgeUrl = `http://bot:${bridgePort}`;
 
   const botEnv = [
     `BOT_SEED_HEX=${secret.seedHex}`,
@@ -501,6 +505,7 @@ async function deployHarnessStack(name, cfg, secret, flags, host, harness) {
     `BOT_ALLOWED_PEERS=${allow.join(",")}`,
     `BOT_USERNAME=${cfg.username ?? ""}`,
     `BOT_STATE_DIR=/app/state`,
+    `BOT_BRIDGE_PORT=${bridgePort}`,   // keep in sync with the harness bridgeUrl and pca status
     // The harness container reaches the bridge over the compose network, so the
     // bridge must bind beyond loopback here (no ports are published to the host).
     `BOT_BRIDGE_HOST=0.0.0.0`,
@@ -516,8 +521,8 @@ async function deployHarnessStack(name, cfg, secret, flags, host, harness) {
     // Runs inside the one-off setup container (home volume mounted) after `models set`
     // has created the config; merges in gateway mode + our channel.
     const channel = allow.length
-      ? { enabled: true, bridgeUrl: "http://bot:8799", dmPolicy: "allowlist", allowFrom: allow }
-      : { enabled: true, bridgeUrl: "http://bot:8799", dmPolicy: "open", allowFrom: ["*"] };
+      ? { enabled: true, bridgeUrl, dmPolicy: "allowlist", allowFrom: allow }
+      : { enabled: true, bridgeUrl, dmPolicy: "open", allowFrom: ["*"] };
     files["openclaw-home/setup-config.cjs"] = `const fs = require("fs");
 const p = "/home/node/.openclaw/openclaw.json";
 const j = JSON.parse(fs.readFileSync(p, "utf8"));
@@ -549,7 +554,7 @@ docker compose -p ${cn} run --rm openclaw sh -lc 'openclaw plugins install --lin
       }
     };
   } else {
-    compose = `services:\n${botService}\n  hermes:\n    image: nousresearch/hermes-agent:latest\n    container_name: ${hn}\n    restart: unless-stopped\n${LOG_OPTS}    command: ["gateway", "run"]\n    environment:\n      - HERMES_UID=0\n      - HERMES_GID=0\n      - POLKADOT_BRIDGE_URL=http://bot:8799\n      - POLKADOT_ALLOWED_USERS=${allow.join(",")}\n    volumes:\n      - hermes-data:/opt/data\n      - ./plugin:/opt/data/plugins/polkadot:ro\n    depends_on: [bot]\n\nvolumes:\n  hermes-data:\n`;
+    compose = `services:\n${botService}\n  hermes:\n    image: nousresearch/hermes-agent:latest\n    container_name: ${hn}\n    restart: unless-stopped\n${LOG_OPTS}    command: ["gateway", "run"]\n    environment:\n      - HERMES_UID=0\n      - HERMES_GID=0\n      - POLKADOT_BRIDGE_URL=${bridgeUrl}\n      - POLKADOT_ALLOWED_USERS=${allow.join(",")}\n    volumes:\n      - hermes-data:/opt/data\n      - ./plugin:/opt/data/plugins/polkadot:ro\n    depends_on: [bot]\n\nvolumes:\n  hermes-data:\n`;
     setup = `cd ${base}\nchown -R root:root plugin 2>/dev/null || true\necho SETUP_OK`;
     afterUp = () => {
       console.log();
@@ -647,23 +652,51 @@ function cmdLogs(name, flags) {
     `docker logs ${follow ? "-f " : ""}--tail ${tail} ${cn}`], { stdio: "inherit" });
 }
 
-function cmdStatus(name, flags) {
-  const { host, cn } = deployTarget(name, flags);
+const healthLine = (h) => {
+  const chain = h.ok ? c("reaching the network", "32") : c(`not reaching the network (last ok ${Math.round((h.lastPollAgoMs ?? 0) / 1000)}s ago)`, "31");
+  return `${h.username || "(no username)"} · ${chain}`;
+};
+
+async function cmdStatus(name, flags) {
+  const cfg = readConfig(name);
+  const host = flags.host ? String(flags.host) : cfg.deploy?.host;
+  const port = cfg.bridgePort ?? 8799;
+  if (!host) {
+    // Not deployed: a locally running bot's bridge binds loopback, so its
+    // /health endpoint is the status source.
+    step(`Status of "${name}" (local)…`);
+    let h = null;
+    try {
+      h = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(4000) }).then((r) => r.json());
+    } catch { /* nothing listening */ }
+    if (!h) {
+      warn(`"${name}" isn't running here (nothing on port ${port}).`);
+      note(`Start it:  pca run ${name}   ·  or deploy it: pca deploy ${name} --host <ssh>`);
+      process.exitCode = 1;
+      return;
+    }
+    if (String(h.account ?? "").toLowerCase() !== String(cfg.account ?? "").toLowerCase()) {
+      warn(`Port ${port} is serving a different bot (${h.username || h.account || "unknown"}), not "${name}".`);
+      process.exitCode = 1;
+      return;
+    }
+    ok(`"${name}" is running locally.`);
+    note(healthLine(h));
+    return;
+  }
+  const cn = cfg.deploy?.container ?? `pca-${name}`;
   step(`Status of "${name}" on ${host}…`);
   const r = runLocal("ssh", [...SSH_OPTS, host,
     `docker ps --filter name=^/${cn}$ --format '{{.Status}}' | head -1; ` +
-    // Probe /health with node (curl isn't in node:22-slim); BOT_BRIDGE_PORT defaults to 8799.
-    `docker exec ${cn} node -e 'fetch("http://127.0.0.1:8799/health",{signal:AbortSignal.timeout(4000)}).then(r=>r.text()).then(t=>process.stdout.write(t)).catch(()=>process.stdout.write("NO_HEALTH"))' 2>/dev/null; echo; ` +
+    // Probe /health with node (curl isn't in node:22-slim); the deploy env pins
+    // BOT_BRIDGE_PORT to the same port probed here.
+    `docker exec ${cn} node -e 'fetch("http://127.0.0.1:${port}/health",{signal:AbortSignal.timeout(4000)}).then(r=>r.text()).then(t=>process.stdout.write(t)).catch(()=>process.stdout.write("NO_HEALTH"))' 2>/dev/null; echo; ` +
     `docker logs --tail 1 ${cn} 2>&1 | grep -oE '"event":"[A-Z_]+"' | tail -1`], { capture: true });
   const [statusLine = "", health = "", lastEvent = ""] = (r.stdout || "").trim().split("\n");
   if (!statusLine) { warn(`Container ${cn} is not running on ${host}.`); return; }
   ok(`${cn}: ${statusLine}`);
   if (health.startsWith("{")) {
-    try {
-      const h = JSON.parse(health);
-      const chain = h.ok ? c("reaching the network", "32") : c(`not reaching the network (last ok ${Math.round((h.lastPollAgoMs ?? 0) / 1000)}s ago)`, "31");
-      note(`${h.username || "(no username)"} · ${chain}`);
-    } catch { /* ignore */ }
+    try { note(healthLine(JSON.parse(health))); } catch { /* ignore */ }
   } else if (health) note(`health: ${health}`);
   if (lastEvent) note(`last event: ${lastEvent}`);
 }
@@ -686,7 +719,7 @@ function usage() {
   pca run <name>                       start the bot locally (foreground)
   pca deploy <name> --host <ssh>       ship it to a server and run it in Docker
   pca logs <name> [-f] [--tail N]      tail a deployed bot's logs
-  pca status <name>                    is a deployed bot running + healthy?
+  pca status <name>                    is the bot running + healthy? (local or deployed)
   pca stop <name>                      stop a deployed bot
   pca list                             list your bots
   pca info <name>                      show address + how to message it
@@ -722,7 +755,7 @@ try {
     case "run": cmdRun(arg); break;                 // spawns a child; manages its own exit
     case "deploy": await cmdDeploy(arg, flags); break;
     case "logs": cmdLogs(arg, flags); break;
-    case "status": cmdStatus(arg, flags); break;
+    case "status": await cmdStatus(arg, flags); break;
     case "stop": cmdStop(arg, flags); break;
     case "list": cmdList(); break;
     case "info": await cmdInfo(arg); break;
