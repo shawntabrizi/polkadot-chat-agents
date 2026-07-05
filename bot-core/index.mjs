@@ -13,14 +13,16 @@
 // on-chain identifier-key lookup. No faucet-specific code (coinage/stripe/etc.).
 //
 // Env: BOT_SEED_HEX (root mini-secret; or FAUCET_CHAT_SERVICE_SECRET),
-//   BOT_ENDPOINT (default Paseo), BOT_BRIDGE_PORT (8799), BOT_BRIDGE_HOST (0.0.0.0),
+//   BOT_ENDPOINT (default Paseo), BOT_BRIDGE_PORT (8799), BOT_BRIDGE_HOST (127.0.0.1),
 //   BOT_ACK_TEXT, BOT_ALLOWED_PEERS (comma-sep peer account hexes; empty = allow all),
 //   BOT_REQUEST_LOOKBACK_DAYS (7), BOT_REQUEST_FUTURE_DAYS (2), BOT_POLL_MS (2000),
 //   BOT_THINKING_TEXT + BOT_THINKING_AFTER_MS (5000) — ack sent if no reply by then.
 
 import http from "node:http";
+import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { blake2b } from "@noble/hashes/blake2.js";
 import { createStateStore } from "./lib/session-store.mjs";
 import { createClient as createPapiClient } from "polkadot-api";
 import { getWsProvider, WsEvent } from "polkadot-api/ws";
@@ -115,6 +117,7 @@ const hexToBytes = (hex) => {
   return Uint8Array.from(clean.match(/../g)?.map((b) => Number.parseInt(b, 16)) ?? []);
 };
 const bytesToHex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+const enc = new TextEncoder();
 const norm = (hex) => String(hex).trim().replace(/^0x/i, "").toLowerCase();
 const log = (event, extra = {}) => console.log(JSON.stringify({ time: new Date().toISOString(), event, ...extra }));
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -293,8 +296,18 @@ const handleInbound = async (peerHex, text, messageId) => {
 };
 
 // ---------- receive: dedup + handlers ----------
+// Both sets are bounded (insertion-ordered, evict oldest) so a long-lived bot
+// doesn't grow them without limit. seenStatements holds statement fingerprints;
+// seenRequests holds message ids (never plaintext — see handleSessionStatement).
 const seenStatements = new Set();
 const seenRequests = new Set();
+const STMT_CAP = 20_000;
+const trimSet = (set, cap) => { while (set.size > cap) set.delete(set.values().next().value); };
+const noteSeenStatement = (key) => { seenStatements.add(key); trimSet(seenStatements, STMT_CAP); };
+// Stable dedup id for a session message: prefer the app's message id; fall back
+// to a hash of requestId:text so we never hold or persist conversation plaintext.
+const messageDedupId = (requestId, text, messageId) =>
+  messageId || `h:${bytesToHex(blake2b(enc.encode(`${requestId}:${text}`), { dkLen: 16 }))}`;
 
 // Persist only what can't be re-derived: per-peer identifierKey + peerDevices.
 // makePeerSession is deterministic, so the channels/keys rebuild exactly from
@@ -314,7 +327,7 @@ const snapshotState = () => ({
   seen: [...seenRequests].slice(-SEEN_CAP),
 });
 const persist = () => { if (stateStore) stateStore.save(snapshotState()); };
-const fp = (data) => bytesToHex(data).slice(0, 64);
+const fp = (data) => bytesToHex(data.subarray(0, 32)); // dedup key: first 32 bytes, no full-payload encode
 
 const handleOpener = async (data) => {
   let decoded;
@@ -386,12 +399,13 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
   const fresh = [];
   for (const m of decoded.messages ?? []) {
     if (typeof m.text === "string" && m.text.length > 0) {
-      // Dedup by the stable per-message id (the app resends its unacked backlog
-      // under fresh request ids) plus the legacy requestId:text key so entries
-      // persisted before this change still count as seen.
-      const ids = [m.messageId, `${decoded.requestId}:${m.text}`].filter(Boolean);
-      const alreadySeen = ids.some((id) => seenRequests.has(id));
-      for (const id of ids) seenRequests.add(id);
+      const id = messageDedupId(decoded.requestId, m.text, m.messageId);
+      // Also honor the legacy plaintext key so entries persisted before this
+      // change still count as seen — but never add new plaintext keys.
+      const legacyKey = `${decoded.requestId}:${m.text}`;
+      const alreadySeen = seenRequests.has(id) || seenRequests.has(legacyKey);
+      seenRequests.add(id);
+      trimSet(seenRequests, SEEN_CAP);
       if (!alreadySeen) fresh.push(m.text);
     }
   }
@@ -455,7 +469,7 @@ const pollOnce = async () => {
       const data = typeof st.data === "string" ? hexToBytes(st.data) : st.data;
       const key = fp(data);
       if (seenStatements.has(key)) continue;
-      seenStatements.add(key);
+      noteSeenStatement(key);
       await handleOpener(data);
     }
   }
@@ -478,7 +492,7 @@ const pollOnce = async () => {
         const data = typeof st.data === "string" ? hexToBytes(st.data) : st.data;
         const key = fp(data);
         if (seenStatements.has(key)) continue;
-        seenStatements.add(key);
+        noteSeenStatement(key);
         await handleSessionStatement(data, peerHex, session, sender);
       }
     }
@@ -541,11 +555,50 @@ const startBridge = () => {
       return json(500, { success: false, error: error instanceof Error ? error.message : String(error) });
     }
   });
+  server.on("error", (e) => {
+    if (e?.code === "EADDRINUSE") {
+      log("BOT_BRIDGE_PORT_IN_USE", { host: bridgeHost, port: bridgePort });
+      console.error(`Bridge port ${bridgePort} is already in use — another bot is likely running. Set BOT_BRIDGE_PORT to a free port.`);
+    } else {
+      log("BOT_BRIDGE_ERROR", { error: String(e?.message ?? e) });
+    }
+    stateStore?.flush();
+    process.exit(1);
+  });
   server.listen(bridgePort, bridgeHost, () => log("BOT_BRIDGE_LISTENING", { host: bridgeHost, port: bridgePort }));
 };
 
 // ---------- main ----------
 log("BOT_STARTING", { endpoint, account: `0x${accountIdHex}`, username, brain, allowlist: allowedPeers.size });
+
+// Single-instance guard: exactly one process may serve a bot identity, or replies
+// double-send. An O_EXCL pidfile in the state dir enforces it (stale pidfiles from
+// a crashed process are taken over). Only when BOT_STATE_DIR is set.
+let pidfilePath = null;
+if (env.BOT_STATE_DIR) {
+  pidfilePath = path.join(env.BOT_STATE_DIR, "bot.pid");
+  try {
+    fs.mkdirSync(env.BOT_STATE_DIR, { recursive: true });
+    let fd;
+    try { fd = fs.openSync(pidfilePath, "wx"); }
+    catch (e) {
+      if (e?.code !== "EEXIST") throw e;
+      const old = Number(fs.readFileSync(pidfilePath, "utf8").trim());
+      let alive = false;
+      try { process.kill(old, 0); alive = old !== process.pid; } catch { alive = false; }
+      if (alive) {
+        console.error(`Another bot process (pid ${old}) already serves this identity (${pidfilePath}). Two would double-reply — stop it first, or use a separate BOT_STATE_DIR.`);
+        process.exit(1);
+      }
+      fd = fs.openSync(pidfilePath, "w"); // stale pidfile — take it over
+    }
+    fs.writeSync(fd, String(process.pid));
+    fs.closeSync(fd);
+  } catch (e) { log("BOT_PIDFILE_WARN", { error: String(e?.message ?? e) }); pidfilePath = null; }
+}
+const cleanupPidfile = () => { if (pidfilePath) { try { fs.rmSync(pidfilePath, { force: true }); } catch { /* ignore */ } } };
+process.on("exit", cleanupPidfile);
+
 startBridge();
 log("BOT_LISTENING", { account: `0x${accountIdHex}`, identifierKey: `0x${norm(bytesToHex(identifierKey))}` });
 
