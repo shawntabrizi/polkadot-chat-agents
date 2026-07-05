@@ -23,7 +23,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { createStateStore } from "./lib/session-store.mjs";
 import { createClient as createPapiClient } from "polkadot-api";
-import { getWsProvider } from "polkadot-api/ws";
+import { getWsProvider, WsEvent } from "polkadot-api/ws";
 import { paseoPeopleNext } from "@polkadot-api/descriptors";
 import { createLazyClient, createPapiStatementStoreAdapter } from "@novasamatech/statement-store";
 import { ss58Address } from "@polkadot-labs/hdkd-helpers";
@@ -130,8 +130,13 @@ const accountIdHex = norm(bytesToHex(accountId));
 const username = env.FAUCET_CHAT_SERVICE_USERNAME ?? env.BOT_USERNAME ?? "";
 
 // ---------- chain clients ----------
-const lazyClient = createLazyClient(getWsProvider(endpoint));
+// Keep a handle on the transport provider so /health can read the real socket
+// state — this adapter resolves queries to empty when disconnected rather than
+// erroring, so connection status is the only reliable outage signal.
+const wsProvider = getWsProvider(endpoint);
+const lazyClient = createLazyClient(wsProvider);
 const statementStore = createPapiStatementStoreAdapter(lazyClient);
+const chainConnected = () => wsProvider.getStatus?.().type === WsEvent.CONNECTED;
 const requestRpc = lazyClient.getRequestFn();
 const papiClient = createPapiClient(getWsProvider(endpoint));
 const peopleApi = papiClient.getTypedApi(paseoPeopleNext);
@@ -413,16 +418,40 @@ const requestDayTopics = () => {
 const watchedSessionPeers = new Set();
 const addSessionWatch = (peerHex) => { watchedSessionPeers.add(norm(peerHex)); };
 
+// Poll liveness: an RPC outage used to be swallowed here, so a dead bot polled
+// into the void while /health still said ok. Track outcomes instead — a query
+// error returns null (distinct from a successful empty []), and the tick result
+// drives BOT_POLL_DEGRADED/RECOVERED logs, /health, and backoff.
+let lastPollOkAt = Date.now();
+let pollFailStreak = 0;
+let lastPollError = null;
+let tickErrored = 0, tickOk = 0;
+const queryTimeoutMs = Number(env.BOT_QUERY_TIMEOUT_MS ?? 15_000);
+// A query against a dead RPC endpoint can hang indefinitely (never resolves or
+// rejects), which would freeze the poll loop forever. Race it against a timeout
+// so an outage becomes a countable error, not a hang.
+const withTimeout = (promise, ms, label) => {
+  let t;
+  return Promise.race([
+    Promise.resolve(promise).finally(() => clearTimeout(t)),
+    new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`${label} timed out after ${ms}ms`)), ms); }),
+  ]);
+};
 const queryTopic = async (topic) => {
   try {
-    return await Promise.resolve(statementStore.queryStatements({ matchAll: [topic] }).match((v) => v, (e) => { throw new Error(String(e?.message ?? e)); }));
-  } catch { return []; }
+    const v = await withTimeout(
+      statementStore.queryStatements({ matchAll: [topic] }).match((x) => x, (e) => { throw new Error(String(e?.message ?? e)); }),
+      queryTimeoutMs, "statement query");
+    tickOk += 1;
+    return v;
+  } catch (e) { tickErrored += 1; lastPollError = String(e?.message ?? e); return null; }
 };
 
 const pollOnce = async () => {
+  tickErrored = 0; tickOk = 0;
   // request-day topics -> openers
   for (const topic of requestDayTopics()) {
-    for (const st of await queryTopic(topic)) {
+    for (const st of (await queryTopic(topic)) ?? []) {
       const data = typeof st.data === "string" ? hexToBytes(st.data) : st.data;
       const key = fp(data);
       if (seenStatements.has(key)) continue;
@@ -445,7 +474,7 @@ const pollOnce = async () => {
         .map((ds) => ({ topic: ds.peerSessionId, session: ds, sender: ds.peerStatementAccountId })),
     ];
     for (const { topic, session, sender } of inbound) {
-      for (const st of await queryTopic(topic)) {
+      for (const st of (await queryTopic(topic)) ?? []) {
         const data = typeof st.data === "string" ? hexToBytes(st.data) : st.data;
         const key = fp(data);
         if (seenStatements.has(key)) continue;
@@ -453,6 +482,15 @@ const pollOnce = async () => {
         await handleSessionStatement(data, peerHex, session, sender);
       }
     }
+  }
+  // Tick outcome: any successful query means the chain is reachable. All-errors
+  // (and at least one attempt) means an outage — surface it, don't poll blindly.
+  if (tickOk > 0) {
+    if (pollFailStreak > 0) log("BOT_POLL_RECOVERED", { afterFailures: pollFailStreak });
+    pollFailStreak = 0; lastPollOkAt = Date.now();
+  } else if (tickErrored > 0) {
+    pollFailStreak += 1;
+    if (pollFailStreak === 1 || pollFailStreak % 10 === 0) log("BOT_POLL_DEGRADED", { failStreak: pollFailStreak, error: lastPollError });
   }
 };
 
@@ -469,7 +507,14 @@ const startBridge = () => {
     const json = (code, obj) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(obj)); };
     try {
       if (req.method === "GET" && url.pathname === "/health") {
-        return json(200, { ok: true, account: `0x${accountIdHex}`, identifierKey: `0x${norm(bytesToHex(identifierKey))}`, username });
+        // ok reflects real reachability, not just "the process is up": the RPC
+        // socket must be connected. (Queries resolve to empty when disconnected,
+        // so the socket state — not query success — is the reliable signal.)
+        const connected = chainConnected();
+        return json(connected ? 200 : 503, {
+          ok: connected, account: `0x${accountIdHex}`, identifierKey: `0x${norm(bytesToHex(identifierKey))}`, username,
+          chain: wsProvider.getStatus?.().type ?? "unknown", pollFailStreak, lastPollAgoMs: Date.now() - lastPollOkAt,
+        });
       }
       if (req.method === "GET" && url.pathname === "/inbound") {
         const waitSecs = Math.min(60, Math.max(0, Number(url.searchParams.get("wait") ?? 25)));
@@ -509,11 +554,18 @@ log("BOT_LISTENING", { account: `0x${accountIdHex}`, identifierKey: `0x${norm(by
 // and reload the dedup set so we don't re-answer already-handled messages.
 const restored = stateStore?.load();
 if (restored?.peers?.length) {
+  let restoredCount = 0;
   for (const p of restored.peers) {
-    const devices = (p.devices ?? []).map((d) => ({ statementAccountId: hexToBytes(d.s), encryptionPublicKey: hexToBytes(d.e) }));
-    buildSession(p.peerHex, p.identifierKeyHex, devices);
-    addSessionWatch(p.peerHex);
+    // Per-peer guard: one malformed persisted entry must not crash startup and
+    // trip a Docker restart loop — skip it and keep the rest of the sessions.
+    try {
+      const devices = (p.devices ?? []).map((d) => ({ statementAccountId: hexToBytes(d.s), encryptionPublicKey: hexToBytes(d.e) }));
+      buildSession(p.peerHex, p.identifierKeyHex, devices);
+      addSessionWatch(p.peerHex);
+      restoredCount += 1;
+    } catch (e) { log("BOT_STATE_PEER_SKIPPED", { peer: p?.peerHex, error: String(e?.message ?? e) }); }
   }
+  restored.peers = restored.peers.slice(0, restoredCount); // for the log line below
 }
 for (const id of restored?.seen ?? []) seenRequests.add(id);
 if (restored) log("BOT_STATE_RESTORED", { peers: restored.peers?.length ?? 0, seen: restored.seen?.length ?? 0 });
@@ -521,5 +573,8 @@ for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { stateStore?.flu
 
 for (;;) {
   try { await pollOnce(); } catch (error) { log("BOT_POLL_ERROR", { error: error instanceof Error ? error.message : String(error) }); }
-  await delay(pollMs);
+  // Back off on a sustained outage so we don't hammer a recovering node with the
+  // full topic fan-out every tick; normal cadence resumes on the first success.
+  const wait = pollFailStreak > 0 ? Math.min(30_000, pollMs * 2 ** Math.min(pollFailStreak, 5)) : pollMs;
+  await delay(wait);
 }

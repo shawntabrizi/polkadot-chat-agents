@@ -556,7 +556,11 @@ function cmdStatus(name, flags) {
   if (!statusLine) { warn(`Container ${cn} is not running on ${host}.`); return; }
   ok(`${cn}: ${statusLine}`);
   if (health.startsWith("{")) {
-    try { const h = JSON.parse(health); note(`bridge healthy · account ${h.account?.slice(0, 12)}… · ${h.username || "(no username)"}`); } catch { /* ignore */ }
+    try {
+      const h = JSON.parse(health);
+      const chain = h.ok ? c("reaching the network", "32") : c(`not reaching the network (last ok ${Math.round((h.lastPollAgoMs ?? 0) / 1000)}s ago)`, "31");
+      note(`${h.username || "(no username)"} · ${chain}`);
+    } catch { /* ignore */ }
   } else if (health) note(`health: ${health}`);
   if (lastEvent) note(`last event: ${lastEvent}`);
 }
