@@ -570,6 +570,7 @@ const startBridge = () => {
 
 // ---------- main ----------
 log("BOT_STARTING", { endpoint, account: `0x${accountIdHex}`, username, brain, allowlist: allowedPeers.size });
+if (!stateStore) log("BOT_STATE_DISABLED", { note: "BOT_STATE_DIR unset — open conversations won't survive a restart" });
 
 // Single-instance guard: exactly one process may serve a bot identity, or replies
 // double-send. An O_EXCL pidfile in the state dir enforces it (stale pidfiles from

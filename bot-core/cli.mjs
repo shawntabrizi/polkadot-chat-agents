@@ -45,6 +45,8 @@ async function withPeopleApi(endpoint, fn) {
 // the working directory. Override with PCA_BOTS_DIR.
 const BOTS_DIR = process.env.PCA_BOTS_DIR ?? path.join(os.homedir(), ".pca", "bots");
 const DEFAULT_ENDPOINT = "wss://paseo-people-next-system-rpc.polkadot.io";
+// Cap container log growth on a VPS (json-file grows unbounded by default).
+const LOG_OPTS = `    logging:\n      driver: json-file\n      options: { max-size: "10m", max-file: "3" }\n`;
 const BRAINS = ["echo", "codex", "claude", "gemini", "grok", "hermes"];
 // Brains that call a model and therefore spend your quota — never left open by default.
 const PAID_BRAINS = new Set(["codex", "claude", "gemini", "grok", "hermes"]);
@@ -366,7 +368,7 @@ async function cmdDeploy(name, flags) {
   const command = spec.install
     ? JSON.stringify(["sh", "-lc", `${spec.install} && exec node index.mjs`])
     : JSON.stringify(["node", "index.mjs"]);
-  const compose = `services:\n  bot:\n    image: node:22-slim\n    container_name: ${cn}\n    restart: unless-stopped\n    working_dir: /app\n    volumes:\n      - ./app:/app\n      - ./state:/app/state\n    env_file:\n      - ./bot.env\n    command: ${command}\n`;
+  const compose = `services:\n  bot:\n    image: node:22-slim\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    volumes:\n      - ./app:/app\n      - ./state:/app/state\n    env_file:\n      - ./bot.env\n    command: ${command}\n`;
 
   if (flags["dry-run"] === true) {
     console.log(`\n--- ${base}/docker-compose.yml ---\n${compose}`);
@@ -455,12 +457,12 @@ async function deployHarnessStack(name, cfg, secret, flags, host, harness) {
     // bridge must bind beyond loopback here (no ports are published to the host).
     `BOT_BRIDGE_HOST=0.0.0.0`,
   ].join("\n");
-  const botService = `  bot:\n    image: node:22-slim\n    container_name: ${cn}\n    restart: unless-stopped\n    working_dir: /app\n    volumes:\n      - ./app:/app\n      - ./state:/app/state\n    env_file:\n      - ./bot.env\n    command: ["node", "index.mjs"]\n`;
+  const botService = `  bot:\n    image: node:22-slim\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    volumes:\n      - ./app:/app\n      - ./state:/app/state\n    env_file:\n      - ./bot.env\n    command: ["node", "index.mjs"]\n`;
 
   const files = { "bot.env": `${botEnv}\n` };  // path (relative to base) -> content
   let compose, setup, afterUp;
   if (harness === "openclaw") {
-    compose = `services:\n${botService}\n  openclaw:\n    build: ./image\n    container_name: ${hn}\n    restart: unless-stopped\n    env_file:\n      - ./gateway.env\n    volumes:\n      - ./openclaw-home:/home/node\n      - ./plugin:/plugin:ro\n    depends_on: [bot]\n    command: ["openclaw", "gateway"]\n`;
+    compose = `services:\n${botService}\n  openclaw:\n    build: ./image\n    container_name: ${hn}\n    restart: unless-stopped\n${LOG_OPTS}    env_file:\n      - ./gateway.env\n    volumes:\n      - ./openclaw-home:/home/node\n      - ./plugin:/plugin:ro\n    depends_on: [bot]\n    command: ["openclaw", "gateway"]\n`;
     files["image/Dockerfile"] = `FROM node:22-slim\nRUN npm i -g openclaw @anthropic-ai/claude-code && npm cache clean --force\nENV HOME=/home/node\nWORKDIR /home/node\nUSER node\nCMD ["openclaw", "gateway"]\n`;
     files["gateway.env"] = `OPENCLAW_GATEWAY_TOKEN=${randomBytes(24).toString("hex")}\n`;
     // Runs inside the one-off setup container (home volume mounted) after `models set`
@@ -499,7 +501,7 @@ docker compose -p ${cn} run --rm openclaw sh -lc 'openclaw plugins install --lin
       }
     };
   } else {
-    compose = `services:\n${botService}\n  hermes:\n    image: nousresearch/hermes-agent:latest\n    container_name: ${hn}\n    restart: unless-stopped\n    command: ["gateway", "run"]\n    environment:\n      - HERMES_UID=0\n      - HERMES_GID=0\n      - POLKADOT_BRIDGE_URL=http://bot:8799\n      - POLKADOT_ALLOWED_USERS=${allow.join(",")}\n    volumes:\n      - hermes-data:/opt/data\n      - ./plugin:/opt/data/plugins/polkadot:ro\n    depends_on: [bot]\n\nvolumes:\n  hermes-data:\n`;
+    compose = `services:\n${botService}\n  hermes:\n    image: nousresearch/hermes-agent:latest\n    container_name: ${hn}\n    restart: unless-stopped\n${LOG_OPTS}    command: ["gateway", "run"]\n    environment:\n      - HERMES_UID=0\n      - HERMES_GID=0\n      - POLKADOT_BRIDGE_URL=http://bot:8799\n      - POLKADOT_ALLOWED_USERS=${allow.join(",")}\n    volumes:\n      - hermes-data:/opt/data\n      - ./plugin:/opt/data/plugins/polkadot:ro\n    depends_on: [bot]\n\nvolumes:\n  hermes-data:\n`;
     setup = `cd ${base}\nchown -R root:root plugin 2>/dev/null || true\necho SETUP_OK`;
     afterUp = () => {
       console.log();
