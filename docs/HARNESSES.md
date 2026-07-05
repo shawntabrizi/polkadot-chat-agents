@@ -115,8 +115,13 @@ openclaw plugins enable polkadot
 
 **4. Start OpenClaw's gateway** and message your bot in the Polkadot app.
 
-See `openclaw-plugin/polkadot/README.md` for details and status (it's the reference
-implementation, pending validation on a live OpenClaw install).
+**Validated live** (OpenClaw 2026.6.11, Docker, claude-cli model). The reference
+deploy runs two containers in one compose stack: bot-core (bridge) + an OpenClaw
+gateway image (`npm i -g openclaw @anthropic-ai/claude-code`, running as the
+non-root `node` user so the claude CLI needs no root override), with the plugin
+bind-mounted and installed via `openclaw plugins install --link`. Gateway config
+needs `gateway.mode: "local"` and an `OPENCLAW_GATEWAY_TOKEN` env var. See
+`openclaw-plugin/polkadot/README.md` for the field notes.
 
 ---
 
