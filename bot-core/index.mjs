@@ -197,10 +197,17 @@ const buildSession = (peerHex, identifierKeyHex, extraDevices = []) => {
 };
 
 // ---------- bridge inbound queue ----------
+const INBOUND_CAP = 1000;
 const inboundQueue = [];
 const waiters = [];
 const enqueueInbound = (item) => {
   inboundQueue.push(item);
+  // Bound the backlog if no harness is polling /inbound (e.g. it's down), so a
+  // misconfigured bridge bot doesn't grow this without limit; drop oldest.
+  if (inboundQueue.length > INBOUND_CAP) {
+    inboundQueue.splice(0, inboundQueue.length - INBOUND_CAP);
+    log("BOT_INBOUND_QUEUE_TRIMMED", { cap: INBOUND_CAP });
+  }
   const w = waiters.shift();
   if (w) { clearTimeout(w.timer); w.resolve(inboundQueue.splice(0)); }
 };

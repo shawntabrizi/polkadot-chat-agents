@@ -63,7 +63,7 @@ async function runLitePersonWasm(entropyHex, messageHex) {
   const path = await import("node:path");
   wasmModule ??= await WebAssembly.compile(fs.readFileSync(WASM_PATH));
   const tmp = path.join(os.tmpdir(), `bandersnatch-${process.pid}-${Date.now()}.out`);
-  const fd = fs.openSync(tmp, "w+");
+  const fd = fs.openSync(tmp, "w+", 0o600); // not world-readable while the proof is written
   try {
     const wasi = new WASI({
       version: "preview1",
@@ -73,7 +73,7 @@ async function runLitePersonWasm(entropyHex, messageHex) {
     });
     const code = wasi.start(await WebAssembly.instantiate(wasmModule, wasi.getImportObject()));
     const out = fs.readFileSync(tmp, "utf8").trim();
-    if (code !== 0) throw new Error(`bandersnatch helper failed (exit ${code}): ${out}`);
+    if (code !== 0) throw new Error(`identity proof helper failed (exit ${code}): ${out}`);
     return JSON.parse(out);
   } finally {
     fs.closeSync(fd);
@@ -84,7 +84,7 @@ async function runLitePersonWasm(entropyHex, messageHex) {
 async function runLitePerson(bin, entropyHex, messageHex) {
   if (!bin) return runLitePersonWasm(entropyHex, messageHex);
   const r = spawnSync(bin, ["lite-person", entropyHex, messageHex], { encoding: "utf8" });
-  if (r.status !== 0) throw new Error(`bandersnatch helper failed: ${r.stderr || r.stdout || r.error?.message}`);
+  if (r.status !== 0) throw new Error(`identity proof helper failed: ${r.stderr || r.stdout || r.error?.message}`);
   return JSON.parse(r.stdout.trim());
 }
 
