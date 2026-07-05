@@ -9,7 +9,8 @@
   },
   "scripts": {
     "start": "node index.mjs",
-    "postinstall": "papi generate"
+    "postinstall": "papi generate",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "@noble/curves": "^2.2.0",
