@@ -33,10 +33,12 @@ ACK-or-resend, batch decoding, deterministic session rebuild).
 ## Testing
 
 - `node --check` each changed `.mjs` file.
-- Transport changes: run an `echo`-brain bot and drive it with
-  `bot-core/test-client.mjs`. Anything touching session or inbound handling must
-  also pass `bot-core/test-client-device.mjs`, which reproduces how the mobile
-  app actually sends (see `docs/TESTING.md`).
+- Transport changes: `npm test` runs the offline e2e suite (mock statement
+  node, both ingress modes) and must pass. For live verification, run an
+  `echo`-brain bot and drive it with `bot-core/test-client.mjs`. Anything
+  touching session or inbound handling must also pass
+  `bot-core/test-client-device.mjs`, which reproduces how the mobile app
+  actually sends (see `docs/TESTING.md`).
 - Do not claim a fix works without an end-to-end reproduction; log output alone
   is not verification.
 - Registration changes: the proof helper must produce byte-identical output via
