@@ -60,13 +60,23 @@ class PolkadotAdapter(BasePlatformAdapter):
         self._session = aiohttp.ClientSession()
         try:
             async with self._session.get(f"{self.bridge_url}/health", timeout=10) as resp:
-                if resp.status != 200:
+                # 503 means the bridge is up but its chain socket is down (an
+                # RPC outage). /inbound and /send still work and the bridge
+                # recovers on its own, so treat it as connected — refusing here
+                # would wedge the platform until someone reconnects manually.
+                if resp.status not in (200, 503):
                     logger.error("Polkadot bridge health check failed: HTTP %s", resp.status)
                     await self._close_session()
                     return False
                 health = await resp.json()
                 self._bot_account = health.get("account")
-                logger.info("Polkadot bridge healthy; bot account %s", self._bot_account)
+                if resp.status == 503:
+                    logger.warning(
+                        "Polkadot bridge up but chain unreachable (bot account %s); continuing",
+                        self._bot_account,
+                    )
+                else:
+                    logger.info("Polkadot bridge healthy; bot account %s", self._bot_account)
         except Exception as exc:  # noqa: BLE001 — surface any connect failure
             logger.error("Cannot reach Polkadot bridge at %s: %s", self.bridge_url, exc)
             await self._close_session()
