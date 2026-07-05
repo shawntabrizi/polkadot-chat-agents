@@ -338,7 +338,7 @@ const handleOpener = async (data) => {
     await submitAppStatement(requestRpc, { walletPair: wallet, channel: session.requestChannel, topics: [session.ownSessionId], scaleEncodedPayload: ackPayload, expiryFactory });
   } catch (error) { log("BOT_ACK_FAILED", { to: senderHex, error: error instanceof Error ? error.message : String(error) }); }
   log("BOT_RECEIVED_OPENER", { from: senderHex, requestId: decoded.messageId, text: decoded.text });
-  await handleInbound(senderHex, decoded.text ?? "", decoded.messageId);
+  enqueueWork(senderHex, () => handleInbound(senderHex, decoded.text ?? "", decoded.messageId));
 };
 
 // ACK a session request (mirrors the app: response goes on our own session
@@ -357,6 +357,20 @@ const sendSessionAck = async (peerHex, requestId) => {
   });
 };
 
+// Per-peer work queues: brain calls (up to 90s) must never block the poll loop
+// or delay ACKs — the app resends its whole backlog until it sees an ACK, so a
+// slow model would directly cause resend storms and head-of-line blocking for
+// every other peer. Work is serialized per peer (preserves reply order and
+// aiHistory consistency) and concurrent across peers.
+const peerWork = new Map(); // peerHex -> tail promise
+const enqueueWork = (peerHex, fn) => {
+  const k = norm(peerHex);
+  const tail = (peerWork.get(k) ?? Promise.resolve()).then(fn)
+    .catch((e) => log("BOT_HANDLER_FAILED", { peer: k, error: String(e?.message ?? e) }));
+  peerWork.set(k, tail);
+  tail.finally(() => { if (peerWork.get(k) === tail) peerWork.delete(k); });
+};
+
 const handleSessionStatement = async (data, peerHex, session, senderAccountId = hexToBytes(peerHex)) => {
   let decoded;
   // A follow-up we can't decrypt used to vanish silently here — log it so a
@@ -364,6 +378,7 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
   try { decoded = decodeSessionStatementPayload(data, session, senderAccountId); }
   catch (e) { log("BOT_SESSION_DECODE_FAILED", { from: peerHex, error: String(e?.message ?? e) }); return; }
   if (decoded?.kind !== "request") return;
+  const fresh = [];
   for (const m of decoded.messages ?? []) {
     if (typeof m.text === "string" && m.text.length > 0) {
       // Dedup by the stable per-message id (the app resends its unacked backlog
@@ -372,14 +387,18 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
       const ids = [m.messageId, `${decoded.requestId}:${m.text}`].filter(Boolean);
       const alreadySeen = ids.some((id) => seenRequests.has(id));
       for (const id of ids) seenRequests.add(id);
-      if (alreadySeen) continue;
-      persist();
-      log("BOT_RECEIVED_TEXT", { from: peerHex, text: m.text });
-      await handleInbound(peerHex, m.text, decoded.requestId);
+      if (!alreadySeen) fresh.push(m.text);
     }
   }
+  if (fresh.length) persist();
+  // ACK means "delivered", not "answered" — send it before any brain work so
+  // the app stops resending even when the model is slow.
   try { await sendSessionAck(peerHex, decoded.requestId); }
   catch (e) { log("BOT_SESSION_ACK_FAILED", { to: peerHex, error: String(e?.message ?? e) }); }
+  for (const text of fresh) {
+    log("BOT_RECEIVED_TEXT", { from: peerHex, text });
+    enqueueWork(peerHex, () => handleInbound(peerHex, text, decoded.requestId));
+  }
 };
 
 // ---------- polling ----------
