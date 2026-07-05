@@ -53,7 +53,10 @@ const DEFAULT_ENDPOINT = "wss://paseo-people-next-system-rpc.polkadot.io";
 const endpoint = env.BOT_ENDPOINT ?? DEFAULT_ENDPOINT;
 const seedHex = (env.BOT_SEED_HEX ?? env.FAUCET_CHAT_SERVICE_SECRET ?? "").trim();
 const bridgePort = Number(env.BOT_BRIDGE_PORT ?? 8799);
-const bridgeHost = env.BOT_BRIDGE_HOST ?? "0.0.0.0";
+// The bridge is unauthenticated (it can read decrypted inbound and publish as
+// the bot), so default to loopback. Container deploys that need cross-container
+// access set BOT_BRIDGE_HOST=0.0.0.0 explicitly (scoped to the compose network).
+const bridgeHost = env.BOT_BRIDGE_HOST ?? "127.0.0.1";
 const brain = (env.BOT_BRAIN ?? "bridge").trim().toLowerCase(); // bridge | hermes | echo | codex | claude | gemini | grok
 const ackText = env.BOT_ACK_TEXT ?? (brain === "bridge" || brain === "hermes" ? "Connecting you to the agent…" : "");
 // If a reply hasn't gone out within BOT_THINKING_AFTER_MS of receiving a message,
@@ -107,7 +110,8 @@ if (!seedHex) { console.error("BOT_SEED_HEX (or FAUCET_CHAT_SERVICE_SECRET) is r
 
 const hexToBytes = (hex) => {
   const clean = String(hex).trim().replace(/^0x/i, "");
-  if (!/^[0-9a-fA-F]*$/.test(clean) || clean.length % 2 !== 0) throw new Error(`bad hex: ${hex}`);
+  // Don't echo the value in the error: this path handles seeds and key material.
+  if (!/^[0-9a-fA-F]*$/.test(clean) || clean.length % 2 !== 0) throw new Error(`bad hex value (${clean.length} chars)`);
   return Uint8Array.from(clean.match(/../g)?.map((b) => Number.parseInt(b, 16)) ?? []);
 };
 const bytesToHex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");

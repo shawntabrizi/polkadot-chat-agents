@@ -341,6 +341,8 @@ async function cmdDeploy(name, flags) {
   const cp = runLocal("scp", [...sshOpts, path.join(tmp, "bot.env"), path.join(tmp, "docker-compose.yml"), `${host}:${base}/`]);
   fs.rmSync(tmp, { recursive: true, force: true });
   if (cp.status !== 0) fail("Copying config (scp) failed.");
+  // scp applies the remote umask, so restore 0600 on the env (it holds the seed).
+  runLocal("ssh", [...sshOpts, host, `chmod 600 ${base}/bot.env`]);
 
   step("Starting the container…");
   const up = runLocal("ssh", [...sshOpts, host, `cd ${base} && docker compose -p ${cn} up -d`]);
@@ -396,6 +398,9 @@ async function deployHarnessStack(name, cfg, secret, flags, host, harness) {
     `BOT_ALLOWED_PEERS=${allow.join(",")}`,
     `BOT_USERNAME=${cfg.username ?? ""}`,
     `BOT_STATE_DIR=/app/state`,
+    // The harness container reaches the bridge over the compose network, so the
+    // bridge must bind beyond loopback here (no ports are published to the host).
+    `BOT_BRIDGE_HOST=0.0.0.0`,
   ].join("\n");
   const botService = `  bot:\n    image: node:22-slim\n    container_name: ${cn}\n    restart: unless-stopped\n    working_dir: /app\n    volumes:\n      - ./app:/app\n      - ./state:/app/state\n    env_file:\n      - ./bot.env\n    command: ["node", "index.mjs"]\n`;
 
