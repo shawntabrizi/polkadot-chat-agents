@@ -30,7 +30,7 @@ import { paseoPeopleNext } from "@polkadot-api/descriptors";
 import { createLazyClient, createPapiStatementStoreAdapter } from "@novasamatech/statement-store";
 import { ss58Address } from "@polkadot-labs/hdkd-helpers";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
-import { withTimeout } from "./vendor/lib/async-utils.mjs";
+import { withTimeout, runWithConcurrency } from "./vendor/lib/async-utils.mjs";
 import {
   makePeerSession,
   deriveP256PrivateKey,
@@ -481,61 +481,74 @@ let lastPollOkAt = Date.now();
 let pollFailStreak = 0;
 let lastPollError = null;
 let tickErrored = 0, tickOk = 0, tickDeferred = 0;
-const queryTopic = async (topic) => {
+// Topics are queried in matchAny batches so per-tick RPC count stays ~constant
+// as peers accumulate (one query per TOPIC_BATCH topics, not one per topic),
+// and batches run concurrently. Reads are independent — only per-session
+// HANDLING order matters, and handling stays serial below.
+const TOPIC_BATCH = Number(env.BOT_TOPIC_BATCH ?? 16);
+const QUERY_CONCURRENCY = 4;
+const queryTopics = async (topics) => {
   try {
     const v = await withTimeout(
-      statementStore.queryStatements({ matchAll: [topic] }).match((x) => x, (e) => { throw new Error(String(e?.message ?? e)); }),
+      statementStore.queryStatements({ matchAny: topics }).match((x) => x, (e) => { throw new Error(String(e?.message ?? e)); }),
       queryTimeoutMs, "statement query");
     tickOk += 1;
     return v;
   } catch (e) { tickErrored += 1; lastPollError = String(e?.message ?? e); return null; }
 };
+// A decoded statement's topics may be raw bytes or hex depending on the codec
+// path; normalize to the bare-hex key used by the watch map.
+const topicHex = (t) => norm(typeof t === "string" ? t : bytesToHex(t));
 
 const pollOnce = async () => {
   tickErrored = 0; tickOk = 0; tickDeferred = 0;
-  // During a total outage every query burns the full timeout, so a tick with
-  // many peers would serialize minutes of doomed waits before the backoff even
-  // engages. A few straight failures with zero successes = give up this tick;
-  // backoff and the next tick take it from there.
+  // During a total outage every query burns the full timeout — a few straight
+  // failures with zero successes = give up this tick; backoff and the next
+  // tick take it from there.
   const tickDead = () => tickOk === 0 && tickErrored >= 3;
-  // request-day topics -> openers
-  for (const topic of requestDayTopics()) {
-    if (tickDead()) break;
-    for (const st of (await queryTopic(topic)) ?? []) {
+  // Watch map for this tick: every topic we poll -> how to dispatch a
+  // statement that carries it. Openers arrive on the request-day topics;
+  // follow-ups on the peer's identity session topic AND each per-device
+  // session topic (the app's devices publish on device topics, NOT the
+  // identity topic — identity-only polling silently misses app follow-ups).
+  const watch = new Map(); // bare-hex topic -> {kind:"opener"} | {kind:"session", peerHex, session, sender}
+  for (const topic of requestDayTopics()) watch.set(topicHex(topic), { kind: "opener", topic });
+  for (const peerHex of watchedSessionPeers) {
+    const entry = sessions.get(peerHex);
+    if (entry == null) continue;
+    watch.set(topicHex(entry.session.peerSessionId), {
+      kind: "session", topic: entry.session.peerSessionId, peerHex, session: entry.session, sender: hexToBytes(peerHex),
+    });
+    for (const ds of entry.session.incomingDeviceSessions ?? []) {
+      const th = topicHex(ds.peerSessionId);
+      if (watch.has(th)) continue;
+      watch.set(th, { kind: "session", topic: ds.peerSessionId, peerHex, session: ds, sender: ds.peerStatementAccountId });
+    }
+  }
+  // Query all watched topics in bounded-concurrency matchAny batches.
+  const allTopics = [...watch.values()].map((w) => w.topic);
+  const batches = [];
+  for (let i = 0; i < allTopics.length; i += TOPIC_BATCH) batches.push(allTopics.slice(i, i + TOPIC_BATCH));
+  const results = new Array(batches.length);
+  await runWithConcurrency(batches, QUERY_CONCURRENCY, async (batch, i) => {
+    results[i] = tickDead() ? null : await queryTopics(batch);
+  });
+  // Dispatch serially, attributing each statement by the watched topic it
+  // carries (statements hold their topics; matchAny loses the per-query 1:1).
+  for (const sts of results) {
+    for (const st of sts ?? []) {
       const data = typeof st.data === "string" ? hexToBytes(st.data) : st.data;
       const key = fp(data);
       if (seenStatements.has(key)) continue;
+      const target = (st.topics ?? []).map((t) => watch.get(topicHex(t))).find(Boolean);
+      if (!target) continue;
       noteSeenStatement(key);
-      await handleOpener(data);
-    }
-  }
-  // session topics -> follow-ups (read peer's ownSessionId == our peerSessionId).
-  // The app's devices publish on per-device session topics derived from their
-  // own encryption keys, NOT the identity topic, so poll each incoming device
-  // session too — identity-only polling silently misses app follow-ups.
-  for (const peerHex of watchedSessionPeers) {
-    if (tickDead()) break;
-    const entry = sessions.get(peerHex);
-    if (entry == null) continue;
-    const identityTopicHex = bytesToHex(entry.session.peerSessionId);
-    const inbound = [
-      { topic: entry.session.peerSessionId, session: entry.session, sender: hexToBytes(peerHex) },
-      ...(entry.session.incomingDeviceSessions ?? [])
-        .filter((ds) => bytesToHex(ds.peerSessionId) !== identityTopicHex)
-        .map((ds) => ({ topic: ds.peerSessionId, session: ds, sender: ds.peerStatementAccountId })),
-    ];
-    for (const { topic, session, sender } of inbound) {
-      if (tickDead()) break;
-      for (const st of (await queryTopic(topic)) ?? []) {
-        const data = typeof st.data === "string" ? hexToBytes(st.data) : st.data;
-        const key = fp(data);
-        if (seenStatements.has(key)) continue;
-        noteSeenStatement(key);
+      if (target.kind === "opener") {
+        await handleOpener(data);
+      } else if ((await handleSessionStatement(data, target.peerHex, target.session, target.sender)) === "deferred") {
         // A deferred statement (pipeline full) must be re-examined next tick.
-        if ((await handleSessionStatement(data, peerHex, session, sender)) === "deferred") {
-          seenStatements.delete(key);
-          tickDeferred += 1;
-        }
+        seenStatements.delete(key);
+        tickDeferred += 1;
       }
     }
   }
