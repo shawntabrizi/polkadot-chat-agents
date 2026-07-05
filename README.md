@@ -1,137 +1,141 @@
 # polkadot-chat-agents
 
-**Run your own AI chat bot inside the Polkadot app.** Message it like any contact —
-it answers with Claude, GPT, Gemini, Grok, or a full agent framework (Hermes,
-OpenClaw) behind it.
+Run an AI chat bot that people can message from the Polkadot app. The bot's
+replies can come from a model CLI (Claude, Codex, Gemini, Grok) or from an agent
+framework such as Hermes or OpenClaw.
 
-No chat server. No webhook. No hosting a platform. Polkadot app chat runs over the
-**Statement Store** — a decentralized, end-to-end-encrypted message layer — so your
-bot is just a process that connects to a public RPC node, from anywhere: a laptop,
-a Raspberry Pi, a $5 VPS.
+Polkadot app chat has no chat server. Messages travel over the Statement Store, a
+decentralized store-and-forward layer, and conversations are end-to-end encrypted.
+A bot is therefore just a process with an outbound connection to a public RPC
+node. It needs no public IP, no webhook, and no hosting platform, and can run on a
+laptop or a small VPS.
 
 ```
- Polkadot app (phone)  ⇄  Statement Store (Paseo)  ⇄  bot-core  ⇄  your AI
-                                                        │
-                                     direct brain (claude/codex/gemini/grok CLI)
-                                     — or an agent harness (Hermes, OpenClaw)
+Polkadot app (phone) <-> Statement Store (Paseo) <-> bot-core <-> brain
 ```
 
-**Status:** working end-to-end. Two reference bots run in production — one driven
-by Hermes + Codex, one by OpenClaw + Claude — both chatting from real phones.
+The "brain" is either a model CLI that bot-core invokes directly, or an agent
+framework connected through a small HTTP bridge. Two reference bots run in
+production: one on Hermes with Codex, one on OpenClaw with Claude.
 
-## What you need
+## Requirements
 
-- **Node.js 20+**. That's it — the identity-proof crypto ships prebuilt (wasm).
-- **The Polkadot app** on your phone, with an account (this is who the bot talks to).
-- **An AI CLI the bot can use** — e.g. [Claude Code](https://claude.com/claude-code)
-  (`claude`), Codex (`codex`), gemini-cli, or grok — logged in on the machine the
-  bot runs on. The bot shells out to it; your keys stay with the CLI.
+- Node.js 20 or newer. The registration proof ships precompiled (wasm), so no
+  other toolchain is needed.
+- The Polkadot app on a phone, with an account.
+- For an AI brain: the model's CLI installed and logged in on the machine the bot
+  runs on. bot-core invokes the CLI; it never handles your API credentials.
 
-Everything blockchain-y (keys, registration, usernames, encryption) is handled for
-you.
-
-## Create your bot (2 commands)
+## Create and run a bot
 
 ```bash
 cd bot-core
-npm install        # one-time
+npm install
 
-# 1. Create it — generates an identity, registers a username on the network,
-#    and locks the bot so only YOUR app account can message it.
-node cli.mjs create mycoolbot --brain claude --owner <your-polkadot-app-address>
-
-# 2. Run it.
+node cli.mjs create mycoolbot --brain claude --owner yourname.42
 node cli.mjs run mycoolbot
 ```
 
-`create` prints a link — open it (or search the printed username, e.g.
-`mycoolbot.07`) in the Polkadot app and say hi. Registration is usually confirmed
-within a few minutes; `node cli.mjs info mycoolbot` re-checks.
+`create` generates the bot's identity, registers a username on the network, and
+restricts the bot so only the `--owner` account can message it. The owner can be
+given as an app username, an SS58 address, or a 32-byte account id in hex.
 
-Slow model? The bot automatically sends "🤔 One moment — thinking…" if a reply
-takes more than ~5s, so chats never feel dropped. Conversations survive restarts —
-session state is persisted per bot.
+The command prints a link and a username (for example `mycoolbot.07`). Open the
+link, or search for the username in the Polkadot app, and send a message.
+Registration is usually confirmed within a few minutes; `node cli.mjs info
+mycoolbot` re-checks.
 
-## Put it on a server (1 command)
+The number suffix is a network-assigned discriminator, since base names are not
+unique. Pass `--digits NN` to request a specific one; if it is taken, `create`
+says so before registering anything.
 
-Any box with Docker + SSH access:
+If a reply takes longer than about five seconds, the bot sends a configurable
+"thinking" acknowledgement so the chat does not appear stalled. Session state is
+persisted per bot, so conversations continue across restarts.
+
+## Run it on a server
+
+`deploy` targets any machine reachable over SSH that has Docker installed:
 
 ```bash
-node cli.mjs deploy mycoolbot --host root@your-server \
-  --anthropic-key sk-ant-…                 # claude brain, fully headless
-node cli.mjs deploy mycoolbot --host root@your-server --dry-run   # preview first
+node cli.mjs deploy mycoolbot --host root@your-server --anthropic-key sk-ant-...
 
-node cli.mjs status mycoolbot              # running + healthy?
-node cli.mjs logs mycoolbot -f             # live logs
+node cli.mjs status mycoolbot
+node cli.mjs logs mycoolbot -f
 node cli.mjs stop mycoolbot
 ```
 
-`deploy` uploads bot-core, generates a compose file + env, starts the container
-(with a persistent state volume), and waits until the bot is online. Direct brains
-(`echo`, `claude`) deploy as one container; bridge bots deploy **with their agent
-framework** as a two-container stack — `--harness openclaw` is fully headless,
-`--harness hermes` prints its one interactive login. Details in
-[`docs/HARNESSES.md`](docs/HARNESSES.md).
+`deploy` uploads bot-core, generates a compose file and environment, starts the
+container with a persistent state volume, and waits for the bot to come online.
+Add `--dry-run` to preview the generated files without deploying.
 
-## Choose a brain
+Direct brains (`echo`, `claude`) deploy as a single container. Bridge bots deploy
+together with their agent framework as a two-container stack: `--harness
+openclaw` requires no interactive steps if the server has Claude CLI credentials,
+and `--harness hermes` prints the one login command it cannot automate. See
+[docs/HARNESSES.md](docs/HARNESSES.md).
 
-| `--brain` | What answers | Auth |
+## Brains
+
+| `--brain` | Replies come from | Authentication |
 |---|---|---|
-| `claude` | Claude, via the `claude` CLI | Claude Code login or API key |
-| `codex` | GPT, via the `codex` CLI | ChatGPT/Codex subscription login |
-| `gemini` / `grok` | that model's CLI | its own login |
-| `echo` | repeats you — zero-config smoke test | none |
-| `hermes` / `bridge` | an external **agent framework** over the local HTTP bridge | the framework's |
+| `claude` | the `claude` CLI | Claude Code login or API key |
+| `codex` | the `codex` CLI | ChatGPT/Codex subscription login |
+| `gemini`, `grok` | that model's CLI | the CLI's own login |
+| `echo` | bot-core itself (repeats the message) | none |
+| `hermes` / `bridge` | an agent framework over the HTTP bridge | the framework's |
 
-Pin a cheap model with `BOT_AI_MODEL` (e.g. `claude-haiku-4-5-20251001`), or wire
-any other CLI with `BOT_AI_CMD`/`BOT_AI_ARGS`. AI brains spend your quota, so `pca`
-refuses to leave one open to the world unless you pass `--public`.
+`BOT_AI_MODEL` pins a specific model (for example `claude-haiku-4-5-20251001` to
+keep costs down). `BOT_AI_CMD` and `BOT_AI_ARGS` wire in any other CLI. Because an
+AI brain spends your quota, `create` refuses to leave one open to arbitrary
+senders unless `--public` is passed.
 
-## Agent frameworks (Hermes, OpenClaw, …)
+## Agent frameworks
 
-For a bot with memory, tools, and personality, run `--brain hermes` and let a
-harness drive the conversation through bot-core's tiny HTTP bridge
-(`GET /inbound` long-poll → `POST /send`). Both integrations are validated live:
+For a bot with memory, tools, and a persona, run `--brain hermes` and let a
+framework drive the conversation through bot-core's HTTP bridge (a long-poll
+`GET /inbound` and a `POST /send`). Two integrations are included and validated:
 
-- **Hermes** — `hermes-plugin/polkadot/` drops into `~/.hermes/plugins/`.
-- **OpenClaw** — `openclaw-plugin/polkadot/` is an OpenClaw channel plugin.
+- Hermes: `hermes-plugin/polkadot/`, a platform adapter that drops into
+  `~/.hermes/plugins/`.
+- OpenClaw: `openclaw-plugin/polkadot/`, a channel plugin.
 
-Setup recipes, the bridge contract (write your own adapter in ~50 lines), and
-deployment field notes: [`docs/HARNESSES.md`](docs/HARNESSES.md).
+The bridge contract is four HTTP routes, so writing an adapter for another
+framework is small. Setup recipes and deployment notes are in
+[docs/HARNESSES.md](docs/HARNESSES.md).
 
-## Test without a phone
+## Testing without a phone
 
 ```bash
-node bot-core/test-client.mjs --seed-hex 0x<attested-seed> \
-  --bot-account 0x… --bot-identifier-key 0x… "hello"
+node bot-core/test-client.mjs --seed-hex 0x... \
+  --bot-account 0x... --bot-identifier-key 0x... "hello"
 ```
 
-Sends a real message over the network and prints the bot's replies. (There's also
-`test-client-device.mjs`, which reproduces the mobile app's multi-device behavior.)
+This sends a real message from an attested identity and prints the bot's replies.
+`test-client-device.mjs` does the same through per-device session channels, which
+is how the mobile app actually sends. See [docs/TESTING.md](docs/TESTING.md).
 
-## Keep these safe
+## Files to protect
 
-- `bots/<name>/secret.json` — the bot's root seed. Anyone with it **is** the bot.
-- `bots/<name>/session-state.json` (and the server's `state/` volume) — session
-  keys for open conversations.
+`bots/<name>/secret.json` holds the bot's root seed; whoever has it controls the
+bot. `bots/<name>/session-state.json` and the server-side `state/` volume hold
+session keys for open conversations. All are created with mode 0600 and are
+gitignored. Back them up; do not commit them.
 
-Both are created `0600` and gitignored — don't commit them, do back them up.
+## Repository layout
 
-## Layout
+- `bot-core/` — the transport and the `pca` CLI: identity, session encryption,
+  send/receive, persistence, brains, HTTP bridge, deploy and ops commands.
+- `hermes-plugin/`, `openclaw-plugin/` — framework adapters.
+- `tools/bandersnatch-cli/` — Rust source of the registration proof helper. The
+  wasm build is committed at `bot-core/vendor/summit-bandersnatch-cli.wasm`;
+  rebuild with `cargo build --release --target wasm32-wasip1`.
+- `docs/` — [DESIGN.md](docs/DESIGN.md) (architecture),
+  [HARNESSES.md](docs/HARNESSES.md) (framework integrations),
+  [TESTING.md](docs/TESTING.md) (headless verification).
 
-- `bot-core/` — the transport + CLI (`cli.mjs` = `pca`): identity, encryption,
-  send/receive, session persistence, brains, HTTP bridge, deploy/ops.
-- `hermes-plugin/`, `openclaw-plugin/` — harness adapters.
-- `tools/bandersnatch-cli/` — Rust source of the registration personhood proof;
-  ships prebuilt as `bot-core/vendor/summit-bandersnatch-cli.wasm` (runs via
-  node:wasi — users never need a Rust toolchain; rebuild: `cargo build --release
-  --target wasm32-wasip1`).
-- `docs/` — [`DESIGN.md`](docs/DESIGN.md) (architecture),
-  [`HARNESSES.md`](docs/HARNESSES.md) (integrations),
-  [`TEST-ROUND-TRIP.md`](docs/TEST-ROUND-TRIP.md) (verification guide).
-
-Currently targets the **Paseo** testnet (`people-next` chain), using Parity's
-identity backend as the registration verifier.
+The project currently targets the Paseo testnet (`people-next` chain) and uses
+Parity's identity backend as the registration verifier.
 
 ## License
 

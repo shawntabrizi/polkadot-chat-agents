@@ -1,184 +1,154 @@
-# Connecting an AI agent harness
+# Agent frameworks and direct brains
 
-`bot-core` is **harness-agnostic**. It handles the Polkadot app chat transport
-(identity, encryption, receive/send) and exposes a small local HTTP **bridge**.
-Any agent framework ("harness") drives the conversation by talking to that bridge
-through a thin **channel/platform plugin**.
+bot-core handles the Polkadot chat transport (identity, encryption, receive,
+send) and stays agnostic about what produces the replies. There are two ways to
+plug in an answer source: run bot-core in bridge mode and let an agent framework
+drive the conversation over a small HTTP API, or use a direct brain, where
+bot-core invokes a model CLI itself.
 
 ```
-Polkadot app  ⇄  Statement Store  ⇄  bot-core (--brain hermes)  ⇄  HTTP bridge  ⇄  harness plugin  ⇄  agent (Hermes / OpenClaw / …)
+Polkadot app <-> Statement Store <-> bot-core <-> HTTP bridge <-> framework plugin <-> agent
 ```
 
-Run bot-core in bridge mode so it hands messages to a harness instead of replying
-itself:
+Bridge mode is selected with the `hermes` brain:
 
 ```bash
-pca create mybot --brain hermes --owner <your-address>
-pca run mybot         # bot-core now exposes the bridge on http://127.0.0.1:8799
-```
-
-## The bridge contract (write an adapter for any harness)
-
-The plugin only needs to speak HTTP to bot-core:
-
-| Method & path | Purpose |
-|---|---|
-| `GET /health` | `{ ok, account, identifierKey, username }` |
-| `GET /inbound?wait=<secs>` | **long-poll** for inbound messages → `[{ chat_id, text, message_id }, …]` (empty array on timeout; `chat_id` is the peer's id) |
-| `POST /send { chat_id, text }` | send a reply to that peer → `{ success, message_id }` |
-| `POST /typing { chat_id }` | best-effort (currently a no-op) |
-
-A harness plugin = **loop on `GET /inbound` → feed each message to the agent →
-`POST /send` the reply**. Point it at the bridge with `POLKADOT_BRIDGE_URL`
-(default `http://127.0.0.1:8799`).
-
-`bot-core` already enforces the **allowlist** (`--owner` / `--public`) before a
-message is ever handed to the harness, so unlisted senders never reach your agent
-or spend quota.
-
----
-
-## Hermes (NousResearch/hermes-agent)
-
-Hermes is a Python agent with a platform-plugin gateway. The Polkadot plugin
-(`hermes-plugin/polkadot/`) is a `BasePlatformAdapter` that long-polls the bridge
-and posts replies.
-
-**1. Install Hermes** and configure a model. On the ChatGPT/Codex subscription:
-
-```bash
-hermes config set model.provider openai-codex
-hermes config set model.default  gpt-5.5          # base gpt-5.5 only; -codex/-mini 400 on this endpoint
-hermes config set model.base_url https://chatgpt.com/backend-api/codex
-docker exec -it <hermes> hermes auth add openai-codex --type oauth --no-browser   # device-flow login
-```
-
-**2. Install the Polkadot plugin** into Hermes's plugins dir (`$HERMES_HOME/plugins/`,
-i.e. `~/.hermes/plugins/` — in the Docker image, `/opt/data/plugins/`):
-
-```bash
-cp -r hermes-plugin/polkadot  <HERMES_HOME>/plugins/polkadot
-```
-
-**3. Point it at the bridge and run the gateway:**
-
-```bash
-export POLKADOT_BRIDGE_URL=http://127.0.0.1:8799      # or the bot-core container's URL
-hermes gateway run
-```
-
-Send your bot a message in the Polkadot app — Hermes answers, with its full
-memory/tools/model behind it.
-
-**Docker (recommended).** `pca deploy mybot --host root@server --harness hermes`
-generates and starts the whole two-container stack; the only manual step left is
-the interactive codex login it prints at the end
-(`docker exec -it <hermes> hermes auth add openai-codex --type oauth --no-browser`)
-plus the model config below. Hand-rolled equivalent: two services on their own
-network: `bot-core` (Node) exposing the bridge, and `nousresearch/hermes-agent`
-with `command: ["gateway","run"]`, the plugin bind-mounted at
-`/opt/data/plugins/polkadot`, and `POLKADOT_BRIDGE_URL=http://bot-core:8799`. The
-plugin recreates its HTTP connection on error, so a bot-core restart won't wedge it.
-
----
-
-## OpenClaw (openclaw/openclaw)
-
-OpenClaw is a TypeScript/Node multi-channel AI gateway with a channel-plugin SDK.
-The Polkadot channel plugin (`openclaw-plugin/polkadot/`) bridges the same way — a
-`gateway.startAccount` background loop long-polls `/inbound`, dispatches each
-message into the agent (`channelRuntime.inbound.run`), and the agent's reply flows
-back through `delivery.deliver` → `POST /send`.
-
-**1. Run bot-core in bridge mode** (so it hands messages to OpenClaw):
-
-```bash
-pca create mybot --brain hermes --owner <your-address>   # "hermes" brain = external-agent bridge
-pca run mybot                                            # bridge on http://127.0.0.1:8799
-```
-
-**2. Install + enable the channel plugin:**
-
-```bash
-openclaw plugins install <path-or-npm-spec-to openclaw-plugin/polkadot>
-openclaw plugins enable polkadot
-```
-
-**3. Configure the channel** (`openclaw.json` → `channels.polkadot`, or env):
-
-```jsonc
-"channels": {
-  "polkadot": {
-    "enabled": true,
-    "bridgeUrl": "http://127.0.0.1:8799",   // or POLKADOT_BRIDGE_URL
-    "dmPolicy": "closed",                    // open | pairing | closed
-    "allowFrom": ["<peer account-id hex>"]
-  }
-}
-```
-
-**4. Start OpenClaw's gateway** and message your bot in the Polkadot app.
-
-**Validated live** (OpenClaw 2026.6.11, Docker, claude-cli model) — and fully
-automated:
-
-```bash
-pca create mybot --brain hermes --owner <your-address>   # bridge-mode bot
-pca deploy mybot --host root@server --harness openclaw
-```
-
-That one command stands up the whole validated stack: bot-core (bridge) + an
-OpenClaw gateway image (`npm i -g openclaw @anthropic-ai/claude-code`, running as
-the non-root `node` user so the claude CLI needs no root override), plugin
-installed, model + channel + gateway config generated, Claude auth seeded from the
-server's `~/.claude` login. Zero interactive steps if the server has Claude creds.
-
-Gotcha worth knowing: Claude's OAuth **refresh tokens rotate** — once the
-container's claude refreshes, the host's original `~/.claude/.credentials.json`
-copy goes stale. If a redeploy hits "Not logged in", re-seed
-`<dir>/openclaw-home/.claude/.credentials.json` from wherever the *live* token is
-(the previous container's home), not the host original.
-
-See `openclaw-plugin/polkadot/README.md` for per-setting field notes.
-
----
-
-## Other harnesses
-
-Any framework that can run a small loop (poll `/inbound`, call your agent, `POST
-/send`) can drive a Polkadot bot — the bridge contract above is all it needs.
-
----
-
-## Direct AI brains (no harness)
-
-If you just want a model to answer — no agent framework — bot-core can shell out
-to a model's own CLI. The transport core stays model-agnostic; each brain is just
-a `prompt → argv` hook, and **each CLI owns its own auth/token** (bot-core never
-touches your keys). Slow replies get an automatic "🤔 thinking…" ack (any brain,
-including the bridge): if no reply has gone out within **`BOT_THINKING_AFTER_MS`**
-(default 5000) the ack is sent — tune it up if it feels chatty, customize the text
-with `BOT_THINKING_TEXT`, or set the text empty to disable. A failed model call is
-logged with its cause (`BOT_AI_AUTH_REVOKED` → re-login vs.
-`BOT_AI_FAILED`/`BOT_AI_TIMEOUT`).
-
-| Brain | CLI it runs | Auth |
-|---|---|---|
-| `--brain codex` | `codex exec …` | `codex login` (ChatGPT/Codex sub) |
-| `--brain claude` | `claude -p …` | Claude Code login / API key |
-| `--brain gemini` | `gemini -p …` | `gemini` login |
-| `--brain grok` | `grok -p …` | grok CLI login |
-
-```bash
-pca create mybot --brain claude --owner <your-address>   # locked to you
+pca create mybot --brain hermes --owner yourname.42
 pca run mybot
 ```
 
-An AI brain spends your quota, so `pca` refuses to leave one open unless you pass
-`--public`. Any other CLI works without code via the escape hatch — set
-`BOT_AI_CMD=<bin>` and optional `BOT_AI_ARGS='["-x","__PROMPT__"]'` (the
-`__PROMPT__` token is replaced by the built prompt).
+The bridge listens on `http://127.0.0.1:8799` by default.
 
-**Pick a low-cost model** with `BOT_AI_MODEL` — it's passed to the brain's own
-`--model`/`-m` flag (e.g. `BOT_AI_MODEL=claude-haiku-4-5-20251001` for the `claude`
-brain). Leave it unset to use the CLI's default model.
+## The bridge contract
+
+A framework plugin needs four HTTP routes:
+
+| Route | Purpose |
+|---|---|
+| `GET /health` | returns `{ ok, account, identifierKey, username }` |
+| `GET /inbound?wait=<secs>` | long-poll; returns `[{ chat_id, text, message_id }, ...]`, an empty array on timeout. `chat_id` is the peer's account-id hex. |
+| `POST /send { chat_id, text }` | publishes a reply to that peer; returns `{ success, message_id }` |
+| `POST /typing { chat_id }` | best-effort, currently a no-op |
+
+An adapter is a loop: poll `/inbound`, feed each message to the agent, `POST
+/send` the reply. Point it at the bridge with `POLKADOT_BRIDGE_URL`. bot-core
+enforces the allowlist before a message reaches the bridge, so unlisted senders
+never reach the agent or spend model quota.
+
+## Hermes
+
+Hermes (NousResearch/hermes-agent) is a Python agent with a platform-plugin
+gateway. The adapter in `hermes-plugin/polkadot/` subclasses
+`BasePlatformAdapter`: it long-polls the bridge and posts replies. It recreates
+its HTTP connection on error, so a bot-core restart does not wedge it.
+
+The deployed setup is generated by:
+
+```bash
+pca deploy mybot --host root@server --harness hermes
+```
+
+This starts a two-container stack (bot-core plus `nousresearch/hermes-agent` with
+the plugin bind-mounted at `/opt/data/plugins/polkadot` and
+`POLKADOT_BRIDGE_URL=http://bot:8799`). Hermes then needs its one-time model
+login, which cannot be automated; the deploy prints the command:
+
+```bash
+docker exec -it <hermes-container> hermes auth add openai-codex --type oauth --no-browser
+```
+
+Model configuration for the ChatGPT/Codex subscription, in Hermes's
+`config.yaml` (or via `hermes config set`):
+
+```yaml
+model:
+  provider: openai-codex
+  default: gpt-5.5          # this endpoint accepts base gpt-5.5 only
+  base_url: https://chatgpt.com/backend-api/codex
+agent:
+  reasoning_effort: low     # the main cost lever on a reasoning model
+```
+
+For a local (non-Docker) setup, copy `hermes-plugin/polkadot` into
+`~/.hermes/plugins/`, export `POLKADOT_BRIDGE_URL`, and run `hermes gateway run`.
+
+## OpenClaw
+
+OpenClaw is a TypeScript multi-channel AI gateway with a channel-plugin SDK. The
+plugin in `openclaw-plugin/polkadot/` runs a long-poll loop per account and
+dispatches messages through `channelRuntime.inbound.run`; replies route back via
+`delivery.deliver` to `POST /send`. It ships a compiled `dist/` bundle, so a
+normal `openclaw plugins install <path-or-git>` works.
+
+The deployed setup is generated by:
+
+```bash
+pca deploy mybot --host root@server --harness openclaw
+```
+
+This builds a gateway image (`openclaw` plus `@anthropic-ai/claude-code`,
+running as the non-root `node` user, so the claude CLI needs no root override),
+installs the plugin, generates the model, channel, and gateway configuration,
+and seeds Claude credentials from the server's `~/.claude` login. If the server
+has those credentials, there are no interactive steps.
+
+Manual channel configuration, if you run OpenClaw yourself
+(`openclaw.json` under `channels.polkadot`):
+
+```jsonc
+{
+  "enabled": true,
+  "bridgeUrl": "http://127.0.0.1:8799",
+  "dmPolicy": "allowlist",
+  "allowFrom": ["<peer account-id hex>"]
+}
+```
+
+Two operational notes learned in deployment:
+
+- The gateway requires `gateway.mode: "local"` in its config and an
+  `OPENCLAW_GATEWAY_TOKEN` in its environment when it detects it is running in a
+  container.
+- Claude OAuth refresh tokens rotate. Once a container's claude CLI refreshes,
+  any older copy of `.credentials.json` (for example the host original) is
+  stale. If a redeploy reports "Not logged in", re-seed the container home from
+  wherever the live token is.
+
+`openclaw-plugin/polkadot/README.md` has per-setting notes.
+
+## Other frameworks
+
+Any framework that can run the poll loop above can drive a bot; the bridge
+contract is the whole integration surface. The Hermes adapter (~150 lines of
+Python) is a reasonable template.
+
+## Direct brains
+
+Without a framework, bot-core can invoke a model CLI itself. Each brain is a
+mapping from prompt to argv; the CLI owns its own credentials.
+
+| Brain | Invokes | Authentication |
+|---|---|---|
+| `codex` | `codex exec ...` | `codex login` (ChatGPT/Codex subscription) |
+| `claude` | `claude -p ...` | Claude Code login or API key |
+| `gemini` | `gemini -p ...` | gemini-cli login |
+| `grok` | `grok -p ...` | grok CLI login |
+
+```bash
+pca create mybot --brain claude --owner yourname.42
+pca run mybot
+```
+
+Related settings:
+
+- `BOT_AI_MODEL` selects a specific model, passed to the CLI's own model flag
+  (for example `claude-haiku-4-5-20251001` to keep costs down).
+- `BOT_AI_CMD` and `BOT_AI_ARGS` wire in any other CLI without code changes; the
+  `__PROMPT__` token in the args array is replaced with the built prompt.
+- `BOT_THINKING_AFTER_MS` (default 5000) and `BOT_THINKING_TEXT` control the
+  acknowledgement sent when a reply is slow; setting the text empty disables it.
+- Failed model calls are logged with a cause: `BOT_AI_AUTH_REVOKED` means the
+  CLI needs a re-login, `BOT_AI_FAILED` and `BOT_AI_TIMEOUT` are transient.
+
+An AI brain spends quota, so `create` requires an allowlist or an explicit
+`--public`.
