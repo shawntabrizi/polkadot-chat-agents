@@ -6,3 +6,11 @@ license = "Apache-2.0"
 
 [dependencies]
 verifiable = { git = "https://github.com/paritytech/verifiable", rev = "f65b39df04f2f9a453d78550438b189c96785285", default-features = false, features = ["std", "prover"] }
+
+# Small deterministic wasm artifact (the .wasm ships in-repo so users don't need cargo).
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

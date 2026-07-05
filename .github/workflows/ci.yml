@@ -25,6 +25,22 @@ jobs:
           node cli.mjs
           PCA_BOTS_DIR="$RUNNER_TEMP/bots" node cli.mjs create cismoke --brain echo --no-register
           test -f "$RUNNER_TEMP/bots/cismoke/config.json"
+      - name: Vendored wasm proof helper works and is deterministic
+        run: |
+          node --input-type=module -e '
+            import { readFileSync, openSync, closeSync } from "node:fs";
+            import { WASI } from "node:wasi";
+            const fd = openSync(process.env.RUNNER_TEMP + "/wasi.out", "w+");
+            const wasi = new WASI({ version: "preview1", stdout: fd, args: ["b", "lite-person",
+              "0x1111111111111111111111111111111111111111111111111111111111111111", "0xdeadbeef"] });
+            const mod = await WebAssembly.compile(readFileSync("vendor/summit-bandersnatch-cli.wasm"));
+            const code = wasi.start(await WebAssembly.instantiate(mod, wasi.getImportObject()));
+            closeSync(fd);
+            const out = readFileSync(process.env.RUNNER_TEMP + "/wasi.out", "utf8");
+            if (code !== 0 || !out.includes("0x4798a99fcda212ba57d62d47d5e695d8b168fc47962a65a733204a52cfeea7d0"))
+              { console.error("wasm proof helper mismatch:", code, out); process.exit(1); }
+            console.log("wasm proof OK");
+          '
 
   openclaw-plugin:
     runs-on: ubuntu-latest
@@ -44,7 +60,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with: { targets: wasm32-wasip1 }
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: tools/bandersnatch-cli }
-      - name: Build identity tool
-        run: cargo build --manifest-path tools/bandersnatch-cli/Cargo.toml
+      - name: Build identity tool (native + the shipped wasm target)
+        run: |
+          cargo build --manifest-path tools/bandersnatch-cli/Cargo.toml
+          cargo build --release --target wasm32-wasip1 --manifest-path tools/bandersnatch-cli/Cargo.toml

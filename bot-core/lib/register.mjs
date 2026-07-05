@@ -38,7 +38,51 @@ const compactLen = (n) => {
 };
 const scaleString = (s) => { const e = enc.encode(s); return concatBytes(compactLen(e.length), e); };
 
-function runLitePerson(bin, entropyHex, messageHex) {
+// The lite-person proof needs bandersnatch ring-VRF crypto that only exists in
+// Rust. We ship it as a WASI build of tools/bandersnatch-cli (vendored .wasm, no
+// Rust toolchain needed by users) and run it in-process via node:wasi. Output is
+// deterministic — identical bytes to the native binary. Set PCA_BANDERSNATCH_CLI
+// (or pass bandersnatchBin) to use a natively built binary instead.
+const WASM_PATH = new URL("../vendor/summit-bandersnatch-cli.wasm", import.meta.url);
+let wasmModule = null; // compiled once, instantiated per run (WASI starts are single-shot)
+
+async function runLitePersonWasm(entropyHex, messageHex) {
+  // node:wasi emits an ExperimentalWarning on import; it would land mid-way
+  // through create's friendly output, so filter that one warning (only that one).
+  if (!globalThis.__pcaWasiWarnFiltered) {
+    globalThis.__pcaWasiWarnFiltered = true;
+    const orig = process.emitWarning.bind(process);
+    process.emitWarning = (warning, ...rest) => {
+      if (String(warning).includes("WASI")) return;
+      orig(warning, ...rest);
+    };
+  }
+  const { WASI } = await import("node:wasi");
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  wasmModule ??= await WebAssembly.compile(fs.readFileSync(WASM_PATH));
+  const tmp = path.join(os.tmpdir(), `bandersnatch-${process.pid}-${Date.now()}.out`);
+  const fd = fs.openSync(tmp, "w+");
+  try {
+    const wasi = new WASI({
+      version: "preview1",
+      args: ["bandersnatch", "lite-person", entropyHex, messageHex],
+      stdout: fd,
+      stderr: fd,
+    });
+    const code = wasi.start(await WebAssembly.instantiate(wasmModule, wasi.getImportObject()));
+    const out = fs.readFileSync(tmp, "utf8").trim();
+    if (code !== 0) throw new Error(`bandersnatch helper failed (exit ${code}): ${out}`);
+    return JSON.parse(out);
+  } finally {
+    fs.closeSync(fd);
+    fs.rmSync(tmp, { force: true });
+  }
+}
+
+async function runLitePerson(bin, entropyHex, messageHex) {
+  if (!bin) return runLitePersonWasm(entropyHex, messageHex);
   const r = spawnSync(bin, ["lite-person", entropyHex, messageHex], { encoding: "utf8" });
   if (r.status !== 0) throw new Error(`bandersnatch helper failed: ${r.stderr || r.stdout || r.error?.message}`);
   return JSON.parse(r.stdout.trim());
@@ -60,7 +104,7 @@ export function normalizeUsername(raw) {
   return { base: m[1], digits: m[2] ?? null };
 }
 
-export async function registerIdentity({ mnemonic, username, digits = null, backendUrl, bandersnatchBin, ss58Prefix = 42 }) {
+export async function registerIdentity({ mnemonic, username, digits = null, backendUrl, bandersnatchBin = null, ss58Prefix = 42 }) {
   const { base, digits: parsedDigits } = normalizeUsername(username);
   const preferredDigits = digits ?? parsedDigits;
 
@@ -74,11 +118,11 @@ export async function registerIdentity({ mnemonic, username, digits = null, back
   const attester = attesterData?.attester;
   if (!attester) throw new Error("identity backend did not return an attester");
 
-  const memberOnly = runLitePerson(bandersnatchBin, bytesToHex(liteEntropy),
+  const memberOnly = await runLitePerson(bandersnatchBin, bytesToHex(liteEntropy),
     bytesToHex(concatBytes(enc.encode(MSG_PREFIX), accountId, new Uint8Array(32))));
   const ringVrfKey = memberOnly.memberKey;
   const liteMessage = concatBytes(enc.encode(MSG_PREFIX), accountId, hexToBytes(ringVrfKey));
-  const litePerson = runLitePerson(bandersnatchBin, bytesToHex(liteEntropy), bytesToHex(liteMessage));
+  const litePerson = await runLitePerson(bandersnatchBin, bytesToHex(liteEntropy), bytesToHex(liteMessage));
 
   const resourcesSig = concatBytes(accountId, hexToBytes(attester), p256Pub, scaleString(base), Uint8Array.of(0));
   const payload = {

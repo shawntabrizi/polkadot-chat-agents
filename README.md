@@ -21,7 +21,7 @@ by Hermes + Codex, one by OpenClaw + Claude — both chatting from real phones.
 
 ## What you need
 
-- **Node.js 20+** and (one-time) **Rust/cargo** to build the small identity tool.
+- **Node.js 20+**. That's it — the identity-proof crypto ships prebuilt (wasm).
 - **The Polkadot app** on your phone, with an account (this is who the bot talks to).
 - **An AI CLI the bot can use** — e.g. [Claude Code](https://claude.com/claude-code)
   (`claude`), Codex (`codex`), gemini-cli, or grok — logged in on the machine the
@@ -34,8 +34,7 @@ you.
 
 ```bash
 cd bot-core
-npm install                                                          # one-time
-cargo build --manifest-path ../tools/bandersnatch-cli/Cargo.toml     # one-time
+npm install        # one-time
 
 # 1. Create it — generates an identity, registers a username on the network,
 #    and locks the bot so only YOUR app account can message it.
@@ -68,9 +67,10 @@ node cli.mjs stop mycoolbot
 ```
 
 `deploy` uploads bot-core, generates a compose file + env, starts the container
-(with a persistent state volume), and waits until the bot is online.
-Deploy currently automates the `echo` and `claude` brains; `codex`/`gemini`/`grok`
-(interactive logins) and the harness topologies are documented in
+(with a persistent state volume), and waits until the bot is online. Direct brains
+(`echo`, `claude`) deploy as one container; bridge bots deploy **with their agent
+framework** as a two-container stack — `--harness openclaw` is fully headless,
+`--harness hermes` prints its one interactive login. Details in
 [`docs/HARNESSES.md`](docs/HARNESSES.md).
 
 ## Choose a brain
@@ -122,8 +122,10 @@ Both are created `0600` and gitignored — don't commit them, do back them up.
 - `bot-core/` — the transport + CLI (`cli.mjs` = `pca`): identity, encryption,
   send/receive, session persistence, brains, HTTP bridge, deploy/ops.
 - `hermes-plugin/`, `openclaw-plugin/` — harness adapters.
-- `tools/bandersnatch-cli/` — Rust helper that builds the personhood proof used
-  once at registration.
+- `tools/bandersnatch-cli/` — Rust source of the registration personhood proof;
+  ships prebuilt as `bot-core/vendor/summit-bandersnatch-cli.wasm` (runs via
+  node:wasi — users never need a Rust toolchain; rebuild: `cargo build --release
+  --target wasm32-wasip1`).
 - `docs/` — [`DESIGN.md`](docs/DESIGN.md) (architecture),
   [`HARNESSES.md`](docs/HARNESSES.md) (integrations),
   [`TEST-ROUND-TRIP.md`](docs/TEST-ROUND-TRIP.md) (verification guide).

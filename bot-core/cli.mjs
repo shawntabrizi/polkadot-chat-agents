@@ -31,8 +31,9 @@ import { deriveP256PrivateKey, p256PublicKeyFromPrivateKey } from "./vendor/app-
 import { registerIdentity, waitForAttestation, DEFAULT_BACKENDS } from "./lib/register.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const BANDERSNATCH_BIN = process.env.PCA_BANDERSNATCH_CLI
-  ?? path.join(HERE, "..", "tools", "bandersnatch-cli", "target", "debug", "summit-bandersnatch-cli");
+// Proofs run via the vendored wasm build by default (no Rust toolchain needed);
+// set PCA_BANDERSNATCH_CLI to a natively built binary to override.
+const BANDERSNATCH_BIN = process.env.PCA_BANDERSNATCH_CLI ?? null;
 
 async function withPeopleApi(endpoint, fn) {
   const client = createPapiClient(getWsProvider(endpoint));
@@ -141,8 +142,8 @@ async function cmdCreate(name, flags) {
   save();
 
   if (register) {
-    if (!fs.existsSync(BANDERSNATCH_BIN)) {
-      fail(`Identity tool not built. Run:\n  cargo build --manifest-path ${path.relative(process.cwd(), path.join(HERE, "..", "tools", "bandersnatch-cli", "Cargo.toml"))}\nThen: pca create ${name}  (or pass --no-register to skip)`);
+    if (BANDERSNATCH_BIN && !fs.existsSync(BANDERSNATCH_BIN)) {
+      fail(`PCA_BANDERSNATCH_CLI points at ${BANDERSNATCH_BIN}, which doesn't exist.`);
     }
     step("Registering your bot on the network…");
     let result;
