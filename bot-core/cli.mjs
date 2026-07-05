@@ -47,9 +47,20 @@ const BOTS_DIR = process.env.PCA_BOTS_DIR ?? path.join(os.homedir(), ".pca", "bo
 const DEFAULT_ENDPOINT = "wss://paseo-people-next-system-rpc.polkadot.io";
 // Cap container log growth on a VPS (json-file grows unbounded by default).
 const LOG_OPTS = `    logging:\n      driver: json-file\n      options: { max-size: "10m", max-file: "3" }\n`;
-const BRAINS = ["echo", "codex", "claude", "gemini", "grok", "hermes"];
+const BRAINS = ["echo", "codex", "claude", "gemini", "grok", "bridge", "hermes"];
 // Brains that call a model and therefore spend your quota — never left open by default.
-const PAID_BRAINS = new Set(["codex", "claude", "gemini", "grok", "hermes"]);
+const PAID_BRAINS = new Set(["codex", "claude", "gemini", "grok", "bridge", "hermes"]);
+// Direct brains shell out to a same-named CLI on this machine. Warn (don't fail —
+// the bot may be destined for a server) when it isn't installed, or every message
+// dies with BOT_AI_SPAWN_FAILED and the user only sees the apology text.
+const DIRECT_BRAIN_CLIS = new Set(["codex", "claude", "gemini", "grok"]);
+function warnMissingBrainCli(brain) {
+  if (!DIRECT_BRAIN_CLIS.has(brain) || process.env.BOT_AI_CMD) return;
+  const r = spawnSync("which", [brain], { stdio: "ignore" });
+  if (r.status !== 0) {
+    warn(`The "${brain}" CLI isn't installed here — the bot will run, but it can't answer until it is.`);
+  }
+}
 
 const bytesToHex = (b) => `0x${Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("")}`;
 
@@ -153,6 +164,7 @@ async function cmdCreate(name, flags) {
   if (fs.existsSync(botDir(name))) fail(`Bot "${name}" already exists (${botDir(name)}). Use a different name.`);
   const brain = String(flags.brain ?? "echo").toLowerCase();
   if (!BRAINS.includes(brain)) fail(`--brain must be one of: ${BRAINS.join(", ")}`);
+  warnMissingBrainCli(brain);
   const endpoint = flags.network == null || flags.network === "paseo" ? DEFAULT_ENDPOINT : String(flags.endpoint ?? flags.network);
   const backendUrl = flags.backend ? String(flags.backend) : DEFAULT_BACKENDS.paseo;
   const allowInputs = [
@@ -335,6 +347,7 @@ function cmdRun(name) {
   if (!fs.existsSync(secretPath(name))) fail(`"${name}" has no secret.json — its identity is missing. Recreate it: pca create ${name}`);
   const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
   if (!cfg.registered) note("Warning: this bot isn't registered on the network yet, so people can't message it.");
+  warnMissingBrainCli(cfg.brain);
   if (cfg.deploy?.host) warn(`Heads up: "${name}" is also deployed on ${cfg.deploy.host}. Running it here too = two processes on one identity (they will double-reply). Stop one first.`);
   step(`Starting "${name}" (${cfg.brain})…`);
   const env = {
@@ -668,7 +681,7 @@ function cmdStop(name, flags) {
 function usage() {
   console.log(`pca — Polkadot Chat Agents
 
-  pca create <botname> [--brain echo|codex|claude|gemini|grok|hermes] [--owner <your username or address>] [--public] [--network paseo] [--username name]
+  pca create <botname> [--brain echo|codex|claude|gemini|grok|bridge] [--owner <your username or address>] [--public] [--network paseo] [--username name]
   pca register <name>                  finish/retry registration for an existing bot
   pca run <name>                       start the bot locally (foreground)
   pca deploy <name> --host <ssh>       ship it to a server and run it in Docker
@@ -694,7 +707,7 @@ deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (br
   stack (openclaw is fully headless if the server has Claude CLI creds).
   logs/status/stop reuse the deploy host saved in the bot's config (override with --host).
 
-Brains:  echo (test)  ·  codex/claude/gemini/grok (direct — shells to that CLI, which owns its own auth)  ·  hermes (hand off to an external agent harness)
+Brains:  echo (test)  ·  codex/claude/gemini/grok (direct — shells to that CLI, which owns its own auth)  ·  bridge (hand off to an external agent harness; "hermes" is an alias)
 
 Bots live in ${BOTS_DIR} (override with PCA_BOTS_DIR).`);
 }
