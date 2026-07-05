@@ -122,6 +122,25 @@ const readConfig = (name) => {
 };
 const listBots = () => (fs.existsSync(BOTS_DIR) ? fs.readdirSync(BOTS_DIR).filter((n) => fs.existsSync(configPath(n))) : []);
 
+// Older versions kept bots in ./bots relative to the working directory. A user
+// upgrading with bots there would see "No bots yet" — and following the
+// suggested `pca create` would mint a SECOND identity while the original
+// (possibly deployed) one sits stranded. Point them at the move instead.
+function warnLegacyBotsDir() {
+  if (process.env.PCA_BOTS_DIR) return;
+  const legacy = path.resolve(process.cwd(), "bots");
+  if (legacy === BOTS_DIR) return;
+  try {
+    const legacyHasBots = fs.existsSync(legacy)
+      && fs.readdirSync(legacy).some((n) => fs.existsSync(path.join(legacy, n, "config.json")));
+    if (legacyHasBots && listBots().length === 0) {
+      warn(`Found bots in ${legacy} from an older pca version — bots now live in ${BOTS_DIR}.`);
+      note(`Move them:  mkdir -p ${path.dirname(BOTS_DIR)} && mv "${legacy}" "${BOTS_DIR}"`);
+      note(`Or keep the old location:  export PCA_BOTS_DIR="${legacy}"`);
+    }
+  } catch { /* best-effort hint only */ }
+}
+
 const deeplink = (accountIdHex) => {
   const id = accountIdHex.replace(/^0x/, "");
   return `polkadotapp://chat?id=0:0x${id}&force=false&chatId=${id}`;
@@ -667,6 +686,7 @@ Bots live in ${BOTS_DIR} (override with PCA_BOTS_DIR).`);
 const { flags, positional } = parseFlags(process.argv.slice(2));
 const [command, arg] = positional;
 try {
+  warnLegacyBotsDir();
   switch (command) {
     case "create": await cmdCreate(arg, flags); break;
     case "register": await cmdRegister(arg, flags); break;

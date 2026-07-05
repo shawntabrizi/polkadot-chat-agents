@@ -122,11 +122,11 @@ is how the mobile app actually sends. See [docs/TESTING.md](docs/TESTING.md).
 
 ## Files to protect
 
-`bots/<name>/secret.json` holds the bot's root seed; whoever has it controls the
-bot. `bots/<name>/session-state.json` and the server-side `state/` volume hold
-session keys for open conversations. A deployed bot's `bot.env` holds the seed
-and any `--anthropic-key`. All are created with mode 0600 and are gitignored.
-Back them up; do not commit them.
+`~/.pca/bots/<name>/secret.json` holds the bot's root seed; whoever has it
+controls the bot. `~/.pca/bots/<name>/session-state.json` and the server-side
+`state/` volume hold session keys for open conversations. A deployed bot's
+`bot.env` holds the seed and any `--anthropic-key`. All are created with mode
+0600. Back them up; do not commit them.
 
 ## Repository layout
 
