@@ -115,6 +115,7 @@ function parseFlags(argv) {
 const botDir = (name) => path.join(BOTS_DIR, name);
 const configPath = (name) => path.join(botDir(name), "config.json");
 const secretPath = (name) => path.join(botDir(name), "secret.json");
+const saveConfig = (name, cfg) => fs.writeFileSync(configPath(name), `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 });
 const readConfig = (name) => {
   if (!name) fail("Which bot? Usage: pca <command> <botname>   (list yours with: pca list)");
   if (!fs.existsSync(configPath(name))) fail(`No bot named "${name}". Create it: pca create ${name}`);
@@ -202,8 +203,7 @@ async function cmdCreate(name, flags) {
     account: accountIdHex, address, identifierKey: bytesToHex(p256),
     username: null, registered: false, createdAt: new Date().toISOString(),
   };
-  const save = () => fs.writeFileSync(configPath(name), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-  save();
+  saveConfig(name, config);
 
   let reg = "skipped";
   if (register) {
@@ -245,7 +245,7 @@ async function runRegistration(name, config, { mnemonic, wantUsername, digits, w
   if (BANDERSNATCH_BIN && !fs.existsSync(BANDERSNATCH_BIN)) {
     fail(`PCA_BANDERSNATCH_CLI points at ${BANDERSNATCH_BIN}, which doesn't exist.`);
   }
-  const save = () => fs.writeFileSync(configPath(name), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  const save = () => saveConfig(name, config);
   if (!config.username) {
     if (!mnemonic) { warn(`No mnemonic stored for "${name}" (imported bot?), so it can't be registered here.`); return "failed"; }
     step("Registering your bot on the network…");
@@ -310,7 +310,7 @@ async function cmdInfo(name) {
       messageable = await withPeopleApi(cfg.endpoint, async (api) =>
         withTimeout(api.query.Resources.Consumers.getValue(cfg.address), 12_000, "network check")
           .then((consumer) => consumer?.identifier_key != null));
-      if (messageable) { cfg.registered = true; fs.writeFileSync(configPath(name), `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 }); }
+      if (messageable) { cfg.registered = true; saveConfig(name, cfg); }
     } catch { reachedNetwork = false; }
   }
   // Distinguish never-registered from claimed-but-pending from confirmed.
@@ -440,7 +440,7 @@ async function cmdDeploy(name, flags) {
 
   // Remember where this bot lives so `pca stop/logs/status` don't need --host.
   cfg.deploy = { host, dir: base, container: cn, at: new Date().toISOString() };
-  fs.writeFileSync(configPath(name), `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 });
+  saveConfig(name, cfg);
 
   step("Waiting for the bot to come online…");
   const wait = runLocal("ssh", [...sshOpts, host,
@@ -591,7 +591,7 @@ docker compose -p ${cn} run --rm openclaw sh -lc 'openclaw plugins install --lin
   const up = runLocal("ssh", [...sshOpts, host, `cd ${base} && docker compose -p ${cn} up -d`]);
   if (up.status !== 0) fail("docker compose up failed.");
   cfg.deploy = { host, dir: base, container: cn, harness, at: new Date().toISOString() };
-  fs.writeFileSync(configPath(name), `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 });
+  saveConfig(name, cfg);
 
   step("Waiting for the bot to come online…");
   const wait = runLocal("ssh", [...sshOpts, host,

@@ -21,8 +21,9 @@ export function createStateStore(filePath, { debounceMs = 1000 } = {}) {
     } catch (e) {
       // Best-effort: a disk error must not take the bot down. But surface it once
       // so a persistently-failing save (full disk, bad perms) isn't invisible —
-      // otherwise "state persists" silently becomes false.
-      if (!warned) { warned = true; console.error(JSON.stringify({ time: new Date().toISOString(), event: "BOT_STATE_SAVE_FAILED", error: String(e?.message ?? e) })); }
+      // otherwise "state persists" silently becomes false. Emit on stdout like
+      // every other JSON event, or log pipelines (pca status) never see it.
+      if (!warned) { warned = true; console.log(JSON.stringify({ time: new Date().toISOString(), event: "BOT_STATE_SAVE_FAILED", error: String(e?.message ?? e) })); }
     }
   };
 
