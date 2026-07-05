@@ -615,26 +615,51 @@ if (!stateStore) log("BOT_STATE_DISABLED", { note: "BOT_STATE_DIR unset — open
 let pidfilePath = null;
 if (env.BOT_STATE_DIR) {
   pidfilePath = path.join(env.BOT_STATE_DIR, "bot.pid");
+  const refuse = (holder) => {
+    console.error(`Another bot process (${holder}) already serves this identity (${pidfilePath}). Two would double-reply — stop it first (or delete the pidfile if you're sure nothing is running).`);
+    process.exit(1);
+  };
   try {
     fs.mkdirSync(env.BOT_STATE_DIR, { recursive: true });
     let fd;
     try { fd = fs.openSync(pidfilePath, "wx"); }
     catch (e) {
       if (e?.code !== "EEXIST") throw e;
-      const old = Number(fs.readFileSync(pidfilePath, "utf8").trim());
+      const content = fs.readFileSync(pidfilePath, "utf8").trim();
+      // Only a positive integer counts as a holder. Empty/garbage content (a
+      // crash between create and write) must read as stale: Number("") is 0,
+      // and kill(0, 0) signals our own process group — it always succeeds, so
+      // without this guard an empty pidfile bricks startup forever.
+      const old = Number.parseInt(content, 10);
       let alive = false;
-      try { process.kill(old, 0); alive = old !== process.pid; } catch { alive = false; }
-      if (alive) {
-        console.error(`Another bot process (pid ${old}) already serves this identity (${pidfilePath}). Two would double-reply — stop it first, or use a separate BOT_STATE_DIR.`);
-        process.exit(1);
+      if (Number.isInteger(old) && old > 0 && old !== process.pid) {
+        try { process.kill(old, 0); alive = true; } catch { alive = false; }
       }
-      fd = fs.openSync(pidfilePath, "w"); // stale pidfile — take it over
+      if (alive) refuse(`pid ${old}`);
+      // Stale — take it over via remove + exclusive re-create so concurrent
+      // starters race for one wx winner instead of both opening with "w".
+      // Re-read first: if the content changed since the staleness check,
+      // another starter just claimed it. (A microsecond interleaving window
+      // remains — nothing in node's fs gives an atomic stale-lock swap — but
+      // it now takes two starts within the same few instructions to collide.)
+      if (fs.readFileSync(pidfilePath, "utf8").trim() !== content) refuse("just started");
+      fs.rmSync(pidfilePath, { force: true });
+      try { fd = fs.openSync(pidfilePath, "wx"); }
+      catch (e2) { if (e2?.code === "EEXIST") refuse("just started"); else throw e2; }
     }
     fs.writeSync(fd, String(process.pid));
     fs.closeSync(fd);
   } catch (e) { log("BOT_PIDFILE_WARN", { error: String(e?.message ?? e) }); pidfilePath = null; }
 }
-const cleanupPidfile = () => { if (pidfilePath) { try { fs.rmSync(pidfilePath, { force: true }); } catch { /* ignore */ } } };
+// Remove the pidfile only if it still holds OUR pid — a dying process that lost
+// the identity to a newer one must not disarm the winner's guard by deleting a
+// pidfile it no longer owns.
+const cleanupPidfile = () => {
+  if (!pidfilePath) return;
+  try {
+    if (fs.readFileSync(pidfilePath, "utf8").trim() === String(process.pid)) fs.rmSync(pidfilePath, { force: true });
+  } catch { /* ignore */ }
+};
 process.on("exit", cleanupPidfile);
 
 startBridge();
