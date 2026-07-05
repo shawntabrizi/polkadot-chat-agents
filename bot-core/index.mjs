@@ -15,7 +15,8 @@
 // Env: BOT_SEED_HEX (root mini-secret; or FAUCET_CHAT_SERVICE_SECRET),
 //   BOT_ENDPOINT (default Paseo), BOT_BRIDGE_PORT (8799), BOT_BRIDGE_HOST (0.0.0.0),
 //   BOT_ACK_TEXT, BOT_ALLOWED_PEERS (comma-sep peer account hexes; empty = allow all),
-//   BOT_REQUEST_LOOKBACK_DAYS (7), BOT_REQUEST_FUTURE_DAYS (2), BOT_POLL_MS (2000).
+//   BOT_REQUEST_LOOKBACK_DAYS (7), BOT_REQUEST_FUTURE_DAYS (2), BOT_POLL_MS (2000),
+//   BOT_THINKING_TEXT + BOT_THINKING_AFTER_MS (3000) — ack sent if no reply by then.
 
 import http from "node:http";
 import path from "node:path";
@@ -55,9 +56,11 @@ const bridgePort = Number(env.BOT_BRIDGE_PORT ?? 8799);
 const bridgeHost = env.BOT_BRIDGE_HOST ?? "0.0.0.0";
 const brain = (env.BOT_BRAIN ?? "bridge").trim().toLowerCase(); // bridge | hermes | echo | codex | claude | gemini | grok
 const ackText = env.BOT_ACK_TEXT ?? (brain === "bridge" || brain === "hermes" ? "Connecting you to the agent…" : "");
-// Sent immediately on each message a slow AI brain will answer, so the user sees
-// the bot is working instead of a silent ~10-30s gap. Set empty to disable.
+// If a reply hasn't gone out within BOT_THINKING_AFTER_MS of receiving a message,
+// send a "thinking" ack so a slow answer (AI call, Hermes round-trip) doesn't feel
+// like the message was lost. Fast replies cancel it. Empty text disables it.
 const thinkingText = env.BOT_THINKING_TEXT ?? "🤔 One moment — thinking…";
+const thinkingAfterMs = Number(env.BOT_THINKING_AFTER_MS ?? 3000);
 
 // Direct AI-CLI "brains": bot-core shells out to an agent CLI that owns its own
 // auth/token. The transport core stays model-agnostic — these are just hooks that
@@ -192,8 +195,26 @@ const enqueueInbound = (item) => {
 
 const isAllowed = (peerHex) => allowedPeers.size === 0 || allowedPeers.has(norm(peerHex));
 
+// ---------- "thinking" ack for slow replies ----------
+// Armed when a message arrives; fires only if nothing has been sent to that peer
+// within thinkingAfterMs. Any outgoing text (sendText) disarms it, so fast
+// replies — echo, a quick model, Hermes on a good day — produce no extra noise.
+const thinkingTimers = new Map(); // peerHex -> timeout
+const disarmThinking = (peerHex) => {
+  const t = thinkingTimers.get(norm(peerHex));
+  if (t) { clearTimeout(t); thinkingTimers.delete(norm(peerHex)); }
+};
+const armThinking = (peerHex) => {
+  if (!thinkingText || !(thinkingAfterMs > 0) || thinkingTimers.has(norm(peerHex))) return;
+  thinkingTimers.set(norm(peerHex), setTimeout(() => {
+    thinkingTimers.delete(norm(peerHex));
+    sendText(peerHex, thinkingText).catch((e) => log("BOT_THINKING_FAILED", { error: String(e?.message ?? e) }));
+  }, thinkingAfterMs));
+};
+
 // ---------- send a reply text to a peer ----------
 const sendText = async (peerHex, text) => {
+  disarmThinking(peerHex); // a real reply is going out — no ack needed
   const entry = sessions.get(norm(peerHex));
   if (entry == null) throw new Error("no active session for peer");
   const payload = encodeSessionRequestPayload(entry.session, makeAppUuid(), [encodeOpaqueTextMessage({ text })]);
@@ -243,8 +264,7 @@ const handleInbound = async (peerHex, text, messageId) => {
     return;
   }
   if (aiSpec) {
-    // Immediate "thinking" ack so the ~10-30s model delay doesn't feel timed out.
-    if (thinkingText) { sendText(peerHex, thinkingText).catch((e) => log("BOT_THINKING_FAILED", { error: String(e?.message ?? e) })); }
+    armThinking(peerHex); // ack if the model takes longer than thinkingAfterMs
     const reply = await runAgentCli(peerHex, text);  // logs its own classified failure reason
     if (!reply) {
       // Don't leave the user hanging after the "thinking" ack.
@@ -257,7 +277,9 @@ const handleInbound = async (peerHex, text, messageId) => {
     await sendText(peerHex, reply).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
     return;
   }
-  // bridge / hermes / unknown: hand off to an external agent via the HTTP bridge
+  // bridge / hermes / unknown: hand off to an external agent via the HTTP bridge.
+  // The agent replies via POST /send -> sendText, which disarms the ack.
+  armThinking(peerHex);
   enqueueInbound({ chat_id: peerHex, text, message_id: messageId });
 };
 
