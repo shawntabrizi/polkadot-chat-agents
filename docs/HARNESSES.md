@@ -70,7 +70,11 @@ hermes gateway run
 Send your bot a message in the Polkadot app — Hermes answers, with its full
 memory/tools/model behind it.
 
-**Docker (recommended, mirrors the reference deploy).** Two services on their own
+**Docker (recommended).** `pca deploy mybot --host root@server --harness hermes`
+generates and starts the whole two-container stack; the only manual step left is
+the interactive codex login it prints at the end
+(`docker exec -it <hermes> hermes auth add openai-codex --type oauth --no-browser`)
+plus the model config below. Hand-rolled equivalent: two services on their own
 network: `bot-core` (Node) exposing the bridge, and `nousresearch/hermes-agent`
 with `command: ["gateway","run"]`, the plugin bind-mounted at
 `/opt/data/plugins/polkadot`, and `POLKADOT_BRIDGE_URL=http://bot-core:8799`. The
@@ -115,13 +119,27 @@ openclaw plugins enable polkadot
 
 **4. Start OpenClaw's gateway** and message your bot in the Polkadot app.
 
-**Validated live** (OpenClaw 2026.6.11, Docker, claude-cli model). The reference
-deploy runs two containers in one compose stack: bot-core (bridge) + an OpenClaw
-gateway image (`npm i -g openclaw @anthropic-ai/claude-code`, running as the
-non-root `node` user so the claude CLI needs no root override), with the plugin
-bind-mounted and installed via `openclaw plugins install --link`. Gateway config
-needs `gateway.mode: "local"` and an `OPENCLAW_GATEWAY_TOKEN` env var. See
-`openclaw-plugin/polkadot/README.md` for the field notes.
+**Validated live** (OpenClaw 2026.6.11, Docker, claude-cli model) — and fully
+automated:
+
+```bash
+pca create mybot --brain hermes --owner <your-address>   # bridge-mode bot
+pca deploy mybot --host root@server --harness openclaw
+```
+
+That one command stands up the whole validated stack: bot-core (bridge) + an
+OpenClaw gateway image (`npm i -g openclaw @anthropic-ai/claude-code`, running as
+the non-root `node` user so the claude CLI needs no root override), plugin
+installed, model + channel + gateway config generated, Claude auth seeded from the
+server's `~/.claude` login. Zero interactive steps if the server has Claude creds.
+
+Gotcha worth knowing: Claude's OAuth **refresh tokens rotate** — once the
+container's claude refreshes, the host's original `~/.claude/.credentials.json`
+copy goes stale. If a redeploy hits "Not logged in", re-seed
+`<dir>/openclaw-home/.claude/.credentials.json` from wherever the *live* token is
+(the previous container's home), not the host original.
+
+See `openclaw-plugin/polkadot/README.md` for per-setting field notes.
 
 ---
 

@@ -14,6 +14,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -238,14 +239,21 @@ function runLocal(cmd, args, { capture = false } = {}) {
 const DEPLOY_BRAINS = { echo: { install: null }, claude: { install: "npm i -g @anthropic-ai/claude-code" } };
 
 async function cmdDeploy(name, flags) {
-  if (!name) fail("Usage: pca deploy <name> --host <ssh-target> [--anthropic-key <key>] [--model <m>] [--dry-run]");
+  if (!name) fail("Usage: pca deploy <name> --host <ssh-target> [--harness openclaw|hermes] [--anthropic-key <key>] [--model <m>] [--dry-run]");
   const host = flags.host ? String(flags.host) : null;
   if (!host) fail(`--host <ssh-target> is required, e.g.  pca deploy ${name} --host root@1.2.3.4`);
   const cfg = readConfig(name);
   if (!fs.existsSync(secretPath(name))) fail(`No secret found for "${name}".`);
   const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
+  if (cfg.brain === "hermes" || cfg.brain === "bridge") {
+    const harness = flags.harness ? String(flags.harness).toLowerCase() : null;
+    if (harness !== "openclaw" && harness !== "hermes") {
+      fail(`"${name}" is a bridge-mode bot — pick which agent framework drives it:\n  pca deploy ${name} --host ${host} --harness openclaw   (fully headless if the server has Claude creds)\n  pca deploy ${name} --host ${host} --harness hermes     (one interactive codex login after deploy)`);
+    }
+    return deployHarnessStack(name, cfg, secret, flags, host, harness);
+  }
   const spec = DEPLOY_BRAINS[cfg.brain];
-  if (!spec) fail(`deploy currently supports the "echo" and "claude" brains (direct, single-container).\nFor "${cfg.brain}", set it up manually — see docs/HARNESSES.md.`);
+  if (!spec) fail(`deploy supports the echo/claude brains and --harness openclaw|hermes for bridge bots.\nFor "${cfg.brain}", set it up manually — see docs/HARNESSES.md.`);
   if (!fs.existsSync(path.join(HERE, "node_modules")) || !fs.existsSync(path.join(HERE, ".papi"))) {
     fail(`bot-core dependencies missing. Run:  (cd ${HERE} && npm ci)  then retry.`);
   }
@@ -328,6 +336,153 @@ async function cmdDeploy(name, flags) {
   }
 }
 
+// Deploy a bridge-mode bot + its agent framework as a two-container compose
+// stack — the exact topologies validated in production (see docs/HARNESSES.md).
+// openclaw: fully headless if the server has Claude CLI creds (seeded into the
+// container's non-root home — no root override needed). hermes: everything but
+// the interactive codex login.
+async function deployHarnessStack(name, cfg, secret, flags, host, harness) {
+  const pluginSrc = path.join(HERE, "..", `${harness}-plugin`, "polkadot");
+  if (!fs.existsSync(pluginSrc)) fail(`Plugin not found at ${pluginSrc} — deploy needs the full repo checkout.`);
+  if (!fs.existsSync(path.join(HERE, "node_modules")) || !fs.existsSync(path.join(HERE, ".papi"))) {
+    fail(`bot-core dependencies missing. Run:  (cd ${HERE} && npm ci)  then retry.`);
+  }
+  if (!cfg.registered) warn(`"${name}" isn't confirmed on the network yet — people can't message it until it is (pca info ${name}).`);
+  const cn = `pca-${name}`;
+  const hn = `pca-${name}-${harness}`;
+  const base = flags["remote-dir"] ? String(flags["remote-dir"]) : `pca-bots/${name}`;
+  const sshOpts = ["-o", "ConnectTimeout=10", "-o", "BatchMode=yes"];
+  const allow = cfg.allow ?? [];
+  const model = flags.model ? String(flags.model) : "claude-cli/claude-sonnet-4-6";
+
+  const botEnv = [
+    `BOT_SEED_HEX=${secret.seedHex}`,
+    `BOT_ENDPOINT=${cfg.endpoint}`,
+    `BOT_BRAIN=bridge`,
+    `BOT_ALLOWED_PEERS=${allow.join(",")}`,
+    `BOT_USERNAME=${cfg.username ?? ""}`,
+    `BOT_STATE_DIR=/app/state`,
+  ].join("\n");
+  const botService = `  bot:\n    image: node:22-slim\n    container_name: ${cn}\n    restart: unless-stopped\n    working_dir: /app\n    volumes:\n      - ./app:/app\n      - ./state:/app/state\n    env_file:\n      - ./bot.env\n    command: ["node", "index.mjs"]\n`;
+
+  const files = { "bot.env": `${botEnv}\n` };  // path (relative to base) -> content
+  let compose, setup, afterUp;
+  if (harness === "openclaw") {
+    compose = `services:\n${botService}\n  openclaw:\n    build: ./image\n    container_name: ${hn}\n    restart: unless-stopped\n    env_file:\n      - ./gateway.env\n    volumes:\n      - ./openclaw-home:/home/node\n      - ./plugin:/plugin:ro\n    depends_on: [bot]\n    command: ["openclaw", "gateway"]\n`;
+    files["image/Dockerfile"] = `FROM node:22-slim\nRUN npm i -g openclaw @anthropic-ai/claude-code && npm cache clean --force\nENV HOME=/home/node\nWORKDIR /home/node\nUSER node\nCMD ["openclaw", "gateway"]\n`;
+    files["gateway.env"] = `OPENCLAW_GATEWAY_TOKEN=${randomBytes(24).toString("hex")}\n`;
+    // Runs inside the one-off setup container (home volume mounted) after `models set`
+    // has created the config; merges in gateway mode + our channel.
+    const channel = allow.length
+      ? { enabled: true, bridgeUrl: "http://bot:8799", dmPolicy: "allowlist", allowFrom: allow }
+      : { enabled: true, bridgeUrl: "http://bot:8799", dmPolicy: "open", allowFrom: ["*"] };
+    files["openclaw-home/setup-config.cjs"] = `const fs = require("fs");
+const p = "/home/node/.openclaw/openclaw.json";
+const j = JSON.parse(fs.readFileSync(p, "utf8"));
+j.gateway = { ...(j.gateway ?? {}), mode: "local" };
+j.channels = { ...(j.channels ?? {}), polkadot: ${JSON.stringify(channel)} };
+fs.writeFileSync(p, JSON.stringify(j, null, 2));
+console.log("openclaw config ok");
+`;
+    setup = `set -e
+cd ${base}
+chown -R root:root plugin 2>/dev/null || true
+mkdir -p openclaw-home/.claude
+if [ -f "$HOME/.claude/.credentials.json" ]; then
+  cp "$HOME/.claude/.credentials.json" openclaw-home/.claude/
+  [ -f "$HOME/.claude.json" ] && cp "$HOME/.claude.json" openclaw-home/.claude.json
+  chmod 700 openclaw-home/.claude
+  echo CREDS_SEEDED
+else
+  echo NO_CREDS
+fi
+chown -R 1000:1000 openclaw-home 2>/dev/null || true
+docker compose -p ${cn} build openclaw >/dev/null 2>&1 && echo IMAGE_BUILT
+docker compose -p ${cn} run --rm openclaw sh -lc 'openclaw plugins install --link /plugin >/dev/null; openclaw models set ${model} >/dev/null; node /home/node/setup-config.cjs' 2>&1 | tail -2
+`;
+    afterUp = (creds) => {
+      if (!creds) {
+        warn("No Claude creds found on the server (~/.claude/.credentials.json) — the gateway is up but the model can't answer.");
+        note(`Fix: log in on the server once (claude login), then rerun: pca deploy ${name} --host ${host} --harness openclaw`);
+      }
+    };
+  } else {
+    compose = `services:\n${botService}\n  hermes:\n    image: nousresearch/hermes-agent:latest\n    container_name: ${hn}\n    restart: unless-stopped\n    command: ["gateway", "run"]\n    environment:\n      - HERMES_UID=0\n      - HERMES_GID=0\n      - POLKADOT_BRIDGE_URL=http://bot:8799\n      - POLKADOT_ALLOWED_USERS=${allow.join(",")}\n    volumes:\n      - hermes-data:/opt/data\n      - ./plugin:/opt/data/plugins/polkadot:ro\n    depends_on: [bot]\n\nvolumes:\n  hermes-data:\n`;
+    setup = `cd ${base}\nchown -R root:root plugin 2>/dev/null || true\necho SETUP_OK`;
+    afterUp = () => {
+      console.log();
+      warn("Hermes needs a one-time model login (interactive, can't be automated):");
+      note(`ssh ${host} 'docker exec -it ${hn} hermes auth add openai-codex --type oauth --no-browser'`);
+      note(`then set the model in the hermes config — see docs/HARNESSES.md (gpt-5.5 / openai-codex).`);
+    };
+  }
+  files["docker-compose.yml"] = compose;
+
+  if (flags["dry-run"] === true) {
+    for (const [rel, content] of Object.entries(files)) {
+      console.log(`\n--- ${base}/${rel} ---\n${content.replace(/((?:SEED_HEX|TOKEN)=).*/g, "$1<hidden>")}`);
+    }
+    console.log(`\n--- remote setup ---\n${setup}`);
+    note("Dry run — nothing deployed.");
+    return;
+  }
+
+  step(`Checking ${host}…`);
+  const pf = runLocal("ssh", [...sshOpts, host, "docker version --format '{{.Server.Version}}' >/dev/null && echo docker-ok"], { capture: true });
+  if (pf.status !== 0) fail(`Can't reach ${host} or Docker isn't available there.\n${(pf.stderr || "").trim()}`);
+  ok("Connected");
+
+  runLocal("ssh", [...sshOpts, host, `mkdir -p ${base}/app ${base}/state ${base}/plugin ${base}/image ${base}/openclaw-home`]);
+  step("Uploading bot-core + plugin…");
+  const rs1 = runLocal("rsync", ["-az", "--delete", "--exclude", "bots/", "--exclude", "*.log", "--exclude", "*.bak*", "--exclude", ".git",
+    "-e", `ssh ${sshOpts.join(" ")}`, `${HERE}/`, `${host}:${base}/app/`]);
+  const rs2 = runLocal("rsync", ["-az", "--delete", "-e", `ssh ${sshOpts.join(" ")}`, `${pluginSrc}/`, `${host}:${base}/plugin/`]);
+  if (rs1.status !== 0 || rs2.status !== 0) fail("Upload (rsync) failed.");
+  ok("Uploaded");
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pca-deploy-"));
+  for (const [rel, content] of Object.entries(files)) {
+    const p = path.join(tmp, rel);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, content, { mode: rel.endsWith(".env") ? 0o600 : 0o644 });
+  }
+  fs.writeFileSync(path.join(tmp, "setup.sh"), setup);
+  const cp = runLocal("rsync", ["-az", "-e", `ssh ${sshOpts.join(" ")}`, `${tmp}/`, `${host}:${base}/`]);
+  fs.rmSync(tmp, { recursive: true, force: true });
+  if (cp.status !== 0) fail("Copying config failed.");
+
+  step(`Setting up ${harness} (image build — first run takes a few minutes)…`);
+  const su = runLocal("ssh", [...sshOpts, host, `bash ${base}/setup.sh`], { capture: true });
+  const setupOut = (su.stdout || "").trim();
+  if (su.status !== 0) fail(`Remote setup failed:\n${setupOut.split("\n").slice(-5).join("\n")}`);
+  const credsSeeded = /CREDS_SEEDED/.test(setupOut);
+  ok(`Setup done${/IMAGE_BUILT/.test(setupOut) ? " (image built)" : ""}`);
+
+  step("Starting the stack…");
+  const up = runLocal("ssh", [...sshOpts, host, `cd ${base} && docker compose -p ${cn} up -d`]);
+  if (up.status !== 0) fail("docker compose up failed.");
+  cfg.deploy = { host, dir: base, container: cn, harness, at: new Date().toISOString() };
+  fs.writeFileSync(configPath(name), `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 });
+
+  step("Waiting for the bot to come online…");
+  const wait = runLocal("ssh", [...sshOpts, host,
+    `for i in $(seq 1 25); do docker logs ${cn} 2>&1 | grep -q BOT_LISTENING && break; sleep 2; done; docker logs --tail 5 ${cn} 2>&1`], { capture: true });
+  if (/BOT_LISTENING/.test(wait.stdout || "")) {
+    ok(`"${name}" is live on ${host} (${cn} + ${hn}).`);
+    console.log();
+    console.log("Message it in the Polkadot app:");
+    console.log(`  ${c(deeplink(cfg.account), "36")}`);
+    if (cfg.username) note(`or search: ${cfg.username}`);
+    afterUp(credsSeeded);
+    console.log();
+    note(`Logs:   pca logs ${name} -f   (bridge)  ·  ssh ${host} 'docker logs -f ${hn}'  (${harness})`);
+    note(`Status: pca status ${name}   ·  Stop: pca stop ${name}`);
+  } else {
+    warn("Stack started, but the bot didn't report BOT_LISTENING. Recent logs:");
+    console.log((wait.stdout || "").split("\n").slice(-6).join("\n"));
+  }
+}
+
 // Resolve the ssh target + container for a deployed bot: --host wins, else the
 // deploy metadata saved by `pca deploy`.
 function deployTarget(name, flags) {
@@ -392,8 +547,10 @@ function usage() {
   --owner <addr>   lock the bot so only your Polkadot app address can message it (recommended)
   --public         let anyone message it (required to leave an AI/hermes bot open)
 
-deploy flags:  --host root@1.2.3.4 (required)  ·  --anthropic-key <key> (claude brain)  ·  --model <m> (low-cost model)  ·  --dry-run
-  Needs Docker on the server + SSH access. Supports the echo and claude brains today.
+deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --anthropic-key <key> (claude brain)  ·  --model <m>  ·  --dry-run
+  Needs Docker on the server + SSH access. Direct brains (echo/claude) deploy as one
+  container; bridge bots deploy bot-core + the chosen agent framework as a two-container
+  stack (openclaw is fully headless if the server has Claude CLI creds).
   logs/status/stop reuse the deploy host saved in the bot's config (override with --host).
 
 Brains:  echo (test)  ·  codex/claude/gemini/grok (direct — shells to that CLI, which owns its own auth)  ·  hermes (hand off to an external agent harness)
