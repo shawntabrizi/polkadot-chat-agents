@@ -51,7 +51,7 @@ const bytesToHex = (b) => `0x${Array.from(b, (x) => x.toString(16).padStart(2, "
 // hex, and return the bare lowercase account-id hex used by the allowlist.
 function toAccountHex(addr) {
   const s = String(addr).trim();
-  const hex = /^0x?([0-9a-fA-F]{64})$/.exec(s);
+  const hex = /^(?:0x)?([0-9a-fA-F]{64})$/.exec(s);
   if (hex) return hex[1].toLowerCase();
   try {
     const [publicKey] = ss58Decode(s);
