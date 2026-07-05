@@ -28,7 +28,7 @@ import { getWsProvider } from "polkadot-api/ws";
 import { paseoPeopleNext } from "@polkadot-api/descriptors";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
 import { deriveP256PrivateKey, p256PublicKeyFromPrivateKey } from "./vendor/app-chat-codec.mjs";
-import { registerIdentity, waitForAttestation, DEFAULT_BACKENDS } from "./lib/register.mjs";
+import { registerIdentity, waitForAttestation, withTimeout, DEFAULT_BACKENDS } from "./lib/register.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // Proofs run via the vendored wasm build by default (no Rust toolchain needed);
@@ -175,26 +175,11 @@ async function cmdCreate(name, flags) {
   save();
 
   if (register) {
-    if (BANDERSNATCH_BIN && !fs.existsSync(BANDERSNATCH_BIN)) {
-      fail(`PCA_BANDERSNATCH_CLI points at ${BANDERSNATCH_BIN}, which doesn't exist.`);
-    }
-    step("Registering your bot on the network…");
-    let result;
-    try {
-      result = await registerIdentity({ mnemonic, username: wantUsername, digits: flags.digits ? String(flags.digits) : null, backendUrl, bandersnatchBin: BANDERSNATCH_BIN });
-    } catch (e) { fail(`Registration failed: ${e instanceof Error ? e.message : String(e)}`); }
-    config.username = result.username;
-    save();
-    ok(`Registered as ${result.username}`);
-    const waitMs = Number(flags.wait ?? 180) * 1000;
-    step(`Waiting for the network to confirm (up to ${Math.round(waitMs / 1000)}s)…`);
-    const attested = await withPeopleApi(endpoint, (api) =>
-      waitForAttestation(api, address, { timeoutMs: waitMs, onTick: () => process.stdout.write(".") }));
-    process.stdout.write("\n");
-    if (attested) { config.registered = true; save(); ok("Confirmed — your bot is live and people can message it!"); }
-    else { warn(`Not confirmed yet — this can take a few minutes. Check later:  pca info ${name}`); }
+    // Registration can fail or stay unconfirmed; the bot dir already exists, so
+    // don't hard-exit — leave it resumable via `pca register`.
+    await runRegistration(name, config, { mnemonic, wantUsername, digits: wantDigits, wait: flags.wait });
   } else {
-    note("Skipped registration (--no-register); the bot won't be messageable until registered.");
+    note("Skipped registration (--no-register). Register later:  pca register " + name);
   }
 
   console.log();
@@ -205,6 +190,57 @@ async function cmdCreate(name, flags) {
   if (config.username) note(`or search: ${config.username}`);
   console.log();
   note(`Start it:  pca run ${name}`);
+}
+
+// Register a bot on the network and wait for confirmation. Idempotent and
+// resumable: claims the username only if not already claimed (re-POSTing a
+// claimed name risks a conflict), then waits for attestation. Never throws —
+// on failure it explains how to retry, so a bot dir is never a dead end.
+async function runRegistration(name, config, { mnemonic, wantUsername, digits, wait }) {
+  if (BANDERSNATCH_BIN && !fs.existsSync(BANDERSNATCH_BIN)) {
+    fail(`PCA_BANDERSNATCH_CLI points at ${BANDERSNATCH_BIN}, which doesn't exist.`);
+  }
+  const save = () => fs.writeFileSync(configPath(name), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  if (!config.username) {
+    if (!mnemonic) { warn(`No mnemonic stored for "${name}" (imported bot?), so it can't be registered here.`); return; }
+    step("Registering your bot on the network…");
+    let result;
+    try {
+      result = await registerIdentity({ mnemonic, username: wantUsername, digits: digits ?? null, backendUrl: config.backendUrl, bandersnatchBin: BANDERSNATCH_BIN });
+    } catch (e) {
+      warn(`Registration didn't complete: ${e instanceof Error ? e.message : String(e)}`);
+      note(`Retry when ready:  pca register ${name}`);
+      return;
+    }
+    config.username = result.username;
+    save();
+    ok(`Registered as ${result.username}`);
+  } else if (config.registered) {
+    ok(`Already registered as ${config.username}.`); return;
+  } else {
+    step(`Username ${config.username} already claimed; waiting for the network to confirm…`);
+  }
+  const waitMs = Number(wait ?? 180) * 1000;
+  step(`Waiting for the network to confirm (up to ${Math.round(waitMs / 1000)}s)…`);
+  let attested = false;
+  try {
+    attested = await withPeopleApi(config.endpoint, (api) =>
+      waitForAttestation(api, config.address, { timeoutMs: waitMs, onTick: () => process.stdout.write(".") }));
+    process.stdout.write("\n");
+  } catch (e) { process.stdout.write("\n"); warn(`Couldn't reach the network: ${e instanceof Error ? e.message : String(e)}`); }
+  if (attested) { config.registered = true; save(); ok("Confirmed — your bot is live and people can message it!"); }
+  else { warn(`Not confirmed yet — this can take a few minutes. Check or retry:  pca register ${name}`); }
+}
+
+async function cmdRegister(name, flags) {
+  if (!name) fail("Usage: pca register <botname>");
+  const cfg = readConfig(name);
+  if (cfg.registered) { ok(`"${name}" is already registered as ${cfg.username}.`); return; }
+  if (!fs.existsSync(secretPath(name))) fail(`No secret found for "${name}".`);
+  const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
+  const wantUsername = String(flags.username ?? cfg.username ?? name);
+  const wantDigits = flags.digits ? String(flags.digits) : (/\.(\d{2})$/.exec(wantUsername)?.[1] ?? null);
+  await runRegistration(name, cfg, { mnemonic: secret.mnemonic, wantUsername, digits: wantDigits, wait: flags.wait });
 }
 
 function cmdList() {
@@ -221,21 +257,26 @@ async function cmdInfo(name) {
   const cfg = readConfig(name);
   // Live re-check: has the network confirmed (attested) the bot yet?
   let messageable = cfg.registered;
+  let reachedNetwork = true;
   if (cfg.username && !cfg.registered) {
     try {
-      messageable = await withPeopleApi(cfg.endpoint, async (api) => {
-        const consumer = await api.query.Resources.Consumers.getValue(cfg.address);
-        return consumer?.identifier_key != null;
-      });
+      messageable = await withPeopleApi(cfg.endpoint, async (api) =>
+        withTimeout(api.query.Resources.Consumers.getValue(cfg.address), 12_000, "network check")
+          .then((consumer) => consumer?.identifier_key != null));
       if (messageable) { cfg.registered = true; fs.writeFileSync(configPath(name), `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 }); }
-    } catch { /* offline; fall back to stored status */ }
+    } catch { reachedNetwork = false; }
   }
+  // Distinguish never-registered from claimed-but-pending from confirmed.
+  const status = messageable ? c("live — people can message it", "32")
+    : !reachedNetwork ? c("can't reach the network right now (try again)", "31")
+    : !cfg.username ? c(`not registered — run: pca register ${name}`, "33")
+    : c(`username claimed, confirmation pending — check again or run: pca register ${name}`, "33");
   console.log(`${c(name, "1")}${cfg.username ? ` (${cfg.username})` : ""}`);
   console.log(`  brain:    ${cfg.brain}`);
   console.log(`  network:  ${cfg.endpoint}`);
   console.log(`  address:  ${cfg.address}`);
   console.log(`  access:   ${(cfg.allow?.length) ? `locked to ${cfg.allow.length} address${cfg.allow.length > 1 ? "es" : ""}` : c("open to anyone", "33")}`);
-  console.log(`  status:   ${messageable ? c("live — people can message it", "32") : c("registration pending (check again in a bit)", "33")}`);
+  console.log(`  status:   ${status}`);
   console.log();
   console.log(`  Message this bot in the Polkadot app:`);
   console.log(`    ${c(deeplink(cfg.account), "36")}`);
@@ -579,6 +620,7 @@ function usage() {
   console.log(`pca — Polkadot Chat Agents
 
   pca create <botname> [--brain echo|codex|claude|gemini|grok|hermes] [--owner <your username or address>] [--public] [--network paseo] [--username name]
+  pca register <name>                  finish/retry registration for an existing bot
   pca run <name>                       start the bot locally (foreground)
   pca deploy <name> --host <ssh>       ship it to a server and run it in Docker
   pca logs <name> [-f] [--tail N]      tail a deployed bot's logs
@@ -608,6 +650,7 @@ const [command, arg] = positional;
 try {
   switch (command) {
     case "create": await cmdCreate(arg, flags); break;
+    case "register": await cmdRegister(arg, flags); break;
     case "run": cmdRun(arg); break;                 // spawns a child; manages its own exit
     case "deploy": await cmdDeploy(arg, flags); break;
     case "logs": cmdLogs(arg, flags); break;

@@ -154,11 +154,21 @@ export async function registerIdentity({ mnemonic, username, digits = null, back
 }
 
 // Poll Resources.Consumers until the bot's identifier_key is on-chain (attested).
+// Race a promise against a timeout so a hung chain query (papi's getValue never
+// settles against an unreachable endpoint) can't defeat the overall deadline.
+export const withTimeout = (promise, ms, label = "chain query") => {
+  let t;
+  return Promise.race([
+    Promise.resolve(promise).finally(() => clearTimeout(t)),
+    new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`${label} timed out after ${ms}ms`)), ms); }),
+  ]);
+};
+
 export async function waitForAttestation(peopleApi, addressSs58, { timeoutMs = 180_000, pollMs = 5_000, onTick } = {}) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     let consumer = null;
-    try { consumer = await peopleApi.query.Resources.Consumers.getValue(addressSs58); } catch { /* transient */ }
+    try { consumer = await withTimeout(peopleApi.query.Resources.Consumers.getValue(addressSs58), pollMs, "attestation check"); } catch { /* transient or timed out */ }
     if (consumer?.identifier_key != null) return true;
     if (Date.now() >= deadline) return false;
     onTick?.();
