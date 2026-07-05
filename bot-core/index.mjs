@@ -157,6 +157,11 @@ const peopleApi = papiClient.getTypedApi(paseoPeopleNext);
 // rejections, but a hung socket never rejects — it would await forever.
 const submitBounded = (args) => withTimeout(submitAppStatement(requestRpc, args), queryTimeoutMs, "statement submit");
 
+// Insertion-order eviction for the per-peer maps below: on a public bot peers
+// accumulate for the life of the process, so unbounded maps are a slow leak.
+const trimMap = (map, cap) => { while (map.size > cap) map.delete(map.keys().next().value); };
+
+const IDENTIFIER_CACHE_CAP = 5000;
 const identifierKeyCache = new Map(); // peerHex -> identifierKeyHex
 const resolveIdentifierKey = async (peerHex) => {
   const key = norm(peerHex);
@@ -170,7 +175,7 @@ const resolveIdentifierKey = async (peerHex) => {
   } catch (error) {
     log("BOT_IDENTIFIER_LOOKUP_FAILED", { peer: key, error: error instanceof Error ? error.message : String(error) });
   }
-  if (value) identifierKeyCache.set(key, value);
+  if (value) { identifierKeyCache.set(key, value); trimMap(identifierKeyCache, IDENTIFIER_CACHE_CAP); }
   return value;
 };
 
@@ -280,6 +285,9 @@ const sendText = async (peerHex, text) => {
 // ---------- brain: decide what to do with an inbound message ----------
 const aiHistory = new Map(); // peerHex -> [{role, text}]
 const AI_TURNS = 8;
+// Capped per peer below, but the peer count itself was unbounded — each entry
+// holds conversation plaintext, so idle peers' history must age out too.
+const AI_HISTORY_PEER_CAP = 500;
 const runAgentCli = (peerHex, userText) => new Promise((resolve) => {
   const hist = (aiHistory.get(peerHex) ?? []).slice(-AI_TURNS * 2)
     .map((t) => `${t.role === "user" ? "User" : "You"}: ${t.text}`).join("\n");
@@ -322,6 +330,7 @@ const handleInbound = async (peerHex, text, messageId, owedId = null) => {
     const h = aiHistory.get(peerHex) ?? [];
     h.push({ role: "user", text }, { role: "bot", text: reply });
     aiHistory.set(peerHex, h.slice(-AI_TURNS * 2));
+    trimMap(aiHistory, AI_HISTORY_PEER_CAP);
     await sendText(peerHex, reply).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
     return;
   }
