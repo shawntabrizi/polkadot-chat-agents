@@ -5,7 +5,7 @@
 // (override with PCA_BOTS_DIR). Blockchain details (keys, addresses, topics)
 // are handled for you; you just pick a name and a brain.
 //
-//   pca create <name> [--brain echo|codex|claude|gemini|grok|hermes] [--network paseo] [--allow 0x..,0x..]
+//   pca create <botname> [--brain echo|codex|claude|gemini|grok|hermes] [--network paseo] [--allow 0x..,0x..]
 //   pca run <name>                  start the bot locally (foreground)
 //   pca deploy <name> --host <ssh>  ship it to a server and run it in Docker
 //   pca list                        list your bots
@@ -58,7 +58,26 @@ function toAccountHex(addr) {
   try {
     const [publicKey] = ss58Decode(s);
     return Array.from(publicKey, (b) => b.toString(16).padStart(2, "0")).join("");
-  } catch { fail(`"${addr}" isn't a valid address — use your Polkadot app address (starts with 5…) or a 0x… account id.`); }
+  } catch { fail(`"${addr}" isn't a valid address — use your app username (e.g. myname.42), your address (5…), or a 0x… account id.`); }
+}
+
+// Accept what a human actually knows: an app username (myname.42), an SS58
+// address, or account hex. Usernames resolve to the account via the identity
+// backend (the same registry the app's search uses).
+async function resolvePeer(input, backendUrl) {
+  const s = String(input).trim().replace(/^@/, "");
+  if (/^[a-z]{6,}(\.\d{2,})?$/.test(s)) {
+    let data;
+    try {
+      const res = await fetch(new URL(`/api/v1/usernames/${s}`, backendUrl));
+      if (!res.ok) throw new Error(String(res.status));
+      data = await res.json();
+    } catch { fail(`Couldn't find the username "${s}" on the network — check the spelling (it's shown in the app under your profile).`); }
+    if (!data?.candidateAccountId) fail(`Username "${s}" has no account on the network yet.`);
+    note(`${s} → ${data.candidateAccountId}`);
+    return toAccountHex(data.candidateAccountId);
+  }
+  return toAccountHex(s);
 }
 const c = (s, code) => (process.stdout.isTTY && !process.env.NO_COLOR ? `\x1b[${code}m${s}\x1b[0m` : s);
 const ok = (s) => console.log(`${c("✓", "32")} ${s}`);
@@ -97,7 +116,7 @@ const deeplink = (accountIdHex) => {
 };
 
 async function cmdCreate(name, flags) {
-  if (!name) fail("Usage: pca create <name>");
+  if (!name) fail("Usage: pca create <botname>   (the first argument is your bot's name, e.g. pca create mycoolbot)");
   if (!/^[a-z][a-z0-9-]{1,30}$/.test(name)) fail("Name must be lowercase letters/digits/hyphens, starting with a letter.");
   if (fs.existsSync(botDir(name))) fail(`Bot "${name}" already exists (${botDir(name)}). Use a different name.`);
   const brain = String(flags.brain ?? "echo").toLowerCase();
@@ -108,7 +127,8 @@ async function cmdCreate(name, flags) {
     ...String(flags.allow ?? "").split(",").map((s) => s.trim()).filter(Boolean),
     ...(flags.owner ? [String(flags.owner)] : []),
   ];
-  const allow = allowInputs.map(toAccountHex);
+  const allow = [];
+  for (const input of allowInputs) allow.push(await resolvePeer(input, backendUrl));
   const isPublic = flags.public === true;
   // Safety: a paid brain (codex/claude/gemini/grok/hermes) left open to everyone can burn your quota.
   if (allow.length === 0 && !isPublic && PAID_BRAINS.has(brain)) {
@@ -536,7 +556,7 @@ function cmdStop(name, flags) {
 function usage() {
   console.log(`pca — Polkadot Chat Agents
 
-  pca create <name> [--brain echo|codex|claude|gemini|grok|hermes] [--owner <your address>] [--public] [--network paseo] [--username name]
+  pca create <botname> [--brain echo|codex|claude|gemini|grok|hermes] [--owner <your username or address>] [--public] [--network paseo] [--username name]
   pca run <name>                       start the bot locally (foreground)
   pca deploy <name> --host <ssh>       ship it to a server and run it in Docker
   pca logs <name> [-f] [--tail N]      tail a deployed bot's logs
@@ -545,7 +565,7 @@ function usage() {
   pca list                             list your bots
   pca info <name>                      show address + how to message it
 
-  --owner <addr>   lock the bot so only your Polkadot app address can message it (recommended)
+  --owner <who>    lock the bot to you — your app username (myname.42), address, or 0x hex (recommended)
   --public         let anyone message it (required to leave an AI/hermes bot open)
 
 deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --anthropic-key <key> (claude brain)  ·  --model <m>  ·  --dry-run
