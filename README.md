@@ -1,117 +1,136 @@
 # polkadot-chat-agents
 
-Framework for running AI chat bots (Hermes, etc.) as participants in the Polkadot
-app's built-in chat, over the Statement Store — **no chat server required**.
+**Run your own AI chat bot inside the Polkadot app.** Message it like any contact —
+it answers with Claude, GPT, Gemini, Grok, or a full agent framework (Hermes,
+OpenClaw) behind it.
 
-**Status: working & deployed.** A Hermes agent backed by a Codex subscription holds
-conversations over Polkadot app chat, running on a VPS. Confirmed end-to-end.
+No chat server. No webhook. No hosting a platform. Polkadot app chat runs over the
+**Statement Store** — a decentralized, end-to-end-encrypted message layer — so your
+bot is just a process that connects to a public RPC node, from anywhere: a laptop,
+a Raspberry Pi, a $5 VPS.
 
-## Layout
+```
+ Polkadot app (phone)  ⇄  Statement Store (Paseo)  ⇄  bot-core  ⇄  your AI
+                                                        │
+                                     direct brain (claude/codex/gemini/grok CLI)
+                                     — or an agent harness (Hermes, OpenClaw)
+```
 
-- **`bot-core/`** — standalone Node transport (no faucet dependency). Loads a bot
-  identity, connects to a Polkadot RPC, receives chat requests + session messages,
-  resolves peers' chat keys on-chain, ACKs, and exposes a local HTTP bridge:
-  - `GET /health`, `GET /inbound?wait=` (long-poll), `POST /send {chat_id,text}`.
-  - Reuses only the generic chat codec + transport (`bot-core/vendor/`).
-  - `bot-core/test-client.mjs` — headless tester (send from an attested seed, read replies).
-- **`hermes-plugin/polkadot/`** — Hermes `BasePlatformAdapter` that relays Polkadot
-  app chat to/from the bot-core bridge (drops into `~/.hermes/plugins/`).
-- **`docs/`** — architecture (`DESIGN.md`) and the round-trip test guide.
+**Status:** working end-to-end. Two reference bots run in production — one driven
+by Hermes + Codex, one by OpenClaw + Claude — both chatting from real phones.
 
-## Quick start
+## What you need
+
+- **Node.js 20+** and (one-time) **Rust/cargo** to build the small identity tool.
+- **The Polkadot app** on your phone, with an account (this is who the bot talks to).
+- **An AI CLI the bot can use** — e.g. [Claude Code](https://claude.com/claude-code)
+  (`claude`), Codex (`codex`), gemini-cli, or grok — logged in on the machine the
+  bot runs on. The bot shells out to it; your keys stay with the CLI.
+
+Everything blockchain-y (keys, registration, usernames, encryption) is handled for
+you.
+
+## Create your bot (2 commands)
 
 ```bash
 cd bot-core
-npm install                                                   # deps + descriptors
-cargo build --manifest-path ../tools/bandersnatch-cli/Cargo.toml   # one-time: identity tool
+npm install                                                          # one-time
+cargo build --manifest-path ../tools/bandersnatch-cli/Cargo.toml     # one-time
 
-# Create an AI bot — generates its identity, registers it, and locks it to you
-node cli.mjs create mycoolbot --brain codex --owner <your-polkadot-app-address>
+# 1. Create it — generates an identity, registers a username on the network,
+#    and locks the bot so only YOUR app account can message it.
+node cli.mjs create mycoolbot --brain claude --owner <your-polkadot-app-address>
 
-# Run it — now message "mycoolbot" from the Polkadot app and it replies
+# 2. Run it.
 node cli.mjs run mycoolbot
 ```
 
-**Keep it running on a server** — `pca deploy` ships the bot to any box with Docker
-+ SSH and starts it in a container (survives logout/reboot):
+`create` prints a link — open it (or search the printed username, e.g.
+`mycoolbot.07`) in the Polkadot app and say hi. Registration is usually confirmed
+within a few minutes; `node cli.mjs info mycoolbot` re-checks.
+
+Slow model? The bot automatically sends "🤔 One moment — thinking…" if a reply
+takes more than ~5s, so chats never feel dropped. Conversations survive restarts —
+session state is persisted per bot.
+
+## Put it on a server (1 command)
+
+Any box with Docker + SSH access:
 
 ```bash
-# claude bot, fully headless — pin a low-cost model to keep tokens cheap
-node cli.mjs deploy mycoolbot --host root@1.2.3.4 \
-  --anthropic-key sk-ant-… --model claude-haiku-4-5-20251001
+node cli.mjs deploy mycoolbot --host root@your-server \
+  --anthropic-key sk-ant-…                 # claude brain, fully headless
+node cli.mjs deploy mycoolbot --host root@your-server --dry-run   # preview first
 
-node cli.mjs deploy mycoolbot --host root@1.2.3.4 --dry-run   # preview compose+env first
+node cli.mjs status mycoolbot              # running + healthy?
+node cli.mjs logs mycoolbot -f             # live logs
+node cli.mjs stop mycoolbot
 ```
 
-It uploads bot-core, generates the compose + env, brings the container up, and waits
-for it to come online. Supports the `echo` and `claude` brains today (single
-container); `codex`/`gemini`/`grok` need an interactive login and `hermes` needs a
-second container — set those up per `docs/HARNESSES.md`.
+`deploy` uploads bot-core, generates a compose file + env, starts the container
+(with a persistent state volume), and waits until the bot is online.
+Deploy currently automates the `echo` and `claude` brains; `codex`/`gemini`/`grok`
+(interactive logins) and the harness topologies are documented in
+[`docs/HARNESSES.md`](docs/HARNESSES.md).
 
-`--owner <address>` locks the bot so only your Polkadot app address can message it
-(recommended — an AI/`hermes` bot spends your quota, so it won't be left open
-unless you pass `--public`). `create` prints a link to message your bot;
-`node cli.mjs info mycoolbot` shows it again + whether the network has confirmed the
-bot (can take a few minutes). `node cli.mjs list` lists your bots. (Install as `pca`.)
+## Choose a brain
 
-**Brains** (`--brain`): a **direct AI brain** answers by shelling out to that
-model's own CLI (which owns its own auth) — `codex`, `claude`, `gemini`, or `grok`.
-`echo` repeats you (a zero-config smoke test). `hermes`/`bridge` hands messages to
-an external agent framework via the HTTP bridge (see below). Any other CLI works
-via `BOT_AI_CMD`/`BOT_AI_ARGS`. See `docs/HARNESSES.md`.
+| `--brain` | What answers | Auth |
+|---|---|---|
+| `claude` | Claude, via the `claude` CLI | Claude Code login or API key |
+| `codex` | GPT, via the `codex` CLI | ChatGPT/Codex subscription login |
+| `gemini` / `grok` | that model's CLI | its own login |
+| `echo` | repeats you — zero-config smoke test | none |
+| `hermes` / `bridge` | an external **agent framework** over the local HTTP bridge | the framework's |
 
-## Advanced: plug into a harness (Hermes)
+Pin a cheap model with `BOT_AI_MODEL` (e.g. `claude-haiku-4-5-20251001`), or wire
+any other CLI with `BOT_AI_CMD`/`BOT_AI_ARGS`. AI brains spend your quota, so `pca`
+refuses to leave one open to the world unless you pass `--public`.
 
-Run bot-core with `--brain hermes`, point a Hermes instance at its bridge
-(`POLKADOT_BRIDGE_URL`, `hermes-plugin/polkadot` dropped into `~/.hermes/plugins/`),
-and Hermes drives the conversation. See `docs/DESIGN.md`.
+## Agent frameworks (Hermes, OpenClaw, …)
 
-## Testing without a phone
+For a bot with memory, tools, and personality, run `--brain hermes` and let a
+harness drive the conversation through bot-core's tiny HTTP bridge
+(`GET /inbound` long-poll → `POST /send`). Both integrations are validated live:
 
-`node bot-core/test-client.mjs --seed-hex 0x<attested-seed> --bot-account 0x.. \
-  --bot-identifier-key 0x.. "hello"` sends a message and prints the bot's replies.
+- **Hermes** — `hermes-plugin/polkadot/` drops into `~/.hermes/plugins/`.
+- **OpenClaw** — `openclaw-plugin/polkadot/` is an OpenClaw channel plugin.
 
----
-_History: the first working version reused the faucet chat listener in "bridge mode";
-`bot-core` is the clean, faucet-free extraction that replaced it._
+Setup recipes, the bridge contract (write your own adapter in ~50 lines), and
+deployment field notes: [`docs/HARNESSES.md`](docs/HARNESSES.md).
 
-## Start here
+## Test without a phone
 
-Read [`docs/DESIGN.md`](docs/DESIGN.md). It captures the transport model, the key
-constraint, the corrected onboarding flow, and the MVP plan.
+```bash
+node bot-core/test-client.mjs --seed-hex 0x<attested-seed> \
+  --bot-account 0x… --bot-identifier-key 0x… "hello"
+```
 
-## The one thing to know
+Sends a real message over the network and prints the bot's replies. (There's also
+`test-client-device.mjs`, which reproduces the mobile app's multi-device behavior.)
 
-An interactive bot must be **messageable**, which on-chain means its account is a
-registered consumer (`Resources::Consumers`, holding an `identifier_key`). That
-requires the bot account to be an **attested lite person** — which requires a
-**verifier with governance-granted attestation quota**. Delegating a statement
-slot gives bandwidth but does **not** make a bot messageable.
+## Keep these safe
 
-So the MVP prerequisite is **verifier access**, not code.
+- `bots/<name>/secret.json` — the bot's root seed. Anyone with it **is** the bot.
+- `bots/<name>/session-state.json` (and the server's `state/` volume) — session
+  keys for open conversations.
 
-## Decisions made
+Both are created `0600` and gitignored — don't commit them, do back them up.
 
-1. **Target network:** Paseo (people-next-v2).
-2. **Verifier:** reuse the faucet's identity backend
-   (`identity-backend-next.parity-testnet.parity.io`) as the verifier for now —
-   it holds attestation quota and its registration flow mints a messageable
-   lite-person consumer. i.e. path A with the existing backend.
+## Layout
 
-Decentralized issuance (path D, runtime change in `../individuality`) is a later
-track, not the MVP.
+- `bot-core/` — the transport + CLI (`cli.mjs` = `pca`): identity, encryption,
+  send/receive, session persistence, brains, HTTP bridge, deploy/ops.
+- `hermes-plugin/`, `openclaw-plugin/` — harness adapters.
+- `tools/bandersnatch-cli/` — Rust helper that builds the personhood proof used
+  once at registration.
+- `docs/` — [`DESIGN.md`](docs/DESIGN.md) (architecture),
+  [`HARNESSES.md`](docs/HARNESSES.md) (integrations),
+  [`TEST-ROUND-TRIP.md`](docs/TEST-ROUND-TRIP.md) (verification guide).
 
-## MVP plan (once unblocked)
+Currently targets the **Paseo** testnet (`people-next` chain), using Parity's
+identity backend as the registration verifier.
 
-1. Manually attest one bot identity (de-risk issuance).
-2. Minimal listener: subscribe to bot topics → decode inbound → ACK → AI API call
-   with per-peer history → publish reply.
-3. Prove a phone→bot→reply round trip (start with a hardcoded echo, then AI).
-4. Generalize into the multi-bot CLI onboarding.
+## License
 
-## Related repos
-
-- `../summit-faucet-chatbot` — the working faucet; source of the transport,
-  identity, and session-crypto code to extract a minimal `bot-core` from.
-- `../individuality` — the runtime (pallets `people-lite`, `resources`); home of
-  path D if we pursue decentralized issuance.
+[MIT](LICENSE)
