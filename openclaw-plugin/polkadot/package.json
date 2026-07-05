@@ -4,8 +4,14 @@
   "private": true,
   "type": "module",
   "description": "OpenClaw channel plugin: Polkadot app chat, via the bot-core HTTP bridge.",
+  "scripts": {
+    "build": "esbuild index.ts --bundle --format=esm --platform=node --target=node20 --external:openclaw --external:'openclaw/*' --outfile=dist/index.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  },
   "openclaw": {
-    "extensions": ["./index.ts"],
+    "extensions": ["./dist/index.js"],
     "channel": {
       "id": "polkadot",
       "label": "Polkadot",

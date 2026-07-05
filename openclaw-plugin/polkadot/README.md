@@ -46,8 +46,9 @@ SDK (`pluginApi >= 2026.6.11`): `gateway.startAccount` runs the long-poll loop;
 `delivery.deliver` routes the agent's reply to `POST /send`.
 
 Field notes from that validation:
-- Package installs need compiled JS (`dist/index.js`); TS source only loads via
-  `openclaw plugins install --link <path>` (local dev mode).
+- The plugin ships compiled JS (`dist/index.js`, committed) so a normal
+  `openclaw plugins install <path-or-git>` works. After editing the TS source,
+  rebuild with `npm run build` (esbuild bundle; `openclaw/*` stays external).
 - Plugin files must be owned by root or the gateway's uid, or loading is blocked.
 - `dmPolicy: "allowlist"` + `allowFrom` is the recommended locked-down config.
 - Run the gateway in a container as a non-root user: set `gateway.mode: "local"`
