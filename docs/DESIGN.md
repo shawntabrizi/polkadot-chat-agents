@@ -36,15 +36,23 @@ These were all learned by debugging against the real mobile app:
   `test-client-device.mjs`.
 - **Acknowledgements.** The app resends its backlog until it sees a session
   response ACK for each request. A bot that never ACKs receives every message
-  again on every poll.
+  again on every poll. bot-core ACKs on delivery (before the brain runs) and
+  journals the owed reply to the state file first, so a crash between ACK and
+  answer re-runs the brain on restart instead of silently dropping the message.
+  When a pipeline is full the statement is deferred un-ACKed — the app's resend
+  is the retry (backpressure, never ACK-then-drop).
 - **Batches.** One session statement can carry several messages, including kinds
   the bot cannot decode (for example image attachments). Decoding is per-message;
   one undecodable message must not abort the batch.
 - **Persistence.** Session keys and channels exist only at the two endpoints;
-  there is no server to rejoin. bot-core persists per-peer device keys and a
-  dedup set to `BOT_STATE_DIR/session-state.json` and rebuilds sessions on
-  startup (`makePeerSession` is deterministic), so restarts do not orphan open
-  conversations.
+  there is no server to rejoin. bot-core persists per-peer device keys, a dedup
+  set, and the owed-replies journal to `BOT_STATE_DIR/session-state.json` and
+  rebuilds sessions on startup (`makePeerSession` is deterministic), so restarts
+  do not orphan open conversations or drop ACKed-but-unanswered messages.
+- **Polling scale.** Watched topics are queried in `matchAny` batches (16 topics
+  per request, 4 concurrent), so per-tick RPC count stays roughly constant as
+  peers accumulate. Statements are attributed back to their session by the
+  topics they carry; handling stays serial per session.
 
 ## Identity: being messageable requires personhood
 

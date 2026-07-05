@@ -226,12 +226,20 @@ const enqueueInbound = (item) => {
   // were already ACKed (the app won't resend them) — log the count loudly.
   if (inboundQueue.length > INBOUND_CAP) {
     const dropped = inboundQueue.length - INBOUND_CAP;
+    // Not settled: trimmed items stay in the owed journal, so a restart
+    // re-runs them instead of losing them outright.
     inboundQueue.splice(0, dropped);
     log("BOT_INBOUND_QUEUE_TRIMMED", { cap: INBOUND_CAP, dropped });
   }
   const w = waiters.shift();
-  if (w) { clearTimeout(w.timer); w.resolve(inboundQueue.splice(0)); }
+  if (w) { clearTimeout(w.timer); w.resolve(drainInbound()); }
 };
+// Hand the queued items to the harness: custody transfers here, so settle each
+// item's owed-journal entry and strip the internal owedId from the payload.
+const drainInbound = () => inboundQueue.splice(0).map(({ owedId, ...item }) => {
+  if (owedId) settleOwed(owedId);
+  return item;
+});
 
 const isAllowed = (peerHex) => allowedPeers.size === 0 || allowedPeers.has(norm(peerHex));
 
@@ -298,7 +306,7 @@ const runAgentCli = (peerHex, userText) => new Promise((resolve) => {
   });
 });
 
-const handleInbound = async (peerHex, text, messageId) => {
+const handleInbound = async (peerHex, text, messageId, owedId = null) => {
   if (brain === "echo") {
     await sendText(peerHex, `Echo: ${text}`).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
     return;
@@ -320,7 +328,16 @@ const handleInbound = async (peerHex, text, messageId) => {
   // bridge / hermes / unknown: hand off to an external agent via the HTTP bridge.
   // The agent replies via POST /send -> sendText, which disarms the ack.
   armThinking(peerHex);
-  enqueueInbound({ chat_id: peerHex, text, message_id: messageId });
+  enqueueInbound({ chat_id: peerHex, text, message_id: messageId, owedId });
+};
+
+// Queue one owed message for the brain, settling the journal entry when the
+// pipeline takes custody (bridge items settle later, on /inbound drain).
+const enqueueOwed = (peerHex, owedId, text, requestId) => {
+  enqueueWork(peerHex, async () => {
+    try { await handleInbound(peerHex, text, requestId, owedId); }
+    finally { if (!usesBridgeQueue) settleOwed(owedId); }
+  });
 };
 
 // ---------- receive: dedup + handlers ----------
@@ -336,6 +353,20 @@ const noteSeenStatement = (key) => { seenStatements.add(key); trimSet(seenStatem
 // to a hash of requestId:text so we never hold or persist conversation plaintext.
 const messageDedupId = (requestId, text, messageId) =>
   messageId || `h:${bytesToHex(blake2b(enc.encode(`${requestId}:${text}`), { dkLen: 16 }))}`;
+
+// ---------- owed replies (crash-durable at-least-once) ----------
+// A message is deduped and ACKed as soon as it's queued (ACK = delivered), so
+// the pending reply exists only in memory — a crash before the brain ran would
+// silently never answer it. Journal owed replies in the state snapshot and
+// flush BEFORE the ACK goes out; a restart re-runs the brain for anything
+// still owed. Settled when the reply pipeline takes custody: direct brains
+// when handleInbound returns (reply or apology sent), bridge brains when the
+// harness drains the item from /inbound. Bounded by the same backpressure
+// caps as the queues it mirrors. Holds message text until answered — transient
+// by design, in a file that is 0600 and already holds key material.
+const owedReplies = new Map(); // owedId -> { peerHex, text, requestId }
+const oweReply = (owedId, peerHex, text, requestId) => owedReplies.set(owedId, { peerHex, text, requestId });
+const settleOwed = (owedId) => { if (owedReplies.delete(owedId)) persist(); };
 
 // Persist only what can't be re-derived: per-peer identifierKey + peerDevices.
 // makePeerSession is deterministic, so the channels/keys rebuild exactly from
@@ -353,6 +384,7 @@ const snapshotState = () => ({
     })),
   })),
   seen: [...seenRequests].slice(-SEEN_CAP),
+  owed: [...owedReplies.entries()].map(([id, o]) => ({ id, p: o.peerHex, t: o.text, r: o.requestId })),
 });
 const persist = () => { if (stateStore) stateStore.save(snapshotState()); };
 const fp = (data) => bytesToHex(data.subarray(0, 32)); // dedup key: first 32 bytes, no full-payload encode
@@ -374,7 +406,9 @@ const handleOpener = async (data) => {
     : [];
   const session = buildSession(senderHex, identifierKeyHex, devices);
   addSessionWatch(senderHex);
-  persist(); // remember this peer's session so it survives a restart
+  oweReply(decoded.messageId, senderHex, decoded.text ?? "", decoded.messageId);
+  persist(); // remember this peer's session (and the owed reply) across restarts
+  stateStore?.flush(); // owed must be on disk before the ACK suppresses resends
   // ACK / accept so the peer establishes the session (advertise our device).
   const accept = decoded.deviceEncPubKeyHex
     ? encodeOpaqueMultiChatAcceptedMessage({ acceptedRequestId: decoded.messageId, statementAccountId: accountId, encryptionPublicKey: identifierKey })
@@ -384,7 +418,7 @@ const handleOpener = async (data) => {
     await submitBounded({ walletPair: wallet, channel: session.requestChannel, topics: [session.ownSessionId], scaleEncodedPayload: ackPayload, expiryFactory });
   } catch (error) { log("BOT_ACK_FAILED", { to: senderHex, error: error instanceof Error ? error.message : String(error) }); }
   log("BOT_RECEIVED_OPENER", { from: senderHex, requestId: decoded.messageId, text: decoded.text });
-  enqueueWork(senderHex, () => handleInbound(senderHex, decoded.text ?? "", decoded.messageId));
+  enqueueOwed(senderHex, decoded.messageId, decoded.text ?? "", decoded.messageId);
 };
 
 // ACK a session request (mirrors the app: response goes on our own session
@@ -447,17 +481,23 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
       const alreadySeen = seenRequests.has(id) || seenRequests.has(legacyKey);
       seenRequests.add(id);
       trimSet(seenRequests, SEEN_CAP);
-      if (!alreadySeen) fresh.push(m.text);
+      if (!alreadySeen) fresh.push({ id, text: m.text });
     }
   }
-  if (fresh.length) persist();
+  if (fresh.length) {
+    // Journal before the ACK goes out: seen + owed land in one snapshot, so a
+    // crash after the ACK can't leave a message deduped but never answered.
+    for (const f of fresh) oweReply(f.id, peerHex, f.text, decoded.requestId);
+    persist();
+    stateStore?.flush();
+  }
   // ACK means "delivered", not "answered" — send it before any brain work so
   // the app stops resending even when the model is slow.
   try { await sendSessionAck(peerHex, decoded.requestId); }
   catch (e) { log("BOT_SESSION_ACK_FAILED", { to: peerHex, error: String(e?.message ?? e) }); }
-  for (const text of fresh) {
-    log("BOT_RECEIVED_TEXT", { from: peerHex, text });
-    enqueueWork(peerHex, () => handleInbound(peerHex, text, decoded.requestId));
+  for (const f of fresh) {
+    log("BOT_RECEIVED_TEXT", { from: peerHex, text: f.text });
+    enqueueOwed(peerHex, f.id, f.text, decoded.requestId);
   }
 };
 
@@ -590,7 +630,7 @@ const startBridge = () => {
       }
       if (req.method === "GET" && url.pathname === "/inbound") {
         const waitSecs = Math.min(60, Math.max(0, Number(url.searchParams.get("wait") ?? 25)));
-        if (inboundQueue.length > 0) return json(200, inboundQueue.splice(0));
+        if (inboundQueue.length > 0) return json(200, drainInbound());
         const drained = await new Promise((resolve) => {
           const timer = setTimeout(() => {
             const i = waiters.findIndex((w) => w.resolve === resolve);
@@ -702,7 +742,18 @@ for (const p of restored?.peers ?? []) {
   } catch (e) { log("BOT_STATE_PEER_SKIPPED", { peer: p?.peerHex, error: String(e?.message ?? e) }); }
 }
 for (const id of restored?.seen ?? []) seenRequests.add(id);
-if (restored) log("BOT_STATE_RESTORED", { peers: restoredPeers, seen: restored.seen?.length ?? 0 });
+// Re-run anything that was ACKed but not yet answered when the last process
+// died — the app will never resend these, the journal is their only way back.
+let restoredOwed = 0;
+for (const o of restored?.owed ?? []) {
+  try {
+    if (!o?.id || !o?.p || typeof o?.t !== "string") continue;
+    oweReply(o.id, o.p, o.t, o.r);
+    enqueueOwed(o.p, o.id, o.t, o.r);
+    restoredOwed += 1;
+  } catch (e) { log("BOT_STATE_OWED_SKIPPED", { error: String(e?.message ?? e) }); }
+}
+if (restored) log("BOT_STATE_RESTORED", { peers: restoredPeers, seen: restored.seen?.length ?? 0, owed: restoredOwed });
 for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { stateStore?.flush(); process.exit(0); });
 
 for (;;) {
