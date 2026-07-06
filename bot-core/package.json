@@ -8,7 +8,7 @@
     "pca": "cli.mjs"
   },
   "scripts": {
-    "start": "node index.mjs",
+    "start": "node cli.mjs run",
     "postinstall": "papi generate",
     "test": "node --test test/*.test.mjs"
   },

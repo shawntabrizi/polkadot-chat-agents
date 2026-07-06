@@ -4,6 +4,18 @@
   "description": "Run AI chat bots inside the Polkadot app. The runnable package is in bot-core/.",
   "scripts": {
     "postinstall": "npm --prefix bot-core install",
-    "test": "npm --prefix bot-core test"
+    "test": "npm --prefix bot-core test",
+    "start": "node bot-core/cli.mjs run",
+    "pca": "node bot-core/cli.mjs",
+    "create": "node bot-core/cli.mjs create",
+    "register": "node bot-core/cli.mjs register",
+    "run": "node bot-core/cli.mjs run",
+    "deploy": "node bot-core/cli.mjs deploy",
+    "logs": "node bot-core/cli.mjs logs",
+    "status": "node bot-core/cli.mjs status",
+    "stop": "node bot-core/cli.mjs stop",
+    "delete": "node bot-core/cli.mjs delete",
+    "list": "node bot-core/cli.mjs list",
+    "info": "node bot-core/cli.mjs info"
   }
 }
