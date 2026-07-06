@@ -1,0 +1,9 @@
+{
+  "name": "polkadot-chat-agents",
+  "private": true,
+  "description": "Run AI chat bots inside the Polkadot app. The runnable package is in bot-core/.",
+  "scripts": {
+    "postinstall": "npm --prefix bot-core install",
+    "test": "npm --prefix bot-core test"
+  }
+}
