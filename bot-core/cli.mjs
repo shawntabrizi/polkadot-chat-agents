@@ -103,7 +103,7 @@ const fail = (s) => { console.error(`${c("✗", "31")} ${s}`); process.exit(1); 
 
 // Flags that are always boolean — they must never consume the following token,
 // or `pca create --public mybot` would swallow the bot name into --public.
-const BOOLEAN_FLAGS = new Set(["public", "dry-run", "no-register", "follow", "greet"]);
+const BOOLEAN_FLAGS = new Set(["public", "dry-run", "no-register", "follow", "greet", "yes"]);
 const SHORT_FLAGS = { "-f": "follow" };
 function parseFlags(argv) {
   const flags = {};
@@ -160,11 +160,14 @@ const deeplink = (accountIdHex) => {
 
 async function cmdCreate(name, flags) {
   if (!name) fail("Usage: pca create <botname>   (the first argument is your bot's name, e.g. pca create mycoolbot)");
-  // A `.NN` suffix is the network-assigned discriminator, not part of the bot's
-  // name — catch the natural mistake and point at --digits.
-  const dotted = /^([a-z][a-z0-9-]*)\.(\d+)$/.exec(name);
-  if (dotted) fail(`The ".${dotted[2]}" number isn't part of the name — the network assigns it. To request it:\n  pca create ${dotted[1]} --digits ${dotted[2]}`);
-  if (!/^[a-z][a-z0-9-]{1,30}$/.test(name)) fail("Name must be lowercase letters/digits/hyphens, starting with a letter.");
+  // A `.NN` suffix requests that username number (e.g. `create mycoolbot.69` =
+  // `--digits 69`) and keeps the local name distinct, so several bots can share
+  // one base name with different numbers.
+  const dotted = /^([a-z][a-z0-9-]{1,30})\.(\d{2})$/.exec(name);
+  if (dotted && !flags.digits) flags.digits = dotted[2];
+  if (!dotted && !/^[a-z][a-z0-9-]{1,30}$/.test(name)) {
+    fail(`Name must be lowercase letters/digits/hyphens starting with a letter — optionally ending in ".NN" (two digits) to request that username number, e.g. mycoolbot or mycoolbot.69.`);
+  }
   if (fs.existsSync(botDir(name))) fail(`Bot "${name}" already exists (${botDir(name)}). Use a different name.`);
   const brain = String(flags.brain ?? "echo").toLowerCase();
   if (!BRAINS.includes(brain)) fail(`--brain must be one of: ${BRAINS.join(", ")}`);
@@ -307,6 +310,20 @@ async function cmdRegister(name, flags) {
   if (reg === "failed") process.exitCode = 1;
 }
 
+function cmdDelete(name, flags) {
+  const cfg = readConfig(name);
+  if (cfg.deploy?.host) {
+    fail(`"${name}" is deployed on ${cfg.deploy.host} — stop it first:  pca stop ${name}\nThen delete again.`);
+  }
+  if (flags.yes !== true) {
+    warn(`Deleting "${name}" destroys its secret key — the identity${cfg.username ? ` and the username ${cfg.username}` : ""} can never be recovered or re-registered by anyone.`);
+    note(`Folder: ${botDir(name)}`);
+    fail(`If you're sure:  pca delete ${name} --yes`);
+  }
+  fs.rmSync(botDir(name), { recursive: true, force: true });
+  ok(`Deleted "${name}"${cfg.username ? ` (${cfg.username} is gone for good)` : ""}.`);
+}
+
 function cmdList() {
   const bots = listBots();
   if (bots.length === 0) { note("No bots yet. Create one: pca create <name>"); return; }
@@ -412,7 +429,7 @@ async function cmdDeploy(name, flags) {
   if (cfg.brain === "claude" && !key) warn("No Anthropic key (--anthropic-key or ANTHROPIC_API_KEY) — the bot will start but can't answer until the container has one.");
   if (!cfg.registered) warn(`"${name}" isn't confirmed on the network yet — people can't message it until it is (pca info ${name}).`);
 
-  const cn = `pca-${name}`;
+  const cn = `pca-${name.replace(/\./g, "-")}`;
   const base = flags["remote-dir"] ? String(flags["remote-dir"]) : `pca-bots/${name}`;
   const sshOpts = ["-o", "ConnectTimeout=10", "-o", "BatchMode=yes"];
 
@@ -504,7 +521,7 @@ async function deployHarnessStack(name, cfg, secret, flags, host, harness) {
     fail(`bot-core dependencies missing. Run:  (cd ${HERE} && npm ci)  then retry.`);
   }
   if (!cfg.registered) warn(`"${name}" isn't confirmed on the network yet — people can't message it until it is (pca info ${name}).`);
-  const cn = `pca-${name}`;
+  const cn = `pca-${name.replace(/\./g, "-")}`;
   const hn = `pca-${name}-${harness}`;
   const base = flags["remote-dir"] ? String(flags["remote-dir"]) : `pca-bots/${name}`;
   const sshOpts = ["-o", "ConnectTimeout=10", "-o", "BatchMode=yes"];
@@ -655,7 +672,7 @@ docker compose -p ${cn} run --rm openclaw sh -lc 'openclaw plugins install --lin
 function deployTarget(name, flags) {
   const cfg = readConfig(name);
   const host = flags.host ? String(flags.host) : cfg.deploy?.host;
-  const cn = cfg.deploy?.container ?? `pca-${name}`;
+  const cn = cfg.deploy?.container ?? `pca-${name.replace(/\./g, "-")}`;
   const dir = cfg.deploy?.dir;
   if (!host) fail(`"${name}" hasn't been deployed (no saved host). Deploy it, or pass --host <ssh>.`);
   return { cfg, host, cn, dir };
@@ -704,7 +721,7 @@ async function cmdStatus(name, flags) {
     note(healthLine(h));
     return;
   }
-  const cn = cfg.deploy?.container ?? `pca-${name}`;
+  const cn = cfg.deploy?.container ?? `pca-${name.replace(/\./g, "-")}`;
   step(`Status of "${name}" on ${host}…`);
   const r = runLocal("ssh", [...SSH_OPTS, host,
     `docker ps --filter name=^/${cn}$ --format '{{.Status}}' | head -1; ` +
@@ -741,6 +758,7 @@ function usage() {
   pca logs <name> [-f] [--tail N]      tail a deployed bot's logs
   pca status <name>                    is the bot running + healthy? (local or deployed)
   pca stop <name>                      stop a deployed bot
+  pca delete <name> --yes              delete a local bot (destroys its key — irreversible)
   pca list                             list your bots
   pca info <name>                      show address + how to message it
 
@@ -780,6 +798,7 @@ try {
     case "logs": cmdLogs(arg, flags); break;
     case "status": await cmdStatus(arg, flags); break;
     case "stop": cmdStop(arg, flags); break;
+    case "delete": cmdDelete(arg, flags); break;
     case "list": cmdList(); break;
     case "info": await cmdInfo(arg); break;
     default: usage(); if (command != null) process.exit(1);
