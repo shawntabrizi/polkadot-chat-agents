@@ -17,6 +17,8 @@
     "delete": "node bot-core/cli.mjs delete",
     "list": "node bot-core/cli.mjs list",
     "info": "node bot-core/cli.mjs info",
-    "help": "node bot-core/cli.mjs help"
+    "help": "node bot-core/cli.mjs help",
+    "release": "npm publish ./bot-core",
+    "release-dry": "npm publish --dry-run ./bot-core"
   }
 }
