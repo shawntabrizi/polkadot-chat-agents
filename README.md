@@ -90,10 +90,17 @@ and `--harness hermes` prints the one login command it cannot automate. See
 | `echo` | bot-core itself (repeats the message) | none |
 | `hermes` / `bridge` | an agent framework over the HTTP bridge | the framework's |
 
-`BOT_AI_MODEL` pins a specific model (for example `claude-haiku-4-5-20251001` to
-keep costs down). `BOT_AI_CMD` and `BOT_AI_ARGS` wire in any other CLI. Because an
-AI brain spends your quota, `create` refuses to leave one open to arbitrary
-senders unless `--public` is passed.
+`--model` pins a specific model, passed to the brain CLI's own model flag — set it
+at `create` (saved with the bot) or override per run: `pca run mybot --model
+claude-haiku-4-5-20251001`. `BOT_AI_CMD` and `BOT_AI_ARGS` wire in any other CLI.
+Because an AI brain spends your quota, `create` refuses to leave one open to
+arbitrary senders unless `--public` is passed.
+
+`--greet` (on `run` or `deploy`) makes the bot message its owner first: on startup
+it opens the chat with each allowlisted owner it has never talked to — a proof of
+life, so you don't have to find and message it. It greets each owner once ever,
+never into an existing thread, and only allowlisted accounts. Customize the text
+with `BOT_GREET_TEXT`.
 
 ## Agent frameworks
 

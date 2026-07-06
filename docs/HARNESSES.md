@@ -141,12 +141,17 @@ pca run mybot
 
 Related settings:
 
-- `BOT_AI_MODEL` selects a specific model, passed to the CLI's own model flag
+- `--model` on `create` (saved) or `run`/`deploy` (override) selects a specific
+  model — it lands in `BOT_AI_MODEL`, passed to the CLI's own model flag
   (for example `claude-haiku-4-5-20251001` to keep costs down).
 - `BOT_AI_CMD` and `BOT_AI_ARGS` wire in any other CLI without code changes; the
   `__PROMPT__` token in the args array is replaced with the built prompt.
 - `BOT_THINKING_AFTER_MS` (default 5000) and `BOT_THINKING_TEXT` control the
   acknowledgement sent when a reply is slow; setting the text empty disables it.
+- `--greet` on `run`/`deploy` (env `BOT_GREET=1`, text via `BOT_GREET_TEXT`): the
+  bot messages each allowlisted owner it has never talked to on startup — once
+  ever per owner, never into an existing thread. Works for any brain, including
+  bridge mode.
 - Failed model calls are logged with a cause: `BOT_AI_AUTH_REVOKED` means the
   CLI needs a re-login, `BOT_AI_FAILED` and `BOT_AI_TIMEOUT` are transient.
 

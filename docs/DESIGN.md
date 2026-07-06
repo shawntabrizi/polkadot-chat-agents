@@ -26,8 +26,13 @@ store-and-forward message layer:
 These were all learned by debugging against the real mobile app:
 
 - **Openers vs. follow-ups.** A new conversation starts with an encrypted chat
-  request on the bot's request topics. Subsequent messages arrive on session
-  topics derived from the shared secret.
+  request on the recipient's request topics. Subsequent messages arrive on
+  session topics derived from the shared secret.
+- **Either side can initiate.** The bot can also open a chat (the `--greet`
+  feature sends the owner a first-contact request). As initiator it must handle
+  the peer's `multiChatAccepted` reply, which advertises the peer's *device*
+  encryption key — fold that into the session or the peer's device-channel
+  replies go unseen (the mirror image of the per-device-channels rule below).
 - **Per-device channels.** The app sends follow-ups on a channel derived from a
   per-device encryption key, not the identity key. A bot must poll every device
   session (`incomingDeviceSessions` from `makePeerSession`), not just the
