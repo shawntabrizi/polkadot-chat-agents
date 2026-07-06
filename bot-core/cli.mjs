@@ -160,6 +160,10 @@ const deeplink = (accountIdHex) => {
 
 async function cmdCreate(name, flags) {
   if (!name) fail("Usage: pca create <botname>   (the first argument is your bot's name, e.g. pca create mycoolbot)");
+  // A `.NN` suffix is the network-assigned discriminator, not part of the bot's
+  // name — catch the natural mistake and point at --digits.
+  const dotted = /^([a-z][a-z0-9-]*)\.(\d+)$/.exec(name);
+  if (dotted) fail(`The ".${dotted[2]}" number isn't part of the name — the network assigns it. To request it:\n  pca create ${dotted[1]} --digits ${dotted[2]}`);
   if (!/^[a-z][a-z0-9-]{1,30}$/.test(name)) fail("Name must be lowercase letters/digits/hyphens, starting with a letter.");
   if (fs.existsSync(botDir(name))) fail(`Bot "${name}" already exists (${botDir(name)}). Use a different name.`);
   const brain = String(flags.brain ?? "echo").toLowerCase();
