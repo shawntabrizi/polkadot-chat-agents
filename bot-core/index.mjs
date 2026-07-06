@@ -17,6 +17,7 @@
 //   BOT_ACK_TEXT, BOT_ALLOWED_PEERS (comma-sep peer account hexes; empty = allow all),
 //   BOT_REQUEST_LOOKBACK_DAYS (7), BOT_REQUEST_FUTURE_DAYS (2), BOT_POLL_MS (2000),
 //   BOT_THINKING_TEXT + BOT_THINKING_AFTER_MS (5000) — ack sent if no reply by then,
+//   BOT_GREET (0; 1 = message allowlisted owners on first start) + BOT_GREET_TEXT,
 //   BOT_SUBSCRIBE (1; 0 = poll-only), BOT_SWEEP_MS (30000, sweep cadence while the
 //   subscription is healthy), BOT_HEARTBEAT_MS (30000), BOT_PEER_IDENTIFIER_KEYS
 //   ("peerhex=keyhex,..." — pin identifier keys, skipping the on-chain lookup).
@@ -44,6 +45,7 @@ import {
   decodeEncryptedChatRequestPayload,
   verifyChatRequestIdentityProof,
   decodeSessionStatementPayload,
+  encodeNativeChatRequestV2,
   encodeOpaqueTextMessage,
   encodeOpaqueChatAcceptedMessage,
   encodeOpaqueMultiChatAcceptedMessage,
@@ -71,6 +73,12 @@ const ackText = env.BOT_ACK_TEXT ?? (brain === "bridge" || brain === "hermes" ? 
 // like the message was lost. Fast replies cancel it. Empty text disables it.
 const thinkingText = env.BOT_THINKING_TEXT ?? "🤔 One moment — thinking…";
 const thinkingAfterMs = Number(env.BOT_THINKING_AFTER_MS ?? 5000);
+// Greet mode: on startup the bot opens the chat with each allowlisted owner it
+// has never talked to (once ever, persisted) — a liveness signal, so the owner
+// doesn't have to find and message the bot first. Only allowlisted peers are
+// ever greeted; an open bot has no owner to greet.
+const greet = env.BOT_GREET === "1" || env.BOT_GREET === "true";
+const greetText = env.BOT_GREET_TEXT ?? `👋 ${env.BOT_USERNAME || env.FAUCET_CHAT_SERVICE_USERNAME || "Your bot"} here — I'm alive! Say hi.`;
 
 // Direct AI-CLI "brains": bot-core shells out to an agent CLI that owns its own
 // auth/token. The transport core stays model-agnostic — these are just hooks that
@@ -405,7 +413,9 @@ const snapshotState = () => ({
   })),
   seen: [...seenRequests].slice(-SEEN_CAP),
   owed: [...owedReplies.entries()].map(([id, o]) => ({ id, p: o.peerHex, t: o.text, r: o.requestId })),
+  greeted: [...greetedPeers],
 });
+const greetedPeers = new Set(); // peers we've sent a first-contact greeting (once ever)
 const persist = () => { if (stateStore) stateStore.save(snapshotState()); };
 const fp = (data) => bytesToHex(data.subarray(0, 32)); // dedup key: first 32 bytes, no full-payload encode
 
@@ -494,6 +504,19 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
   if (decoded?.kind !== "request") return;
   const fresh = [];
   for (const m of decoded.messages ?? []) {
+    // Initiator side of an outgoing greeting: the peer's accept can advertise
+    // their device encryption key — fold it into the session (and subscribe to
+    // its topics) or the peer's device-channel replies would go unseen.
+    if (m.kind === "multiChatAccepted" && m.encryptionPublicKey) {
+      const entry = sessions.get(norm(peerHex));
+      if (entry) {
+        buildSession(peerHex, entry.identifierKeyHex, [{ statementAccountId: m.statementAccountId, encryptionPublicKey: m.encryptionPublicKey }]);
+        ingress?.resubscribe();
+        persist();
+        log("BOT_PEER_DEVICE_ADDED", { from: peerHex, device: norm(bytesToHex(m.encryptionPublicKey)).slice(0, 16) });
+      }
+      continue;
+    }
     if (typeof m.text === "string" && m.text.length > 0) {
       const id = messageDedupId(decoded.requestId, m.text, m.messageId);
       // Also honor the legacy plaintext key so entries persisted before this
@@ -784,6 +807,7 @@ for (const p of restored?.peers ?? []) {
   } catch (e) { log("BOT_STATE_PEER_SKIPPED", { peer: p?.peerHex, error: String(e?.message ?? e) }); }
 }
 for (const id of restored?.seen ?? []) seenRequests.add(id);
+for (const id of restored?.greeted ?? []) greetedPeers.add(id);
 // Re-run anything that was ACKed but not yet answered when the last process
 // died — the app will never resend these, the journal is their only way back.
 let restoredOwed = 0;
@@ -863,6 +887,42 @@ if ((env.BOT_SUBSCRIBE ?? "1") !== "0") {
   resubscribe(true);
   ingress = { supervisor, resubscribe };
   log("BOT_SUBSCRIBED", { heartbeatMs: Number(env.BOT_HEARTBEAT_MS ?? 30_000) });
+}
+
+// Greet mode: open the chat with each allowlisted owner we've never talked to.
+// Runs after state restore (so greetedPeers/sessions are known) and after the
+// ingress is up (so the new session topics get subscribed).
+if (greet) {
+  if (allowedPeers.size === 0) {
+    log("BOT_GREET_SKIPPED", { note: "no allowlist — an open bot has no owner to greet" });
+  } else {
+    for (const peerHex of allowedPeers) {
+      if (greetedPeers.has(peerHex) || sessions.has(peerHex)) continue; // once ever, never into an existing thread
+      try {
+        const identifierKeyHex = await resolveIdentifierKey(peerHex);
+        if (!identifierKeyHex) { log("BOT_GREET_NO_IDENTIFIER", { to: peerHex }); continue; }
+        const peerAccount = hexToBytes(peerHex);
+        const session = buildSession(peerHex, identifierKeyHex);
+        addSessionWatch(peerHex);
+        ingress?.resubscribe();
+        const { payload } = encodeNativeChatRequestV2({
+          walletPair: wallet,
+          botAccountId: peerAccount,           // the codec's "bot" is simply the recipient
+          botIdentifierKey: hexToBytes(identifierKeyHex),
+          ownP256PrivateKey: p256PrivateKey,
+          ownP256PublicKey: identifierKey,
+          text: greetText,
+        });
+        const today = chatRequestDayFromUnixSeconds(Math.floor(Date.now() / 1000));
+        const topics = [chatRequestAllPeerStatementsTopic(peerAccount)];
+        if (today != null) topics.push(chatRequestPaginationTopic(peerAccount, today));
+        await submitBounded({ walletPair: wallet, channel: session.outgoingRequestChannel, topics, scaleEncodedPayload: payload, expiryFactory });
+        greetedPeers.add(peerHex);
+        persist();
+        log("BOT_GREETED", { to: peerHex });
+      } catch (e) { log("BOT_GREET_FAILED", { to: peerHex, error: String(e?.message ?? e) }); }
+    }
+  }
 }
 
 // While the subscription proves live, the poll loop is only a reconciliation

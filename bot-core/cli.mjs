@@ -103,7 +103,7 @@ const fail = (s) => { console.error(`${c("✗", "31")} ${s}`); process.exit(1); 
 
 // Flags that are always boolean — they must never consume the following token,
 // or `pca create --public mybot` would swallow the bot name into --public.
-const BOOLEAN_FLAGS = new Set(["public", "dry-run", "no-register", "follow"]);
+const BOOLEAN_FLAGS = new Set(["public", "dry-run", "no-register", "follow", "greet"]);
 const SHORT_FLAGS = { "-f": "follow" };
 function parseFlags(argv) {
   const flags = {};
@@ -211,6 +211,7 @@ async function cmdCreate(name, flags) {
   fs.writeFileSync(secretPath(name), `${JSON.stringify({ mnemonic, seedHex: bytesToHex(seed) }, null, 2)}\n`, { mode: 0o600 });
   const config = {
     name, endpoint, backendUrl, brain, allow,
+    ...(flags.model ? { model: String(flags.model) } : {}),   // pin the AI model (per-brain CLI flag)
     bridgePort: Number(flags.port ?? 8799),
     account: accountIdHex, address, identifierKey: bytesToHex(p256),
     username: null, registered: false, createdAt: new Date().toISOString(),
@@ -342,7 +343,7 @@ async function cmdInfo(name) {
   if (cfg.username) note(`or search: ${cfg.username}`);
 }
 
-function cmdRun(name) {
+function cmdRun(name, flags = {}) {
   const cfg = readConfig(name);
   if (!fs.existsSync(secretPath(name))) fail(`"${name}" has no secret.json — its identity is missing. Recreate it: pca create ${name}`);
   const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
@@ -361,6 +362,14 @@ function cmdRun(name) {
     BOT_USERNAME: cfg.username ?? "",
     BOT_STATE_DIR: botDir(name),   // persist sessions so a restart keeps open threads
   };
+  // Model: --model overrides the one saved by create (both land in BOT_AI_MODEL,
+  // which each direct brain passes to its CLI's own model flag).
+  const model = flags.model ? String(flags.model) : cfg.model;
+  if (model) env.BOT_AI_MODEL = model;
+  if (flags.greet === true) {
+    env.BOT_GREET = "1";
+    note("Greet mode: the bot will message its owner(s) first — watch your phone.");
+  }
   const child = spawn(process.execPath, [path.join(HERE, "index.mjs")], { env, stdio: "inherit" });
   child.on("exit", (code) => process.exit(code ?? 0));
 }
@@ -413,7 +422,9 @@ async function cmdDeploy(name, flags) {
     `BOT_STATE_DIR=/app/state`,   // persist sessions to the state volume (survives redeploys)
     `BOT_BRIDGE_PORT=${cfg.bridgePort ?? 8799}`,   // keep in sync with the pca status probe
   ];
-  if (flags.model) envLines.push(`BOT_AI_MODEL=${String(flags.model)}`);
+  const deployModel = flags.model ? String(flags.model) : cfg.model;
+  if (deployModel) envLines.push(`BOT_AI_MODEL=${deployModel}`);
+  if (flags.greet === true) envLines.push("BOT_GREET=1");
   if (cfg.brain === "claude" && key) envLines.push(`ANTHROPIC_API_KEY=${key}`);
   const command = spec.install
     ? JSON.stringify(["sh", "-lc", `${spec.install} && exec node index.mjs`])
@@ -509,6 +520,7 @@ async function deployHarnessStack(name, cfg, secret, flags, host, harness) {
     // The harness container reaches the bridge over the compose network, so the
     // bridge must bind beyond loopback here (no ports are published to the host).
     `BOT_BRIDGE_HOST=0.0.0.0`,
+    ...(flags.greet === true ? ["BOT_GREET=1"] : []),
   ].join("\n");
   const botService = `  bot:\n    image: node:22-slim\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    volumes:\n      - ./app:/app\n      - ./state:/app/state\n    env_file:\n      - ./bot.env\n    command: ["node", "index.mjs"]\n`;
 
@@ -720,7 +732,7 @@ function usage() {
 
   pca create <botname> [--brain echo|codex|claude|gemini|grok|bridge] [--owner <your username or address>] [--public] [--network paseo] [--username name]
   pca register <name>                  finish/retry registration for an existing bot
-  pca run <name>                       start the bot locally (foreground)
+  pca run <name> [--model <m>] [--greet]   start the bot locally (foreground)
   pca deploy <name> --host <ssh>       ship it to a server and run it in Docker
   pca logs <name> [-f] [--tail N]      tail a deployed bot's logs
   pca status <name>                    is the bot running + healthy? (local or deployed)
@@ -734,6 +746,9 @@ create flags:
   --public         let anyone message it (required to leave an AI/hermes bot open)
   --username <u>   network username base if different from the bot name (6+ lowercase letters)
   --digits <NN>    request a specific username number (mybot.NN); omit to auto-assign a free one
+  --model <m>      pin the AI model, passed to the brain CLI's own model flag
+                   (e.g. claude-haiku-4-5-20251001); saved to the bot, --model on run/deploy overrides
+  --greet          (run/deploy) the bot opens the chat with its owner on first start — proof of life
   --no-register    create the identity locally without registering (finish later with pca register)
   --wait <secs>    how long to wait for on-chain confirmation (default 180)
   --network <ep>   target network: paseo (default) or a full wss:// endpoint
@@ -756,7 +771,7 @@ try {
   switch (command) {
     case "create": await cmdCreate(arg, flags); break;
     case "register": await cmdRegister(arg, flags); break;
-    case "run": cmdRun(arg); break;                 // spawns a child; manages its own exit
+    case "run": cmdRun(arg, flags); break;                 // spawns a child; manages its own exit
     case "deploy": await cmdDeploy(arg, flags); break;
     case "logs": cmdLogs(arg, flags); break;
     case "status": await cmdStatus(arg, flags); break;
