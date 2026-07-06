@@ -28,6 +28,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { blake2b } from "@noble/hashes/blake2.js";
 import { createStateStore } from "./lib/session-store.mjs";
+import { createCommandHandler } from "./lib/commands.mjs";
 import { createClient as createPapiClient } from "polkadot-api";
 import { getWsProvider, WsEvent } from "polkadot-api/ws";
 import { paseoPeopleNext } from "@polkadot-api/descriptors";
@@ -340,44 +341,15 @@ const runAgentCli = (peerHex, userText) => new Promise((resolve) => {
 // system (e.g. OpenClaw's /new); intercepting would shadow it with a layer
 // that can't actually act on the harness's state.
 const peerModelOverrides = new Map(); // peerHex -> model chosen via /model (in-memory)
-const handleCommand = (peerHex, text) => {
-  const m = /^\/([a-z]+)(?:\s+(\S+))?\s*$/i.exec(text);
-  if (!m) return null;
-  const [, cmd, argument] = m;
-  switch (cmd.toLowerCase()) {
-    case "help":
-      return [
-        "Commands:",
-        "/reset — forget our conversation so far",
-        "/model — show the model answering you (/model <name> to switch, /model default to go back)",
-        "/ping — check the bot is alive",
-      ].join("\n");
-    case "reset":
-      aiHistory.delete(norm(peerHex));
-      return "🧹 Fresh start — I've forgotten our conversation.";
-    case "ping":
-      return `🏓 pong — ${username || "bot"} is alive (chain: ${chainConnected() ? "connected" : "reconnecting"}).`;
-    case "model": {
-      if (!argument) {
-        const current = peerModelOverrides.get(norm(peerHex)) ?? (aiModel || "(CLI default)");
-        return `Model: ${current}. Switch with /model <name>, or /model default.`;
-      }
-      if (argument === "default") {
-        peerModelOverrides.delete(norm(peerHex));
-        return `Back to ${aiModel || "the CLI's default model"}.`;
-      }
-      peerModelOverrides.set(norm(peerHex), argument);
-      trimMap(peerModelOverrides, AI_HISTORY_PEER_CAP);
-      return `OK — answering you with ${argument} from now on (this chat only; /model default to undo).`;
-    }
-    default:
-      // Command-shaped but unknown (a typo like /rest, a habit like /start):
-      // redirect to /help — the model answering a failed command as if it were
-      // prose is baffling. Slash text that is NOT command-shaped (spaces,
-      // punctuation) never matches the regex above and still goes to the model.
-      return `I don't know /${cmd.toLowerCase()} — try /help to see what I can do.`;
-  }
-};
+const handleCommandFor = createCommandHandler({
+  aiHistory,
+  peerModelOverrides,
+  defaultModel: aiModel,
+  username,
+  chainConnected,
+  trimOverrides: () => trimMap(peerModelOverrides, AI_HISTORY_PEER_CAP),
+});
+const handleCommand = (peerHex, text) => handleCommandFor(norm(peerHex), text);
 
 const handleInbound = async (peerHex, text, messageId, owedId = null) => {
   if (brain === "echo") {
