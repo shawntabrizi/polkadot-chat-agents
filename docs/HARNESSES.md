@@ -146,6 +146,10 @@ Related settings:
   (for example `claude-haiku-4-5-20251001` to keep costs down).
 - `BOT_AI_CMD` and `BOT_AI_ARGS` wire in any other CLI without code changes; the
   `__PROMPT__` token in the args array is replaced with the built prompt.
+- In-chat commands (direct brains only): /help, /reset (forget the conversation),
+  /model [name|default] (switch models for that chat), /ping. Handled by bot-core
+  instantly, no model tokens spent. Bridge bots pass slash-commands through to the
+  framework, which owns that conversation and has its own commands (e.g. OpenClaw's /new).
 - `BOT_THINKING_AFTER_MS` (default 5000) and `BOT_THINKING_TEXT` control the
   acknowledgement sent when a reply is slow; setting the text empty disables it.
 - `--greet` on `run`/`deploy` (env `BOT_GREET=1`, text via `BOT_GREET_TEXT`): the

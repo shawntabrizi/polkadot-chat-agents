@@ -316,7 +316,7 @@ const runAgentCli = (peerHex, userText) => new Promise((resolve) => {
     `User: ${userText}`, "You:",
   ].filter(Boolean).join("\n\n");
   // stdin MUST be ignored: a piped stdin makes some CLIs (e.g. codex) block on "Reading additional input".
-  const child = spawn(aiSpec.cmd, aiSpec.args(prompt, aiModel), { stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(aiSpec.cmd, aiSpec.args(prompt, peerModelOverrides.get(norm(peerHex)) ?? aiModel), { stdio: ["ignore", "pipe", "pipe"] });
   let out = "", err = "";
   const timer = setTimeout(() => { child.kill("SIGKILL"); log("BOT_AI_TIMEOUT", { to: peerHex }); resolve(null); }, 90_000);
   child.stdout.on("data", (d) => { out += d; });
@@ -333,12 +333,60 @@ const runAgentCli = (peerHex, userText) => new Promise((resolve) => {
   });
 });
 
+// In-chat commands, for the brains bot-core itself hosts. Commands are state
+// operations, so they run wherever the conversation state lives: here for the
+// direct CLI brains (bot-core owns aiHistory + model choice), but NEVER in
+// bridge mode — the harness owns that conversation and has its own command
+// system (e.g. OpenClaw's /new); intercepting would shadow it with a layer
+// that can't actually act on the harness's state.
+const peerModelOverrides = new Map(); // peerHex -> model chosen via /model (in-memory)
+const handleCommand = (peerHex, text) => {
+  const m = /^\/([a-z]+)(?:\s+(\S+))?\s*$/i.exec(text);
+  if (!m) return null;
+  const [, cmd, argument] = m;
+  switch (cmd.toLowerCase()) {
+    case "help":
+      return [
+        "Commands:",
+        "/reset — forget our conversation so far",
+        "/model — show the model answering you (/model <name> to switch, /model default to go back)",
+        "/ping — check the bot is alive",
+      ].join("\n");
+    case "reset":
+      aiHistory.delete(norm(peerHex));
+      return "🧹 Fresh start — I've forgotten our conversation.";
+    case "ping":
+      return `🏓 pong — ${username || "bot"} is alive (chain: ${chainConnected() ? "connected" : "reconnecting"}).`;
+    case "model": {
+      if (!argument) {
+        const current = peerModelOverrides.get(norm(peerHex)) ?? (aiModel || "(CLI default)");
+        return `Model: ${current}. Switch with /model <name>, or /model default.`;
+      }
+      if (argument === "default") {
+        peerModelOverrides.delete(norm(peerHex));
+        return `Back to ${aiModel || "the CLI's default model"}.`;
+      }
+      peerModelOverrides.set(norm(peerHex), argument);
+      trimMap(peerModelOverrides, AI_HISTORY_PEER_CAP);
+      return `OK — answering you with ${argument} from now on (this chat only; /model default to undo).`;
+    }
+    default:
+      return null; // unknown /word — let the model take it (could be prose starting with "/")
+  }
+};
+
 const handleInbound = async (peerHex, text, messageId, owedId = null) => {
   if (brain === "echo") {
     await sendText(peerHex, `Echo: ${text}`).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
     return;
   }
   if (aiSpec) {
+    const commandReply = handleCommand(peerHex, text);
+    if (commandReply) {
+      log("BOT_COMMAND", { from: peerHex, command: text.split(/\s/)[0] });
+      await sendText(peerHex, commandReply).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
+      return;
+    }
     armThinking(peerHex); // ack if the model takes longer than thinkingAfterMs
     const reply = await runAgentCli(peerHex, text);  // logs its own classified failure reason
     if (!reply) {
