@@ -179,7 +179,12 @@ async function cmdCreate(name, flags) {
     ...(flags.owner ? [String(flags.owner)] : []),
   ];
   const allow = [];
-  for (const input of allowInputs) allow.push(await resolvePeer(input, backendUrl));
+  const allowLabels = {}; // hex -> what the human typed (username/address), for display
+  for (const input of allowInputs) {
+    const hex = await resolvePeer(input, backendUrl);
+    allow.push(hex);
+    allowLabels[hex] = String(input).trim().replace(/^@/, "");
+  }
   const isPublic = flags.public === true;
   // Safety: a paid brain (codex/claude/gemini/grok/hermes) left open to everyone can burn your quota.
   if (allow.length === 0 && !isPublic && PAID_BRAINS.has(brain)) {
@@ -217,7 +222,7 @@ async function cmdCreate(name, flags) {
   fs.mkdirSync(botDir(name), { recursive: true, mode: 0o700 });
   fs.writeFileSync(secretPath(name), `${JSON.stringify({ mnemonic, seedHex: bytesToHex(seed) }, null, 2)}\n`, { mode: 0o600 });
   const config = {
-    name, endpoint, backendUrl, brain, allow,
+    name, endpoint, backendUrl, brain, allow, allowLabels,
     ...(flags.model ? { model: String(flags.model) } : {}),   // pin the AI model (per-brain CLI flag)
     bridgePort: Number(flags.port ?? 8799),
     account: accountIdHex, address, identifierKey: bytesToHex(p256),
@@ -324,14 +329,51 @@ function cmdDelete(name, flags) {
   ok(`Deleted "${name}"${cfg.username ? ` (${cfg.username} is gone for good)` : ""}.`);
 }
 
+// Short human form of an allowlist account hex when create didn't record what
+// was typed (older configs): the SS58 address, elided.
+function shortAllowEntry(hex) {
+  try {
+    const bytes = Uint8Array.from(hex.match(/../g).map((b) => parseInt(b, 16)));
+    const addr = ss58Address(bytes, 42);
+    return `${addr.slice(0, 5)}…${addr.slice(-4)}`;
+  } catch { return `${hex.slice(0, 8)}…`; }
+}
+
 function cmdList() {
   const bots = listBots();
   if (bots.length === 0) { note("No bots yet. Create one: pca create <name>"); return; }
+  const rows = [];
+  const broken = [];
   for (const name of bots) {
-    const cfg = readConfig(name);
-    console.log(`${c(name, "1")}  brain=${cfg.brain}  ${cfg.registered ? c("registered", "32") : c("not registered", "33")}`);
-    note(cfg.address);
+    // One damaged config must not make every bot unlistable.
+    let cfg;
+    try { cfg = JSON.parse(fs.readFileSync(configPath(name), "utf8")); }
+    catch { broken.push(name); continue; }
+    const username = cfg.username
+      ? (cfg.registered ? { text: cfg.username } : { text: `${cfg.username} (pending)`, color: "33" })
+      : { text: "not registered", color: "33" };
+    const brain = cfg.model ? `${cfg.brain} · ${cfg.model}` : cfg.brain;
+    const labels = (cfg.allow ?? []).map((hex) => cfg.allowLabels?.[hex] ?? shortAllowEntry(hex));
+    const access = labels.length === 0
+      ? { text: "public", color: "33" }
+      : { text: labels.length <= 2 ? labels.join(", ") : `${labels[0]} +${labels.length - 1} more` };
+    const where = cfg.deploy?.host ? { text: `deployed → ${cfg.deploy.host}`, color: "36" } : { text: "local" };
+    rows.push([{ text: name, color: "1" }, username, { text: brain }, access, where]);
   }
+  const headers = ["NAME", "USERNAME", "BRAIN", "WHO CAN MESSAGE IT", "WHERE"];
+  const widths = headers.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].text.length)));
+  const pad = (s, w) => s + " ".repeat(Math.max(0, w - s.length));
+  console.log(headers.map((h, i) => c(pad(h, widths[i]), "90")).join("  "));
+  for (const row of rows) {
+    console.log(row.map((cell, i) => {
+      const padded = pad(cell.text, widths[i]);
+      return cell.color ? c(padded, cell.color) : padded;
+    }).join("  "));
+  }
+  for (const name of broken) warn(`"${name}" has a damaged config.json — skipped (${configPath(name)})`);
+  console.log();
+  note(`Details + message link: pca info <name>`);
+  note(`Stored in ${BOTS_DIR} — back that folder up; it holds each bot's keys.`);
 }
 
 async function cmdInfo(name) {
@@ -356,7 +398,8 @@ async function cmdInfo(name) {
   console.log(`  brain:    ${cfg.brain}`);
   console.log(`  network:  ${cfg.endpoint}`);
   console.log(`  address:  ${cfg.address}`);
-  console.log(`  access:   ${(cfg.allow?.length) ? `locked to ${cfg.allow.length} address${cfg.allow.length > 1 ? "es" : ""}` : c("open to anyone", "33")}`);
+  const allowShown = (cfg.allow ?? []).map((hex) => cfg.allowLabels?.[hex] ?? shortAllowEntry(hex));
+  console.log(`  access:   ${allowShown.length ? `only ${allowShown.join(", ")} can message it` : c("open to anyone", "33")}`);
   console.log(`  status:   ${status}`);
   console.log();
   console.log(`  Message this bot in the Polkadot app:`);
