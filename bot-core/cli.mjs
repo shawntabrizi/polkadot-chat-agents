@@ -25,7 +25,7 @@ import {
 } from "@polkadot-labs/hdkd-helpers";
 import { createClient as createPapiClient } from "polkadot-api";
 import { getWsProvider } from "polkadot-api/ws";
-import { paseoPeopleNext } from "@polkadot-api/descriptors";
+import { paseoPeopleNext } from "./lib/descriptors.mjs";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
 import { deriveP256PrivateKey, p256PublicKeyFromPrivateKey } from "./vendor/app-chat-codec.mjs";
 import { registerIdentity, waitForAttestation, withTimeout, DEFAULT_BACKENDS } from "./lib/register.mjs";

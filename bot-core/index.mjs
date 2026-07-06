@@ -31,7 +31,7 @@ import { createStateStore } from "./lib/session-store.mjs";
 import { createCommandHandler } from "./lib/commands.mjs";
 import { createClient as createPapiClient } from "polkadot-api";
 import { getWsProvider, WsEvent } from "polkadot-api/ws";
-import { paseoPeopleNext } from "@polkadot-api/descriptors";
+import { paseoPeopleNext } from "./lib/descriptors.mjs";
 import { createLazyClient, createPapiStatementStoreAdapter } from "@novasamatech/statement-store";
 import { ss58Address } from "@polkadot-labs/hdkd-helpers";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";

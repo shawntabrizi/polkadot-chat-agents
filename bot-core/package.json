@@ -1,23 +1,23 @@
 {
-  "name": "polkadot-chat-bot-core",
+  "name": "polkadot-chat-agents",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
-  "description": "Standalone transport bridge: Polkadot app chat <-> local HTTP API for AI agent harnesses.",
+  "description": "Run AI chat bots inside the Polkadot app — Claude/GPT/Gemini/Grok or agent frameworks (Hermes, OpenClaw) over the Statement Store. No chat server.",
   "bin": {
-    "pca": "cli.mjs"
+    "pca": "cli.mjs",
+    "polkadot-chat-agents": "cli.mjs"
   },
   "scripts": {
     "start": "node cli.mjs run",
-    "postinstall": "papi generate",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "prepare": "papi generate && node scripts/sync-descriptors.mjs",
+    "prepublishOnly": "npm test"
   },
   "dependencies": {
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
     "@novasamatech/statement-store": "^0.7.9",
     "@novasamatech/substrate-slot-sr25519-wasm": "^0.8.2",
-    "@polkadot-api/descriptors": "file:.papi/descriptors",
     "@polkadot-labs/hdkd-helpers": "^0.0.30",
     "@scure/sr25519": "^2.2.0",
     "polkadot-api": "^2.1.1"
@@ -27,5 +27,33 @@
   },
   "devDependencies": {
     "ws": "^8.21.0"
-  }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shawntabrizi/polkadot-chat-agents.git",
+    "directory": "bot-core"
+  },
+  "homepage": "https://github.com/shawntabrizi/polkadot-chat-agents#readme",
+  "bugs": "https://github.com/shawntabrizi/polkadot-chat-agents/issues",
+  "keywords": [
+    "polkadot",
+    "chatbot",
+    "ai",
+    "claude",
+    "agent",
+    "statement-store",
+    "bot"
+  ],
+  "files": [
+    "index.mjs",
+    "cli.mjs",
+    "test-client.mjs",
+    "test-client-device.mjs",
+    "lib/",
+    "vendor/",
+    "README.md",
+    "LICENSE",
+    "scripts/"
+  ]
 }

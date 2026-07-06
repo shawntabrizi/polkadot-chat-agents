@@ -17,7 +17,7 @@ jobs:
       - name: Install (runs papi generate from committed metadata)
         run: npm ci
       - name: Descriptors resolve
-        run: node -e 'import("@polkadot-api/descriptors").then(()=>console.log("descriptors OK"))'
+        run: node -e 'import("./lib/descriptors.mjs").then(()=>console.log("descriptors OK"))'
       - name: Syntax check
         run: for f in index.mjs cli.mjs test-client.mjs test-client-device.mjs lib/*.mjs; do node --check "$f"; done
       - name: Unit tests

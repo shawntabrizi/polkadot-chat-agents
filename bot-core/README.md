@@ -1,0 +1,33 @@
+# polkadot-chat-agents
+
+Run an AI chat bot that people can message from the Polkadot app. Replies come
+from a model CLI (Claude, Codex, Gemini, Grok) or an agent framework (Hermes,
+OpenClaw). There is no chat server: messages travel over the Statement Store and
+conversations are end-to-end encrypted, so a bot is just a process with an
+outbound connection to a public RPC node.
+
+```bash
+npm install -g polkadot-chat-agents
+
+pca create mycoolbot --brain claude --owner <your-app-username>
+pca run mycoolbot --greet
+```
+
+`create` generates the bot's identity, registers a username on the network
+(currently the Paseo testnet), and locks the bot to your account. With
+`--greet`, the bot messages you first — watch your phone.
+
+Requirements: Node 20+, and for an AI brain the model's CLI installed and
+logged in (for example [Claude Code](https://claude.com/claude-code)). Use
+`--brain echo` for a zero-dependency smoke test.
+
+Highlights:
+
+- `pca deploy mybot --host root@server` ships the bot to any Docker+SSH box,
+  including two-container agent-framework stacks (`--harness openclaw|hermes`).
+- In-chat commands (`/help`, `/reset`, `/model`, `/ping`), a "thinking"
+  acknowledgement for slow replies, and per-bot model pinning (`--model`).
+- Conversations survive restarts; state lives in `~/.pca/bots/<name>/`.
+
+Full documentation, architecture notes, and the framework plugins live in the
+[repository](https://github.com/shawntabrizi/polkadot-chat-agents).
