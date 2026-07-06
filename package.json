@@ -16,6 +16,7 @@
     "stop": "node bot-core/cli.mjs stop",
     "delete": "node bot-core/cli.mjs delete",
     "list": "node bot-core/cli.mjs list",
-    "info": "node bot-core/cli.mjs info"
+    "info": "node bot-core/cli.mjs info",
+    "help": "node bot-core/cli.mjs help"
   }
 }

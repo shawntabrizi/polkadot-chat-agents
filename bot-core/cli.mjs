@@ -844,6 +844,7 @@ try {
     case "delete": cmdDelete(arg, flags); break;
     case "list": cmdList(); break;
     case "info": await cmdInfo(arg); break;
+    case "help": usage(); break;
     default: usage(); if (command != null) process.exit(1);
   }
   // Commands that open chain WS clients (create/info/deploy) keep the event loop
