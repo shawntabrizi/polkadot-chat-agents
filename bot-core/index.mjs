@@ -78,7 +78,7 @@ const thinkingAfterMs = Number(env.BOT_THINKING_AFTER_MS ?? 5000);
 // doesn't have to find and message the bot first. Only allowlisted peers are
 // ever greeted; an open bot has no owner to greet.
 const greet = env.BOT_GREET === "1" || env.BOT_GREET === "true";
-const greetText = env.BOT_GREET_TEXT ?? `👋 ${env.BOT_USERNAME || env.FAUCET_CHAT_SERVICE_USERNAME || "Your bot"} here — I'm alive! Say hi.`;
+const greetText = env.BOT_GREET_TEXT ?? `👋 ${env.BOT_USERNAME || env.FAUCET_CHAT_SERVICE_USERNAME || "Your bot"} here — I'm alive! Say hi, or /help for what I can do.`;
 
 // Direct AI-CLI "brains": bot-core shells out to an agent CLI that owns its own
 // auth/token. The transport core stays model-agnostic — these are just hooks that
@@ -371,7 +371,11 @@ const handleCommand = (peerHex, text) => {
       return `OK — answering you with ${argument} from now on (this chat only; /model default to undo).`;
     }
     default:
-      return null; // unknown /word — let the model take it (could be prose starting with "/")
+      // Command-shaped but unknown (a typo like /rest, a habit like /start):
+      // redirect to /help — the model answering a failed command as if it were
+      // prose is baffling. Slash text that is NOT command-shaped (spaces,
+      // punctuation) never matches the regex above and still goes to the model.
+      return `I don't know /${cmd.toLowerCase()} — try /help to see what I can do.`;
   }
 };
 
@@ -398,7 +402,15 @@ const handleInbound = async (peerHex, text, messageId, owedId = null) => {
     h.push({ role: "user", text }, { role: "bot", text: reply });
     aiHistory.set(peerHex, h.slice(-AI_TURNS * 2));
     trimMap(aiHistory, AI_HISTORY_PEER_CAP);
-    await sendText(peerHex, reply).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
+    // Discovery: the very first reply to a peer carries a one-time /help hint
+    // (persisted, so a restart doesn't repeat it).
+    let outgoing = reply;
+    if (!introducedPeers.has(norm(peerHex))) {
+      introducedPeers.add(norm(peerHex));
+      persist();
+      outgoing += "\n\n(Tip: send /help to see my commands.)";
+    }
+    await sendText(peerHex, outgoing).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
     return;
   }
   // bridge / hermes / unknown: hand off to an external agent via the HTTP bridge.
@@ -462,8 +474,10 @@ const snapshotState = () => ({
   seen: [...seenRequests].slice(-SEEN_CAP),
   owed: [...owedReplies.entries()].map(([id, o]) => ({ id, p: o.peerHex, t: o.text, r: o.requestId })),
   greeted: [...greetedPeers],
+  intro: [...introducedPeers],
 });
 const greetedPeers = new Set(); // peers we've sent a first-contact greeting (once ever)
+const introducedPeers = new Set(); // peers whose first reply carried the /help hint
 const persist = () => { if (stateStore) stateStore.save(snapshotState()); };
 const fp = (data) => bytesToHex(data.subarray(0, 32)); // dedup key: first 32 bytes, no full-payload encode
 
@@ -856,6 +870,7 @@ for (const p of restored?.peers ?? []) {
 }
 for (const id of restored?.seen ?? []) seenRequests.add(id);
 for (const id of restored?.greeted ?? []) greetedPeers.add(id);
+for (const id of restored?.intro ?? []) introducedPeers.add(id);
 // Re-run anything that was ACKed but not yet answered when the last process
 // died — the app will never resend these, the journal is their only way back.
 let restoredOwed = 0;
