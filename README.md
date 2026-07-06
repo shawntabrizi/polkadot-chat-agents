@@ -31,15 +31,15 @@ production: one on Hermes with Codex, one on OpenClaw with Claude.
 ## Create and run a bot
 
 ```bash
-cd bot-core
 npm install
-npm link        # optional: installs the `pca` command used below (or just use `node cli.mjs`)
-
-pca create mycoolbot --brain claude --owner yourname.42
-pca run mycoolbot
+npm run create -- mycoolbot --brain claude --owner yourname.42
+npm start -- mycoolbot --greet
 ```
 
-Every `pca` below is interchangeable with `node cli.mjs` if you skip `npm link`.
+Every subcommand works this way from the repo root (`npm run list`, `npm run info
+-- mycoolbot`, ... — the `--` separates npm's arguments from the bot's). For a
+real `pca` command without the npm ceremony, run `npm link` once inside
+`bot-core/`; the docs below use the short `pca` form.
 
 `create` generates the bot's identity, registers a username on the network, and
 restricts the bot so only the `--owner` account can message it. The owner can be

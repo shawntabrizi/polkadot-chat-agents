@@ -103,8 +103,8 @@ const fail = (s) => { console.error(`${c("✗", "31")} ${s}`); process.exit(1); 
 
 // Flags that are always boolean — they must never consume the following token,
 // or `pca create --public mybot` would swallow the bot name into --public.
-const BOOLEAN_FLAGS = new Set(["public", "dry-run", "no-register", "follow", "greet", "yes"]);
-const SHORT_FLAGS = { "-f": "follow" };
+const BOOLEAN_FLAGS = new Set(["public", "dry-run", "no-register", "follow", "greet", "yes", "help", "version"]);
+const SHORT_FLAGS = { "-f": "follow", "-h": "help", "-V": "version" };
 function parseFlags(argv) {
   const flags = {};
   const positional = [];
@@ -401,6 +401,7 @@ async function cmdInfo(name) {
   const allowShown = (cfg.allow ?? []).map((hex) => cfg.allowLabels?.[hex] ?? shortAllowEntry(hex));
   console.log(`  access:   ${allowShown.length ? `only ${allowShown.join(", ")} can message it` : c("open to anyone", "33")}`);
   console.log(`  status:   ${status}`);
+  if (cfg.deploy?.host) console.log(`  deployed: ${cfg.deploy.host} (container ${cfg.deploy.container}) — pca status ${name}`);
   console.log();
   console.log(`  Message this bot in the Polkadot app:`);
   console.log(`    ${c(deeplink(cfg.account), "36")}`);
@@ -525,7 +526,7 @@ async function cmdDeploy(name, flags) {
   runLocal("ssh", [...sshOpts, host, `chmod 600 ${base}/bot.env`]);
 
   step("Starting the container…");
-  const up = runLocal("ssh", [...sshOpts, host, `cd ${base} && docker compose -p ${cn} up -d --force-recreate`]);
+  const up = runLocal("ssh", [...sshOpts, host, `cd ${base} && docker compose -p ${cn} up -d --force-recreate --remove-orphans`]);
   if (up.status !== 0) fail("docker compose up failed.");
 
   // Remember where this bot lives so `pca stop/logs/status` don't need --host.
@@ -686,7 +687,7 @@ docker compose -p ${cn} run --rm openclaw sh -lc 'openclaw plugins install --lin
   ok(`Setup done${/IMAGE_BUILT/.test(setupOut) ? " (image built)" : ""}`);
 
   step("Starting the stack…");
-  const up = runLocal("ssh", [...sshOpts, host, `cd ${base} && docker compose -p ${cn} up -d --force-recreate`]);
+  const up = runLocal("ssh", [...sshOpts, host, `cd ${base} && docker compose -p ${cn} up -d --force-recreate --remove-orphans`]);
   if (up.status !== 0) fail("docker compose up failed.");
   cfg.deploy = { host, dir: base, container: cn, harness, at: new Date().toISOString() };
   saveConfig(name, cfg);
@@ -829,8 +830,37 @@ Brains:  echo (test)  ·  codex/claude/gemini/grok (direct — shells to that CL
 Bots live in ${BOTS_DIR} (override with PCA_BOTS_DIR).`);
 }
 
+// Which flags each command accepts. A flag not on the list is almost always a
+// typo (--modle) or a misplaced flag (--greet on create) — and silently
+// ignoring it means the user believes a setting took effect when it didn't.
+const COMMAND_FLAGS = {
+  create: ["brain", "owner", "allow", "public", "network", "endpoint", "backend", "username", "digits", "model", "port", "wait", "no-register"],
+  register: ["username", "digits", "wait"],
+  run: ["model", "greet"],
+  deploy: ["host", "harness", "anthropic-key", "model", "dry-run", "remote-dir", "greet"],
+  logs: ["host", "follow", "tail"],
+  status: ["host"],
+  stop: ["host"],
+  delete: ["yes"],
+  list: [], info: [], help: [],
+};
+
 const { flags, positional } = parseFlags(process.argv.slice(2));
 const [command, arg] = positional;
+if (flags.help === true || flags.h === true) { usage(); process.exit(0); }
+if (flags.version === true || flags.V === true || command === "version") {
+  console.log(JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8")).version);
+  process.exit(0);
+}
+{
+  const known = COMMAND_FLAGS[command];
+  if (known) {
+    const bad = Object.keys(flags).filter((k) => !known.includes(k));
+    if (bad.length) {
+      fail(`Unknown flag${bad.length > 1 ? "s" : ""} for "${command}": ${bad.map((b) => `--${b}`).join(", ")}\n  Flags for ${command}: ${known.length ? known.map((f) => `--${f}`).join(", ") : "(none)"}`);
+    }
+  }
+}
 try {
   warnLegacyBotsDir();
   switch (command) {
