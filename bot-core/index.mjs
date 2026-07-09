@@ -48,6 +48,10 @@ import {
   decodeSessionStatementPayload,
   encodeNativeChatRequestV2,
   encodeOpaqueTextMessage,
+  encodeOpaqueReactionMessage,
+  encodeOpaqueReplyMessage,
+  encodeOpaqueEditedMessage,
+  encodeOpaqueDataChannelClosedMessage,
   encodeOpaqueChatAcceptedMessage,
   encodeOpaqueMultiChatAcceptedMessage,
   encodeSessionRequestPayload,
@@ -285,21 +289,49 @@ const armThinking = (peerHex) => {
   }, thinkingAfterMs));
 };
 
-// ---------- send a reply text to a peer ----------
-const sendText = async (peerHex, text) => {
+// ---------- send a reply to a peer ----------
+// Returns the outgoing envelope messageId (an app UUID) so callers — notably
+// POST /send — hand the brain an id it can later edit or that the peer can
+// react to. replyTo quotes a peer message; editOf rewrites one of our own.
+const sendMessage = async (peerHex, { text, replyTo = null, editOf = null }) => {
   disarmThinking(peerHex); // a real reply is going out — no ack needed
   const entry = sessions.get(norm(peerHex));
   if (entry == null) throw new Error("no active session for peer");
-  const payload = encodeSessionRequestPayload(entry.session, makeAppUuid(), [encodeOpaqueTextMessage({ text })]);
-  const result = await submitBounded({
+  const messageId = makeAppUuid();
+  const opaque = replyTo
+    ? encodeOpaqueReplyMessage({ messageId, replyToMessageId: replyTo, text })
+    : editOf
+      ? encodeOpaqueEditedMessage({ messageId, targetMessageId: editOf, text })
+      : encodeOpaqueTextMessage({ messageId, text });
+  const payload = encodeSessionRequestPayload(entry.session, makeAppUuid(), [opaque]);
+  await submitBounded({
     walletPair: wallet,
     channel: entry.session.requestChannel,
     topics: [entry.session.ownSessionId],
     scaleEncodedPayload: payload,
     expiryFactory,
   });
-  log("BOT_SENT_TEXT", { to: peerHex, chars: text.length });
-  return result?.priority ?? String(Date.now());
+  log("BOT_SENT_TEXT", { to: peerHex, chars: text.length, ...(replyTo ? { replyTo } : {}), ...(editOf ? { editOf } : {}) });
+  return messageId;
+};
+const sendText = (peerHex, text) => sendMessage(peerHex, { text });
+
+// Reactions ride the same session channel but are not "replies": they never
+// disarm the thinking ack and carry no text of their own.
+const sendReaction = async (peerHex, targetMessageId, emoji, removed = false) => {
+  const entry = sessions.get(norm(peerHex));
+  if (entry == null) throw new Error("no active session for peer");
+  const payload = encodeSessionRequestPayload(entry.session, makeAppUuid(), [
+    encodeOpaqueReactionMessage({ targetMessageId, emoji, removed }),
+  ]);
+  await submitBounded({
+    walletPair: wallet,
+    channel: entry.session.requestChannel,
+    topics: [entry.session.ownSessionId],
+    scaleEncodedPayload: payload,
+    expiryFactory,
+  });
+  log("BOT_SENT_REACTION", { to: peerHex, removed, target: targetMessageId });
 };
 
 // ---------- brain: decide what to do with an inbound message ----------
@@ -741,10 +773,24 @@ const startBridge = () => {
         return json(200, drained);
       }
       if (req.method === "POST" && url.pathname === "/send") {
-        const { chat_id: chatId, text } = await readJson(req);
+        const { chat_id: chatId, text, reply_to: replyTo, edit_of: editOf } = await readJson(req);
         if (!chatId || !text) return json(400, { success: false, error: "chat_id and text required" });
-        const messageId = await sendText(chatId, String(text));
-        return json(200, { success: true, message_id: String(messageId) });
+        if (replyTo && editOf) return json(400, { success: false, error: "reply_to and edit_of are mutually exclusive" });
+        const messageId = await sendMessage(chatId, {
+          text: String(text),
+          replyTo: replyTo ? String(replyTo) : null,
+          editOf: editOf ? String(editOf) : null,
+        });
+        return json(200, { success: true, message_id: messageId });
+      }
+      if (req.method === "POST" && url.pathname === "/react") {
+        const { chat_id: chatId, message_id: targetId, emoji, remove } = await readJson(req);
+        if (!chatId || !targetId || !emoji) return json(400, { success: false, error: "chat_id, message_id and emoji required" });
+        // The wire accepts any string; cap it so a confused harness can't push
+        // paragraphs through the reaction field.
+        if (String(emoji).length > 16) return json(400, { success: false, error: "emoji too long" });
+        await sendReaction(chatId, String(targetId), String(emoji), Boolean(remove));
+        return json(200, { success: true });
       }
       if (req.method === "POST" && url.pathname === "/typing") return json(200, { ok: true });
       return json(404, { error: "not found" });

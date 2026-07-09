@@ -27,7 +27,8 @@ A framework plugin needs four HTTP routes:
 |---|---|
 | `GET /health` | returns `{ ok, account, identifierKey, username }` |
 | `GET /inbound?wait=<secs>` | long-poll; returns `[{ chat_id, text, message_id }, ...]`, an empty array on timeout. `chat_id` is the peer's account-id hex. |
-| `POST /send { chat_id, text }` | publishes a reply to that peer; returns `{ success, message_id }` |
+| `POST /send { chat_id, text, reply_to?, edit_of? }` | publishes a reply to that peer; returns `{ success, message_id }`. `message_id` is the outgoing message's id — hold on to it to edit that message later. `reply_to: <message_id>` renders as a quote of that peer message in the app; `edit_of: <message_id>` rewrites a message the bot sent earlier (the app updates the bubble in place). The two are mutually exclusive. |
+| `POST /react { chat_id, message_id, emoji, remove? }` | reacts to a peer message with an emoji (shown as a chip under the bubble in the app); `remove: true` retracts a previous reaction. Returns `{ success }`. |
 | `POST /typing { chat_id }` | best-effort, currently a no-op |
 
 An adapter is a loop: poll `/inbound`, feed each message to the agent, `POST
