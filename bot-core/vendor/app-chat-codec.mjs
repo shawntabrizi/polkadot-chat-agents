@@ -235,6 +235,17 @@ function scaleEncodeUInt64(value) {
   return encoded;
 }
 
+function scaleDecodeUInt32At(bytes, offset = 0) {
+  if (offset + 4 > bytes.length) {
+    throw new Error(`SCALE u32 exceeds buffer at ${offset}`);
+  }
+  let value = 0;
+  for (let index = 0; index < 4; index += 1) {
+    value += bytes[offset + index] * 2 ** (8 * index);
+  }
+  return { value, offset: offset + 4 };
+}
+
 function scaleDecodeUInt64At(bytes, offset = 0) {
   let value = 0n;
   for (let index = 0; index < 8; index += 1) {
@@ -648,18 +659,76 @@ function decodeRemoteTokenContentAt(bytes, offset) {
 function decodeRichTextAt(bytes, offset) {
   const text = scaleDecodeOptionAt(bytes, offset, scaleDecodeStringAt);
   offset = text.offset;
-  const attachments = scaleDecodeOptionAt(bytes, offset, decodeUnsupportedAttachmentsAt);
+  const attachments = scaleDecodeOptionAt(bytes, offset, decodeAttachmentsAt);
   return {
     value: { text: text.value, attachments: attachments.value },
     offset: attachments.offset,
   };
 }
 
-function decodeUnsupportedAttachmentsAt(bytes, offset) {
-  const decoded = scaleDecodeArrayAt(bytes, offset, (attachmentBytes, attachmentOffset) => {
-    throw new Error(`Unsupported rich-text attachment at ${attachmentOffset}`);
-  });
-  return decoded;
+function decodeAttachmentsAt(bytes, offset) {
+  return scaleDecodeArrayAt(bytes, offset, decodeFileVariantAt);
+}
+
+// Attachment layout mirrors the mobile app's FileVariant (ChatRichRemoteContent
+// .swift). Unknown enum tags throw on purpose: the per-message try/catch in
+// decodeOpaqueMessageAt turns the message undecodable without hurting the batch.
+function decodeFileVariantAt(bytes, offset) {
+  const variantTag = bytes[offset];
+  if (variantTag !== 0) {
+    throw new Error(`Unsupported FileVariant tag ${variantTag} at ${offset}`);
+  }
+  const identifier = scaleDecodeBytesAt(bytes, offset + 1);
+  const claimTicket = scaleDecodeBytesAt(bytes, identifier.offset);
+  const node = decodeNodeEndpointAt(bytes, claimTicket.offset);
+  const meta = decodeFileMetaAt(bytes, node.offset);
+  return {
+    value: {
+      kind: "p2pMixnetFile",
+      identifier: identifier.value,
+      identifierHex: normalizeHex(bytesToHex(identifier.value)),
+      claimTicket: claimTicket.value,
+      wssUrl: node.value,
+      ...meta.value,
+    },
+    offset: meta.offset,
+  };
+}
+
+function decodeNodeEndpointAt(bytes, offset) {
+  const tag = bytes[offset];
+  if (tag !== 0) {
+    throw new Error(`Unsupported NodeEndpoint tag ${tag} at ${offset}`);
+  }
+  return scaleDecodeStringAt(bytes, offset + 1);
+}
+
+function decodeFileMetaAt(bytes, offset) {
+  const tag = bytes[offset];
+  if (tag !== 0 && tag !== 1 && tag !== 2) {
+    throw new Error(`Unsupported FileMeta tag ${tag} at ${offset}`);
+  }
+  const mimeType = scaleDecodeStringAt(bytes, offset + 1);
+  const fileSize = scaleDecodeUInt32At(bytes, mimeType.offset);
+  const general = { mimeType: mimeType.value, fileSize: fileSize.value };
+  if (tag === 0) {
+    return { value: { fileKind: "general", ...general }, offset: fileSize.offset };
+  }
+  if (tag === 1) {
+    const width = scaleDecodeUInt32At(bytes, fileSize.offset);
+    const height = scaleDecodeUInt32At(bytes, width.offset);
+    const thumbnail = scaleDecodeOptionAt(bytes, height.offset, scaleDecodeBytesAt);
+    return {
+      value: { fileKind: "image", ...general, width: width.value, height: height.value, thumbnail: thumbnail.value },
+      offset: thumbnail.offset,
+    };
+  }
+  const duration = scaleDecodeUInt32At(bytes, fileSize.offset);
+  const thumbnail = scaleDecodeOptionAt(bytes, duration.offset, scaleDecodeBytesAt);
+  return {
+    value: { fileKind: "video", ...general, duration: duration.value, thumbnail: thumbnail.value },
+    offset: thumbnail.offset,
+  };
 }
 
 function decodeStatementProofAt(bytes, offset = 0) {
@@ -685,6 +754,72 @@ export function encodeOpaqueTextMessage({ messageId = makeAppUuid(), timestamp =
     messageId,
     timestamp,
     content: concatBytes(Uint8Array.of(0), scaleEncodeString(text)),
+  });
+}
+
+// RichText on the wire: Option<String> text, Option<Vec<FileVariant>> attachments.
+// The bot only sends text (attachments always None — outbound files need the HOP
+// upload path, which is not implemented).
+function encodeRichText(text) {
+  return concatBytes(
+    scaleEncodeOption(text == null ? null : scaleEncodeString(text)),
+    Uint8Array.of(0),
+  );
+}
+
+export function encodeOpaqueReactionMessage({
+  messageId = makeAppUuid(),
+  timestamp = chatTimestampNow(),
+  targetMessageId,
+  emoji,
+  removed = false,
+}) {
+  return encodeOpaqueRemoteMessage({
+    messageId,
+    timestamp,
+    content: concatBytes(
+      Uint8Array.of(removed ? 5 : 4),
+      scaleEncodeString(targetMessageId),
+      scaleEncodeString(emoji),
+    ),
+  });
+}
+
+export function encodeOpaqueReplyMessage({
+  messageId = makeAppUuid(),
+  timestamp = chatTimestampNow(),
+  replyToMessageId,
+  text,
+}) {
+  return encodeOpaqueRemoteMessage({
+    messageId,
+    timestamp,
+    content: concatBytes(Uint8Array.of(7), scaleEncodeString(replyToMessageId), encodeRichText(text)),
+  });
+}
+
+export function encodeOpaqueEditedMessage({
+  messageId = makeAppUuid(),
+  timestamp = chatTimestampNow(),
+  targetMessageId,
+  text,
+}) {
+  return encodeOpaqueRemoteMessage({
+    messageId,
+    timestamp,
+    content: concatBytes(Uint8Array.of(12), scaleEncodeString(targetMessageId), encodeRichText(text)),
+  });
+}
+
+export function encodeOpaqueDataChannelClosedMessage({
+  messageId = makeAppUuid(),
+  timestamp = chatTimestampNow(),
+  offerId,
+}) {
+  return encodeOpaqueRemoteMessage({
+    messageId,
+    timestamp,
+    content: concatBytes(Uint8Array.of(11), scaleEncodeString(offerId)),
   });
 }
 
@@ -966,7 +1101,9 @@ function decodeMessageExchangeResponseAt(bytes, offset) {
   };
 }
 
-function decodeOpaqueMessageAt(bytes, offset) {
+// Exported for the codec unit tests (round-trip a single opaque message
+// without building a whole encrypted session statement).
+export function decodeOpaqueMessageAt(bytes, offset) {
   const opaque = scaleDecodeBytesAt(bytes, offset);
   // Each opaque message is length-prefixed, so one undecodable message (e.g. a
   // rich-text image attachment) must not abort the rest of the batch — the app
@@ -1060,6 +1197,85 @@ function decodeRemoteMessage(bytes) {
       totalValueString: totalValue.value.toString(),
       coinKeys: coinKeys.value,
       offset: coinKeys.offset,
+    };
+  }
+  if (contentKind === 3) {
+    return {
+      messageId: messageId.value,
+      timestamp: Number(timestamp.value),
+      kind: "contactAdded",
+      offset,
+    };
+  }
+  if (contentKind === 4 || contentKind === 5) {
+    const targetMessageId = scaleDecodeStringAt(bytes, offset);
+    const emoji = scaleDecodeStringAt(bytes, targetMessageId.offset);
+    return {
+      messageId: messageId.value,
+      timestamp: Number(timestamp.value),
+      kind: "reaction",
+      removed: contentKind === 5,
+      targetMessageId: targetMessageId.value,
+      emoji: emoji.value,
+      offset: emoji.offset,
+    };
+  }
+  if (contentKind === 7) {
+    const replyToMessageId = scaleDecodeStringAt(bytes, offset);
+    const richText = decodeRichTextAt(bytes, replyToMessageId.offset);
+    return {
+      messageId: messageId.value,
+      timestamp: Number(timestamp.value),
+      kind: "reply",
+      replyToMessageId: replyToMessageId.value,
+      text: richText.value.text ?? "",
+      richText: richText.value,
+      offset: richText.offset,
+    };
+  }
+  if (contentKind === 8) {
+    // WebRTC call offer. The sdp blob is decoded only for framing — surface its
+    // length, not its content. The offer's envelope messageId doubles as the
+    // offerId a dataChannelClosed decline must reference.
+    const sdp = scaleDecodeBytesAt(bytes, offset);
+    return {
+      messageId: messageId.value,
+      timestamp: Number(timestamp.value),
+      kind: "dataChannelOffer",
+      purpose: bytes[sdp.offset],
+      sdpLength: sdp.value.length,
+      offset: sdp.offset + 1,
+    };
+  }
+  if (contentKind === 11) {
+    const offerId = scaleDecodeStringAt(bytes, offset);
+    return {
+      messageId: messageId.value,
+      timestamp: Number(timestamp.value),
+      kind: "dataChannelClosed",
+      offerId: offerId.value,
+      offset: offerId.offset,
+    };
+  }
+  if (contentKind === 12) {
+    const targetMessageId = scaleDecodeStringAt(bytes, offset);
+    const richText = decodeRichTextAt(bytes, targetMessageId.offset);
+    return {
+      messageId: messageId.value,
+      timestamp: Number(timestamp.value),
+      kind: "edited",
+      targetMessageId: targetMessageId.value,
+      text: richText.value.text ?? "",
+      richText: richText.value,
+      offset: richText.offset,
+    };
+  }
+  if (contentKind === 13) {
+    return {
+      messageId: messageId.value,
+      timestamp: Number(timestamp.value),
+      kind: "leftChat",
+      offset,
     };
   }
   return {
