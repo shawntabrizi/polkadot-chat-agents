@@ -1,7 +1,32 @@
 // Thin HTTP client for the bot-core bridge (the Polkadot transport daemon).
-// Contract: GET /health, GET /inbound?wait=<secs> (long-poll), POST /send {chat_id,text}.
+// Contract: GET /health, GET /inbound?wait=<secs> (long-poll), POST /send
+// {chat_id,text,reply_to?,edit_of?}, GET /media/:id (downloaded attachments).
 
-export type InboundMsg = { chat_id: string; text: string; message_id: string };
+// Attachment metadata as bot-core exposes it: bytes are already downloaded on
+// the bot-core side and served at `url` (relative to the bridge base URL).
+export type InboundAttachment = {
+  id: string;
+  kind: "image" | "video" | "general";
+  mime: string;
+  size: number;
+  width?: number;
+  height?: number;
+  duration?: number;
+  downloaded: boolean;
+  url?: string;
+  error?: string;
+};
+
+export type InboundMsg = {
+  chat_id: string;
+  text: string;
+  message_id: string;
+  // present for non-plain-text kinds: "richText" | "reply" | "edited"
+  kind?: string;
+  reply_to?: string;
+  edit_of?: string;
+  attachments?: InboundAttachment[];
+};
 export type SendResult = { success: boolean; message_id?: string; error?: string };
 
 export function createBridge(baseUrl: string) {

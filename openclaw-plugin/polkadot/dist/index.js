@@ -55,6 +55,15 @@ function createBridge(baseUrl) {
 
 // src/gateway.ts
 var POLL_WAIT_SECS = 25;
+function attachmentNotes(msg, bridgeBaseUrl) {
+  if (!msg.attachments?.length) return "";
+  const base = bridgeBaseUrl.replace(/\/+$/, "");
+  return msg.attachments.map(
+    (a) => a.downloaded && a.url ? `
+[attachment ${a.kind}: ${base}${a.url} (${a.mime}, ${a.size} bytes)]` : `
+[attachment ${a.kind} (${a.mime}) failed to download${a.error ? `: ${a.error}` : ""}]`
+  ).join("");
+}
 async function startPolkadotGatewayAccount(ctx) {
   const account = resolvePolkadotAccount({ cfg: ctx.cfg, accountId: ctx.account?.accountId });
   if (!account.enabled) return;
@@ -105,7 +114,7 @@ async function dispatchInbound(ctx, channelRuntime, account, bridge, msg) {
         id: msg.message_id || randomUUID(),
         timestamp: Date.now(),
         rawText: msg.text,
-        textForAgent: msg.text,
+        textForAgent: msg.text + attachmentNotes(msg, account.bridgeUrl),
         textForCommands: msg.text,
         raw: msg
       }),

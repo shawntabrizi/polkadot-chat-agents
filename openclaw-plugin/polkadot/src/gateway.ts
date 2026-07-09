@@ -13,6 +13,20 @@ import { POLKADOT_CHANNEL_ID, resolvePolkadotAccount, type ResolvedPolkadotAccou
 
 const POLL_WAIT_SECS = 25;
 
+// The agent only sees text, so attachments (already downloaded by bot-core)
+// surface as bracketed notes with an absolute /media URL the agent can fetch.
+function attachmentNotes(msg: InboundMsg, bridgeBaseUrl: string): string {
+  if (!msg.attachments?.length) return "";
+  const base = bridgeBaseUrl.replace(/\/+$/, "");
+  return msg.attachments
+    .map((a) =>
+      a.downloaded && a.url
+        ? `\n[attachment ${a.kind}: ${base}${a.url} (${a.mime}, ${a.size} bytes)]`
+        : `\n[attachment ${a.kind} (${a.mime}) failed to download${a.error ? `: ${a.error}` : ""}]`,
+    )
+    .join("");
+}
+
 export async function startPolkadotGatewayAccount(ctx: any): Promise<void> {
   const account: ResolvedPolkadotAccount = resolvePolkadotAccount({ cfg: ctx.cfg, accountId: ctx.account?.accountId });
   if (!account.enabled) return;
@@ -75,7 +89,7 @@ async function dispatchInbound(
         id: msg.message_id || randomUUID(),
         timestamp: Date.now(),
         rawText: msg.text,
-        textForAgent: msg.text,
+        textForAgent: msg.text + attachmentNotes(msg, account.bridgeUrl),
         textForCommands: msg.text,
         raw: msg,
       }),
