@@ -24,11 +24,14 @@
 
 import http from "node:http";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { blake2b } from "@noble/hashes/blake2.js";
 import { createStateStore } from "./lib/session-store.mjs";
 import { createCommandHandler } from "./lib/commands.mjs";
+import { downloadP2PFile } from "./lib/hop-client.mjs";
+import { createMediaStore } from "./lib/media-store.mjs";
 import { createClient as createPapiClient } from "polkadot-api";
 import { getWsProvider, WsEvent } from "polkadot-api/ws";
 import { paseoPeopleNext } from "./lib/descriptors.mjs";
@@ -142,6 +145,75 @@ const bytesToHex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2
 const enc = new TextEncoder();
 const norm = (hex) => String(hex).trim().replace(/^0x/i, "").toLowerCase();
 const log = (event, extra = {}) => console.log(JSON.stringify({ time: new Date().toISOString(), event, ...extra }));
+
+// ---------- attachment media (downloaded blobs) ----------
+// Attachments arrive as HOP references (identifier + claimTicket + node URL);
+// the bytes are fetched into the media store so brains can read them and the
+// bridge can serve them via GET /media/:id. Stateless runs get a temp dir.
+const mediaMaxBytes = Number(env.BOT_MEDIA_MAX_BYTES ?? 32 * 1024 * 1024);
+const hopTimeoutMs = Number(env.BOT_HOP_TIMEOUT_MS ?? 120_000);
+const hopAllowInsecure = env.BOT_HOP_ALLOW_INSECURE === "1"; // tests only: mock node is plain ws
+const hopAllowedNodes = String(env.BOT_HOP_ALLOWED_NODES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+const mediaStore = createMediaStore({
+  dir: env.BOT_STATE_DIR ? path.join(env.BOT_STATE_DIR, "media") : fs.mkdtempSync(path.join(os.tmpdir(), "bot-media-")),
+  ttlHours: Number(env.BOT_MEDIA_TTL_HOURS ?? 48),
+  maxTotalMb: Number(env.BOT_MEDIA_MAX_TOTAL_MB ?? 512),
+  log,
+});
+mediaStore.sweep();
+setInterval(() => mediaStore.sweep(), 3_600_000).unref();
+
+const humanSize = (bytes) =>
+  bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+const attachmentNoun = (a) => (a.fileKind === "image" ? "photo" : a.fileKind === "video" ? "video" : "file");
+// Decoded codec attachment -> journal-able metadata: hex strings only, so it
+// survives JSON round-trips in the owed journal. ticketHex is key material —
+// never logged, never handed across the bridge.
+const toAttachmentMeta = (a) => ({
+  id: a.identifierHex,
+  ticketHex: norm(bytesToHex(a.claimTicket)),
+  wssUrl: a.wssUrl,
+  mime: a.mimeType,
+  size: a.fileSize,
+  fileKind: a.fileKind,
+  ...(a.width != null ? { width: a.width, height: a.height } : {}),
+  ...(a.duration != null ? { duration: a.duration } : {}),
+});
+// Every consumer of a message expects non-empty text, so caption-less
+// attachments get a synthesized placeholder.
+const synthesizeText = (caption, attachments) =>
+  caption || (attachments ?? []).map((a) => `[${attachmentNoun(a)}, ${a.mime}, ${humanSize(a.size)}]`).join(" ");
+
+// Fetch each attachment into the media store, annotating the metadata in
+// place ({downloaded, path} or {downloaded:false, error}). Failures are notes
+// for the brain, never fatal — the message is already ACKed. Runs inside the
+// per-peer work queue, after the ACK, so a slow node can't cause resend storms.
+const fetchAttachments = async (attachments) => {
+  for (const a of attachments ?? []) {
+    const existing = mediaStore.find(a.id);
+    if (existing) { a.downloaded = true; a.path = existing.path; continue; }
+    try {
+      if (a.size > mediaMaxBytes) throw new Error(`larger than BOT_MEDIA_MAX_BYTES (${a.size} bytes)`);
+      const bytes = await downloadP2PFile({
+        wssUrl: a.wssUrl,
+        identifier: hexToBytes(a.id),
+        claimTicket: hexToBytes(a.ticketHex),
+        maxBytes: mediaMaxBytes,
+        deadlineMs: hopTimeoutMs,
+        allowInsecure: hopAllowInsecure,
+        allowedNodes: hopAllowedNodes.length ? hopAllowedNodes : null,
+        log,
+      });
+      a.downloaded = true;
+      a.path = mediaStore.save(a.id, bytes, a.mime);
+      log("BOT_MEDIA_DOWNLOADED", { id: a.id.slice(0, 16), mime: a.mime, bytes: bytes.length });
+    } catch (e) {
+      a.downloaded = false;
+      a.error = String(e?.message ?? e);
+      log("BOT_MEDIA_DOWNLOAD_FAILED", { id: a.id.slice(0, 16), error: a.error });
+    }
+  }
+};
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------- identity ----------
@@ -261,14 +333,30 @@ const enqueueInbound = (item) => {
     log("BOT_INBOUND_QUEUE_TRIMMED", { cap: INBOUND_CAP, dropped });
   }
   const w = waiters.shift();
-  if (w) { clearTimeout(w.timer); w.resolve(drainInbound()); }
+  if (w) { clearTimeout(w.timer); w.resolve(drainInbound(w.events)); }
+};
+// Non-message signals (reactions, coinage, leftChat, …) ride a separate,
+// smaller queue delivered only to /inbound?events=1 pollers: a harness that
+// doesn't opt in would run its agent on a reaction and chat-reply to it.
+// Events are informational — never journaled, loss on crash is acceptable.
+const EVENT_CAP = 200;
+const eventQueue = [];
+const enqueueEvent = (item) => {
+  if (!usesBridgeQueue) return;
+  eventQueue.push(item);
+  if (eventQueue.length > EVENT_CAP) eventQueue.splice(0, eventQueue.length - EVENT_CAP);
+  const i = waiters.findIndex((w) => w.events);
+  if (i >= 0) { const [w] = waiters.splice(i, 1); clearTimeout(w.timer); w.resolve(drainInbound(true)); }
 };
 // Hand the queued items to the harness: custody transfers here, so settle each
 // item's owed-journal entry and strip the internal owedId from the payload.
-const drainInbound = () => inboundQueue.splice(0).map(({ owedId, ...item }) => {
-  if (owedId) settleOwed(owedId);
-  return item;
-});
+const drainInbound = (includeEvents = false) => {
+  const items = inboundQueue.splice(0).map(({ owedId, ...item }) => {
+    if (owedId) settleOwed(owedId);
+    return item;
+  });
+  return includeEvents ? [...items, ...eventQueue.splice(0)] : items;
+};
 
 const isAllowed = (peerHex) => allowedPeers.size === 0 || allowedPeers.has(norm(peerHex));
 
@@ -383,27 +471,60 @@ const handleCommandFor = createCommandHandler({
 });
 const handleCommand = (peerHex, text) => handleCommandFor(norm(peerHex), text);
 
-const handleInbound = async (peerHex, text, messageId, owedId = null) => {
+// Bridge-facing attachment shape: no claimTicket (key material stays inside
+// bot-core); the harness fetches bytes via GET /media/:id.
+const publicAttachment = (a) => ({
+  id: a.id,
+  kind: a.fileKind,
+  mime: a.mime,
+  size: a.size,
+  ...(a.width != null ? { width: a.width, height: a.height } : {}),
+  ...(a.duration != null ? { duration: a.duration } : {}),
+  downloaded: Boolean(a.downloaded),
+  ...(a.downloaded ? { url: `/media/${a.id}` } : {}),
+  ...(a.error ? { error: a.error } : {}),
+});
+
+// Direct-brain prompt rendering: attachments become bracketed notes with the
+// downloaded file path (the CLI can read it), replies/edits become context
+// prefixes. msg.text is the raw caption and may be empty.
+const renderForBrain = (msg) => {
+  const parts = [];
+  if (msg.editOf) parts.push("[edited their earlier message]");
+  else if (msg.replyTo) parts.push("[replying to your earlier message]");
+  if (msg.text) parts.push(msg.text);
+  for (const a of msg.attachments ?? []) {
+    parts.push(a.downloaded
+      ? `[User sent a ${attachmentNoun(a)} saved at ${a.path} (${a.mime}, ${humanSize(a.size)})]`
+      : `[User sent a ${attachmentNoun(a)} (${a.mime}, ${humanSize(a.size)}) — download failed: ${a.error ?? "unknown error"}]`);
+  }
+  return parts.join(" ") || synthesizeText("", msg.attachments);
+};
+
+// msg: { text, messageId, kind, attachments?, replyTo?, editOf? }
+const handleInbound = async (peerHex, msg, owedId = null) => {
+  await fetchAttachments(msg.attachments);
   if (brain === "echo") {
-    await sendText(peerHex, `Echo: ${text}`).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
+    await sendText(peerHex, `Echo: ${synthesizeText(msg.text, msg.attachments)}`).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
     return;
   }
   if (aiSpec) {
-    const commandReply = handleCommand(peerHex, text);
+    const commandReply = handleCommand(peerHex, msg.text);
     if (commandReply) {
-      log("BOT_COMMAND", { from: peerHex, command: text.split(/\s/)[0] });
+      log("BOT_COMMAND", { from: peerHex, command: msg.text.split(/\s/)[0] });
       await sendText(peerHex, commandReply).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
       return;
     }
+    const userText = renderForBrain(msg);
     armThinking(peerHex); // ack if the model takes longer than thinkingAfterMs
-    const reply = await runAgentCli(peerHex, text);  // logs its own classified failure reason
+    const reply = await runAgentCli(peerHex, userText);  // logs its own classified failure reason
     if (!reply) {
       // Don't leave the user hanging after the "thinking" ack.
       await sendText(peerHex, "Sorry — I couldn't reach my AI just now. Please try again in a moment.").catch(() => {});
       return;
     }
     const h = aiHistory.get(peerHex) ?? [];
-    h.push({ role: "user", text }, { role: "bot", text: reply });
+    h.push({ role: "user", text: userText }, { role: "bot", text: reply });
     aiHistory.set(peerHex, h.slice(-AI_TURNS * 2));
     trimMap(aiHistory, AI_HISTORY_PEER_CAP);
     // Discovery: the very first reply to a peer carries a one-time /help hint
@@ -418,16 +539,25 @@ const handleInbound = async (peerHex, text, messageId, owedId = null) => {
     return;
   }
   // bridge / hermes / unknown: hand off to an external agent via the HTTP bridge.
-  // The agent replies via POST /send -> sendText, which disarms the ack.
+  // The agent replies via POST /send -> sendMessage, which disarms the ack.
   armThinking(peerHex);
-  enqueueInbound({ chat_id: peerHex, text, message_id: messageId, owedId });
+  enqueueInbound({
+    chat_id: peerHex,
+    text: synthesizeText(msg.text, msg.attachments),
+    message_id: msg.messageId,
+    owedId,
+    ...(msg.kind && msg.kind !== "text" ? { kind: msg.kind } : {}),
+    ...(msg.replyTo ? { reply_to: msg.replyTo } : {}),
+    ...(msg.editOf ? { edit_of: msg.editOf } : {}),
+    ...(msg.attachments?.length ? { attachments: msg.attachments.map(publicAttachment) } : {}),
+  });
 };
 
 // Queue one owed message for the brain, settling the journal entry when the
 // pipeline takes custody (bridge items settle later, on /inbound drain).
-const enqueueOwed = (peerHex, owedId, text, requestId) => {
+const enqueueOwed = (peerHex, owedId, msg, requestId) => {
   enqueueWork(peerHex, async () => {
-    try { await handleInbound(peerHex, text, requestId, owedId); }
+    try { await handleInbound(peerHex, msg, owedId); }
     finally { if (!usesBridgeQueue) settleOwed(owedId); }
   });
 };
@@ -456,8 +586,8 @@ const messageDedupId = (requestId, text, messageId) =>
 // harness drains the item from /inbound. Bounded by the same backpressure
 // caps as the queues it mirrors. Holds message text until answered — transient
 // by design, in a file that is 0600 and already holds key material.
-const owedReplies = new Map(); // owedId -> { peerHex, text, requestId }
-const oweReply = (owedId, peerHex, text, requestId) => owedReplies.set(owedId, { peerHex, text, requestId });
+const owedReplies = new Map(); // owedId -> { peerHex, requestId, msg }
+const oweReply = (owedId, peerHex, msg, requestId) => owedReplies.set(owedId, { peerHex, requestId, msg });
 const settleOwed = (owedId) => { if (owedReplies.delete(owedId)) persist(); };
 
 // Persist only what can't be re-derived: per-peer identifierKey + peerDevices.
@@ -476,7 +606,28 @@ const snapshotState = () => ({
     })),
   })),
   seen: [...seenRequests].slice(-SEEN_CAP),
-  owed: [...owedReplies.entries()].map(([id, o]) => ({ id, p: o.peerHex, t: o.text, r: o.requestId })),
+  // Additive optional fields (k/q/e/a) keep the snapshot readable by older
+  // binaries, which fall back to answering from t (caption or synthesized
+  // text). The attachment claim ticket ("ct") is key material — acceptable
+  // here because this file is 0600 and already holds session keys, and owed
+  // entries are transient (settled when the reply pipeline takes custody).
+  owed: [...owedReplies.entries()].map(([id, o]) => ({
+    id,
+    p: o.peerHex,
+    t: synthesizeText(o.msg.text, o.msg.attachments),
+    r: o.requestId,
+    ...(o.msg.kind && o.msg.kind !== "text" ? { k: o.msg.kind } : {}),
+    ...(o.msg.replyTo ? { q: o.msg.replyTo } : {}),
+    ...(o.msg.editOf ? { e: o.msg.editOf } : {}),
+    ...(o.msg.attachments?.length ? {
+      c: o.msg.text, // raw caption; t above is synthesized for older binaries
+      a: o.msg.attachments.map((x) => ({
+        i: x.id, ct: x.ticketHex, u: x.wssUrl, m: x.mime, s: x.size, kd: x.fileKind,
+        ...(x.width != null ? { w: x.width, h: x.height } : {}),
+        ...(x.duration != null ? { d: x.duration } : {}),
+      })),
+    } : {}),
+  })),
   greeted: [...greetedPeers],
   intro: [...introducedPeers],
 });
@@ -487,7 +638,11 @@ const fp = (data) => bytesToHex(data.subarray(0, 32)); // dedup key: first 32 by
 
 const handleOpener = async (data) => {
   let decoded;
-  try { decoded = decodeEncryptedChatRequestPayload(data, p256PrivateKey, accountId); } catch { return; }
+  // Unlike session batches, an opener has no per-message isolation: a welcome
+  // message we can't decode drops the whole request (and the app resends it
+  // forever, since no session ever ACKs) — make that visible.
+  try { decoded = decodeEncryptedChatRequestPayload(data, p256PrivateKey, accountId); }
+  catch (e) { log("BOT_OPENER_DECODE_FAILED", { error: String(e?.message ?? e) }); return; }
   const senderHex = norm(decoded.peerAccountIdHex);
   if (seenRequests.has(decoded.messageId)) return;
   if (!isAllowed(senderHex)) { log("BOT_REJECTED_UNLISTED", { from: senderHex }); return; }
@@ -503,7 +658,17 @@ const handleOpener = async (data) => {
   const session = buildSession(senderHex, identifierKeyHex, devices);
   addSessionWatch(senderHex);
   ingress?.resubscribe(); // watch this peer's session topics by push, not just sweep
-  oweReply(decoded.messageId, senderHex, decoded.text ?? "", decoded.messageId);
+  // The opener's welcome message is a RichText and can carry attachments
+  // (e.g. a photo as the very first message) — route them like session ones.
+  const openerAttachments = (decoded.welcomeMessage?.attachments ?? [])
+    .filter((a) => a.kind === "p2pMixnetFile").map(toAttachmentMeta);
+  const openerMsg = {
+    text: decoded.text ?? "",
+    messageId: decoded.messageId,
+    kind: openerAttachments.length ? "richText" : "text",
+    ...(openerAttachments.length ? { attachments: openerAttachments } : {}),
+  };
+  oweReply(decoded.messageId, senderHex, openerMsg, decoded.messageId);
   persist(); // remember this peer's session (and the owed reply) across restarts
   stateStore?.flush(); // owed must be on disk before the ACK suppresses resends
   // ACK / accept so the peer establishes the session (advertise our device).
@@ -514,8 +679,8 @@ const handleOpener = async (data) => {
     const ackPayload = encodeSessionRequestPayload(session, makeAppUuid(), [accept, encodeOpaqueTextMessage({ text: ackText })], { forceIdentity: true });
     await submitBounded({ walletPair: wallet, channel: session.requestChannel, topics: [session.ownSessionId], scaleEncodedPayload: ackPayload, expiryFactory });
   } catch (error) { log("BOT_ACK_FAILED", { to: senderHex, error: error instanceof Error ? error.message : String(error) }); }
-  log("BOT_RECEIVED_OPENER", { from: senderHex, requestId: decoded.messageId, text: decoded.text });
-  enqueueOwed(senderHex, decoded.messageId, decoded.text ?? "", decoded.messageId);
+  log("BOT_RECEIVED_OPENER", { from: senderHex, requestId: decoded.messageId, text: decoded.text, ...(openerAttachments.length ? { attachments: openerAttachments.length } : {}) });
+  enqueueOwed(senderHex, decoded.messageId, openerMsg, decoded.messageId);
 };
 
 // ACK a session request (mirrors the app: response goes on our own session
@@ -568,7 +733,8 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
   try { decoded = decodeSessionStatementPayload(data, session, senderAccountId); }
   catch (e) { log("BOT_SESSION_DECODE_FAILED", { from: peerHex, error: String(e?.message ?? e) }); return; }
   if (decoded?.kind !== "request") return;
-  const fresh = [];
+  const fresh = [];   // messages that run the brain (journaled + owed)
+  const declines = []; // call offers to auto-decline after the ACK
   for (const m of decoded.messages ?? []) {
     // Initiator side of an outgoing greeting: the peer's accept can advertise
     // their device encryption key — fold it into the session (and subscribe to
@@ -583,21 +749,78 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
       }
       continue;
     }
-    if (typeof m.text === "string" && m.text.length > 0) {
-      const id = messageDedupId(decoded.requestId, m.text, m.messageId);
+    if (m.kind === "undecodable") {
+      // Used to vanish silently; a message kind we can't parse should at least
+      // be diagnosable.
+      log("BOT_UNDECODABLE_MESSAGE", { from: peerHex, error: m.error });
+      continue;
+    }
+    // Brain-run kinds. Text must be non-empty unless attachments carry the
+    // content (a caption-less photo).
+    const attachments = (m.richText?.attachments ?? []).filter((a) => a.kind === "p2pMixnetFile").map(toAttachmentMeta);
+    const isBrainKind = (m.kind === "text" || m.kind === "richText" || m.kind === "reply" || m.kind === "edited")
+      && typeof m.text === "string" && (m.text.length > 0 || attachments.length > 0);
+    if (isBrainKind) {
+      const id = messageDedupId(decoded.requestId, `${m.kind}:${m.text}`, m.messageId);
       // Also honor the legacy plaintext key so entries persisted before this
       // change still count as seen — but never add new plaintext keys.
       const legacyKey = `${decoded.requestId}:${m.text}`;
       const alreadySeen = seenRequests.has(id) || seenRequests.has(legacyKey);
       seenRequests.add(id);
       trimSet(seenRequests, SEEN_CAP);
-      if (!alreadySeen) fresh.push({ id, text: m.text });
+      if (alreadySeen) continue;
+      fresh.push({
+        id,
+        msg: {
+          text: m.text,
+          messageId: m.messageId ?? id,
+          kind: m.kind,
+          ...(m.kind === "reply" ? { replyTo: m.replyToMessageId } : {}),
+          ...(m.kind === "edited" ? { editOf: m.targetMessageId } : {}),
+          ...(attachments.length ? { attachments } : {}),
+        },
+      });
+      continue;
     }
+    // Everything below is a signal, not a message: recorded/acted on, never
+    // journaled (informational — loss on crash is acceptable). Same
+    // messageId-first dedup so app resends don't double-fire.
+    if (!m.messageId) continue;
+    const id = messageDedupId(decoded.requestId, m.kind, m.messageId);
+    if (seenRequests.has(id)) continue;
+    seenRequests.add(id);
+    trimSet(seenRequests, SEEN_CAP);
+    if (m.kind === "reaction") {
+      log("BOT_RECEIVED_REACTION", { from: peerHex, emoji: m.emoji, target: m.targetMessageId, removed: m.removed });
+      if (aiSpec) {
+        // Visible to the model on the next turn, without spawning a CLI run —
+        // replying to a reaction with a chat message would be bizarre UX.
+        const h = aiHistory.get(peerHex) ?? [];
+        h.push({ role: "user", text: `(reacted ${m.emoji}${m.removed ? " — then removed it" : ""} to your earlier message)` });
+        aiHistory.set(peerHex, h.slice(-AI_TURNS * 2));
+      }
+      enqueueEvent({ chat_id: peerHex, kind: "reaction", message_id: m.messageId, target_message_id: m.targetMessageId, emoji: m.emoji, removed: m.removed, text: `[user ${m.removed ? "removed their reaction" : `reacted ${m.emoji}`}]` });
+    } else if (m.kind === "coinageSend") {
+      // Informational only: claiming the coins needs the full Coinage stack.
+      log("BOT_COINAGE_RECEIVED", { from: peerHex, totalValue: m.totalValueString, coins: m.coinKeys.length });
+      enqueueEvent({ chat_id: peerHex, kind: "coinageSend", message_id: m.messageId, total_value: m.totalValueString, text: `[user sent a Coinage payment (raw value ${m.totalValueString}) — the bot cannot claim it]` });
+    } else if (m.kind === "contactAdded" || m.kind === "leftChat") {
+      log(m.kind === "leftChat" ? "BOT_PEER_LEFT" : "BOT_CONTACT_ADDED", { from: peerHex });
+      enqueueEvent({ chat_id: peerHex, kind: m.kind, message_id: m.messageId, text: m.kind === "leftChat" ? "[user left the chat]" : "[user added the bot as a contact]" });
+    } else if (m.kind === "dataChannelOffer") {
+      // A WebRTC call — the bot has no media stack, so decline instead of
+      // ringing forever. Log the purpose byte to learn its values in the wild.
+      log("BOT_CALL_OFFER", { from: peerHex, purpose: m.purpose, sdpLength: m.sdpLength });
+      declines.push(m.messageId);
+    } else if (m.kind === "unsupported") {
+      log("BOT_UNSUPPORTED_CONTENT", { from: peerHex, contentKind: m.contentKind });
+    }
+    // chatAccepted / dataChannelClosed: nothing to do.
   }
   if (fresh.length) {
     // Journal before the ACK goes out: seen + owed land in one snapshot, so a
     // crash after the ACK can't leave a message deduped but never answered.
-    for (const f of fresh) oweReply(f.id, peerHex, f.text, decoded.requestId);
+    for (const f of fresh) oweReply(f.id, peerHex, f.msg, decoded.requestId);
     persist();
     stateStore?.flush();
   }
@@ -606,8 +829,19 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
   try { await sendSessionAck(peerHex, decoded.requestId); }
   catch (e) { log("BOT_SESSION_ACK_FAILED", { to: peerHex, error: String(e?.message ?? e) }); }
   for (const f of fresh) {
-    log("BOT_RECEIVED_TEXT", { from: peerHex, text: f.text });
-    enqueueOwed(peerHex, f.id, f.text, decoded.requestId);
+    log("BOT_RECEIVED_TEXT", { from: peerHex, text: f.msg.text, ...(f.msg.kind !== "text" ? { kind: f.msg.kind } : {}), ...(f.msg.attachments ? { attachments: f.msg.attachments.length } : {}) });
+    enqueueOwed(peerHex, f.id, f.msg, decoded.requestId);
+  }
+  for (const offerId of declines) {
+    enqueueWork(peerHex, async () => {
+      try {
+        const entry = sessions.get(norm(peerHex));
+        if (entry == null) return;
+        const payload = encodeSessionRequestPayload(entry.session, makeAppUuid(), [encodeOpaqueDataChannelClosedMessage({ offerId })]);
+        await submitBounded({ walletPair: wallet, channel: entry.session.requestChannel, topics: [entry.session.ownSessionId], scaleEncodedPayload: payload, expiryFactory });
+        log("BOT_CALL_DECLINED", { to: peerHex, offerId });
+      } catch (e) { log("BOT_CALL_DECLINE_FAILED", { to: peerHex, error: String(e?.message ?? e) }); }
+    });
   }
 };
 
@@ -761,16 +995,27 @@ const startBridge = () => {
       }
       if (req.method === "GET" && url.pathname === "/inbound") {
         const waitSecs = Math.min(60, Math.max(0, Number(url.searchParams.get("wait") ?? 25)));
-        if (inboundQueue.length > 0) return json(200, drainInbound());
+        // events=1 opts in to non-message signals (reactions, coinage, …); a
+        // harness that didn't ask would chat-reply to a reaction.
+        const events = url.searchParams.get("events") === "1";
+        if (inboundQueue.length > 0 || (events && eventQueue.length > 0)) return json(200, drainInbound(events));
         const drained = await new Promise((resolve) => {
           const timer = setTimeout(() => {
             const i = waiters.findIndex((w) => w.resolve === resolve);
             if (i >= 0) waiters.splice(i, 1);
             resolve([]);
           }, waitSecs * 1000);
-          waiters.push({ resolve, timer });
+          waiters.push({ resolve, timer, events });
         });
         return json(200, drained);
+      }
+      if (req.method === "GET" && url.pathname.startsWith("/media/")) {
+        // The id regex inside mediaStore.find is the path-traversal guard.
+        const found = mediaStore.find(url.pathname.slice("/media/".length));
+        if (!found) return json(404, { error: "not found" });
+        res.writeHead(200, { "content-type": found.mime });
+        fs.createReadStream(found.path).pipe(res);
+        return;
       }
       if (req.method === "POST" && url.pathname === "/send") {
         const { chat_id: chatId, text, reply_to: replyTo, edit_of: editOf } = await readJson(req);
@@ -895,8 +1140,22 @@ let restoredOwed = 0;
 for (const o of restored?.owed ?? []) {
   try {
     if (!o?.id || !o?.p || typeof o?.t !== "string") continue;
-    oweReply(o.id, o.p, o.t, o.r);
-    enqueueOwed(o.p, o.id, o.t, o.r);
+    const msg = {
+      text: typeof o.c === "string" ? o.c : o.t,
+      messageId: o.id,
+      kind: o.k ?? "text",
+      ...(o.q ? { replyTo: o.q } : {}),
+      ...(o.e ? { editOf: o.e } : {}),
+      ...(Array.isArray(o.a) && o.a.length ? {
+        attachments: o.a.map((x) => ({
+          id: x.i, ticketHex: x.ct, wssUrl: x.u, mime: x.m, size: x.s, fileKind: x.kd,
+          ...(x.w != null ? { width: x.w, height: x.h } : {}),
+          ...(x.d != null ? { duration: x.d } : {}),
+        })),
+      } : {}),
+    };
+    oweReply(o.id, o.p, msg, o.r);
+    enqueueOwed(o.p, o.id, msg, o.r);
     restoredOwed += 1;
   } catch (e) { log("BOT_STATE_OWED_SKIPPED", { error: String(e?.message ?? e) }); }
 }
