@@ -4,10 +4,14 @@
 
 `npm test` in `bot-core/` runs the transport end-to-end against an in-memory
 statement node (`test/mock-statement-node.mjs`): round trips with poison
-batches, restart survival with dedup, and owed-reply crash recovery — each in
-both ingress modes (poll-only and subscription). CI runs this on every push.
-`BOT_PEER_IDENTIFIER_KEYS` pins peer identifier keys so no people chain is
-needed.
+batches, restart survival with dedup, owed-reply crash recovery, and the rich
+features — attachment download (against an in-memory HOP node,
+`test/mock-hop-node.mjs`), reply quotes, reactions, and call auto-decline —
+each in both ingress modes (poll-only and subscription). Single-mode tests
+cover the bridge surface (`/inbound` shape, `/media`, `reply_to`/`edit_of`/
+`/react`, `events=1`) and an owed *attachment* surviving kill -9. CI runs this
+on every push. `BOT_PEER_IDENTIFIER_KEYS` pins peer identifier keys so no
+people chain is needed.
 
 ## Live network
 
@@ -53,6 +57,21 @@ node bot-core/test-client-device.mjs \
 If a bot answers `test-client.mjs` but not the app, this client is the repro
 tool: the bug is almost certainly in device-session polling or ACKs.
 
+Optional flags exercise the rich features after the follow-ups: `--reply 1`
+(follow-ups quote the bot's last message), `--react "🔥"` (expect an ACK and no
+reply), `--offer-call 1` (send a WebRTC offer; exit code fails unless the bot
+declines it), and `--attach '<json>'` + `--attach-caption` (send a real
+richText attachment pre-uploaded to a HOP node — the offline suite generates
+the JSON via the mock node's `putFile`).
+
+## Live checklist with a real phone
+
+After transport changes, verify against the actual app: send a photo (expect
+`BOT_MEDIA_DOWNLOADED` and a reply that reflects it), react to a bot message
+(`BOT_RECEIVED_REACTION`, no reply), edit one of your messages (the bot answers
+again with `kind: "edited"` logged), place a call (the app should show it
+declined), and send a Coinage payment (`BOT_COINAGE_RECEIVED`, log only).
+
 ## Restart survival
 
 To verify persistence, message a bot, restart its process (or
@@ -72,7 +91,12 @@ bot-core logs one JSON line per event. The ones worth grepping:
 | `BOT_RECEIVED_OPENER` / `BOT_RECEIVED_TEXT` | inbound message accepted |
 | `BOT_REJECTED_UNLISTED` | sender not on the allowlist |
 | `BOT_SESSION_DECODE_FAILED` | follow-up arrived but could not be decrypted |
-| `BOT_SENT_TEXT` | reply published |
+| `BOT_SENT_TEXT` | reply published (carries `replyTo`/`editOf` when quoting/editing) |
+| `BOT_MEDIA_DOWNLOADED` / `BOT_MEDIA_DOWNLOAD_FAILED` | attachment fetched from the HOP node (or not — the brain gets a failure note) |
+| `BOT_RECEIVED_REACTION` / `BOT_SENT_REACTION` | emoji reaction in / out |
+| `BOT_CALL_OFFER` / `BOT_CALL_DECLINED` | WebRTC call offer received / auto-declined |
+| `BOT_COINAGE_RECEIVED` | peer sent a Coinage payment (informational; the bot cannot claim it) |
+| `BOT_UNDECODABLE_MESSAGE` / `BOT_UNSUPPORTED_CONTENT` | message kind the codec can't parse / doesn't know |
 | `BOT_AI_FAILED` / `BOT_AI_TIMEOUT` / `BOT_AI_AUTH_REVOKED` | direct-brain model call failed (the last one means re-login) |
 
 ## CI

@@ -26,7 +26,8 @@ A framework plugin needs four HTTP routes:
 | Route | Purpose |
 |---|---|
 | `GET /health` | returns `{ ok, account, identifierKey, username }` |
-| `GET /inbound?wait=<secs>` | long-poll; returns `[{ chat_id, text, message_id }, ...]`, an empty array on timeout. `chat_id` is the peer's account-id hex. |
+| `GET /inbound?wait=<secs>` | long-poll; returns `[{ chat_id, text, message_id }, ...]`, an empty array on timeout. `chat_id` is the peer's account-id hex. `text` is always non-empty (a placeholder like `[photo, image/jpeg, 245 KB]` is synthesized for caption-less attachments). Items may carry `kind` (`richText`/`reply`/`edited`), `reply_to`, `edit_of`, and `attachments: [{ id, kind, mime, size, width?, height?, duration?, downloaded, url?, error? }]`. Add `&events=1` to also receive non-message signals (`kind`: `reaction`, `coinageSend`, `leftChat`, `contactAdded`) — opt-in, so a harness that ignores them never chat-replies to a reaction. |
+| `GET /media/<id>` | bytes of a downloaded attachment (`id`/`url` from the inbound item), served with its content type |
 | `POST /send { chat_id, text, reply_to?, edit_of? }` | publishes a reply to that peer; returns `{ success, message_id }`. `message_id` is the outgoing message's id — hold on to it to edit that message later. `reply_to: <message_id>` renders as a quote of that peer message in the app; `edit_of: <message_id>` rewrites a message the bot sent earlier (the app updates the bubble in place). The two are mutually exclusive. |
 | `POST /react { chat_id, message_id, emoji, remove? }` | reacts to a peer message with an emoji (shown as a chip under the bubble in the app); `remove: true` retracts a previous reaction. Returns `{ success }`. |
 | `POST /typing { chat_id }` | best-effort, currently a no-op |

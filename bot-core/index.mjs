@@ -5,8 +5,12 @@
 // It receives chat requests + session follow-ups addressed to the bot identity,
 // ACKs them, and exposes:
 //   GET  /health                     -> { ok, account, identifierKey, username }
-//   GET  /inbound?wait=<secs>        -> long-poll; [{chat_id, text, message_id}, ...]
-//   POST /send  {chat_id, text}      -> publish a reply to that peer
+//   GET  /inbound?wait=<secs>        -> long-poll; [{chat_id, text, message_id,
+//                                       kind?, reply_to?, edit_of?, attachments?}, ...]
+//                                       (&events=1 adds reactions/coinage/leftChat)
+//   GET  /media/<id>                 -> bytes of a downloaded attachment
+//   POST /send  {chat_id, text, reply_to?, edit_of?} -> publish a reply / quote / edit
+//   POST /react {chat_id, message_id, emoji, remove?} -> emoji reaction
 //   POST /typing {chat_id}           -> no-op (best effort)
 //
 // Reuses ONLY the generic transport codec (vendor/) + a papi client for the
@@ -21,6 +25,10 @@
 //   BOT_SUBSCRIBE (1; 0 = poll-only), BOT_SWEEP_MS (30000, sweep cadence while the
 //   subscription is healthy), BOT_HEARTBEAT_MS (30000), BOT_PEER_IDENTIFIER_KEYS
 //   ("peerhex=keyhex,..." — pin identifier keys, skipping the on-chain lookup).
+//   Attachments: BOT_MEDIA_MAX_BYTES (32MB), BOT_MEDIA_TTL_HOURS (48),
+//   BOT_MEDIA_MAX_TOTAL_MB (512), BOT_HOP_TIMEOUT_MS (120000),
+//   BOT_HOP_ALLOWED_NODES (comma-sep host suffixes; empty = allow any wss host),
+//   BOT_HOP_ALLOW_INSECURE (tests only: permit ws:// and IP hosts).
 
 import http from "node:http";
 import fs from "node:fs";

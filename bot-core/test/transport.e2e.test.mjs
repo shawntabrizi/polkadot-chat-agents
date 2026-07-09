@@ -8,9 +8,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import net from "node:net";
+import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { startMockStatementNode } from "./mock-statement-node.mjs";
+import { startMockHopNode } from "./mock-hop-node.mjs";
 import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
 import { deriveP256PrivateKey, p256PublicKeyFromPrivateKey } from "../vendor/app-chat-codec.mjs";
 
@@ -73,6 +75,7 @@ async function startBot({ endpoint, stateDir, extraEnv = {} }) {
   const bot = {
     child,
     events,
+    bridgePort,
     // Resolve when an event matching pred arrives (or already arrived).
     waitFor(pred, { timeoutMs = 15_000, label = "event" } = {}) {
       const hit = events.find(pred);
@@ -114,6 +117,15 @@ function runClient(endpoint, extraArgs, texts) {
 }
 
 const tmpState = () => fs.mkdtempSync(path.join(os.tmpdir(), "pca-e2e-"));
+
+// --attach spec for test-client-device: a file pre-uploaded to the mock HOP node.
+const attachSpecOf = (file, bytes, mime = "image/jpeg") => JSON.stringify({
+  identifier: `0x${bytesToHex(file.identifier)}`,
+  ticket: `0x${bytesToHex(file.claimTicket)}`,
+  url: file.wssUrl,
+  mime,
+  size: bytes.length,
+});
 
 // The transport matrix runs the same scenarios in both ingress modes.
 for (const [mode, extraEnv] of [
@@ -174,6 +186,43 @@ for (const [mode, extraEnv] of [
     }
   });
 
+  test(`attachment download, reply quotes, reaction, call decline (${mode})`, async () => {
+    const node = await startMockStatementNode();
+    const hop = await startMockHopNode();
+    const stateDir = tmpState();
+    const photo = new Uint8Array(crypto.randomBytes(300_000));
+    const file = hop.putFile(photo);
+    const bot = await startBot({ endpoint: node.url, stateDir, extraEnv: { ...extraEnv, BOT_HOP_ALLOW_INSECURE: "1" } });
+    try {
+      if (extraEnv.BOT_SUBSCRIBE === "1") await bot.waitFor((e) => e.event === "BOT_SUBSCRIBED", { label: "BOT_SUBSCRIBED" });
+      const r = await runClient(node.url, [
+        "--attach", attachSpecOf(file, photo), "--attach-caption", "look at this",
+        "--reply", "1", "--react", "🔥", "--offer-call", "1",
+      ], ["rich opener", "quoted follow"]);
+      assert.equal(r.code, 0, `client failed (incl. call-decline check):\n${r.out}`);
+      // The caption came through as the message text and was echoed after the
+      // download; the photo landed byte-exact in the media store.
+      assert.match(r.out, /Echo: look at this/);
+      await bot.waitFor((e) => e.event === "BOT_MEDIA_DOWNLOADED", { label: "BOT_MEDIA_DOWNLOADED" });
+      const stored = fs.readFileSync(path.join(stateDir, "media", `${bytesToHex(file.identifier)}.jpg`));
+      assert.equal(Buffer.compare(stored, photo), 0, "stored media differs from the uploaded photo");
+      // The follow-up arrived as a quote of the bot's previous message.
+      const reply = bot.events.find((e) => e.event === "BOT_RECEIVED_TEXT" && e.kind === "reply");
+      assert.ok(reply, "no reply-kind message observed");
+      // The reaction was recorded but never answered: exactly the three Echo
+      // replies (opener, follow-up, photo) went out.
+      const reaction = await bot.waitFor((e) => e.event === "BOT_RECEIVED_REACTION", { label: "BOT_RECEIVED_REACTION" });
+      assert.equal(reaction.emoji, "🔥");
+      await bot.waitFor((e) => e.event === "BOT_CALL_DECLINED", { label: "BOT_CALL_DECLINED" });
+      assert.equal(bot.events.filter((e) => e.event === "BOT_SENT_TEXT").length, 3, "unexpected extra replies (reaction answered?)");
+    } finally {
+      await bot.stop();
+      await node.close();
+      await hop.close();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
   test(`owed reply survives kill -9 mid-brain (${mode})`, async () => {
     const node = await startMockStatementNode();
     const stateDir = tmpState();
@@ -215,3 +264,131 @@ for (const [mode, extraEnv] of [
     }
   });
 }
+
+test("bridge surface: /inbound shape, /media, reply/edit/react, events", async () => {
+  const node = await startMockStatementNode();
+  const hop = await startMockHopNode();
+  const stateDir = tmpState();
+  const photo = new Uint8Array(crypto.randomBytes(200_000));
+  const file = hop.putFile(photo);
+  const bot = await startBot({
+    endpoint: node.url,
+    stateDir,
+    extraEnv: { BOT_SUBSCRIBE: "0", BOT_BRAIN: "bridge", BOT_HOP_ALLOW_INSECURE: "1" },
+  });
+  const base = `http://127.0.0.1:${bot.bridgePort}`;
+  const post = (route, body) => fetch(`${base}${route}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }).then((r) => r.json());
+  // Drain /inbound into one shared list (a drain discards what it returns, so
+  // per-predicate polling would lose sibling items).
+  const received = [];
+  const pump = async (pred, { events = false, timeoutMs = 30_000, label = "inbound item" } = {}) => {
+    const until = Date.now() + timeoutMs;
+    while (Date.now() < until) {
+      const hit = received.find(pred);
+      if (hit) return hit;
+      const items = await fetch(`${base}/inbound?wait=2${events ? "&events=1" : ""}`).then((r) => r.json());
+      received.push(...items);
+    }
+    throw new Error(`timed out waiting for ${label}; got ${JSON.stringify(received)}`);
+  };
+  try {
+    const client1 = runClient(node.url, ["--attach", attachSpecOf(file, photo)], ["bridge opener"]);
+    // Opener arrives over the bridge; answer it as a quote so the client's
+    // exit-0 rule (a reply + an ACK) is satisfied.
+    const opener = await pump((i) => i.text === "bridge opener", { label: "opener" });
+    const sent = await post("/send", { chat_id: opener.chat_id, text: "seen it", reply_to: opener.message_id });
+    assert.equal(sent.success, true, JSON.stringify(sent));
+    assert.match(sent.message_id, /^[0-9A-F-]{36}$/, "expected a real envelope UUID");
+
+    // The caption-less photo: synthesized text, attachment metadata without the
+    // claim ticket, bytes served at /media.
+    const photoItem = await pump((i) => i.attachments?.length > 0, { label: "photo item" });
+    assert.equal(photoItem.kind, "richText");
+    assert.match(photoItem.text, /\[photo, image\/jpeg/);
+    const [att] = photoItem.attachments;
+    assert.equal(att.downloaded, true, JSON.stringify(att));
+    assert.equal(att.url, `/media/${bytesToHex(file.identifier)}`);
+    assert.equal(att.mime, "image/jpeg");
+    assert.equal(Object.keys(att).some((k) => /ticket|ct/i.test(k)), false, "claim ticket leaked across the bridge");
+    const served = Buffer.from(await fetch(`${base}${att.url}`).then((r) => r.arrayBuffer()));
+    assert.equal(Buffer.compare(served, photo), 0, "served media differs from the uploaded photo");
+
+    // Edit the earlier reply in place, then check the send path recorded it.
+    const edited = await post("/send", { chat_id: opener.chat_id, text: "seen it (edited)", edit_of: sent.message_id });
+    assert.equal(edited.success, true, JSON.stringify(edited));
+    const editEvent = bot.events.find((e) => e.event === "BOT_SENT_TEXT" && e.editOf === sent.message_id);
+    assert.ok(editEvent, "edit not sent");
+    const both = await post("/send", { chat_id: opener.chat_id, text: "x", reply_to: "a", edit_of: "b" });
+    assert.equal(both.success, false, "reply_to+edit_of must be rejected");
+    await client1;
+
+    // Second client run: the bot answers "ping", the client reacts to that
+    // reply, and the reaction surfaces only on the events=1 poller.
+    const client2 = runClient(node.url, ["--no-opener", "1", "--react", "💯"], ["ping"]);
+    const ping = await pump((i) => i.text === "ping", { label: "ping" });
+    const pong = await post("/send", { chat_id: ping.chat_id, text: "pong" });
+    assert.equal(pong.success, true);
+    const reactionEvent = await pump((i) => i.kind === "reaction", { events: true, label: "reaction event" });
+    assert.equal(reactionEvent.emoji, "💯");
+    assert.equal(reactionEvent.target_message_id, pong.message_id, "reaction targets the bot's pong");
+    // Outbound reaction route.
+    const reacted = await post("/react", { chat_id: ping.chat_id, message_id: ping.message_id, emoji: "👀" });
+    assert.equal(reacted.success, true, JSON.stringify(reacted));
+    await bot.waitFor((e) => e.event === "BOT_SENT_REACTION", { label: "BOT_SENT_REACTION" });
+    await client2;
+  } finally {
+    await bot.stop();
+    await node.close();
+    await hop.close();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("owed attachment survives kill -9 and re-processes after restart", async () => {
+  const node = await startMockStatementNode();
+  const hop = await startMockHopNode();
+  const stateDir = tmpState();
+  const photo = new Uint8Array(crypto.randomBytes(100_000));
+  const file = hop.putFile(photo);
+  const slowBrain = {
+    BOT_SUBSCRIBE: "0",
+    BOT_BRAIN: "claude",
+    BOT_AI_CMD: "sh",
+    BOT_AI_ARGS: JSON.stringify(["-c", "sleep 3 && echo recovered-answer"]),
+    BOT_THINKING_TEXT: "",
+    BOT_HOP_ALLOW_INSECURE: "1",
+  };
+  let bot = await startBot({ endpoint: node.url, stateDir, extraEnv: slowBrain });
+  try {
+    const opener = await runClient(node.url, [], ["owed opener", "warmup"]);
+    assert.equal(opener.code, 0, `client failed:\n${opener.out}`);
+
+    // Photo arrives, gets ACKed and downloaded, then the bot dies mid-brain:
+    // the owed journal is the only way the message comes back.
+    const clientDone = runClient(node.url, ["--no-opener", "1", "--attach", attachSpecOf(file, photo), "--attach-caption", "crash photo"], []);
+    await bot.waitFor((e) => e.event === "BOT_RECEIVED_TEXT" && e.text === "crash photo", { label: "crash photo received" });
+    await bot.waitFor((e) => e.event === "BOT_MEDIA_DOWNLOADED", { label: "BOT_MEDIA_DOWNLOADED" });
+    await bot.stop("SIGKILL");
+    await clientDone;
+
+    const state = JSON.parse(fs.readFileSync(path.join(stateDir, "session-state.json"), "utf8"));
+    const owed = state.owed?.find((o) => o.c === "crash photo");
+    assert.ok(owed, `owed journal missing the photo message: ${JSON.stringify(state.owed)}`);
+    assert.equal(owed.a?.[0]?.i, bytesToHex(file.identifier), "journal lost the attachment identifier");
+    assert.ok(owed.a?.[0]?.ct, "journal lost the claim ticket (restart couldn't re-download)");
+
+    bot = await startBot({ endpoint: node.url, stateDir, extraEnv: slowBrain });
+    const restored = await bot.waitFor((e) => e.event === "BOT_STATE_RESTORED", { label: "BOT_STATE_RESTORED" });
+    assert.equal(restored.owed >= 1, true, `expected owed >= 1, got ${restored.owed}`);
+    await bot.waitFor((e) => e.event === "BOT_SENT_TEXT", { label: "owed reply sent", timeoutMs: 20_000 });
+    const replies = await runClient(node.url, ["--no-opener", "1"], ["post-crash ping"]);
+    assert.match(replies.out, /recovered-answer/, `owed reply not observed:\n${replies.out}`);
+  } finally {
+    await bot.stop();
+    await node.close();
+    await hop.close();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+});

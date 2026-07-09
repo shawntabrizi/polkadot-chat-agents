@@ -9,6 +9,13 @@
 // Usage:
 //   node test-client-device.mjs --seed-hex 0x.. --bot-account 0x.. \
 //     --bot-identifier-key 0x.. [--no-opener 1] [--wait-secs 30] "opener" ["follow-up" ...]
+// Feature flags (all optional, run after the follow-ups):
+//   --attach '{"identifier":"0x..","ticket":"0x..","url":"ws://..","mime":"image/jpeg","size":N}'
+//       send a REAL richText attachment (pre-uploaded to a HOP node, e.g. the
+//       tests' mock node) [--attach-caption "text"]
+//   --reply 1        send follow-ups as kind-7 replies quoting the bot's last message
+//   --react "🔥"     react to the bot's last message (expect ACK, no reply)
+//   --offer-call 1   send a WebRTC offer and require a dataChannelClosed decline
 import crypto from "node:crypto";
 import { createLazyClient, createPapiStatementStoreAdapter } from "@novasamatech/statement-store";
 import { getWsProvider } from "polkadot-api/ws";
@@ -20,6 +27,8 @@ import {
   deriveP256PrivateKey,
   encodeNativeChatRequestV2,
   encodeOpaqueTextMessage,
+  encodeOpaqueReactionMessage,
+  encodeOpaqueReplyMessage,
   encodeSessionRequestPayload,
   makeAppUuid,
   makePeerSession,
@@ -83,6 +92,8 @@ console.log(`device ownSessionId (bot must poll this): 0x${bytesToHex(deviceSess
 const seen = new Set();
 let replies = 0;
 let acked = [];
+let lastBotMessageId = null;
+const declinedOffers = [];
 const drain = async () => {
   for (const topic of [identitySession.peerSessionId]) {
     let stmts = [];
@@ -97,7 +108,10 @@ const drain = async () => {
         try { d = decodeSessionStatementPayload(data, sess, botAccountId); break; } catch (e) { d = { err: e.message }; }
       }
       if (d?.err) { console.log(`  [recv-decode-fail] ${d.err}`); continue; }
-      if (d?.kind === "request") for (const m of d.messages ?? []) if (m.text) { replies += 1; console.log(`  [BOT] ${m.text}`); }
+      if (d?.kind === "request") for (const m of d.messages ?? []) {
+        if (m.text) { replies += 1; lastBotMessageId = m.messageId ?? lastBotMessageId; console.log(`  [BOT] ${m.text}`); }
+        if (m.kind === "dataChannelClosed") { declinedOffers.push(m.offerId); console.log(`  [CALL CLOSED] offerId=${m.offerId}`); }
+      }
       if (d?.kind === "response") { acked.push(d.requestId); console.log(`  [ACK] requestId=${d.requestId} code=${d.responseCode}`); }
     }
   }
@@ -132,17 +146,70 @@ const poison = scaleEncodeBytes(concat(
   Uint8Array.of(1), Uint8Array.of(4),           // attachments: Some, len 1
   Uint8Array.of(0, 0, 0, 0),                    // junk attachment body
 ));
-for (const text of followUps) {
-  const followUp = encodeSessionRequestPayload(deviceSession, makeAppUuid(), [poison, encodeOpaqueTextMessage({ text })]);
+const submitDeviceBatch = async (opaqueMessages, label) => {
+  const payload = encodeSessionRequestPayload(deviceSession, makeAppUuid(), opaqueMessages);
   await submitAppStatement(requestRpc, {
     walletPair: wallet,
     channel: deviceSession.requestChannel,
     topics: [deviceSession.ownSessionId],
-    scaleEncodedPayload: followUp,
+    scaleEncodedPayload: payload,
     expiryFactory,
   });
-  console.log(`[ME device-channel] (poison image msg) + "${text}"`);
+  console.log(`[ME device-channel] ${label}`);
+};
+for (const text of followUps) {
+  const content = opt("reply") && lastBotMessageId
+    ? encodeOpaqueReplyMessage({ replyToMessageId: lastBotMessageId, text })
+    : encodeOpaqueTextMessage({ text });
+  await submitDeviceBatch([poison, content], `(poison image msg) + ${opt("reply") && lastBotMessageId ? "(reply) " : ""}"${text}"`);
   await pollFor(waitSecs);
 }
+
+// 3) Optional feature exercises (real attachment, reaction, call offer).
+const strB = (s) => scaleEncodeBytes(enc.encode(s));
+const u32 = (n) => Uint8Array.of(n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff);
+const attachSpec = opt("attach") ? JSON.parse(opt("attach")) : null;
+if (attachSpec) {
+  // A real richText+P2PMixnetFile message, byte-identical to what the app
+  // sends after uploading a photo (image meta, thumbnail None).
+  const caption = opt("attach-caption") ?? "";
+  const fileVariant = concat(
+    Uint8Array.of(0),
+    scaleEncodeBytes(hexToBytes(attachSpec.identifier)),
+    scaleEncodeBytes(hexToBytes(attachSpec.ticket)),
+    Uint8Array.of(0), strB(attachSpec.url),
+    Uint8Array.of(1), strB(attachSpec.mime ?? "image/jpeg"), u32(attachSpec.size),
+    u32(attachSpec.width ?? 640), u32(attachSpec.height ?? 480), Uint8Array.of(0),
+  );
+  const attachmentMsg = scaleEncodeBytes(concat(
+    strB(makeAppUuid()), encodeU64(Date.now()), Uint8Array.of(0), Uint8Array.of(15),
+    caption ? concat(Uint8Array.of(1), strB(caption)) : Uint8Array.of(0),
+    Uint8Array.of(1), Uint8Array.of(4), fileVariant,
+  ));
+  await submitDeviceBatch([poison, attachmentMsg], `(photo attachment${caption ? ` + "${caption}"` : ""})`);
+  await pollFor(waitSecs);
+}
+if (opt("react")) {
+  if (!lastBotMessageId) { console.log("[SKIP react] no bot message id seen"); }
+  else {
+    await submitDeviceBatch(
+      [encodeOpaqueReactionMessage({ targetMessageId: lastBotMessageId, emoji: opt("react") })],
+      `(reaction ${opt("react")} -> ${lastBotMessageId})`,
+    );
+    await pollFor(Math.min(waitSecs, 12)); // expect an ACK and nothing else
+  }
+}
+let offerDeclined = true;
+if (opt("offer-call")) {
+  const offerId = makeAppUuid();
+  const offerMsg = scaleEncodeBytes(concat(
+    strB(offerId), encodeU64(Date.now()), Uint8Array.of(0), Uint8Array.of(8),
+    scaleEncodeBytes(enc.encode("v=0 test-offer")), Uint8Array.of(0),
+  ));
+  await submitDeviceBatch([offerMsg], `(call offer ${offerId})`);
+  await pollFor(waitSecs);
+  offerDeclined = declinedOffers.includes(offerId);
+  console.log(offerDeclined ? `[CALL DECLINED] ${offerId}` : `[CALL NOT DECLINED] ${offerId}`);
+}
 console.log(`\n=== replies=${replies} acks=${acked.length} ===`);
-process.exit(replies > 0 && acked.length > 0 ? 0 : 1);
+process.exit(replies > 0 && acked.length > 0 && offerDeclined ? 0 : 1);
