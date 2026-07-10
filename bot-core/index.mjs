@@ -1252,7 +1252,9 @@ const startBridge = () => {
     stateStore?.flush();
     process.exit(1);
   });
-  server.listen(bridgePort, bridgeHost, () => log("BOT_BRIDGE_LISTENING", { host: bridgeHost, port: bridgePort }));
+  // Report the BOUND port, not the requested one: BOT_BRIDGE_PORT=0 lets the
+  // OS assign a free port, and this event is how the operator learns it.
+  server.listen(bridgePort, bridgeHost, () => log("BOT_BRIDGE_LISTENING", { host: bridgeHost, port: server.address().port }));
 };
 
 // ---------- main ----------
