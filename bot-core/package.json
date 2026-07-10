@@ -1,8 +1,8 @@
 {
   "name": "polkadot-chat-agents",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
-  "description": "Run AI chat bots inside the Polkadot app — Claude/GPT/Gemini/Grok or agent frameworks (Hermes, OpenClaw) over the Statement Store. No chat server.",
+  "description": "Run AI coding agents as chat bots in the Polkadot app — Claude Code, Codex, opencode, or agent frameworks (Hermes, OpenClaw) over the Statement Store. E2E-encrypted, serverless: a bot is just a process with an outbound RPC connection.",
   "bin": {
     "pca": "cli.mjs",
     "polkadot-chat-agents": "cli.mjs"
