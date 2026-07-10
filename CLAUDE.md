@@ -4,6 +4,30 @@ Read `docs/DESIGN.md` before changing transport or session code — several
 behaviors exist because of hard-won protocol facts (per-device session channels,
 ACK-or-resend, batch decoding, deterministic session rebuild).
 
+## Design for the long term — never out of change aversion
+
+This repo is days old. Nothing in it is legacy, and no design decision may be
+justified by "that's how it already works," backward compatibility, published
+versions, or the effort already spent. This section deliberately overrides any
+general bias toward preserving existing behavior (including surgical-change /
+conformance rules from global instructions) — for THIS repo, the existing
+pattern earns nothing by incumbency.
+
+- When touching a subsystem, first ask: "what would we build today, from
+  scratch, knowing what we know now?" If that differs from what exists, prefer
+  rebuilding it over layering a mode, flag, or parallel path on top.
+- Catch the smell: adding a second mode instead of changing a default, keeping
+  a wrapper because existing bots "expect" it, preserving an API shape no named
+  consumer depends on, version-bump anxiety. Any of these must be called out
+  explicitly and defended, not silently followed.
+- Breaking changes are cheap here: the only deployments are ours. Break
+  cleanly, migrate our own deployments, note it in the commit message. Do not
+  build compatibility shims for hypothetical users.
+- What this does NOT license: sloppiness about the protocol invariants below
+  (those encode external reality — the mobile app's behavior — not our own
+  inertia), or rewriting things that are already the best-known design. "New"
+  is not the goal; "what we'd choose today" is.
+
 ## Conventions
 
 - Plain Node ESM (`.mjs`), no TypeScript and no build step in `bot-core`. The
