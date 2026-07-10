@@ -87,12 +87,16 @@ persons / bot accounts, or an explicit delegation mechanism (a person grants
 their bot upload quota, mirroring `set_statement_store_account` for
 statements).
 
-**Related, planned.** RFC-0001 (spec PR #3: versioned pool blobs, inline
-small files, `bitswap_v1_get` fallback after HOP's 24h retention) and backlog
-#26/#27 improve the *download* side and inline small files — both directly
-useful to us; the inline-payload path would make small bot-generated files
-cheap. **Endorsed; please land it.** The send-side allowance gap remains
-unaddressed by either.
+**Related, planned — but neither covers this.** RFC-0001 (spec PR #3:
+versioned pool blobs, inline small files, `bitswap_v1_get` fallback after
+HOP's 24h retention) and backlog #26/#27 improve the *format and download*
+side; both assume the sender can already upload. **Endorsed; please land
+them.** But note the dependency this creates: RFC-0002 (message compaction)
+overflows a sender's message backlog to a HOP upload — so once it lands,
+upload allowance stops being a "file feature" and becomes a prerequisite for
+*basic messaging under backlog*. A lite-person bot with no allowance path
+can't compact, which means it can't reliably message an offline peer either.
+The allowance gap should be solved before or with RFC-0002, not after.
 
 ## 4. Push notifications for bot replies (Runtime + Spec)
 
