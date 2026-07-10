@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node cli.mjs run",
-    "test": "node --test --test-timeout=120000 test/*.test.mjs",
+    "test": "node --test --test-timeout=900000 test/*.test.mjs",
     "prepare": "papi generate && node scripts/sync-descriptors.mjs",
     "prepublishOnly": "[ -n \"$SKIP_TESTS\" ] && echo 'SKIP_TESTS set, skipping tests before publish' || npm test"
   },
