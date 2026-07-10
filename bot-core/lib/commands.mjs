@@ -21,6 +21,12 @@ export function createCommandHandler({
   workspaces = null,
   getPeerProject = () => null,
   setPeerProject = () => {},
+  // Reasoning effort: the engine's accepted levels (null = unsupported).
+  effortLevels = null,
+  defaultEffort = "",
+  peerEffortOverrides = new Map(),
+  // Cumulative per-peer usage tally, or null when nothing recorded yet.
+  getUsage = () => null,
 }) {
   const hasProjects = () => (workspaces?.size ?? 0) > 0;
   const projectLabel = (p) => (p ? `${p.alias}${p.branch ? `@${p.branch}` : ""}` : null);
@@ -50,7 +56,9 @@ export function createCommandHandler({
           "/reset — start a fresh session (forget our conversation so far)",
           "/stop — stop what I'm currently working on",
           "/model — show the model answering you (/model <name> to switch, /model default to go back)",
+          ...(effortLevels ? ["/reasoning — dial my thinking depth (/reasoning <level>, /reasoning default)"] : []),
           ...(hasProjects() ? ["/project — pick the project I work in (/project <name>[@branch], /project default)"] : []),
+          "/usage — tokens and cost spent on this chat since my last restart",
           "/ping — check the bot is alive",
         ].join("\n");
       case "reset":
@@ -72,6 +80,28 @@ export function createCommandHandler({
         peerModelOverrides.set(peerKey, argument);
         trimOverrides();
         return `OK — answering you with ${argument} from now on (this chat only; /model default to undo).`;
+      }
+      case "reasoning": {
+        if (!effortLevels) return "This engine has no reasoning control — /model is the lever it offers.";
+        if (!argument) {
+          const current = peerEffortOverrides.get(peerKey) ?? (defaultEffort || "(engine default)");
+          return `Reasoning effort: ${current}. Levels: ${effortLevels.join(", ")} — /reasoning <level>, or /reasoning default.`;
+        }
+        if (argument === "default") {
+          peerEffortOverrides.delete(peerKey);
+          return `Back to ${defaultEffort || "the engine's default reasoning effort"}.`;
+        }
+        const level = argument.toLowerCase();
+        if (!effortLevels.includes(level)) return `"${argument}" isn't a level I know — try one of: ${effortLevels.join(", ")}.`;
+        peerEffortOverrides.set(peerKey, level);
+        trimOverrides();
+        return `🧠 Reasoning effort ${level} from now on (this chat only; /reasoning default to undo).`;
+      }
+      case "usage": {
+        const u = getUsage(peerKey);
+        if (!u || !u.turns) return "No usage recorded for this chat since my last restart.";
+        const cost = u.costUsd > 0 ? `, ~$${u.costUsd.toFixed(4)}` : "";
+        return `This chat since my last restart: ${u.turns} turn${u.turns === 1 ? "" : "s"}, ${u.inputTokens.toLocaleString("en-US")} tokens in / ${u.outputTokens.toLocaleString("en-US")} out${cost}.`;
       }
       case "project": {
         if (!hasProjects()) return "No projects are set up for me — my operator can add one with: pca project <bot> add <alias> <path>.";

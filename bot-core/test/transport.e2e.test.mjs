@@ -621,6 +621,43 @@ test("engine: a long answer is chunked into ordered parts, none lost", async () 
   }
 });
 
+test("engine: a sent file is staged into the workspace before the turn", async () => {
+  const node = await startMockStatementNode();
+  const hop = await startMockHopNode();
+  const stateDir = tmpState();
+  const bytes = new Uint8Array(Buffer.from("spec-content-123"));
+  const file = hop.putFile(bytes);
+  // The mock CLI answers with the prompt it was given ($1 = the verbatim
+  // prompt), which carries the attachment's staged path.
+  const bot = await startBot({
+    endpoint: node.url,
+    stateDir,
+    extraEnv: {
+      BOT_SUBSCRIBE: "0", BOT_BRAIN: "claude", BOT_AI_CMD: "sh",
+      BOT_AI_ARGS: JSON.stringify(["-c", "printf '{\"type\":\"result\",\"result\":\"PROMPT %s\"}\\n' \"$1\"", "sh", "__PROMPT__"]),
+      BOT_THINKING_TEXT: "", BOT_HOP_ALLOW_INSECURE: "1",
+    },
+  });
+  try {
+    const r = await runClient(node.url, [
+      "--attach", attachSpecOf(file, bytes), "--attach-caption", "here is the spec",
+      "--wait-secs", "14",
+    ], ["hello first", "follow-up"]);
+    assert.equal(r.code, 0, `client failed:\n${r.out}`);
+    // The prompt the engine saw references the staged copy inside the
+    // workspace, not the media store.
+    const m = /PROMPT .*saved at (\S+)/.exec(r.out);
+    assert.ok(m, `no staged path in the engine prompt:\n${r.out}`);
+    assert.ok(m[1].includes(`${path.sep}.attachments${path.sep}`), `not staged into .attachments: ${m[1]}`);
+    assert.equal(fs.readFileSync(m[1]).toString(), "spec-content-123", "staged bytes differ");
+  } finally {
+    await bot.stop();
+    await node.close();
+    await hop.close();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("engine: /project switches the turn cwd to the registered project", async () => {
   const node = await startMockStatementNode();
   const stateDir = tmpState();

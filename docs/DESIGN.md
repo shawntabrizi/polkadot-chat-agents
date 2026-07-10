@@ -188,7 +188,24 @@ frames, and enforce an idle-silence backstop (no wall-clock limit; a long build
 is legitimate, a wedge is killed and the peer queue unblocks). `/stop` cancels a
 turn (intercepted before the per-peer queue), `/reset` starts a fresh session.
 opencode reaches many providers through one `--model provider/model` flag, so
-there are no per-vendor brains. Bridge mode instead hands messages to an external
+there are no per-vendor brains.
+
+Per-peer engine knobs: `/model` (any string, passed to the CLI's model flag),
+`/reasoning` (validated against the engine's levels — claude
+`--effort low|medium|high|xhigh|max`, codex `-c model_reasoning_effort=…`;
+opencode has none), `/project` (see workspaces below). Each turn's token/cost
+usage from the CLI's result event is logged as `BOT_AI_USAGE` and tallied
+in-memory for `/usage`. Downloaded attachments are staged into the turn cwd's
+`.attachments/` before the engine runs, so the agent acts on files inside its
+own workspace.
+
+Multi-project workspaces (`BOT_AI_PROJECTS`, managed by `pca project`): a peer
+picks a registered project with `/project <alias>` — or `/project
+<alias>@<branch>`, which resolves to a lazily-created `git worktree` under
+`BOT_STATE_DIR/worktrees` (`lib/workspaces.mjs`; conservative alias/branch
+charsets, path-escape guards). The active project persists per peer in the
+session snapshot; switching clears the resume token, because a resumed engine
+session is only valid in the cwd it started in. Bridge mode instead hands messages to an external
 agent framework over one HTTP hop. Deployed engines run in a non-root container
 that is the sandbox for their tools (see HARNESSES.md).
 

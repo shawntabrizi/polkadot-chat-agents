@@ -98,7 +98,8 @@ write) in a container that is their sandbox.
 
 `opencode` is the many-models path — one engine reaches Anthropic, OpenAI,
 Google, xAI, OpenRouter, local models, etc. In-chat: `/stop` cancels the current
-turn, `/reset` starts a fresh session, `/model` switches model.
+turn, `/reset` starts a fresh session, `/model` switches model, `/reasoning`
+dials thinking depth (claude/codex), `/usage` shows tokens and cost spent.
 
 `--model` pins the model (`BOT_AI_MODEL`; a `provider/model` slug for opencode) —
 set it at `create` (saved) or override per run. `BOT_AI_CMD`/`BOT_AI_ARGS` wire in
@@ -107,8 +108,10 @@ Because an AI brain spends your quota, `create` refuses to leave one open to
 arbitrary senders unless `--public` is passed.
 
 In chat, direct-brain bots answer `/help`, `/reset`, `/model <name>`,
-`/project`, and `/ping` instantly themselves; bridge bots leave slash-commands
-to their framework.
+`/reasoning <level>`, `/project`, `/usage`, and `/ping` instantly themselves;
+bridge bots leave slash-commands to their framework. Files you send are
+downloaded and staged into the agent's workspace (`.attachments/`), so "here's
+the spec, implement it" works with a photo or document attached.
 
 **Projects.** `pca project <bot> add <alias> <path>` registers a directory the
 agent can work in (repeat for more). In chat, `/project <alias>` points your

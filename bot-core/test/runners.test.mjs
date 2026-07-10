@@ -168,3 +168,34 @@ test("custom engine reuses claude parsing but has no fixed command", () => {
   assert.equal(out.sessionId, "C-1");
   assert.equal(out.answer, "ok");
 });
+
+test("reasoning effort maps to each engine's own flag", () => {
+  const claude = RUNNERS.claude.buildArgs({ prompt: "hi", effort: "high", allowedTools: ["Bash"] });
+  assert.ok(claude.includes("--effort") && claude.includes("high"));
+  const codex = RUNNERS.codex.buildArgs({ prompt: "hi", effort: "minimal" });
+  assert.ok(codex.includes("-c") && codex.includes("model_reasoning_effort=minimal"));
+  // opencode has no reasoning flag; the engine advertises that.
+  assert.equal(RUNNERS.opencode.effortLevels, null);
+  assert.deepEqual(RUNNERS.claude.effortLevels, ["low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(RUNNERS.codex.effortLevels, ["minimal", "low", "medium", "high", "xhigh"]);
+  // No effort -> no flag.
+  assert.equal(RUNNERS.claude.buildArgs({ prompt: "hi", allowedTools: ["Bash"] }).includes("--effort"), false);
+});
+
+test("claude result events carry token/cost usage", () => {
+  const [ev] = RUNNERS.claude.parseEvent({
+    type: "result", result: "done", is_error: false,
+    usage: { input_tokens: 1200, output_tokens: 345 }, total_cost_usd: 0.0123,
+  });
+  assert.equal(ev.kind, "result");
+  assert.deepEqual(ev.usage, { inputTokens: 1200, outputTokens: 345, costUsd: 0.0123 });
+  // No usage reported -> no usage field.
+  const [bare] = RUNNERS.claude.parseEvent({ type: "result", result: "done", is_error: false });
+  assert.equal(bare.usage, undefined);
+});
+
+test("codex turn.completed carries token usage", () => {
+  const [ev] = RUNNERS.codex.parseEvent({ type: "turn.completed", usage: { input_tokens: 900, output_tokens: 88 } });
+  assert.equal(ev.kind, "result");
+  assert.deepEqual(ev.usage, { inputTokens: 900, outputTokens: 88 });
+});

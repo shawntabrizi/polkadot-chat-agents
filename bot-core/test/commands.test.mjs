@@ -127,3 +127,34 @@ test("/help mentions /project only when projects exist", () => {
   assert.equal(make().handler("p", "/help").includes("/project"), false);
   assert.ok(make({ workspaces: fakeWorkspaces(["sdk"]) }).handler("p", "/help").includes("/project"));
 });
+
+test("/reasoning validates levels, sets per-peer, and reverts", () => {
+  const peerEffortOverrides = new Map();
+  const handler = createCommandHandler({
+    clearResume: () => {}, peerModelOverrides: new Map(), defaultModel: "",
+    username: "t", chainConnected: () => true,
+    effortLevels: ["low", "medium", "high"], defaultEffort: "medium", peerEffortOverrides,
+  });
+  assert.ok(handler("p", "/reasoning").includes("medium"));
+  assert.ok(handler("p", "/reasoning warp").includes("low, medium, high"));
+  assert.ok(handler("p", "/reasoning HIGH").includes("high"));
+  assert.equal(peerEffortOverrides.get("p"), "high");
+  assert.ok(handler("p", "/reasoning default").includes("medium"));
+  assert.equal(peerEffortOverrides.has("p"), false);
+});
+
+test("/reasoning on an engine without the control says so", () => {
+  const { handler } = make(); // effortLevels defaults to null
+  assert.ok(handler("p", "/reasoning").includes("no reasoning control"));
+});
+
+test("/usage reports the per-chat tally or its absence", () => {
+  const usage = new Map([["alice", { turns: 3, inputTokens: 5000, outputTokens: 1200, costUsd: 0.05 }]]);
+  const handler = createCommandHandler({
+    clearResume: () => {}, peerModelOverrides: new Map(), defaultModel: "",
+    username: "t", chainConnected: () => true, getUsage: (k) => usage.get(k) ?? null,
+  });
+  const reply = handler("alice", "/usage");
+  assert.ok(reply.includes("3 turns") && reply.includes("5,000") && reply.includes("$0.0500"), reply);
+  assert.ok(handler("bob", "/usage").includes("No usage recorded"));
+});

@@ -44,7 +44,8 @@
 //   (BOT_STATE_DIR/workspace), BOT_AI_CMD/BOT_AI_ARGS (custom stream-json CLI),
 //   BOT_AI_PROJECTS (JSON {alias: dir} — /project <alias>[@branch] then picks
 //   the turn's cwd; branches get isolated git worktrees under
-//   BOT_STATE_DIR/worktrees).
+//   BOT_STATE_DIR/worktrees), BOT_AI_REASONING (default reasoning effort,
+//   engine-specific levels; /reasoning overrides per peer).
 
 import http from "node:http";
 import fs from "node:fs";
@@ -178,9 +179,16 @@ if (customCmd && env.BOT_AI_ARGS) {
 const engine = customCmd ? RUNNERS.custom : resolveEngine(brain); // null unless a direct engine
 const engineCommand = customCmd || engine?.command;
 if (engine) fs.mkdirSync(aiWorkspace, { recursive: true, mode: 0o700 });
-const buildEngineArgs = ({ prompt, model, resume }) => {
+// Default reasoning effort (engine-specific flag; see lib/runners.mjs).
+// Validated here so a typo fails at startup, not silently per turn.
+const aiReasoning = (env.BOT_AI_REASONING ?? "").trim();
+if (engine && aiReasoning && !engine.effortLevels?.includes(aiReasoning)) {
+  console.error(`BOT_AI_REASONING=${aiReasoning} is not valid for this engine${engine.effortLevels ? ` (levels: ${engine.effortLevels.join(", ")})` : " (it has no reasoning control)"}`);
+  process.exit(2);
+}
+const buildEngineArgs = ({ prompt, model, resume, effort }) => {
   if (customCmd) return customArgsTmpl ? customArgsTmpl.map((a) => (a === "__PROMPT__" ? prompt : a)) : [prompt];
-  return engine.buildArgs({ prompt, model, resume, allowedTools, skipPermissions });
+  return engine.buildArgs({ prompt, model, resume, effort, allowedTools, skipPermissions });
 };
 const lookbackDays = Number(env.BOT_REQUEST_LOOKBACK_DAYS ?? 7);
 const futureDays = Number(env.BOT_REQUEST_FUTURE_DAYS ?? 2);
@@ -569,9 +577,27 @@ const sendReaction = async (peerHex, targetMessageId, emoji, removed = false) =>
 const AI_PEER_CAP = 500; // bound the per-peer maps (idle peers age out)
 const peerResume = new Map();          // peerHex -> engine session id (native --resume)
 const peerModelOverrides = new Map();  // peerHex -> model chosen via /model
+const peerEffortOverrides = new Map(); // peerHex -> reasoning effort chosen via /reasoning
 const peerProjects = new Map();        // peerHex -> { alias, branch|null } chosen via /project
+const peerUsage = new Map();           // peerHex -> cumulative { turns, inputTokens, outputTokens, costUsd }
 const runningChildren = new Map();     // peerHex -> live child process (for /stop + idle kill)
 const stopRequested = new Set();       // peers whose turn /stop is cancelling
+
+// Token/cost usage: the engines already report it per turn — log it and keep
+// an in-memory per-peer tally for /usage (observability, not billing; resets
+// on restart).
+const recordUsage = (peerHex, usage) => {
+  if (!usage) return;
+  const k = norm(peerHex);
+  const t = peerUsage.get(k) ?? { turns: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 };
+  t.turns += 1;
+  t.inputTokens += usage.inputTokens ?? 0;
+  t.outputTokens += usage.outputTokens ?? 0;
+  t.costUsd += usage.costUsd ?? 0;
+  peerUsage.set(k, t);
+  trimMap(peerUsage, AI_PEER_CAP);
+  log("BOT_AI_USAGE", { to: peerHex, ...usage });
+};
 
 // Project registry (BOT_AI_PROJECTS): validated aliases -> dirs, plus lazy
 // per-branch git worktrees. Only meaningful for direct engines.
@@ -623,14 +649,15 @@ const runEngine = (peerHex, userText, onAction = null, cwd = aiWorkspace) => new
   const k = norm(peerHex);
   const model = peerModelOverrides.get(k) ?? aiModel;
   const resume = peerResume.get(k) ?? null;
-  const argv = buildEngineArgs({ prompt: userText, model, resume });
+  const effort = peerEffortOverrides.get(k) ?? aiReasoning ?? "";
+  const argv = buildEngineArgs({ prompt: userText, model, resume, effort: effort || null });
   const childEnv = { ...process.env };
   if (engine.stripApiKeyEnv && !apiBilling) delete childEnv.ANTHROPIC_API_KEY;
   // Detached: a new process group, so killProcessGroup reaps the CLI's children.
   // stdin ignored: some CLIs (codex) otherwise block on "Reading additional input".
   const child = spawn(engineCommand, argv, { stdio: ["ignore", "pipe", "pipe"], cwd, env: childEnv, detached: true });
   runningChildren.set(k, child);
-  let err = "", lineBuf = "", answer = "", resultText = null, errored = null, gotSession = false, settled = false;
+  let err = "", lineBuf = "", answer = "", resultText = null, errored = null, gotSession = false, settled = false, usage = null;
   let idle;
   const bumpIdle = () => {
     clearTimeout(idle);
@@ -654,7 +681,7 @@ const runEngine = (peerHex, userText, onAction = null, cwd = aiWorkspace) => new
         if (ev.sessionId && !gotSession) { gotSession = true; peerResume.set(k, ev.sessionId); trimMap(peerResume, AI_PEER_CAP); persist(); }
       } else if (ev.kind === "action") onAction?.(ev.title);
       else if (ev.kind === "text") answer += ev.text;
-      else if (ev.kind === "result") resultText = ev.text || null;
+      else if (ev.kind === "result") { resultText = ev.text || null; if (ev.usage) usage = ev.usage; }
       else if (ev.kind === "error") errored = ev.message;
     }
   };
@@ -666,7 +693,7 @@ const runEngine = (peerHex, userText, onAction = null, cwd = aiWorkspace) => new
     if (stopRequested.delete(k)) return finish({ stopped: true });
     const finalAnswer = (resultText ?? answer).trim();
     if (errored) { log("BOT_AI_FAILED", { to: peerHex, error: String(errored).slice(-300) }); return finish(null); }
-    if (code === 0 || finalAnswer) return finish({ answer: finalAnswer });
+    if (code === 0 || finalAnswer) { recordUsage(peerHex, usage); return finish({ answer: finalAnswer }); }
     // Classify the failure so the operator knows the remedy (re-auth vs. retry).
     const authRevoked = /401|unauthorized|refresh token|could not be refreshed|log ?out and sign in/i.test(err);
     log(authRevoked ? "BOT_AI_AUTH_REVOKED" : "BOT_AI_FAILED", { to: peerHex, code, stderr: err.trim().slice(-500) });
@@ -683,10 +710,14 @@ const handleCommandFor = createCommandHandler({
   defaultModel: aiModel,
   username,
   chainConnected,
-  trimOverrides: () => trimMap(peerModelOverrides, AI_PEER_CAP),
+  trimOverrides: () => { trimMap(peerModelOverrides, AI_PEER_CAP); trimMap(peerEffortOverrides, AI_PEER_CAP); },
   workspaces,
   getPeerProject: (peerKey) => peerProjects.get(peerKey) ?? null,
   setPeerProject,
+  effortLevels: engine?.effortLevels ?? null,
+  defaultEffort: aiReasoning,
+  peerEffortOverrides,
+  getUsage: (peerKey) => peerUsage.get(peerKey) ?? null,
 });
 const handleCommand = (peerHex, text) => handleCommandFor(norm(peerHex), text);
 
@@ -749,10 +780,6 @@ const handleInbound = async (peerHex, msg, owedId = null) => {
       }
       for (const part of sentFirst ? parts.slice(1) : parts) await sendText(peerHex, part);
     };
-    // Verbatim prompt — the engine keeps its own session; we only add the
-    // attachment/reply/edit CONTEXT the message carries (real content, not a
-    // persona wrapper).
-    const userText = renderForBrain(msg);
     // The turn's cwd: shared workspace or the peer's chosen project/worktree.
     // Worktree prep can fail (not a repo, bad branch) — answer with the error
     // instead of running the engine somewhere the user didn't pick.
@@ -764,6 +791,23 @@ const handleInbound = async (peerHex, msg, owedId = null) => {
       await sendText(peerHex, `⚠️ I couldn't open ${proj ? `${proj.alias}${proj.branch ? `@${proj.branch}` : ""}` : "the workspace"}: ${String(e?.message ?? e)}. /project default switches back to the shared workspace.`).catch(() => {});
       return;
     }
+    // Stage downloaded attachments into the workspace (.attachments/) so the
+    // agent acts on a file inside its own cwd — media-store blobs live
+    // outside it. Failure falls back to the media-store path in the prompt.
+    for (const a of msg.attachments ?? []) {
+      if (!a.downloaded) continue;
+      try {
+        const stageDir = path.join(turnCwd, ".attachments");
+        fs.mkdirSync(stageDir, { recursive: true });
+        const dest = path.join(stageDir, path.basename(a.path));
+        fs.copyFileSync(a.path, dest);
+        a.path = dest;
+      } catch (e) { log("BOT_ATTACHMENT_STAGE_FAILED", { id: a.id.slice(0, 16), error: String(e?.message ?? e) }); }
+    }
+    // Verbatim prompt — the engine keeps its own session; we only add the
+    // attachment/reply/edit CONTEXT the message carries (real content, not a
+    // persona wrapper).
+    const userText = renderForBrain(msg);
     armThinking(peerHex); // live placeholder if the turn takes longer than thinkingAfterMs
     // Tool events become "▸ action" lines on the placeholder.
     const onAction = liveProgress ? (title) => {

@@ -11,10 +11,16 @@
 //   { kind: "started", sessionId }  — capture for --resume next turn
 //   { kind: "action",  title }      — one-line progress line ("▸ $ cargo test")
 //   { kind: "text",    text }       — a chunk of the answer (accumulate)
-//   { kind: "result",  text, ok }   — terminal; text may be "" (use accumulated)
+//   { kind: "result",  text, ok, usage? } — terminal; text may be "" (use
+//       accumulated); usage is { inputTokens?, outputTokens?, costUsd? } when
+//       the CLI reported it
 //   { kind: "error",   message }    — terminal failure
 // parseEvent is PURE (obj -> Event[]); the caller accumulates and picks the
 // answer, which keeps every engine unit-testable against fixture JSONL.
+//
+// effortLevels lists the values an engine's reasoning-effort flag accepts
+// (null = the engine has no such flag); buildArgs takes `effort` accordingly.
+// Levels verified against takopi's engine_overrides + runner argv builders.
 
 // Shared one-line titles for tool events across engines (Takopi-style).
 export const toolActionTitle = (name, input = {}) => {
@@ -35,10 +41,12 @@ export const toolActionTitle = (name, input = {}) => {
 const claude = {
   command: "claude",
   stripApiKeyEnv: true, // force subscription billing unless BOT_AI_API_BILLING
-  buildArgs({ prompt, model, resume, allowedTools, skipPermissions }) {
+  effortLevels: ["low", "medium", "high", "xhigh", "max"],
+  buildArgs({ prompt, model, resume, allowedTools, skipPermissions, effort }) {
     const args = ["-p", "--output-format", "stream-json", "--verbose"];
     if (resume) args.push("--resume", resume);
     if (model) args.push("--model", model);
+    if (effort) args.push("--effort", effort);
     if (skipPermissions) args.push("--dangerously-skip-permissions");
     else if (allowedTools?.length) args.push("--allowedTools", allowedTools.join(","));
     args.push("--", prompt);
@@ -58,7 +66,12 @@ const claude = {
     }
     if (obj?.type === "result") {
       if (obj.is_error) return [{ kind: "error", message: String(obj.result ?? obj.subtype ?? "claude error") }];
-      return [{ kind: "result", text: typeof obj.result === "string" ? obj.result : "", ok: true }];
+      const usage = {
+        ...(obj.usage?.input_tokens != null ? { inputTokens: obj.usage.input_tokens } : {}),
+        ...(obj.usage?.output_tokens != null ? { outputTokens: obj.usage.output_tokens } : {}),
+        ...(obj.total_cost_usd != null ? { costUsd: obj.total_cost_usd } : {}),
+      };
+      return [{ kind: "result", text: typeof obj.result === "string" ? obj.result : "", ok: true, ...(Object.keys(usage).length ? { usage } : {}) }];
     }
     return [];
   },
@@ -73,9 +86,11 @@ const claude = {
 const codex = {
   command: "codex",
   stripApiKeyEnv: false,
-  buildArgs({ prompt, model, resume, skipPermissions }) {
+  effortLevels: ["minimal", "low", "medium", "high", "xhigh"],
+  buildArgs({ prompt, model, resume, skipPermissions, effort }) {
     const args = ["exec", "--json", "--skip-git-repo-check", "--color=never"];
     if (model) args.push("-m", model);
+    if (effort) args.push("-c", `model_reasoning_effort=${effort}`);
     if (skipPermissions) args.push("--dangerously-bypass-approvals-and-sandbox");
     else args.push("-s", "workspace-write");
     // `exec resume <id> <prompt>` continues a thread; fresh runs take the prompt
@@ -103,7 +118,13 @@ const codex = {
       }
       return [];
     }
-    if (obj?.type === "turn.completed") return [{ kind: "result", text: "", ok: true }];
+    if (obj?.type === "turn.completed") {
+      const usage = {
+        ...(obj.usage?.input_tokens != null ? { inputTokens: obj.usage.input_tokens } : {}),
+        ...(obj.usage?.output_tokens != null ? { outputTokens: obj.usage.output_tokens } : {}),
+      };
+      return [{ kind: "result", text: "", ok: true, ...(Object.keys(usage).length ? { usage } : {}) }];
+    }
     return [];
   },
 };
@@ -117,6 +138,7 @@ const codex = {
 const opencode = {
   command: "opencode",
   stripApiKeyEnv: false,
+  effortLevels: null, // no reasoning-effort flag (verified against takopi)
   buildArgs({ prompt, model, resume, skipPermissions }) {
     const args = ["run", "--format", "json"];
     if (resume) args.push("--session", resume);

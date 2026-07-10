@@ -59,23 +59,26 @@ takopi has these; we have equivalents, often better-suited to our transport:
 ### MEDIUM
 
 3. **`/file`-style workspace I/O.**
-   - *In (buildable now):* copy a user-sent attachment (already downloaded to
-     the media store) into the agent's workspace so the agent can act on it
-     ("here's the spec, implement it"). Small.
+   - *In:* ✅ DONE — downloaded attachments are staged into the turn cwd's
+     `.attachments/` before the engine runs, so the agent acts on a file
+     inside its own workspace (falls back to the media-store path on copy
+     failure).
    - *Out (blocked):* pulling a file/artifact from the workspace back to chat
      needs outbound HOP upload, which is the existing backlog item (see
      docs/DESIGN.md "sending files"). Gated on that.
 
-4. **Per-run reasoning/effort control (`/reasoning`).** Cheap given the engine
-   table: map an effort level per engine (claude `--effort`, codex
-   `-c model_reasoning_effort=…`, opencode `--variant`), a `/reasoning`
-   command + `BOT_AI_REASONING` default, stored per peer like `/model`. Lets a
-   user dial thinking depth per conversation. Ref `commands/reasoning.py`.
+4. **✅ DONE — Per-run reasoning/effort control (`/reasoning`).** Engine table
+   maps levels to flags — claude `--effort low|medium|high|xhigh|max`, codex
+   `-c model_reasoning_effort=minimal|…|xhigh`; opencode has NO such flag
+   (verified against takopi — the earlier `--variant` note here was wrong).
+   `/reasoning <level>` per peer, `BOT_AI_REASONING` default (validated at
+   startup).
 
-5. **Usage surfacing.** The engines' result events already carry token/cost
-   usage (claude/codex/opencode all report it) — neither bot exposes it. Log it
-   (`BOT_AI_USAGE {tokens, cost}`) and optionally answer `/usage`. Cheap
-   observability; nearly free since the data is already parsed.
+5. **✅ DONE — Usage surfacing.** claude result events (`usage`,
+   `total_cost_usd`) and codex `turn.completed` (`usage`) are normalized onto
+   the result event; each turn logs `BOT_AI_USAGE` and `/usage` answers the
+   per-chat tally (in-memory, resets on restart). opencode reports no usage in
+   its JSON output (the premise above was wrong for it).
 
 6. **Input coalescing.** Debounce rapid consecutive user messages (~1s window)
    into one prompt so a user "thinking out loud" across three bubbles becomes
@@ -97,6 +100,6 @@ takopi has these; we have equivalents, often better-suited to our transport:
 
 1. ~~Long-answer chunking~~ ✅ done (as outbound lanes + chunking).
 2. ~~Multi-project workspaces + worktrees~~ ✅ done.
-3. Attachment → workspace `/file put` (MEDIUM — half-built via the media store).
-4. `/reasoning` per-run effort (MEDIUM — cheap given the engine table).
-5. Usage surfacing (MEDIUM — nearly free, data already parsed).
+3. ~~Attachment → workspace~~ ✅ done (inbound staging; outbound still gated on HOP upload).
+4. ~~`/reasoning` per-run effort~~ ✅ done (claude + codex; opencode has no such flag).
+5. ~~Usage surfacing~~ ✅ done (BOT_AI_USAGE log + /usage; claude + codex).
