@@ -29,6 +29,8 @@
 //   BOT_MEDIA_MAX_TOTAL_MB (512), BOT_HOP_TIMEOUT_MS (120000),
 //   BOT_HOP_ALLOWED_NODES (comma-sep host suffixes; empty = allow any wss host),
 //   BOT_HOP_ALLOW_INSECURE (tests only: permit ws:// and IP hosts).
+//   Replies: BOT_REPLY_CHUNK_BYTES (4000) — long answers are split into parts
+//   of at most this many UTF-8 bytes (paragraph/code-fence aware).
 //   Live replies: BOT_LIVE_EDIT_MIN_MS (3000) / BOT_LIVE_EDIT_MAX_MS (15000)
 //   edit throttle, BOT_LIVE_HEARTBEAT_MS (15000) elapsed-clock frames,
 //   BOT_LIVE_ACK_TIMEOUT_MS (60000), BOT_LIVE_PROGRESS (1; 0 = placeholder and
@@ -39,7 +41,10 @@
 //   BOT_AI_SKIP_PERMISSIONS (1 = full autonomy), BOT_AI_API_BILLING (1 = keep
 //   ANTHROPIC_API_KEY for claude), BOT_AI_IDLE_TIMEOUT_MS (600000, kills a
 //   silent/wedged turn), BOT_AI_MAX_MS (0 = no hard cap), BOT_AI_WORKSPACE
-//   (BOT_STATE_DIR/workspace), BOT_AI_CMD/BOT_AI_ARGS (custom stream-json CLI).
+//   (BOT_STATE_DIR/workspace), BOT_AI_CMD/BOT_AI_ARGS (custom stream-json CLI),
+//   BOT_AI_PROJECTS (JSON {alias: dir} — /project <alias>[@branch] then picks
+//   the turn's cwd; branches get isolated git worktrees under
+//   BOT_STATE_DIR/worktrees).
 
 import http from "node:http";
 import fs from "node:fs";
@@ -49,6 +54,9 @@ import { spawn } from "node:child_process";
 import { blake2b } from "@noble/hashes/blake2.js";
 import { createStateStore } from "./lib/session-store.mjs";
 import { createCommandHandler } from "./lib/commands.mjs";
+import { splitMessageText } from "./lib/chunk.mjs";
+import { createOutboundLanes } from "./lib/outbound-lanes.mjs";
+import { createWorkspaces } from "./lib/workspaces.mjs";
 import { downloadP2PFile } from "./lib/hop-client.mjs";
 import { createMediaStore } from "./lib/media-store.mjs";
 import { createLiveReplies, createProgressTracker } from "./lib/live-reply.mjs";
@@ -116,6 +124,10 @@ const liveProgress = env.BOT_LIVE_PROGRESS !== "0";
 const liveTtlMs = Number(env.BOT_LIVE_TTL_MS ?? 600_000);
 const liveTimeoutText = env.BOT_LIVE_TIMEOUT_TEXT
   ?? "⚠️ I lost track of this one — something went wrong on my end. Please send it again.";
+// Long answers are split into parts of at most this many UTF-8 bytes — each
+// part is one chat bubble. Well under the statement allowance (a lite person
+// gets 500 KiB), sized for mobile readability (Telegram-proven ~4k).
+const replyChunkBytes = Number(env.BOT_REPLY_CHUNK_BYTES ?? 4000);
 // Greet mode: on startup the bot opens the chat with each allowlisted owner it
 // has never talked to (once ever, persisted) — a liveness signal, so the owner
 // doesn't have to find and message the bot first. Only allowlisted peers are
@@ -144,6 +156,14 @@ const aiMaxMs = Number(env.BOT_AI_MAX_MS ?? 0); // 0 = no hard cap
 // Where the agent works: one workspace shared by all peers, persisted so files
 // (and each peer's resume session) survive restarts.
 const aiWorkspace = env.BOT_AI_WORKSPACE ?? (env.BOT_STATE_DIR ? path.join(env.BOT_STATE_DIR, "workspace") : fs.mkdtempSync(path.join(os.tmpdir(), "bot-ws-")));
+// Multi-project workspaces: BOT_AI_PROJECTS maps aliases to project dirs; a
+// peer picks one with /project <alias>[@branch] (branch = isolated worktree)
+// and their turns then run there instead of the shared workspace.
+let aiProjects = {};
+if (env.BOT_AI_PROJECTS) {
+  try { aiProjects = JSON.parse(env.BOT_AI_PROJECTS); } catch { console.error("BOT_AI_PROJECTS must be a JSON object {alias: path}"); process.exit(2); }
+  if (aiProjects == null || typeof aiProjects !== "object" || Array.isArray(aiProjects)) { console.error("BOT_AI_PROJECTS must be a JSON object {alias: path}"); process.exit(2); }
+}
 
 // Escape hatch: BOT_AI_CMD=<bin> [+ BOT_AI_ARGS=<JSON array> with "__PROMPT__"]
 // runs a custom CLI that speaks claude-shaped stream-json (also how the offline
@@ -449,57 +469,57 @@ const armThinking = (peerHex) => {
   }, thinkingAfterMs));
 };
 
-// ---------- outbound ACK tracking ----------
-// The peer's app sends a session-response ACK for every request statement it
-// consumes (mirror of our sendSessionAck). We track our own outgoing
-// requestIds so live replies can gate edits on "the placeholder was fetched"
-// — an edit submitted earlier would replace the un-fetched placeholder in the
-// channel slot and orphan every subsequent edit (docs/LIVE-REPLIES.md).
-const pendingAcks = new Map(); // requestId -> { resolve, timer }
-const PENDING_ACK_CAP = 500;
-const awaitOutboundAck = (requestId, timeoutMs = liveAckTimeoutMs) => new Promise((resolve) => {
-  const timer = setTimeout(() => { pendingAcks.delete(requestId); resolve(false); }, timeoutMs);
-  timer.unref?.();
-  pendingAcks.set(requestId, { resolve, timer });
-  while (pendingAcks.size > PENDING_ACK_CAP) {
-    const [oldId, old] = pendingAcks.entries().next().value;
-    pendingAcks.delete(oldId);
-    clearTimeout(old.timer);
-    old.resolve(false);
-  }
+// ---------- outbound lanes (one statement per peer channel slot) ----------
+// The statement store keeps ONE statement per (account, channel), so every
+// message published on a peer's session request channel flows through that
+// peer's outbound lane: at most one un-ACKed statement is current, later
+// messages extend it (lossless slot replacement) or queue until the peer's
+// session-response ACK frees the slot. Mirrors the mobile app's own
+// OutgoingRequestQueue; see lib/outbound-lanes.mjs.
+const outbound = createOutboundLanes({
+  encodeBatch: (peerHex, requestId, opaques, { forceIdentity }) => {
+    const entry = sessions.get(norm(peerHex));
+    if (entry == null) throw new Error("no active session for peer");
+    return encodeSessionRequestPayload(entry.session, requestId, opaques, forceIdentity ? { forceIdentity: true } : {});
+  },
+  submitPayload: async (peerHex, payload) => {
+    const entry = sessions.get(norm(peerHex));
+    if (entry == null) throw new Error("no active session for peer");
+    await submitBounded({
+      walletPair: wallet,
+      channel: entry.session.requestChannel,
+      topics: [entry.session.ownSessionId],
+      scaleEncodedPayload: payload,
+      expiryFactory,
+    });
+  },
+  makeRequestId: makeAppUuid,
+  // Liveness backstop: with messages queued behind an un-ACKed statement,
+  // take the slot over after this long (a conformant app ACKs in seconds).
+  ackGraceMs: Number(env.BOT_OUTBOUND_ACK_GRACE_MS ?? 60_000),
+  log,
 });
-const resolveOutboundAck = (requestId) => {
-  const p = pendingAcks.get(requestId);
-  if (!p) return;
-  pendingAcks.delete(requestId);
-  clearTimeout(p.timer);
-  p.resolve(true);
-};
 
 // ---------- send a reply to a peer ----------
 // Returns the outgoing envelope messageId (an app UUID) so callers — notably
 // POST /send — hand the brain an id it can later edit or that the peer can
-// react to. replyTo quotes a peer message; editOf rewrites one of our own.
-const submitMessage = async (peerHex, { text, replyTo = null, editOf = null }) => {
-  const entry = sessions.get(norm(peerHex));
-  if (entry == null) throw new Error("no active session for peer");
+// react to, plus a `delivered` promise that resolves true once the peer ACKed
+// the statement carrying the message. replyTo quotes a peer message; editOf
+// rewrites one of our own; supersedes drops never-fetched messages from the
+// slot (live-reply fallback).
+const submitMessage = async (peerHex, { text, replyTo = null, editOf = null, supersedes = [] }) => {
+  const k = norm(peerHex);
+  if (sessions.get(k) == null) throw new Error("no active session for peer");
   const messageId = makeAppUuid();
-  const requestId = makeAppUuid();
   const opaque = replyTo
     ? encodeOpaqueReplyMessage({ messageId, replyToMessageId: replyTo, text })
     : editOf
       ? encodeOpaqueEditedMessage({ messageId, targetMessageId: editOf, text })
       : encodeOpaqueTextMessage({ messageId, text });
-  const payload = encodeSessionRequestPayload(entry.session, requestId, [opaque]);
-  await submitBounded({
-    walletPair: wallet,
-    channel: entry.session.requestChannel,
-    topics: [entry.session.ownSessionId],
-    scaleEncodedPayload: payload,
-    expiryFactory,
-  });
+  const { submitted, delivered } = outbound.enqueue(k, opaque, { messageId, supersedes });
+  await submitted;
   log("BOT_SENT_TEXT", { to: peerHex, chars: text.length, ...(replyTo ? { replyTo } : {}), ...(editOf ? { editOf } : {}) });
-  return { messageId, requestId };
+  return { messageId, delivered };
 };
 const sendMessage = async (peerHex, opts) => {
   disarmThinking(peerHex); // a real reply is going out — no placeholder needed
@@ -509,8 +529,13 @@ const sendText = (peerHex, text) => sendMessage(peerHex, { text });
 
 // ---------- live replies (one evolving message per slow turn) ----------
 const liveReplies = createLiveReplies({
-  send: ({ peerHex, text, editOf }) => submitMessage(peerHex, { text, editOf }),
-  awaitAck: (requestId) => awaitOutboundAck(requestId),
+  send: ({ peerHex, text, editOf, supersedes }) => submitMessage(peerHex, { text, editOf, supersedes }),
+  // The lane's delivered promise, bounded: a peer that never fetches the
+  // placeholder must not gate the final answer forever.
+  awaitAck: (delivered) => Promise.race([
+    delivered,
+    new Promise((resolve) => { const t = setTimeout(() => resolve(false), liveAckTimeoutMs); t.unref?.(); }),
+  ]),
   minIntervalMs: liveMinEditMs,
   maxIntervalMs: liveMaxEditMs,
   finalAckWaitMs: Number(env.BOT_LIVE_FINAL_ACK_WAIT_MS ?? 10_000),
@@ -533,18 +558,10 @@ const peekLivePlaceholder = (peerHex) => livePlaceholders.get(norm(peerHex)) ?? 
 // Reactions ride the same session channel but are not "replies": they never
 // disarm the thinking ack and carry no text of their own.
 const sendReaction = async (peerHex, targetMessageId, emoji, removed = false) => {
-  const entry = sessions.get(norm(peerHex));
-  if (entry == null) throw new Error("no active session for peer");
-  const payload = encodeSessionRequestPayload(entry.session, makeAppUuid(), [
-    encodeOpaqueReactionMessage({ targetMessageId, emoji, removed }),
-  ]);
-  await submitBounded({
-    walletPair: wallet,
-    channel: entry.session.requestChannel,
-    topics: [entry.session.ownSessionId],
-    scaleEncodedPayload: payload,
-    expiryFactory,
-  });
+  const k = norm(peerHex);
+  if (sessions.get(k) == null) throw new Error("no active session for peer");
+  const { submitted } = outbound.enqueue(k, encodeOpaqueReactionMessage({ targetMessageId, emoji, removed }));
+  await submitted;
   log("BOT_SENT_REACTION", { to: peerHex, removed, target: targetMessageId });
 };
 
@@ -552,8 +569,33 @@ const sendReaction = async (peerHex, targetMessageId, emoji, removed = false) =>
 const AI_PEER_CAP = 500; // bound the per-peer maps (idle peers age out)
 const peerResume = new Map();          // peerHex -> engine session id (native --resume)
 const peerModelOverrides = new Map();  // peerHex -> model chosen via /model
+const peerProjects = new Map();        // peerHex -> { alias, branch|null } chosen via /project
 const runningChildren = new Map();     // peerHex -> live child process (for /stop + idle kill)
 const stopRequested = new Set();       // peers whose turn /stop is cancelling
+
+// Project registry (BOT_AI_PROJECTS): validated aliases -> dirs, plus lazy
+// per-branch git worktrees. Only meaningful for direct engines.
+const workspaces = engine ? createWorkspaces({
+  projects: aiProjects,
+  worktreesDir: env.BOT_STATE_DIR ? path.join(env.BOT_STATE_DIR, "worktrees") : path.join(os.tmpdir(), "pca-worktrees"),
+  log,
+}) : null;
+if (workspaces?.size) log("BOT_PROJECTS", { aliases: workspaces.aliases() });
+// A resume token is scoped to the cwd it was captured in, so a project switch
+// always starts a fresh engine session.
+const setPeerProject = (peerKey, value) => {
+  if (value) { peerProjects.set(peerKey, value); trimMap(peerProjects, AI_PEER_CAP); }
+  else peerProjects.delete(peerKey);
+  peerResume.delete(peerKey);
+  persist();
+};
+// The turn's cwd: the peer's project (root or branch worktree) or the shared
+// workspace. Throws a user-presentable error (unknown project, worktree
+// failure) — the caller answers with it instead of running the engine.
+const resolveTurnCwd = async (peerKey) => {
+  const proj = peerProjects.get(peerKey);
+  return proj ? workspaces.resolveCwd(proj) : aiWorkspace;
+};
 
 // Kill a child's whole process group (SIGTERM, then SIGKILL after a grace
 // period) so agent-spawned subprocesses (bash, builds) are reaped too.
@@ -577,7 +619,7 @@ const stopRun = (peerHex) => {
 // accumulated. No wall-clock limit — an idle-silence backstop kills a wedged
 // process (and unblocks the peer queue). Returns { answer }, { stopped:true }
 // (user /stop), or null on failure.
-const runEngine = (peerHex, userText, onAction = null) => new Promise((resolve) => {
+const runEngine = (peerHex, userText, onAction = null, cwd = aiWorkspace) => new Promise((resolve) => {
   const k = norm(peerHex);
   const model = peerModelOverrides.get(k) ?? aiModel;
   const resume = peerResume.get(k) ?? null;
@@ -586,7 +628,7 @@ const runEngine = (peerHex, userText, onAction = null) => new Promise((resolve) 
   if (engine.stripApiKeyEnv && !apiBilling) delete childEnv.ANTHROPIC_API_KEY;
   // Detached: a new process group, so killProcessGroup reaps the CLI's children.
   // stdin ignored: some CLIs (codex) otherwise block on "Reading additional input".
-  const child = spawn(engineCommand, argv, { stdio: ["ignore", "pipe", "pipe"], cwd: aiWorkspace, env: childEnv, detached: true });
+  const child = spawn(engineCommand, argv, { stdio: ["ignore", "pipe", "pipe"], cwd, env: childEnv, detached: true });
   runningChildren.set(k, child);
   let err = "", lineBuf = "", answer = "", resultText = null, errored = null, gotSession = false, settled = false;
   let idle;
@@ -642,6 +684,9 @@ const handleCommandFor = createCommandHandler({
   username,
   chainConnected,
   trimOverrides: () => trimMap(peerModelOverrides, AI_PEER_CAP),
+  workspaces,
+  getPeerProject: (peerKey) => peerProjects.get(peerKey) ?? null,
+  setPeerProject,
 });
 const handleCommand = (peerHex, text) => handleCommandFor(norm(peerHex), text);
 
@@ -690,19 +735,35 @@ const handleInbound = async (peerHex, msg, owedId = null) => {
       return;
     }
     // Deliver by finalizing the live placeholder when one was posted (the
-    // "thinking…" bubble BECOMES the answer); plain send otherwise.
+    // "thinking…" bubble BECOMES the answer); plain send otherwise. A long
+    // answer is split into parts — the placeholder becomes the first part,
+    // the rest follow as messages (the outbound lane keeps them ordered).
     const deliverReply = async (text) => {
+      const parts = splitMessageText(text, replyChunkBytes);
+      if (parts.length > 1) log("BOT_REPLY_CHUNKED", { to: peerHex, parts: parts.length, chars: text.length });
       const lp = await takeLivePlaceholder(peerHex);
+      let sentFirst = false;
       if (lp) {
-        try { await lp.handle.finalize(text); return; }
+        try { await lp.handle.finalize(parts[0]); sentFirst = true; }
         catch (e) { log("BOT_LIVE_FINALIZE_FAILED", { to: peerHex, error: String(e?.message ?? e) }); }
       }
-      await sendText(peerHex, text);
+      for (const part of sentFirst ? parts.slice(1) : parts) await sendText(peerHex, part);
     };
     // Verbatim prompt — the engine keeps its own session; we only add the
     // attachment/reply/edit CONTEXT the message carries (real content, not a
     // persona wrapper).
     const userText = renderForBrain(msg);
+    // The turn's cwd: shared workspace or the peer's chosen project/worktree.
+    // Worktree prep can fail (not a repo, bad branch) — answer with the error
+    // instead of running the engine somewhere the user didn't pick.
+    let turnCwd;
+    try { turnCwd = await resolveTurnCwd(norm(peerHex)); }
+    catch (e) {
+      const proj = peerProjects.get(norm(peerHex));
+      log("BOT_PROJECT_CWD_FAILED", { to: peerHex, project: proj?.alias, branch: proj?.branch ?? null, error: String(e?.message ?? e) });
+      await sendText(peerHex, `⚠️ I couldn't open ${proj ? `${proj.alias}${proj.branch ? `@${proj.branch}` : ""}` : "the workspace"}: ${String(e?.message ?? e)}. /project default switches back to the shared workspace.`).catch(() => {});
+      return;
+    }
     armThinking(peerHex); // live placeholder if the turn takes longer than thinkingAfterMs
     // Tool events become "▸ action" lines on the placeholder.
     const onAction = liveProgress ? (title) => {
@@ -713,7 +774,7 @@ const handleInbound = async (peerHex, msg, owedId = null) => {
         lp.handle.update(lp.tracker.render());
       }).catch(() => {});
     } : null;
-    const result = await runEngine(peerHex, userText, onAction);  // logs its own classified failure reason
+    const result = await runEngine(peerHex, userText, onAction, turnCwd);  // logs its own classified failure reason
     if (result?.stopped) return; // /stop already finalized the placeholder
     if (!result) {
       // Don't leave the user hanging after the "thinking" placeholder.
@@ -802,6 +863,12 @@ const snapshotState = () => ({
       e: norm(bytesToHex(d.encryptionPublicKey)),
     })),
     ...(peerResume.has(norm(peerHex)) ? { rs: peerResume.get(norm(peerHex)) } : {}),
+    // Active project/branch (chosen via /project) — the resume token above is
+    // only valid in this cwd, so both restore together or not at all.
+    ...(peerProjects.has(norm(peerHex)) ? {
+      pj: peerProjects.get(norm(peerHex)).alias,
+      ...(peerProjects.get(norm(peerHex)).branch ? { br: peerProjects.get(norm(peerHex)).branch } : {}),
+    } : {}),
   })),
   seen: [...seenRequests].slice(-SEEN_CAP),
   // Additive optional fields (k/q/e/a) keep the snapshot readable by older
@@ -874,8 +941,11 @@ const handleOpener = async (data) => {
     ? encodeOpaqueMultiChatAcceptedMessage({ acceptedRequestId: decoded.messageId, statementAccountId: accountId, encryptionPublicKey: identifierKey })
     : encodeOpaqueChatAcceptedMessage({ acceptedRequestId: decoded.messageId });
   try {
-    const ackPayload = encodeSessionRequestPayload(session, makeAppUuid(), [accept, encodeOpaqueTextMessage({ text: ackText })], { forceIdentity: true });
-    await submitBounded({ walletPair: wallet, channel: session.requestChannel, topics: [session.ownSessionId], scaleEncodedPayload: ackPayload, expiryFactory });
+    // Same-tick enqueues ride one statement, preserving the single
+    // [accept, welcome] payload the app expects on first contact.
+    const a = outbound.enqueue(senderHex, accept, { forceIdentity: true });
+    const w = outbound.enqueue(senderHex, encodeOpaqueTextMessage({ text: ackText }), { forceIdentity: true });
+    await Promise.all([a.submitted, w.submitted]);
   } catch (error) { log("BOT_ACK_FAILED", { to: senderHex, error: error instanceof Error ? error.message : String(error) }); }
   log("BOT_RECEIVED_OPENER", { from: senderHex, requestId: decoded.messageId, text: decoded.text, ...(openerAttachments.length ? { attachments: openerAttachments.length } : {}) });
   enqueueOwed(senderHex, decoded.messageId, openerMsg, decoded.messageId);
@@ -931,8 +1001,9 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
   try { decoded = decodeSessionStatementPayload(data, session, senderAccountId); }
   catch (e) { log("BOT_SESSION_DECODE_FAILED", { from: peerHex, error: String(e?.message ?? e) }); return; }
   if (decoded?.kind === "response") {
-    // The peer ACKed one of OUR request statements — unlocks live-reply edits.
-    resolveOutboundAck(decoded.requestId);
+    // The peer ACKed one of OUR request statements — frees the peer's
+    // outbound lane slot (and, through it, unlocks live-reply edits).
+    outbound.onAck(norm(peerHex), decoded.requestId);
     return;
   }
   if (decoded?.kind !== "request") return;
@@ -1054,10 +1125,8 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
   for (const offerId of declines) {
     enqueueWork(peerHex, async () => {
       try {
-        const entry = sessions.get(norm(peerHex));
-        if (entry == null) return;
-        const payload = encodeSessionRequestPayload(entry.session, makeAppUuid(), [encodeOpaqueDataChannelClosedMessage({ offerId })]);
-        await submitBounded({ walletPair: wallet, channel: entry.session.requestChannel, topics: [entry.session.ownSessionId], scaleEncodedPayload: payload, expiryFactory });
+        if (sessions.get(norm(peerHex)) == null) return;
+        await outbound.enqueue(norm(peerHex), encodeOpaqueDataChannelClosedMessage({ offerId })).submitted;
         log("BOT_CALL_DECLINED", { to: peerHex, offerId });
       } catch (e) { log("BOT_CALL_DECLINE_FAILED", { to: peerHex, error: String(e?.message ?? e) }); }
     });
@@ -1243,39 +1312,42 @@ const startBridge = () => {
         const { chat_id: chatId, text, reply_to: replyTo, edit_of: editOf } = await readJson(req);
         if (!chatId || !text) return json(400, { success: false, error: "chat_id and text required" });
         if (replyTo && editOf) return json(400, { success: false, error: "reply_to and edit_of are mutually exclusive" });
-        // Auto-upgrade: the first plain send for a peer with an open live
-        // placeholder becomes its final edit — every harness gets the
-        // thinking->answer single-message flow without code changes.
-        if (!replyTo && !editOf) {
-          const lp = await takeLivePlaceholder(chatId);
-          if (lp) {
-            try {
-              const { messageId } = await lp.handle.finalize(String(text));
-              return json(200, { success: true, message_id: messageId });
-            } catch (e) {
-              log("BOT_LIVE_FINALIZE_FAILED", { to: chatId, error: String(e?.message ?? e) });
-            }
-          }
-        } else {
-          // The answer went out as a quote/edit, which cannot BE the
-          // placeholder — retire the placeholder to a terminal glyph so it
-          // never dangles (a later unrelated send must not "upgrade" it).
-          const lp = await takeLivePlaceholder(chatId);
-          if (lp) lp.handle.finalize("✓").catch((e) => log("BOT_LIVE_FINALIZE_FAILED", { to: chatId, error: String(e?.message ?? e) }));
-        }
         // Harness-driven edits go through the live outbox: throttled,
         // latest-wins, so a streaming harness (Hermes edits every 0.8s) can't
-        // exceed the protocol-safe cadence. Fire-and-forget by design.
+        // exceed the protocol-safe cadence. Fire-and-forget by design. An
+        // edit replaces ONE message, so it is never chunked.
         if (editOf) {
+          // The answer went out as an edit, which cannot BE the placeholder —
+          // retire the placeholder to a terminal glyph so it never dangles.
+          const lpe = await takeLivePlaceholder(chatId);
+          if (lpe) lpe.handle.finalize("✓").catch((e) => log("BOT_LIVE_FINALIZE_FAILED", { to: chatId, error: String(e?.message ?? e) }));
           disarmThinking(chatId);
           liveReplies.throttledEdit(norm(chatId), String(editOf), String(text));
           return json(200, { success: true, message_id: String(editOf), coalesced: true });
         }
-        const messageId = await sendMessage(chatId, {
-          text: String(text),
-          replyTo: replyTo ? String(replyTo) : null,
-        });
-        return json(200, { success: true, message_id: messageId });
+        // Long harness answers are chunked like direct-engine ones; the
+        // outbound lane keeps the parts ordered on the wire.
+        const parts = splitMessageText(String(text), replyChunkBytes);
+        if (parts.length > 1) log("BOT_REPLY_CHUNKED", { to: chatId, parts: parts.length, chars: String(text).length });
+        let firstId = null;
+        const lp = await takeLivePlaceholder(chatId);
+        if (lp && !replyTo) {
+          // Auto-upgrade: the first plain send for a peer with an open live
+          // placeholder becomes its final edit — every harness gets the
+          // thinking->answer single-message flow without code changes.
+          try { firstId = (await lp.handle.finalize(parts[0])).messageId; }
+          catch (e) { log("BOT_LIVE_FINALIZE_FAILED", { to: chatId, error: String(e?.message ?? e) }); }
+        } else if (lp) {
+          // The answer goes out as a quote, which cannot BE the placeholder —
+          // retire the placeholder to a terminal glyph so it never dangles.
+          lp.handle.finalize("✓").catch((e) => log("BOT_LIVE_FINALIZE_FAILED", { to: chatId, error: String(e?.message ?? e) }));
+        }
+        for (const [i, part] of parts.entries()) {
+          if (i === 0 && firstId) continue;
+          const id = await sendMessage(chatId, { text: part, replyTo: i === 0 && replyTo ? String(replyTo) : null });
+          if (i === 0) firstId = id;
+        }
+        return json(200, { success: true, message_id: firstId, ...(parts.length > 1 ? { parts: parts.length } : {}) });
       }
       if (req.method === "POST" && url.pathname === "/react") {
         const { chat_id: chatId, message_id: targetId, emoji, remove } = await readJson(req);
@@ -1369,13 +1441,14 @@ log("BOT_LISTENING", { account: `0x${accountIdHex}`, identifierKey: `0x${norm(by
 // rebuild each peer's (deterministic) session and resume watching its channel,
 // and reload the dedup set so we don't re-answer already-handled messages.
 const restored = stateStore?.load();
-// Resume tokens are only valid for the same engine + workspace they were
-// captured under; a change to either invalidates every token (resuming a
-// session against the wrong cwd/CLI corrupts it).
-const resumeValid = engine && restored?.agent
-  && restored.agent.engine === (customCmd ? "custom" : brain)
-  && restored.agent.workspace === aiWorkspace;
-if (engine && restored?.agent && !resumeValid) log("BOT_RESUME_INVALIDATED", { was: restored.agent, now: { engine: customCmd ? "custom" : brain, workspace: aiWorkspace } });
+// Resume tokens are scoped to the engine AND the cwd they were captured in
+// (resuming against the wrong tree/CLI corrupts the session). An engine
+// change invalidates every token; a workspace change invalidates tokens of
+// peers in the shared workspace — a project peer's cwd is the project itself,
+// validated against the registry below.
+const engineMatches = engine && restored?.agent && restored.agent.engine === (customCmd ? "custom" : brain);
+const defaultWorkspaceMatches = engineMatches && restored.agent.workspace === aiWorkspace;
+if (engine && restored?.agent && !defaultWorkspaceMatches) log("BOT_RESUME_INVALIDATED", { was: restored.agent, now: { engine: customCmd ? "custom" : brain, workspace: aiWorkspace } });
 let restoredPeers = 0;
 for (const p of restored?.peers ?? []) {
   // Per-peer guard: one malformed persisted entry must not crash startup and
@@ -1384,7 +1457,10 @@ for (const p of restored?.peers ?? []) {
     const devices = (p.devices ?? []).map((d) => ({ statementAccountId: hexToBytes(d.s), encryptionPublicKey: hexToBytes(d.e) }));
     buildSession(p.peerHex, p.identifierKeyHex, devices);
     addSessionWatch(p.peerHex);
-    if (resumeValid && p.rs) peerResume.set(norm(p.peerHex), p.rs);
+    const proj = p.pj && workspaces?.has(p.pj) ? { alias: p.pj, branch: p.br ?? null } : null;
+    if (proj) peerProjects.set(norm(p.peerHex), proj);
+    else if (p.pj) log("BOT_PROJECT_DROPPED", { peer: p.peerHex, alias: p.pj, reason: "no longer registered" });
+    if (p.rs && engineMatches && (p.pj ? proj != null : defaultWorkspaceMatches)) peerResume.set(norm(p.peerHex), p.rs);
     restoredPeers += 1;
   } catch (e) { log("BOT_STATE_PEER_SKIPPED", { peer: p?.peerHex, error: String(e?.message ?? e) }); }
 }

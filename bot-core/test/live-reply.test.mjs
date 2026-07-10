@@ -37,13 +37,13 @@ const makeHarness = ({ minIntervalMs = 1000, maxIntervalMs = 8000, finalAckWaitM
   let nextMsg = 1;
   const acks = new Map(); // requestId -> resolve
   const live = createLiveReplies({
-    send: async ({ peerHex, text, editOf }) => {
+    send: async ({ peerHex, text, editOf, supersedes }) => {
       const messageId = editOf ? null : `MSG-${nextMsg++}`;
-      const requestId = `REQ-${sent.length + 1}`;
-      sent.push({ peerHex, text, editOf: editOf ?? null, messageId });
-      return { messageId, requestId };
+      const token = `REQ-${sent.length + 1}`;
+      sent.push({ peerHex, text, editOf: editOf ?? null, messageId, supersedes: supersedes ?? null });
+      return { messageId, delivered: token };
     },
-    awaitAck: (requestId) => new Promise((resolve) => acks.set(requestId, resolve)),
+    awaitAck: (token) => new Promise((resolve) => acks.set(token, resolve)),
     minIntervalMs,
     maxIntervalMs,
     finalAckWaitMs,
@@ -159,6 +159,7 @@ test("finalize falls back to a plain message when the ACK never comes", async ()
   const last = h.sent.at(-1);
   assert.equal(last.editOf, null, "fallback must be a plain message");
   assert.equal(last.text, "answer");
+  assert.deepEqual(last.supersedes, [handle.messageId], "fallback must supersede the unfetched placeholder");
   assert.equal(h.sent.filter((s) => s.editOf).length, 0, "no progress edits without ACK");
 });
 
@@ -181,7 +182,7 @@ test("a failed edit submit drops the frame but later frames recover", async () =
     send: async ({ text, editOf }) => {
       if (fail && editOf) throw new Error("submit failed");
       sent.push({ text, editOf: editOf ?? null });
-      return { messageId: editOf ? null : "MSG-1", requestId: `REQ-${nextReq++}` };
+      return { messageId: editOf ? null : "MSG-1", delivered: `REQ-${nextReq++}` };
     },
     awaitAck: (id) => new Promise((r) => acks.set(id, r)),
     minIntervalMs: 100,

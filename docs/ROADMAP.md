@@ -37,24 +37,24 @@ takopi has these; we have equivalents, often better-suited to our transport:
 
 ### HIGH
 
-1. **Long-answer chunking (silent-truncation bug).** We send a reply as ONE
-   statement; a long agent answer (code + explanation) exceeds the node's size
-   cap and the submit throws — the user gets nothing. Agents produce long
-   output, so this bites in normal use. Fix: split on paragraph/code-fence
-   boundaries into ≤N-byte parts (re-open fences across splits), first part
-   finalizes the live placeholder, the rest as follow-up messages. Ref takopi
-   `render.py` `split_markdown_body`/`message_overflow`. ~½ day + tests.
+1. **✅ DONE — Long-answer chunking + outbound lanes.** Investigation refined
+   the premise: the statement cap is the account allowance (500 KiB for a lite
+   person, `LitePersonStatementLimit`), and the sharper bug was that the store
+   keeps ONE statement per (account, channel) — ANY two quick sends clobbered
+   each other. Landed as: `lib/outbound-lanes.mjs` (per-peer ACK-or-extend
+   statement queue mirroring the app's `OutgoingRequestQueue`, with a
+   `BOT_OUTBOUND_ACK_GRACE_MS` liveness backstop) + `lib/chunk.mjs`
+   (`BOT_REPLY_CHUNK_BYTES`, default 4000; paragraph/fence-aware splits) wired
+   through `deliverReply` and `POST /send`.
 
-2. **Multi-project workspaces + git worktrees.** Today one shared workspace.
-   takopi's biggest capability beyond the runner core: a project registry
-   (`pca project add <alias> <path>`), a `/<project>` or `/<project> @branch`
-   directive that picks the turn's cwd (repo root, or an isolated
-   `git worktree` per branch), with path-escape guards, and a `ctx:` footer so
-   context survives across replies (adapt to our per-peer model: persist a
-   per-peer active project/branch in `session-state.json`; a resume token is
-   scoped to its cwd, so switching project starts a fresh session). Ref
-   `worktrees.py`, `directives.py`, `config.py`. Biggest coding-agent upgrade;
-   ~2 days. Do after (1).
+2. **✅ DONE — Multi-project workspaces + git worktrees.**
+   `pca project <bot> add <alias> <path>` registry → `BOT_AI_PROJECTS`;
+   `/project <alias>[@branch]` (or bare `/<alias>`) picks the turn cwd, with
+   per-branch `git worktree` isolation (`lib/workspaces.mjs`, alias/branch
+   charset guards + path-escape checks). Per-peer active project persists in
+   `session-state.json` (`pj`/`br`); a switch clears the resume token (tokens
+   are cwd-scoped). Local `pca run` only — deployed containers can't see host
+   paths (deploy-time mounts remain future work).
 
 ### MEDIUM
 
@@ -95,8 +95,8 @@ takopi has these; we have equivalents, often better-suited to our transport:
 
 ## Top 5 to do, in order
 
-1. Long-answer chunking (HIGH — fixes a real silent failure).
-2. Multi-project workspaces + worktrees (HIGH — biggest agent upgrade).
+1. ~~Long-answer chunking~~ ✅ done (as outbound lanes + chunking).
+2. ~~Multi-project workspaces + worktrees~~ ✅ done.
 3. Attachment → workspace `/file put` (MEDIUM — half-built via the media store).
 4. `/reasoning` per-run effort (MEDIUM — cheap given the engine table).
 5. Usage surfacing (MEDIUM — nearly free, data already parsed).

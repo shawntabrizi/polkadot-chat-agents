@@ -25,8 +25,13 @@ const defaultTimers = {
   clear: (t) => clearTimeout(t),
 };
 
-// send({ peerHex, text, editOf? }) -> Promise<{ messageId, requestId }>
-// awaitAck(requestId) -> Promise<boolean> (false on timeout)
+// send({ peerHex, text, editOf?, supersedes? }) -> Promise<{ messageId, delivered }>
+//   `delivered` is an opaque token for awaitAck (in production: a promise that
+//   resolves once the peer ACKed the statement carrying the message).
+//   `supersedes: [messageId]` asks the outbound lane to drop those messages if
+//   the peer never fetched them (used by the no-ACK finalize fallback so the
+//   stale placeholder bubble is replaced by the answer, not shown above it).
+// awaitAck(delivered) -> Promise<boolean> (false on timeout)
 export const createLiveReplies = ({
   send,
   awaitAck,
@@ -131,22 +136,22 @@ export const createLiveReplies = ({
       await send({ peerHex: lane.peerHex, text, editOf: lane.messageId });
       return { messageId: lane.messageId, edited: true };
     }
-    // Peer never fetched the placeholder: a plain message simply replaces it
-    // in the channel slot, so the user sees only the answer.
+    // Peer never fetched the placeholder: send the answer as a plain message
+    // that supersedes it, so the slot ends up holding only the answer.
     log("BOT_LIVE_FALLBACK", { to: lane.peerHex, placeholder: lane.messageId });
-    const sent = await send({ peerHex: lane.peerHex, text });
+    const sent = await send({ peerHex: lane.peerHex, text, supersedes: [lane.messageId] });
     return { messageId: sent.messageId, edited: false };
   };
 
   return {
     // Send a live placeholder message; edits unlock when the peer ACKs it.
     async begin(peerHex, text) {
-      const { messageId, requestId } = await send({ peerHex, text });
+      const { messageId, delivered } = await send({ peerHex, text });
       const lane = makeLane(peerHex, messageId, "pending");
       lane.lastSentText = text;
       lane.lastEditAt = now();
       lane.ackResolvers = [];
-      awaitAck(requestId).then((ok) => {
+      awaitAck(delivered).then((ok) => {
         lane.ackState = ok ? "acked" : "failed";
         for (const r of lane.ackResolvers.splice(0)) r();
         if (ok) scheduleFlush(lane);

@@ -47,6 +47,10 @@ pattern earns nothing by incumbency.
   session, and every inbound request must be ACKed (the app resends until it
   sees one).
 - One undecodable message in a batch must not prevent decoding the rest.
+- All outbound session messages go through the per-peer outbound lane
+  (`lib/outbound-lanes.mjs`) — never submit directly on the request channel.
+  The store keeps ONE statement per (account, channel); a direct submit
+  clobbers whatever un-fetched messages the slot held.
 - Session state (`BOT_STATE_DIR/session-state.json`) must survive restarts:
   persist peer devices and the dedup set; rebuild sessions on startup before
   polling.

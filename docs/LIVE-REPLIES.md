@@ -95,8 +95,10 @@ error   final edit: placeholder becomes the error/apology
   placeholder in the channel slot — clean degradation, user sees only the
   answer.
 - Long answers: first chunk edits the placeholder, remainder as follow-up
-  messages, split on paragraph boundaries (re-open code fences across splits),
-  sized against `dataTooLarge`.
+  messages, split on paragraph boundaries (re-open code fences across splits).
+  Implemented: `lib/chunk.mjs` (`BOT_REPLY_CHUNK_BYTES`, default 4000) splits;
+  the parts ride the per-peer outbound lane (`lib/outbound-lanes.mjs`) so they
+  arrive in order and never clobber each other in the channel slot.
 
 ### Edit budget and cadence (protocol guardrails, enforced in bot-core)
 

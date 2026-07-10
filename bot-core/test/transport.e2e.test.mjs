@@ -102,12 +102,16 @@ async function startBot({ endpoint, stateDir, extraEnv = {} }) {
 function runClient(endpoint, extraArgs, texts) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [path.join(BOT_CORE, "test-client-device.mjs"),
+      // extraArgs go FIRST: the client's flag parser takes the first
+      // occurrence, so per-test overrides (e.g. --wait-secs) must precede the
+      // defaults or they are silently ignored.
+      ...extraArgs,
       "--seed-hex", CLIENT_SEED,
       "--bot-account", `0x${BOT_ACCOUNT}`,
       "--bot-identifier-key", `0x${BOT_ID_KEY}`,
       "--endpoint", endpoint,
       "--wait-secs", "8",
-      ...extraArgs, ...texts,
+      ...texts,
     ], { stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     child.stdout.on("data", (d) => { out += d; });
@@ -364,6 +368,9 @@ const liveBrainEnv = {
   BOT_LIVE_EDIT_MIN_MS: "300",
   BOT_LIVE_HEARTBEAT_MS: "1500",
   BOT_LIVE_FINAL_ACK_WAIT_MS: "4000",
+  // The no-ACK scenarios must not wait the production-length outbound grace
+  // before the placeholder/final can take the channel slot.
+  BOT_OUTBOUND_ACK_GRACE_MS: "2000",
 };
 
 test("live reply: placeholder becomes progress frames, then the answer", async () => {
@@ -579,6 +586,68 @@ test("engine: idle-silence backstop kills a wedged turn and apologizes", async (
     await bot.stop();
     await node.close();
     fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("engine: a long answer is chunked into ordered parts, none lost", async () => {
+  const node = await startMockStatementNode();
+  const stateDir = tmpState();
+  // Three ~300-byte paragraphs against a 400-byte chunk cap -> 3+ parts. The
+  // paragraphs use only sh-quote-safe characters.
+  const paras = ["alpha " + "a".repeat(300), "bravo " + "b".repeat(300), "charlie " + "c".repeat(300)];
+  const resultLine = JSON.stringify({ type: "result", result: paras.join("\n\n") });
+  const bot = await startBot({
+    endpoint: node.url,
+    stateDir,
+    extraEnv: {
+      BOT_SUBSCRIBE: "0", BOT_BRAIN: "claude", BOT_AI_CMD: "sh",
+      BOT_AI_ARGS: JSON.stringify(["-c", `printf '%s\n' '${resultLine}'`]),
+      BOT_THINKING_TEXT: "", BOT_REPLY_CHUNK_BYTES: "400",
+    },
+  });
+  try {
+    const r = await runClient(node.url, ["--wait-secs", "12"], ["give me a long answer", "and again"]);
+    assert.equal(r.code, 0, `client failed:\n${r.out}`);
+    const chunked = await bot.waitFor((e) => e.event === "BOT_REPLY_CHUNKED", { label: "BOT_REPLY_CHUNKED" });
+    assert.ok(chunked.parts >= 3, `expected >=3 parts, got ${chunked.parts}`);
+    // Every paragraph reached the peer, in order, torn nowhere.
+    const positions = paras.map((p) => r.out.indexOf(p));
+    assert.ok(positions.every((p) => p >= 0), `missing answer parts:\n${r.out.slice(0, 2000)}`);
+    assert.deepEqual([...positions].sort((a, b) => a - b), positions, "parts arrived out of order");
+  } finally {
+    await bot.stop();
+    await node.close();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("engine: /project switches the turn cwd to the registered project", async () => {
+  const node = await startMockStatementNode();
+  const stateDir = tmpState();
+  const projDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pca-proj-")));
+  // The mock CLI answers with its own cwd, so the reply proves where it ran.
+  const bot = await startBot({
+    endpoint: node.url,
+    stateDir,
+    extraEnv: {
+      BOT_SUBSCRIBE: "0", BOT_BRAIN: "claude", BOT_AI_CMD: "sh",
+      BOT_AI_ARGS: JSON.stringify(["-c", "printf '{\"type\":\"result\",\"result\":\"cwd:%s\"}\\n' \"$(pwd)\""]),
+      BOT_THINKING_TEXT: "",
+      BOT_AI_PROJECTS: JSON.stringify({ proj: projDir }),
+    },
+  });
+  try {
+    const r = await runClient(node.url, ["--wait-secs", "14"], ["where are you", "/project proj", "where now"]);
+    assert.equal(r.code, 0, `client failed:\n${r.out}`);
+    // Turn 1: shared workspace. Command: switch confirmation. Turn 2: project dir.
+    assert.match(r.out, /cwd:.*workspace/, `first turn not in the shared workspace:\n${r.out}`);
+    assert.match(r.out, /Working in proj/, `switch confirmation missing:\n${r.out}`);
+    assert.ok(r.out.includes(`cwd:${projDir}`), `second turn did not run in the project dir:\n${r.out}`);
+  } finally {
+    await bot.stop();
+    await node.close();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+    fs.rmSync(projDir, { recursive: true, force: true });
   }
 });
 

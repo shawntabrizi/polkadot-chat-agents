@@ -46,6 +46,29 @@ These were all learned by debugging against the real mobile app:
   answer re-runs the brain on restart instead of silently dropping the message.
   When a pipeline is full the statement is deferred un-ACKed — the app's resend
   is the retry (backpressure, never ACK-then-drop).
+- **One statement per channel (outbound lanes).** The statement store keeps a
+  single statement per (account, channel), and every bot→peer message rides the
+  session request channel — so publishing a second statement before the peer
+  fetched the first silently REPLACES it. All outbound session messages
+  therefore flow through a per-peer outbound lane (`lib/outbound-lanes.mjs`),
+  mirroring the app's own `OutgoingRequestQueue`: at most one un-ACKed request
+  statement is current per peer; messages that arrive meanwhile extend it (a
+  re-encoded superset under a new requestId — replacement is then lossless,
+  receivers dedup by messageId) or wait in a bounded queue that drains on the
+  peer's session-response ACK. ACKs of a superseded requestId are ignored (the
+  peer will fetch and ACK the extended statement too). Liveness backstop: when
+  messages are queued behind a statement un-ACKed for
+  `BOT_OUTBOUND_ACK_GRACE_MS` (60s), the queued batch takes the slot over
+  (old-style replacement, so an unreachable peer can't mute the bot); with
+  nothing queued the current statement waits in the slot indefinitely. Never
+  submit directly on the request channel.
+- **Long answers are chunked.** A reply is split by `lib/chunk.mjs`
+  (`BOT_REPLY_CHUNK_BYTES`, default 4000 UTF-8 bytes; splits prefer paragraph
+  boundaries, re-open code fences across parts, never tear a UTF-8 code point)
+  into several messages that ride the outbound lane in order. This keeps every
+  bubble readable and every statement far below the account's 500 KiB
+  statement allowance (`LitePersonStatementLimit` on the people chain). The
+  first part finalizes the live placeholder; the rest follow as messages.
 - **Batches.** One session statement can carry several messages, including kinds
   the bot cannot decode (unknown content kinds, future attachment variants).
   Decoding is per-message; one undecodable message must not abort the batch.
