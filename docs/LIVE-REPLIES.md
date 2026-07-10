@@ -190,13 +190,16 @@ sender-generated via the notify relay). When either lands, revisit:
   latest-wins coalescing, skip-identical, finalize-as-edit with plain-message
   fallback (`BOT_LIVE_FINAL_ACK_WAIT_MS`), harness edit lanes. Progress
   renderer: `⏳ working · 24s · step 3` + rolling `▸ action` lines.
-- `bot-core/index.mjs` — outbound ACK tracking (session responses previously
-  ignored), placeholder lifecycle in `armThinking`/`deliverReply`, heartbeat
-  frames (`BOT_LIVE_HEARTBEAT_MS`), claude brain in stream-json mode for tool
-  events (`BOT_AI_STREAM`, `BOT_LIVE_PROGRESS=0` to disable), bridge
-  auto-upgrade (first plain `/send` finalizes the open placeholder; a
-  `reply_to`/`edit_of` send retires it to `✓`), `edit_of` routed through the
-  throttled lane, `/health.live` capability advertisement.
+- `bot-core/index.mjs` — placeholder lifecycle in `armThinking`/
+  `deliverToChat`/`beginTurnProgress` (the direct-engine brain reaches these
+  through the agent runtime's `chat` surface), heartbeat frames
+  (`BOT_LIVE_HEARTBEAT_MS`), tool events as progress lines
+  (`BOT_LIVE_PROGRESS=0` to disable), bridge auto-upgrade (first plain
+  `/send` finalizes the open placeholder; a `reply_to`/`edit_of` send retires
+  it to `✓`), `edit_of` routed through the throttled lane, `/health.live`
+  capability advertisement. The peer's session-response ACKs are consumed by
+  the outbound lanes (`lib/outbound-lanes.mjs`); live replies gate edits on
+  the lane's per-message `delivered` promise.
 - Hermes adapter implements `edit_message`, which switches on Hermes's own
   progressive streaming; bot-core down-samples its ~0.8s edit cadence.
 - OpenClaw needs no plugin change: its first block send is auto-upgraded.
