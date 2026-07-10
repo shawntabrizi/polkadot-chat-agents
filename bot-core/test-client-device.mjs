@@ -8,7 +8,11 @@
 //    exercise batch resilience
 // Usage:
 //   node test-client-device.mjs --seed-hex 0x.. --bot-account 0x.. \
-//     --bot-identifier-key 0x.. [--no-opener 1] [--wait-secs 30] "opener" ["follow-up" ...]
+//     --bot-identifier-key 0x.. [--no-opener 1] [--wait-secs 30] \
+//     [--settle-ms N] [--poll-ms 2000] "opener" ["follow-up" ...]
+// --settle-ms N ends a wait window early once at least one statement arrived
+// in it AND nothing new has arrived for N ms (0 = always sit out the full
+// window). --wait-secs stays the hard ceiling either way.
 // Feature flags (all optional, run after the follow-ups):
 //   --attach '{"identifier":"0x..","ticket":"0x..","url":"ws://..","mime":"image/jpeg","size":N}'
 //       send a REAL richText attachment (pre-uploaded to a HOP node, e.g. the
@@ -52,6 +56,8 @@ const seed = hexToBytes(opt("seed-hex"));
 const botAccountId = hexToBytes(opt("bot-account"));
 const botIdentifierKey = hexToBytes(opt("bot-identifier-key"));
 const waitSecs = Number(opt("wait-secs") ?? 30);
+const settleMs = Number(opt("settle-ms") ?? 0);
+const pollMs = Number(opt("poll-ms") ?? 2000);
 
 const wallet = deriveSr25519PairFromSeed(seed, "//wallet");
 const identityPriv = deriveP256PrivateKey(deriveSr25519PairFromSeed(seed, "//wallet//chat"));
@@ -92,6 +98,8 @@ console.log(`sender=0x${bytesToHex(wallet.publicKey)} deviceKey=0x${bytesToHex(d
 console.log(`device ownSessionId (bot must poll this): 0x${bytesToHex(deviceSession.ownSessionId)}`);
 
 const seen = new Set();
+let statementsSeen = 0;
+let lastStatementAt = 0;
 let replies = 0;
 let acked = [];
 let lastBotMessageId = null;
@@ -108,6 +116,8 @@ const drain = async () => {
       const k = bytesToHex(data).slice(0, 48);
       if (seen.has(k)) continue;
       seen.add(k);
+      statementsSeen += 1;
+      lastStatementAt = Date.now();
       let d = null;
       for (const sess of [recvSession, identitySession]) {
         try { d = decodeSessionStatementPayload(data, sess, botAccountId); break; } catch (e) { d = { err: e.message }; }
@@ -138,7 +148,17 @@ const drain = async () => {
     }
   }
 };
-const pollFor = async (secs) => { const until = Date.now() + secs * 1000; while (Date.now() < until) { await drain(); await delay(2000); } };
+const pollFor = async (secs) => {
+  const seenAtStart = statementsSeen;
+  const until = Date.now() + secs * 1000;
+  while (Date.now() < until) {
+    await drain();
+    // Early exit needs activity IN THIS window: a topic pre-populated by an
+    // earlier window (or an earlier run) must not count as "the bot answered".
+    if (settleMs > 0 && statementsSeen > seenAtStart && Date.now() - lastStatementAt >= settleMs) return;
+    await delay(pollMs);
+  }
+};
 
 // 1) opener advertising the device key (skip with --no-opener 1 to test an existing thread)
 let followUps = texts;
