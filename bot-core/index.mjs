@@ -29,6 +29,10 @@
 //   BOT_MEDIA_MAX_TOTAL_MB (512), BOT_HOP_TIMEOUT_MS (120000),
 //   BOT_HOP_ALLOWED_NODES (comma-sep host suffixes; empty = allow any wss host),
 //   BOT_HOP_ALLOW_INSECURE (tests only: permit ws:// and IP hosts).
+//   Live replies: BOT_LIVE_EDIT_MIN_MS (3000) / BOT_LIVE_EDIT_MAX_MS (15000)
+//   edit throttle, BOT_LIVE_HEARTBEAT_MS (15000) elapsed-clock frames,
+//   BOT_LIVE_ACK_TIMEOUT_MS (60000), BOT_LIVE_PROGRESS (1; 0 = placeholder and
+//   final only), BOT_AI_STREAM (force stream-json parsing for a custom CLI).
 
 import http from "node:http";
 import fs from "node:fs";
@@ -40,6 +44,7 @@ import { createStateStore } from "./lib/session-store.mjs";
 import { createCommandHandler } from "./lib/commands.mjs";
 import { downloadP2PFile } from "./lib/hop-client.mjs";
 import { createMediaStore } from "./lib/media-store.mjs";
+import { createLiveReplies, createProgressTracker } from "./lib/live-reply.mjs";
 import { createClient as createPapiClient } from "polkadot-api";
 import { getWsProvider, WsEvent } from "polkadot-api/ws";
 import { paseoPeopleNext } from "./lib/descriptors.mjs";
@@ -89,6 +94,15 @@ const ackText = env.BOT_ACK_TEXT ?? (brain === "bridge" || brain === "hermes" ? 
 // like the message was lost. Fast replies cancel it. Empty text disables it.
 const thinkingText = env.BOT_THINKING_TEXT ?? "🤔 One moment — thinking…";
 const thinkingAfterMs = Number(env.BOT_THINKING_AFTER_MS ?? 5000);
+// Live replies: the thinking placeholder becomes ONE evolving message (edited
+// through progress into the final answer) instead of a throwaway bubble.
+// Edit cadence/budget guardrails live in lib/live-reply.mjs; see
+// docs/LIVE-REPLIES.md for the protocol constraints behind them.
+const liveMinEditMs = Number(env.BOT_LIVE_EDIT_MIN_MS ?? 3000);
+const liveMaxEditMs = Number(env.BOT_LIVE_EDIT_MAX_MS ?? 15_000);
+const liveHeartbeatMs = Number(env.BOT_LIVE_HEARTBEAT_MS ?? 15_000);
+const liveAckTimeoutMs = Number(env.BOT_LIVE_ACK_TIMEOUT_MS ?? 60_000);
+const liveProgress = env.BOT_LIVE_PROGRESS !== "0";
 // Greet mode: on startup the bot opens the chat with each allowlisted owner it
 // has never talked to (once ever, persisted) — a liveness signal, so the owner
 // doesn't have to find and message the bot first. Only allowlisted peers are
@@ -105,7 +119,13 @@ const aiModel = (env.BOT_AI_MODEL ?? "").trim();
 const m = (flag, model) => (model ? [flag, model] : []);
 const AI_BRAINS = {
   codex:  { cmd: "codex",  args: (p, mo) => ["exec", "--sandbox", "read-only", "--skip-git-repo-check", ...m("-m", mo), p] },
-  claude: { cmd: "claude", args: (p, mo) => ["-p", ...m("--model", mo), p] },   // Claude Code print mode
+  claude: {
+    cmd: "claude",
+    args: (p, mo) => ["-p", ...m("--model", mo), p],   // Claude Code print mode
+    // stream-json emits one JSON event per line (assistant tool_use blocks,
+    // then a final {type:"result"}) — feeds Takopi-style progress lines.
+    streamArgs: (p, mo) => ["-p", "--output-format", "stream-json", "--verbose", ...m("--model", mo), p],
+  },
   gemini: { cmd: "gemini", args: (p, mo) => [...m("-m", mo), "-p", p] },        // gemini-cli non-interactive
   grok:   { cmd: "grok",   args: (p, mo) => [...m("-m", mo), "-p", p] },        // grok CLI (may need the generic override below)
 };
@@ -125,6 +145,10 @@ const aiSpec = (() => {
   }
   return AI_BRAINS[brain] ?? null;
 })();
+// Structured event streaming (Takopi-style "▸ action" progress lines): on by
+// default for the claude preset, opt-in for a custom CLI that emits the same
+// stream-json format (BOT_AI_STREAM=1), disabled with BOT_LIVE_PROGRESS=0.
+const aiStream = liveProgress && (env.BOT_AI_STREAM === "1" || (brain === "claude" && !(env.BOT_AI_CMD ?? "").trim()));
 const lookbackDays = Number(env.BOT_REQUEST_LOOKBACK_DAYS ?? 7);
 const futureDays = Number(env.BOT_REQUEST_FUTURE_DAYS ?? 2);
 const pollMs = Number(env.BOT_POLL_MS ?? 2000);
@@ -378,28 +402,71 @@ const disarmThinking = (peerHex) => {
   if (t) { clearTimeout(t); thinkingTimers.delete(norm(peerHex)); }
 };
 const armThinking = (peerHex) => {
-  if (!thinkingText || !(thinkingAfterMs > 0) || thinkingTimers.has(norm(peerHex))) return;
-  thinkingTimers.set(norm(peerHex), setTimeout(() => {
-    thinkingTimers.delete(norm(peerHex));
-    sendText(peerHex, thinkingText).catch((e) => log("BOT_THINKING_FAILED", { error: String(e?.message ?? e) }));
+  const k = norm(peerHex);
+  if (!thinkingText || !(thinkingAfterMs > 0) || thinkingTimers.has(k)) return;
+  thinkingTimers.set(k, setTimeout(() => {
+    thinkingTimers.delete(k);
+    if (livePlaceholders.has(k)) return; // a previous turn's placeholder is still open
+    // The placeholder is a LIVE message: it will be edited through progress
+    // frames and finally become the answer itself (docs/LIVE-REPLIES.md).
+    livePlaceholders.set(k, (async () => {
+      const handle = await liveReplies.begin(k, thinkingText);
+      const tracker = createProgressTracker({ label: "working" });
+      // Heartbeat: even with no tool events, the elapsed clock ticks so the
+      // chat never looks stalled. Frames are throttled/coalesced downstream.
+      const timer = setInterval(() => { if (!handle.finalized) handle.update(tracker.render()); }, liveHeartbeatMs);
+      timer.unref?.();
+      log("BOT_LIVE_PLACEHOLDER", { to: k, messageId: handle.messageId });
+      return { handle, tracker, timer };
+    })().catch((e) => {
+      log("BOT_THINKING_FAILED", { error: String(e?.message ?? e) });
+      return null;
+    }));
   }, thinkingAfterMs));
+};
+
+// ---------- outbound ACK tracking ----------
+// The peer's app sends a session-response ACK for every request statement it
+// consumes (mirror of our sendSessionAck). We track our own outgoing
+// requestIds so live replies can gate edits on "the placeholder was fetched"
+// — an edit submitted earlier would replace the un-fetched placeholder in the
+// channel slot and orphan every subsequent edit (docs/LIVE-REPLIES.md).
+const pendingAcks = new Map(); // requestId -> { resolve, timer }
+const PENDING_ACK_CAP = 500;
+const awaitOutboundAck = (requestId, timeoutMs = liveAckTimeoutMs) => new Promise((resolve) => {
+  const timer = setTimeout(() => { pendingAcks.delete(requestId); resolve(false); }, timeoutMs);
+  timer.unref?.();
+  pendingAcks.set(requestId, { resolve, timer });
+  while (pendingAcks.size > PENDING_ACK_CAP) {
+    const [oldId, old] = pendingAcks.entries().next().value;
+    pendingAcks.delete(oldId);
+    clearTimeout(old.timer);
+    old.resolve(false);
+  }
+});
+const resolveOutboundAck = (requestId) => {
+  const p = pendingAcks.get(requestId);
+  if (!p) return;
+  pendingAcks.delete(requestId);
+  clearTimeout(p.timer);
+  p.resolve(true);
 };
 
 // ---------- send a reply to a peer ----------
 // Returns the outgoing envelope messageId (an app UUID) so callers — notably
 // POST /send — hand the brain an id it can later edit or that the peer can
 // react to. replyTo quotes a peer message; editOf rewrites one of our own.
-const sendMessage = async (peerHex, { text, replyTo = null, editOf = null }) => {
-  disarmThinking(peerHex); // a real reply is going out — no ack needed
+const submitMessage = async (peerHex, { text, replyTo = null, editOf = null }) => {
   const entry = sessions.get(norm(peerHex));
   if (entry == null) throw new Error("no active session for peer");
   const messageId = makeAppUuid();
+  const requestId = makeAppUuid();
   const opaque = replyTo
     ? encodeOpaqueReplyMessage({ messageId, replyToMessageId: replyTo, text })
     : editOf
       ? encodeOpaqueEditedMessage({ messageId, targetMessageId: editOf, text })
       : encodeOpaqueTextMessage({ messageId, text });
-  const payload = encodeSessionRequestPayload(entry.session, makeAppUuid(), [opaque]);
+  const payload = encodeSessionRequestPayload(entry.session, requestId, [opaque]);
   await submitBounded({
     walletPair: wallet,
     channel: entry.session.requestChannel,
@@ -408,9 +475,35 @@ const sendMessage = async (peerHex, { text, replyTo = null, editOf = null }) => 
     expiryFactory,
   });
   log("BOT_SENT_TEXT", { to: peerHex, chars: text.length, ...(replyTo ? { replyTo } : {}), ...(editOf ? { editOf } : {}) });
-  return messageId;
+  return { messageId, requestId };
+};
+const sendMessage = async (peerHex, opts) => {
+  disarmThinking(peerHex); // a real reply is going out — no placeholder needed
+  return (await submitMessage(peerHex, opts)).messageId;
 };
 const sendText = (peerHex, text) => sendMessage(peerHex, { text });
+
+// ---------- live replies (one evolving message per slow turn) ----------
+const liveReplies = createLiveReplies({
+  send: ({ peerHex, text, editOf }) => submitMessage(peerHex, { text, editOf }),
+  awaitAck: (requestId) => awaitOutboundAck(requestId),
+  minIntervalMs: liveMinEditMs,
+  maxIntervalMs: liveMaxEditMs,
+  log,
+});
+// peerHex -> Promise<{handle, tracker, timer} | null> for the current turn's
+// placeholder. Consumed (take) exactly once, by whoever delivers the answer.
+const livePlaceholders = new Map();
+const takeLivePlaceholder = async (peerHex) => {
+  const k = norm(peerHex);
+  const p = livePlaceholders.get(k);
+  if (!p) return null;
+  livePlaceholders.delete(k);
+  const lp = await p.catch(() => null);
+  if (lp) clearInterval(lp.timer);
+  return lp;
+};
+const peekLivePlaceholder = (peerHex) => livePlaceholders.get(norm(peerHex)) ?? null;
 
 // Reactions ride the same session channel but are not "replies": they never
 // disarm the thinking ack and carry no text of their own.
@@ -436,7 +529,19 @@ const AI_TURNS = 8;
 // Capped per peer below, but the peer count itself was unbounded — each entry
 // holds conversation plaintext, so idle peers' history must age out too.
 const AI_HISTORY_PEER_CAP = 500;
-const runAgentCli = (peerHex, userText) => new Promise((resolve) => {
+// One-line Takopi-style titles for tool events surfaced in progress frames.
+const toolActionTitle = (name, input = {}) => {
+  const base = (p) => String(p ?? "").split("/").pop();
+  if (name === "Bash") return `$ ${String(input.command ?? "").slice(0, 80)}`;
+  if (name === "Read") return `reading ${base(input.file_path)}`;
+  if (name === "Write" || name === "Edit") return `editing ${base(input.file_path)}`;
+  if (name === "Grep" || name === "Glob") return `searching ${String(input.pattern ?? "")}`;
+  if (name === "WebSearch") return `searching: ${String(input.query ?? "")}`;
+  if (name === "WebFetch") return `fetching ${String(input.url ?? "")}`;
+  return String(name || "tool");
+};
+
+const runAgentCli = (peerHex, userText, onAction = null) => new Promise((resolve) => {
   const hist = (aiHistory.get(peerHex) ?? []).slice(-AI_TURNS * 2)
     .map((t) => `${t.role === "user" ? "User" : "You"}: ${t.text}`).join("\n");
   const prompt = [
@@ -444,16 +549,43 @@ const runAgentCli = (peerHex, userText) => new Promise((resolve) => {
     hist ? `Conversation so far:\n${hist}` : "",
     `User: ${userText}`, "You:",
   ].filter(Boolean).join("\n\n");
+  const model = peerModelOverrides.get(norm(peerHex)) ?? aiModel;
+  const argv = aiStream && aiSpec.streamArgs ? aiSpec.streamArgs(prompt, model) : aiSpec.args(prompt, model);
   // stdin MUST be ignored: a piped stdin makes some CLIs (e.g. codex) block on "Reading additional input".
-  const child = spawn(aiSpec.cmd, aiSpec.args(prompt, peerModelOverrides.get(norm(peerHex)) ?? aiModel), { stdio: ["ignore", "pipe", "pipe"] });
-  let out = "", err = "";
+  const child = spawn(aiSpec.cmd, argv, { stdio: ["ignore", "pipe", "pipe"] });
+  let out = "", err = "", lineBuf = "";
+  let streamResult = null, lastAssistantText = null;
+  // stream-json mode: one JSON event per line — tool_use blocks become
+  // progress actions, the {type:"result"} event carries the final answer.
+  const onStreamLine = (line) => {
+    let ev;
+    try { ev = JSON.parse(line); } catch { return; }
+    if (ev?.type === "result" && typeof ev.result === "string") { streamResult = ev.result; return; }
+    if (ev?.type === "assistant") {
+      for (const block of ev.message?.content ?? []) {
+        if (block?.type === "tool_use") onAction?.(toolActionTitle(block.name, block.input));
+        else if (block?.type === "text" && block.text) lastAssistantText = block.text;
+      }
+    }
+  };
   const timer = setTimeout(() => { child.kill("SIGKILL"); log("BOT_AI_TIMEOUT", { to: peerHex }); resolve(null); }, 90_000);
-  child.stdout.on("data", (d) => { out += d; });
+  child.stdout.on("data", (d) => {
+    out += d;
+    if (!aiStream) return;
+    lineBuf += d;
+    let nl;
+    while ((nl = lineBuf.indexOf("\n")) >= 0) { onStreamLine(lineBuf.slice(0, nl)); lineBuf = lineBuf.slice(nl + 1); }
+  });
   child.stderr.on("data", (d) => { err += d; });
   child.on("error", (e) => { clearTimeout(timer); log("BOT_AI_SPAWN_FAILED", { error: String(e?.message ?? e) }); resolve(null); });
   child.on("close", (code) => {
     clearTimeout(timer);
-    if (code === 0) return resolve(out.trim());
+    if (code === 0) {
+      if (aiStream && lineBuf) onStreamLine(lineBuf);
+      // Prefer the structured result; fall back to the last assistant text or
+      // raw stdout so an older CLI without stream-json still answers.
+      return resolve(aiStream ? (streamResult ?? lastAssistantText ?? out.trim()) : out.trim());
+    }
     // Classify the failure so the operator knows the remedy (re-auth vs. retry).
     // Token management belongs to the codex CLI; we only surface *which* failure it is.
     const authRevoked = /401|unauthorized|refresh token|could not be refreshed|log ?out and sign in/i.test(err);
@@ -523,12 +655,31 @@ const handleInbound = async (peerHex, msg, owedId = null) => {
       await sendText(peerHex, commandReply).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
       return;
     }
+    // Deliver by finalizing the live placeholder when one was posted (the
+    // "thinking…" bubble BECOMES the answer); plain send otherwise.
+    const deliverReply = async (text) => {
+      const lp = await takeLivePlaceholder(peerHex);
+      if (lp) {
+        try { await lp.handle.finalize(text); return; }
+        catch (e) { log("BOT_LIVE_FINALIZE_FAILED", { to: peerHex, error: String(e?.message ?? e) }); }
+      }
+      await sendText(peerHex, text);
+    };
     const userText = renderForBrain(msg);
-    armThinking(peerHex); // ack if the model takes longer than thinkingAfterMs
-    const reply = await runAgentCli(peerHex, userText);  // logs its own classified failure reason
+    armThinking(peerHex); // live placeholder if the model takes longer than thinkingAfterMs
+    // Tool events (claude stream-json) become "▸ action" lines on the placeholder.
+    const onAction = liveProgress ? (title) => {
+      const p = peekLivePlaceholder(peerHex);
+      p?.then((lp) => {
+        if (!lp || lp.handle.finalized) return;
+        lp.tracker.add(title);
+        lp.handle.update(lp.tracker.render());
+      }).catch(() => {});
+    } : null;
+    const reply = await runAgentCli(peerHex, userText, onAction);  // logs its own classified failure reason
     if (!reply) {
-      // Don't leave the user hanging after the "thinking" ack.
-      await sendText(peerHex, "Sorry — I couldn't reach my AI just now. Please try again in a moment.").catch(() => {});
+      // Don't leave the user hanging after the "thinking" placeholder.
+      await deliverReply("Sorry — I couldn't reach my AI just now. Please try again in a moment.").catch(() => {});
       return;
     }
     const h = aiHistory.get(peerHex) ?? [];
@@ -543,7 +694,7 @@ const handleInbound = async (peerHex, msg, owedId = null) => {
       persist();
       outgoing += "\n\n(Tip: send /help to see my commands.)";
     }
-    await sendText(peerHex, outgoing).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
+    await deliverReply(outgoing).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
     return;
   }
   // bridge / hermes / unknown: hand off to an external agent via the HTTP bridge.
@@ -740,6 +891,11 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
   // broken/stale session is diagnosable instead of looking like "no message".
   try { decoded = decodeSessionStatementPayload(data, session, senderAccountId); }
   catch (e) { log("BOT_SESSION_DECODE_FAILED", { from: peerHex, error: String(e?.message ?? e) }); return; }
+  if (decoded?.kind === "response") {
+    // The peer ACKed one of OUR request statements — unlocks live-reply edits.
+    resolveOutboundAck(decoded.requestId);
+    return;
+  }
   if (decoded?.kind !== "request") return;
   const fresh = [];   // messages that run the brain (journaled + owed)
   const declines = []; // call offers to auto-decline after the ACK
@@ -999,6 +1155,9 @@ const startBridge = () => {
           chain: wsProvider.getStatus?.().type ?? "unknown", peopleChain: papiProvider.getStatus?.().type ?? "unknown",
           pollFailStreak, lastPollAgoMs: Date.now() - lastPollOkAt,
           ingress: ing ? { healthy: ing.sinceOkMs < ing.staleMs, sinceOkMs: ing.sinceOkMs, recoveries: ing.consecutiveRecoveries } : null,
+          // Capability advertisement for harness adapters (OpenClaw-style
+          // supportsEdit gating): edits exist and are throttled server-side.
+          live: { supportsEdit: true, minEditMs: liveMinEditMs, placeholderAfterMs: thinkingText ? thinkingAfterMs : null },
         });
       }
       if (req.method === "GET" && url.pathname === "/inbound") {
@@ -1029,10 +1188,31 @@ const startBridge = () => {
         const { chat_id: chatId, text, reply_to: replyTo, edit_of: editOf } = await readJson(req);
         if (!chatId || !text) return json(400, { success: false, error: "chat_id and text required" });
         if (replyTo && editOf) return json(400, { success: false, error: "reply_to and edit_of are mutually exclusive" });
+        // Auto-upgrade: the first plain send for a peer with an open live
+        // placeholder becomes its final edit — every harness gets the
+        // thinking->answer single-message flow without code changes.
+        if (!replyTo && !editOf) {
+          const lp = await takeLivePlaceholder(chatId);
+          if (lp) {
+            try {
+              const { messageId } = await lp.handle.finalize(String(text));
+              return json(200, { success: true, message_id: messageId });
+            } catch (e) {
+              log("BOT_LIVE_FINALIZE_FAILED", { to: chatId, error: String(e?.message ?? e) });
+            }
+          }
+        }
+        // Harness-driven edits go through the live outbox: throttled,
+        // latest-wins, so a streaming harness (Hermes edits every 0.8s) can't
+        // exceed the protocol-safe cadence. Fire-and-forget by design.
+        if (editOf) {
+          disarmThinking(chatId);
+          liveReplies.throttledEdit(norm(chatId), String(editOf), String(text));
+          return json(200, { success: true, message_id: String(editOf), coalesced: true });
+        }
         const messageId = await sendMessage(chatId, {
           text: String(text),
           replyTo: replyTo ? String(replyTo) : null,
-          editOf: editOf ? String(editOf) : null,
         });
         return json(200, { success: true, message_id: messageId });
       }
