@@ -144,8 +144,31 @@ outright", which matters for agents even when the peer is online.
 
 - **No delete/unsend.** `MessageContent` has no delete kind (kinds 0–18
   checked, v0.16). Agents occasionally need to retract (wrong-chat, oversized,
-  or superseded content); humans want it too. Ask: a `deleted(messageId)`
-  content kind with soft-delete semantics on the receiver.
+  or superseded content); humans want it too. The serverless design splits
+  the semantics cleanly into a strong path and a cooperative path, and the
+  spec should define both:
+  - *Undelivered — real deletion.* While a message sits in the sender's
+    outstanding request statement, the sender can re-submit the channel slot
+    without it (channel replacement), removing the ciphertext from the store
+    entirely — the recipient never sees it. The spec should bless this: a
+    delete of an un-ACKed message MUST drop it from the outstanding request.
+    (The sender can't distinguish fetched-but-not-ACKed, so UX says "probably
+    never seen", not "certainly".)
+  - *Delivered — cooperative tombstone.* Once fetched and decrypted, the
+    plaintext lives in the peer's local database; deletion becomes a
+    `deleted(messageId)` content kind that a compliant client honors:
+    receiver MUST tombstone ("message deleted"), MUST propagate the tombstone
+    across its own devices via mds, SHOULD collapse the message's edit
+    history. Same trust-the-client model as Signal/WhatsApp delete-for-
+    everyone and Matrix redactions — E2EE forces it regardless of transport.
+  - *Honesty requirements.* Statements are publicly readable ciphertext until
+    they expire or are replaced (a copied blob can't be recalled, and the
+    static session keys mean deletion is not forward secrecy); the push
+    payload already carried the content; and the counterparty may run a
+    non-compliant client. UX MUST present delete-for-everyone as a request,
+    not a guarantee. The serverless upside deserves stating too: statements
+    expire and there is no server archive, so once both clients comply the
+    message exists nowhere legitimate.
 - **No typing/working indicator.** There is no presence or typing signal in
   the protocol. We simulate "the agent is working" with placeholder edits,
   which costs statements and edit-history rows (see §2). A lightweight,
