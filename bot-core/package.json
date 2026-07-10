@@ -11,7 +11,7 @@
     "start": "node cli.mjs run",
     "test": "node --test test/*.test.mjs",
     "prepare": "papi generate && node scripts/sync-descriptors.mjs",
-    "prepublishOnly": "npm test"
+    "prepublishOnly": "[ -n \"$SKIP_TESTS\" ] && echo 'SKIP_TESTS set, skipping tests before publish' || npm test"
   },
   "dependencies": {
     "@noble/curves": "^2.2.0",

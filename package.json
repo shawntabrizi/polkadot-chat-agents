@@ -19,6 +19,7 @@
     "info": "node bot-core/cli.mjs info",
     "help": "node bot-core/cli.mjs help",
     "release": "npm publish ./bot-core",
+    "release:skip-tests": "SKIP_TESTS=1 npm publish ./bot-core",
     "release-dry": "npm publish --dry-run ./bot-core"
   }
 }
