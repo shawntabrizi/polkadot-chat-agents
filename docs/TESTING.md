@@ -103,7 +103,8 @@ bot-core logs one JSON line per event. The ones worth grepping:
 | `BOT_UNDECODABLE_MESSAGE` / `BOT_UNSUPPORTED_CONTENT` | message kind the codec can't parse / doesn't know |
 | `BOT_LIVE_PLACEHOLDER` / `BOT_LIVE_FALLBACK` | thinking placeholder posted / peer never ACKed it, answer sent plain |
 | `BOT_LIVE_ACK_TIMEOUT` / `BOT_LIVE_EDIT_FAILED` / `BOT_LIVE_FINALIZE_FAILED` | live-reply edge cases (progress dropped, final fell back) |
-| `BOT_AI_FAILED` / `BOT_AI_TIMEOUT` / `BOT_AI_AUTH_REVOKED` | direct-brain model call failed (the last one means re-login) |
+| `BOT_AI_FAILED` / `BOT_AI_AUTH_REVOKED` / `BOT_AI_IDLE_TIMEOUT` | direct-engine turn failed / needs re-login / was killed by the idle backstop |
+| `BOT_STOP` / `BOT_RESUME_INVALIDATED` | user /stop cancelled a turn / resume tokens dropped after an engine or workspace change |
 
 ## CI
 

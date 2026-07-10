@@ -228,9 +228,9 @@ for (const [mode, extraEnv] of [
     const stateDir = tmpState();
     const slowBrain = {
       ...extraEnv,
-      BOT_BRAIN: "claude", // any AI brain; the CLI is overridden below
+      BOT_BRAIN: "claude", // engine parser; the CLI itself is the mock sh below
       BOT_AI_CMD: "sh",
-      BOT_AI_ARGS: JSON.stringify(["-c", "sleep 3 && echo recovered-answer"]),
+      BOT_AI_ARGS: JSON.stringify(["-c", "sleep 3; printf '{\"type\":\"result\",\"result\":\"recovered-answer\"}\\n'"]),
       BOT_THINKING_TEXT: "", // keep the send log unambiguous
     };
     let bot = await startBot({ endpoint: node.url, stateDir, extraEnv: slowBrain });
@@ -501,6 +501,87 @@ test("live reply: an unanswered placeholder resolves to a timeout note", async (
   }
 });
 
+test("engine: session token is captured from the stream and persisted per peer", async () => {
+  const node = await startMockStatementNode();
+  const stateDir = tmpState();
+  const bot = await startBot({
+    endpoint: node.url,
+    stateDir,
+    extraEnv: {
+      BOT_SUBSCRIBE: "0", BOT_BRAIN: "claude", BOT_AI_CMD: "sh", BOT_THINKING_TEXT: "",
+      // Emit a claude-style init (carries session_id) then the answer.
+      BOT_AI_ARGS: JSON.stringify(["-c",
+        "printf '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"SES-XYZ\"}\\n'; printf '{\"type\":\"result\",\"result\":\"hi\"}\\n'"]),
+    },
+  });
+  try {
+    const r = await runClient(node.url, [], ["capture opener", "again"]);
+    assert.equal(r.code, 0, `client failed:\n${r.out}`);
+    await bot.waitFor((e) => e.event === "BOT_SENT_TEXT", { label: "answer sent" });
+    // The captured session id is persisted so the next turn resumes it.
+    const state = JSON.parse(fs.readFileSync(path.join(stateDir, "session-state.json"), "utf8"));
+    assert.equal(state.agent?.engine, "custom");
+    assert.ok(state.peers.some((p) => p.rs === "SES-XYZ"), `no peer carries the session token: ${JSON.stringify(state.peers)}`);
+  } finally {
+    await bot.stop();
+    await node.close();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("engine: /stop cancels a running turn and finalizes the placeholder", async () => {
+  const node = await startMockStatementNode();
+  const stateDir = tmpState();
+  const bot = await startBot({
+    endpoint: node.url,
+    stateDir,
+    extraEnv: {
+      BOT_SUBSCRIBE: "0", BOT_BRAIN: "claude", BOT_AI_CMD: "sh",
+      // A turn that never finishes on its own (until killed).
+      BOT_AI_ARGS: JSON.stringify(["-c", "printf '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"S1\"}\\n'; sleep 120"]),
+      BOT_THINKING_TEXT: "⏳ thinking…", BOT_THINKING_AFTER_MS: "1000", BOT_LIVE_EDIT_MIN_MS: "300",
+    },
+  });
+  try {
+    // First message starts the long turn; "/stop" arrives as a device follow-up
+    // while it runs and must cancel it (bypassing the per-peer queue).
+    const r = await runClient(node.url, ["--wait-secs", "6"], ["do something slow", "/stop"]);
+    const stop = await bot.waitFor((e) => e.event === "BOT_STOP", { label: "BOT_STOP" });
+    assert.equal(stop.stopped, true, "a running turn should have been stopped");
+    assert.match(r.out, /\[BOT EDIT [0-9A-F-]+\] ⏹ Stopped\./, `stop edit not seen:\n${r.out}`);
+  } finally {
+    await bot.stop();
+    await node.close();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("engine: idle-silence backstop kills a wedged turn and apologizes", async () => {
+  const node = await startMockStatementNode();
+  const stateDir = tmpState();
+  const bot = await startBot({
+    endpoint: node.url,
+    stateDir,
+    extraEnv: {
+      BOT_SUBSCRIBE: "0", BOT_BRAIN: "claude", BOT_AI_CMD: "sh",
+      // Emit once (resets the idle timer), then go silent forever.
+      BOT_AI_ARGS: JSON.stringify(["-c", "printf '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"S2\"}\\n'; sleep 120"]),
+      BOT_THINKING_TEXT: "", BOT_AI_IDLE_TIMEOUT_MS: "2500",
+    },
+  });
+  try {
+    // Single opener (no device follow-up), so the client never sees a session
+    // ACK and its exit rule fails — assert on behavior, not exit code.
+    const r = await runClient(node.url, ["--wait-secs", "12"], ["wedge me"]);
+    await bot.waitFor((e) => e.event === "BOT_AI_IDLE_TIMEOUT", { label: "BOT_AI_IDLE_TIMEOUT" });
+    assert.match(r.out, /couldn't reach my agent/, `apology not sent after idle kill:\n${r.out}`);
+  } finally {
+    await bot.stop();
+    await node.close();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("owed attachment survives kill -9 and re-processes after restart", async () => {
   const node = await startMockStatementNode();
   const hop = await startMockHopNode();
@@ -511,7 +592,7 @@ test("owed attachment survives kill -9 and re-processes after restart", async ()
     BOT_SUBSCRIBE: "0",
     BOT_BRAIN: "claude",
     BOT_AI_CMD: "sh",
-    BOT_AI_ARGS: JSON.stringify(["-c", "sleep 3 && echo recovered-answer"]),
+    BOT_AI_ARGS: JSON.stringify(["-c", "sleep 3; printf '{\"type\":\"result\",\"result\":\"recovered-answer\"}\\n'"]),
     BOT_THINKING_TEXT: "",
     BOT_HOP_ALLOW_INSECURE: "1",
   };

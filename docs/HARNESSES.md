@@ -124,17 +124,24 @@ Any framework that can run the poll loop above can drive a bot; the bridge
 contract is the whole integration surface. The Hermes adapter (~150 lines of
 Python) is a reasonable template.
 
-## Direct brains
+## Direct engines
 
-Without a framework, bot-core can invoke a model CLI itself. Each brain is a
-mapping from prompt to argv; the CLI owns its own credentials.
+Without a framework, bot-core runs a headless coding-agent CLI itself — as an
+autonomous agent, not a chat wrapper: the user's message is passed verbatim (no
+injected persona), conversation continuity is the CLI's own native session
+(`--resume`), and tools are on. Each engine is a small config in
+`lib/runners.mjs` that turns a (prompt, model, resume) into argv and normalizes
+the CLI's JSONL event stream; bot-core owns the shared spawn/stream loop.
 
-| Brain | Invokes | Authentication |
-|---|---|---|
-| `codex` | `codex exec ...` | `codex login` (ChatGPT/Codex subscription) |
-| `claude` | `claude -p ...` | Claude Code login or API key |
-| `gemini` | `gemini -p ...` | gemini-cli login |
-| `grok` | `grok -p ...` | grok CLI login |
+| Engine | Invokes | Reaches | Authentication |
+|---|---|---|---|
+| `claude` | `claude -p --output-format stream-json …` | Claude models | Claude Code login or `ANTHROPIC_API_KEY` |
+| `codex` | `codex exec --json …` | OpenAI models | `codex login` or `OPENAI_API_KEY` |
+| `opencode` | `opencode run --format json …` | **many providers** via `--model provider/model` (anthropic/…, openai/…, google/…, xai/…, openrouter/…, ollama/…) | that provider's key or `opencode auth login` |
+
+opencode is the many-models path: one engine reaches ~any provider, so there is
+no need for per-vendor brains (`gemini`/`grok` were removed — use
+`opencode --model google/…` or `xai/…`).
 
 ```bash
 pca create mybot --brain claude --owner yourname.42
@@ -143,23 +150,44 @@ pca run mybot
 
 Related settings:
 
-- `--model` on `create` (saved) or `run`/`deploy` (override) selects a specific
-  model — it lands in `BOT_AI_MODEL`, passed to the CLI's own model flag
-  (for example `claude-haiku-4-5-20251001` to keep costs down).
-- `BOT_AI_CMD` and `BOT_AI_ARGS` wire in any other CLI without code changes; the
-  `__PROMPT__` token in the args array is replaced with the built prompt.
-- In-chat commands (direct brains only): /help, /reset (forget the conversation),
-  /model [name|default] (switch models for that chat), /ping. Handled by bot-core
-  instantly, no model tokens spent. Bridge bots pass slash-commands through to the
-  framework, which owns that conversation and has its own commands (e.g. OpenClaw's /new).
+- `--model` on `create` (saved) or `run`/`deploy` (override) selects the model —
+  `BOT_AI_MODEL`. For opencode it's a `provider/model` slug (the provider
+  selector); for claude/codex a plain model name.
+- Tools are on by default (`BOT_AI_ALLOWED_TOOLS`, default `Bash,Read,Edit,Write`).
+  `BOT_AI_SKIP_PERMISSIONS=1` grants full autonomy (all tools) — safe because a
+  deployed engine runs inside its own container (see the safety model below).
+- The agent works in a persistent workspace (`BOT_AI_WORKSPACE`, default
+  `BOT_STATE_DIR/workspace`) that survives restarts.
+- `BOT_AI_CMD`/`BOT_AI_ARGS` wire in a custom CLI that speaks claude-shaped
+  stream-json (`__PROMPT__` is replaced with the prompt).
+- In-chat commands (direct engines only): /help, /reset (start a fresh session),
+  /stop (cancel the current turn), /model [name|default], /ping. Handled by
+  bot-core instantly. Bridge bots pass slash-commands through to the framework.
+- No wall-clock timeout — a long build/test is legitimate. An idle-silence
+  backstop (`BOT_AI_IDLE_TIMEOUT_MS`, default 10 min of zero output) kills a
+  wedged turn and unblocks the peer; `/stop` is the user's cancel lever.
 - `BOT_THINKING_AFTER_MS` (default 5000) and `BOT_THINKING_TEXT` control the
-  acknowledgement sent when a reply is slow; setting the text empty disables it.
+  live placeholder posted when a reply is slow (see docs/LIVE-REPLIES.md);
+  setting the text empty disables it.
 - `--greet` on `run`/`deploy` (env `BOT_GREET=1`, text via `BOT_GREET_TEXT`): the
   bot messages each allowlisted owner it has never talked to on startup — once
   ever per owner, never into an existing thread. Works for any brain, including
   bridge mode.
-- Failed model calls are logged with a cause: `BOT_AI_AUTH_REVOKED` means the
-  CLI needs a re-login, `BOT_AI_FAILED` and `BOT_AI_TIMEOUT` are transient.
+- Failed turns are logged with a cause: `BOT_AI_AUTH_REVOKED` means the CLI
+  needs a re-login, `BOT_AI_FAILED` is transient, `BOT_AI_IDLE_TIMEOUT` means a
+  wedged turn was killed by the idle backstop.
+
+### Safety model for containerized agents
+
+A deployed engine runs its tools autonomously, so the boundary is the
+**container**, not a permission prompt. `pca deploy` builds a non-root image
+(`USER node` — Claude Code refuses `--dangerously-skip-permissions` as root)
+with the CLI baked in, mounts a persistent `/workspace` (the agent's cwd) and
+`/state`, and passes provider keys via `bot.env` and/or OAuth creds mounted at
+`./home`. The container has its own filesystem and open network egress but
+nothing from the host; the allowlist (`--owner`/`--allow`) gates who can drive
+it. `--safe-tools` restricts to the read/write/edit/bash allowlist instead of
+full autonomy. Sessions and the workspace persist across redeploys.
 
 An AI brain spends quota, so `create` requires an allowlist or an explicit
 `--public`.

@@ -1,8 +1,9 @@
 # polkadot-chat-agents
 
 Run an AI chat bot that people can message from the Polkadot app. The bot's
-replies can come from a model CLI (Claude, Codex, Gemini, Grok) or from an agent
-framework such as Hermes or OpenClaw.
+replies can come from a headless coding-agent CLI (Claude, Codex, or OpenCode —
+which itself reaches many providers) or from an agent framework such as Hermes or
+OpenClaw.
 
 Polkadot app chat has no chat server. Messages travel over the Statement Store, a
 decentralized store-and-forward layer, and conversations are end-to-end encrypted.
@@ -74,25 +75,34 @@ pca stop mycoolbot
 container with a persistent state volume, and waits for the bot to come online.
 Add `--dry-run` to preview the generated files without deploying.
 
-Direct brains (`echo`, `claude`) deploy as a single container. Bridge bots deploy
-together with their agent framework as a two-container stack: `--harness
-openclaw` requires no interactive steps if the server has Claude CLI credentials,
-and `--harness hermes` prints the one login command it cannot automate. See
-[docs/HARNESSES.md](docs/HARNESSES.md).
+Direct engines (`echo`, `claude`, `codex`, `opencode`) deploy as a single
+non-root container with the agent CLI baked in and a persistent workspace it
+works in. Bridge bots deploy together with their agent framework as a
+two-container stack: `--harness openclaw` requires no interactive steps if the
+server has Claude CLI credentials, and `--harness hermes` prints the one login
+command it cannot automate. See [docs/HARNESSES.md](docs/HARNESSES.md).
 
 ## Brains
 
-| `--brain` | Replies come from | Authentication |
-|---|---|---|
-| `claude` | the `claude` CLI | Claude Code login or API key |
-| `codex` | the `codex` CLI | ChatGPT/Codex subscription login |
-| `gemini`, `grok` | that model's CLI | the CLI's own login |
-| `echo` | bot-core itself (repeats the message) | none |
-| `hermes` / `bridge` | an agent framework over the HTTP bridge | the framework's |
+Direct engines run a headless coding-agent CLI as an autonomous agent — verbatim
+prompts, native session memory (`--resume`), and real tools (bash/read/edit/
+write) in a container that is their sandbox.
 
-`--model` pins a specific model, passed to the brain CLI's own model flag — set it
-at `create` (saved with the bot) or override per run: `pca run mybot --model
-claude-haiku-4-5-20251001`. `BOT_AI_CMD` and `BOT_AI_ARGS` wire in any other CLI.
+| `--brain` | Replies come from | Reaches | Authentication |
+|---|---|---|---|
+| `claude` | the `claude` CLI | Claude models | Claude Code login or `ANTHROPIC_API_KEY` |
+| `codex` | the `codex` CLI | OpenAI models | ChatGPT/Codex login or `OPENAI_API_KEY` |
+| `opencode` | the `opencode` CLI | many providers via `--model provider/model` | that provider's key or `opencode auth login` |
+| `echo` | bot-core itself (repeats the message) | — | none |
+| `hermes` / `bridge` | an agent framework over the HTTP bridge | — | the framework's |
+
+`opencode` is the many-models path — one engine reaches Anthropic, OpenAI,
+Google, xAI, OpenRouter, local models, etc. In-chat: `/stop` cancels the current
+turn, `/reset` starts a fresh session, `/model` switches model.
+
+`--model` pins the model (`BOT_AI_MODEL`; a `provider/model` slug for opencode) —
+set it at `create` (saved) or override per run. `BOT_AI_CMD`/`BOT_AI_ARGS` wire in
+a custom CLI that speaks claude-shaped stream-json.
 Because an AI brain spends your quota, `create` refuses to leave one open to
 arbitrary senders unless `--public` is passed.
 

@@ -77,7 +77,7 @@ with each inbound kind:
 | Kind | Handling |
 |---|---|
 | text (0), richText (15), reply (7), edited (12) | run the brain (journaled + owed like any message) |
-| reacted / reactionRemoved (4/5) | recorded: log + history note for direct brains, `/inbound?events=1` for bridges — never answered |
+| reacted / reactionRemoved (4/5) | recorded: logged, and delivered to `/inbound?events=1` bridge pollers — never answered (a chat reply to a reaction is bizarre UX) |
 | coinageSend (16), contactAdded (3), leftChat (13) | logged + bridge event; coinage is informational only (claiming needs the full Coinage stack) |
 | dataChannelOffer (8) | auto-declined with dataChannelClosed (11) after the ACK — the bot has no WebRTC stack, declining beats ringing forever |
 | anything else | logged (`BOT_UNSUPPORTED_CONTENT` / `BOT_UNDECODABLE_MESSAGE`) and skipped |
@@ -144,7 +144,8 @@ bot-core (Node)
   identity + registration        cli.mjs create / lib/register.mjs
   transport                      index.mjs: poll, decode, ACK, send
   session persistence            lib/session-store.mjs
-  brains                         direct CLI (claude/codex/gemini/grok) or bridge
+  brains                         direct engine (claude/codex/opencode) or bridge
+  agent engines                  lib/runners.mjs (engine table) + index.mjs runEngine
   HTTP bridge                    for agent frameworks
   deploy + ops                   cli.mjs deploy / logs / status / stop
 
@@ -152,10 +153,21 @@ hermes-plugin/polkadot (Python)  Hermes BasePlatformAdapter over the bridge
 openclaw-plugin/polkadot (TS)    OpenClaw channel plugin over the bridge
 ```
 
-One transport, many brains. A direct brain shells out to a model CLI (the CLI
-owns its own credentials; `BOT_AI_MODEL` selects the model). Bridge mode hands
-messages to an external agent framework instead, so the language boundary between
-the Node transport and a Python or TypeScript agent is one HTTP hop.
+One transport, many brains. A **direct engine** runs a headless coding-agent CLI
+(claude/codex/opencode) as an autonomous agent: the message is passed verbatim
+(no injected persona), continuity is the CLI's native session via `--resume`
+(a token captured from its event stream, persisted per peer, invalidated on an
+engine/workspace change), and tools run in a persistent workspace. `lib/runners
+.mjs` holds each engine's argv builder + JSONL-event normalizer (to one
+started/action/text/result vocabulary); `runEngine` in index.mjs owns the shared
+loop — spawn in a process group, stream and normalize, feed live-reply progress
+frames, and enforce an idle-silence backstop (no wall-clock limit; a long build
+is legitimate, a wedge is killed and the peer queue unblocks). `/stop` cancels a
+turn (intercepted before the per-peer queue), `/reset` starts a fresh session.
+opencode reaches many providers through one `--model provider/model` flag, so
+there are no per-vendor brains. Bridge mode instead hands messages to an external
+agent framework over one HTTP hop. Deployed engines run in a non-root container
+that is the sandbox for their tools (see HARNESSES.md).
 
 If no reply has gone out within `BOT_THINKING_AFTER_MS` (default 5s) of receiving
 a message, the bot posts a "thinking" placeholder — a LIVE message that is then
@@ -198,10 +210,14 @@ app username) or an explicit `--public` for any brain that costs money.
 
 - `secret.json` (the bot's root seed) and `session-state.json` (session keys) are
   written mode 0600 and gitignored. Whoever holds the seed is the bot.
-- The bot-core transport never handles model credentials: direct brains call the
-  model's own CLI, and frameworks hold their own auth. The one exception is the
-  deploy CLI — `pca deploy --anthropic-key` writes the key you pass into the
-  container's `bot.env` so a headless `claude` bot can authenticate; treat that
-  file as a secret (it also holds the seed; mode 0600, gitignored).
-- Deployed harness stacks run the agent CLI as a non-root container user, so no
-  permission-bypass flags are needed.
+- The bot-core transport never handles model credentials: direct engines call
+  the CLI (which owns its own auth), and frameworks hold their own. The
+  exception is the deploy CLI — `pca deploy --anthropic-key` (and
+  `--openai-key`/`--openrouter-key`/…) writes the key into the container's
+  `bot.env`; OAuth creds can instead be mounted at `./home`. Treat `bot.env` as
+  a secret (it also holds the seed; mode 0600, gitignored).
+- Deployed engines and harness stacks run the CLI as a non-root container user
+  (`USER node`), which is what lets a direct engine use
+  `--dangerously-skip-permissions` safely — the container is the sandbox for its
+  tools (own filesystem, open egress, nothing from the host; the allowlist gates
+  who can drive it). `--safe-tools` restricts to a read/write/edit/bash allowlist.
