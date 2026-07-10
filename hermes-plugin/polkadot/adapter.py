@@ -15,7 +15,8 @@ configured Hermes install. See ../../docs/DESIGN.md (section 6b).
 import asyncio
 import logging
 import os
-from typing import Any, Dict, Optional
+import tempfile
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 
@@ -131,11 +132,43 @@ class PolkadotAdapter(BasePlatformAdapter):
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30.0)
 
+    async def _fetch_attachments(self, attachments: List[Dict[str, Any]]) -> Tuple[List[str], List[str]]:
+        """Download bridge-served attachments to local files for vision access.
+
+        bot-core has already pulled the encrypted blobs off the HOP node; the
+        bridge serves them at /media/<id>. Hermes expects media as LOCAL file
+        paths on the event (``media_urls``), which its vision pipeline base64s
+        into image content parts — so fetch each one here.
+        """
+        paths: List[str] = []
+        types: List[str] = []
+        for a in attachments:
+            url = a.get("url")
+            if not (a.get("downloaded") and url):
+                logger.warning("Polkadot attachment %s not downloaded by bridge: %s", a.get("id"), a.get("error"))
+                continue
+            try:
+                async with self._session.get(f"{self.bridge_url}{url}", timeout=60) as resp:
+                    if resp.status != 200:
+                        raise RuntimeError(f"HTTP {resp.status}")
+                    data = await resp.read()
+                mime = a.get("mime") or "application/octet-stream"
+                ext = (mime.split("/", 1) + [""])[1].replace("+", "-") or "bin"
+                path = os.path.join(tempfile.gettempdir(), f"polkadot-media-{str(a.get('id', 'x'))[:16]}.{ext}")
+                with open(path, "wb") as f:
+                    f.write(data)
+                paths.append(path)
+                types.append(mime)
+            except Exception as exc:  # noqa: BLE001 — a failed fetch must not drop the message
+                logger.warning("Polkadot attachment fetch failed for %s: %s", a.get("id"), exc)
+        return paths, types
+
     async def _dispatch_inbound(self, msg: Dict[str, Any]) -> None:
         chat_id = msg.get("chat_id")
         text = msg.get("text") or ""
         if not chat_id or not text:
             return
+        media_paths, media_types = await self._fetch_attachments(msg.get("attachments") or [])
         source = self.build_source(
             chat_id=chat_id,
             chat_type="dm",
@@ -143,11 +176,15 @@ class PolkadotAdapter(BasePlatformAdapter):
             user_name=msg.get("user_name") or chat_id[:8],
             message_id=msg.get("message_id"),
         )
+        is_photo = any(t.startswith("image/") for t in media_types)
         event = MessageEvent(
             text=text,
-            message_type=MessageType.TEXT,
+            message_type=MessageType.PHOTO if is_photo else MessageType.TEXT,
             source=source,
             message_id=msg.get("message_id"),
+            media_urls=media_paths,
+            media_types=media_types,
+            reply_to_message_id=msg.get("reply_to"),
         )
         await self.handle_message(event)
 
