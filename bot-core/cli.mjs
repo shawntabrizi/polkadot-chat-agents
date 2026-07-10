@@ -5,7 +5,7 @@
 // (override with PCA_BOTS_DIR). Blockchain details (keys, addresses, topics)
 // are handled for you; you just pick a name and a brain.
 //
-//   pca create <botname> [--brain echo|codex|claude|gemini|grok|hermes] [--network paseo] [--allow 0x..,0x..]
+//   pca create <botname> [--brain echo|claude|codex|opencode|bridge|hermes] [--network paseo] [--allow 0x..,0x..]
 //   pca run <name>                  start the bot locally (foreground)
 //   pca deploy <name> --host <ssh>  ship it to a server and run it in Docker
 //   pca list                        list your bots
@@ -47,13 +47,13 @@ const BOTS_DIR = process.env.PCA_BOTS_DIR ?? path.join(os.homedir(), ".pca", "bo
 const DEFAULT_ENDPOINT = "wss://paseo-people-next-system-rpc.polkadot.io";
 // Cap container log growth on a VPS (json-file grows unbounded by default).
 const LOG_OPTS = `    logging:\n      driver: json-file\n      options: { max-size: "10m", max-file: "3" }\n`;
-const BRAINS = ["echo", "codex", "claude", "gemini", "grok", "bridge", "hermes"];
+const BRAINS = ["echo", "claude", "codex", "opencode", "bridge", "hermes"];
 // Brains that call a model and therefore spend your quota — never left open by default.
-const PAID_BRAINS = new Set(["codex", "claude", "gemini", "grok", "bridge", "hermes"]);
-// Direct brains shell out to a same-named CLI on this machine. Warn (don't fail —
+const PAID_BRAINS = new Set(["claude", "codex", "opencode", "bridge", "hermes"]);
+// Direct engines shell out to a same-named CLI on this machine. Warn (don't fail —
 // the bot may be destined for a server) when it isn't installed, or every message
 // dies with BOT_AI_SPAWN_FAILED and the user only sees the apology text.
-const DIRECT_BRAIN_CLIS = new Set(["codex", "claude", "gemini", "grok"]);
+const DIRECT_BRAIN_CLIS = new Set(["claude", "codex", "opencode"]);
 function warnMissingBrainCli(brain) {
   if (!DIRECT_BRAIN_CLIS.has(brain) || process.env.BOT_AI_CMD) return;
   const r = spawnSync("which", [brain], { stdio: "ignore" });
@@ -444,14 +444,23 @@ function runLocal(cmd, args, { capture = false } = {}) {
   return spawnSync(cmd, args, { encoding: "utf8", stdio: capture ? ["ignore", "pipe", "inherit"] : "inherit" });
 }
 
-// Brains deploy can stand up as a single self-contained container. echo needs no
-// model CLI; claude installs Claude Code and authenticates via ANTHROPIC_API_KEY.
-// (codex/gemini/grok/hermes need an interactive login or a second container — not
-// yet automated; see docs/HARNESSES.md.)
-const DEPLOY_BRAINS = { echo: { install: null }, claude: { install: "npm i -g @anthropic-ai/claude-code" } };
+// Direct engines deploy as a single self-contained container: a non-root image
+// with the agent CLI baked in (fast restarts; --dangerously-skip-permissions is
+// refused as root, so USER node is load-bearing), a persistent workspace the
+// agent works in, and provider auth via API keys and/or mounted OAuth creds.
+// `keyEnvs` are the provider API-key env vars this engine can use (opencode
+// reaches many providers, so it accepts several).
+const DEPLOY_ENGINES = {
+  echo:     { pkg: null, keyEnvs: [] },
+  claude:   { pkg: "@anthropic-ai/claude-code", keyEnvs: ["ANTHROPIC_API_KEY"] },
+  codex:    { pkg: "@openai/codex", keyEnvs: ["OPENAI_API_KEY"] },
+  opencode: { pkg: "opencode-ai", keyEnvs: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY"] },
+};
+// --anthropic-key etc. and the same-named process env are both accepted.
+const KEY_FLAGS = { ANTHROPIC_API_KEY: "anthropic-key", OPENAI_API_KEY: "openai-key", OPENROUTER_API_KEY: "openrouter-key", GEMINI_API_KEY: "gemini-key", GROQ_API_KEY: "groq-key" };
 
 async function cmdDeploy(name, flags) {
-  if (!name) fail("Usage: pca deploy <name> --host <ssh-target> [--harness openclaw|hermes] [--anthropic-key <key>] [--model <m>] [--dry-run]");
+  if (!name) fail("Usage: pca deploy <name> --host <ssh-target> [--harness openclaw|hermes] [--anthropic-key <key>] [--model <m>] [--safe-tools] [--dry-run]");
   const host = flags.host ? String(flags.host) : null;
   if (!host) fail(`--host <ssh-target> is required, e.g.  pca deploy ${name} --host root@1.2.3.4`);
   const cfg = readConfig(name);
@@ -464,41 +473,61 @@ async function cmdDeploy(name, flags) {
     }
     return deployHarnessStack(name, cfg, secret, flags, host, harness);
   }
-  const spec = DEPLOY_BRAINS[cfg.brain];
-  if (!spec) fail(`deploy supports the echo/claude brains and --harness openclaw|hermes for bridge bots.\nFor "${cfg.brain}", set it up manually — see docs/HARNESSES.md.`);
+  const spec = DEPLOY_ENGINES[cfg.brain];
+  if (!spec) fail(`deploy supports echo/claude/codex/opencode and --harness openclaw|hermes for bridge bots.\nFor "${cfg.brain}", set it up manually — see docs/HARNESSES.md.`);
   if (!fs.existsSync(path.join(HERE, "node_modules")) || !fs.existsSync(path.join(HERE, ".papi"))) {
     fail(`bot-core dependencies missing. Run:  (cd ${HERE} && npm ci)  then retry.`);
   }
-  const key = flags["anthropic-key"] ? String(flags["anthropic-key"]) : process.env.ANTHROPIC_API_KEY;
-  if (cfg.brain === "claude" && !key) warn("No Anthropic key (--anthropic-key or ANTHROPIC_API_KEY) — the bot will start but can't answer until the container has one.");
+  // Collect provider API keys this engine can use, from --*-key flags or env.
+  const keys = {};
+  for (const envVar of spec.keyEnvs) {
+    const v = flags[KEY_FLAGS[envVar]] ? String(flags[KEY_FLAGS[envVar]]) : process.env[envVar];
+    if (v) keys[envVar] = v;
+  }
+  if (spec.pkg && Object.keys(keys).length === 0) {
+    warn(`No provider API key for "${cfg.brain}" (e.g. --anthropic-key, or mount OAuth creds) — the bot starts but can't answer until it has auth.`);
+  }
   if (!cfg.registered) warn(`"${name}" isn't confirmed on the network yet — people can't message it until it is (pca info ${name}).`);
 
   const cn = `pca-${name.replace(/\./g, "-")}`;
   const base = flags["remote-dir"] ? String(flags["remote-dir"]) : `pca-bots/${name}`;
   const sshOpts = ["-o", "ConnectTimeout=10", "-o", "BatchMode=yes"];
+  // Full autonomy by default: the container IS the sandbox, and the point of a
+  // dockerized coding agent is to run tools without prompting. --safe-tools
+  // restricts to the Bash,Read,Edit,Write allowlist instead.
+  const skipPerms = spec.pkg && flags["safe-tools"] !== true;
 
-  // Generate env + compose locally, then (unless dry-run) ship and launch.
+  // Generate env + compose + Dockerfile locally, then (unless dry-run) ship & launch.
   const envLines = [
     `BOT_SEED_HEX=${secret.seedHex}`,
     `BOT_ENDPOINT=${cfg.endpoint}`,
     `BOT_BRAIN=${cfg.brain}`,
     `BOT_ALLOWED_PEERS=${(cfg.allow ?? []).join(",")}`,
     `BOT_USERNAME=${cfg.username ?? ""}`,
-    `BOT_STATE_DIR=/app/state`,   // persist sessions to the state volume (survives redeploys)
-    `BOT_BRIDGE_PORT=${cfg.bridgePort ?? 8799}`,   // keep in sync with the pca status probe
+    `BOT_STATE_DIR=/state`,          // node-owned volume, survives redeploys
+    `BOT_AI_WORKSPACE=/workspace`,   // where the agent works; persistent
+    `BOT_BRIDGE_PORT=${cfg.bridgePort ?? 8799}`,
   ];
   const deployModel = flags.model ? String(flags.model) : cfg.model;
   if (deployModel) envLines.push(`BOT_AI_MODEL=${deployModel}`);
+  if (skipPerms) envLines.push("BOT_AI_SKIP_PERMISSIONS=1");
   if (flags.greet === true) envLines.push("BOT_GREET=1");
-  if (cfg.brain === "claude" && key) envLines.push(`ANTHROPIC_API_KEY=${key}`);
-  const command = spec.install
-    ? JSON.stringify(["sh", "-lc", `${spec.install} && exec node index.mjs`])
-    : JSON.stringify(["node", "index.mjs"]);
-  const compose = `services:\n  bot:\n    image: node:22-slim\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    volumes:\n      - ./app:/app\n      - ./state:/app/state\n    env_file:\n      - ./bot.env\n    command: ${command}\n`;
+  for (const [k, v] of Object.entries(keys)) envLines.push(`${k}=${v}`);
+
+  // echo needs no CLI (plain node image); engines get a non-root baked image.
+  const dockerfile = spec.pkg
+    ? `FROM node:22-slim\nRUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates ripgrep && rm -rf /var/lib/apt/lists/*\nRUN npm i -g ${spec.pkg} && npm cache clean --force\nENV HOME=/home/node\nUSER node\nWORKDIR /app\nCMD ["node", "index.mjs"]\n`
+    : null;
+  const engineService = spec.pkg
+    ? `  bot:\n    build: ./image\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n      - ./workspace:/workspace\n      - ./home:/home/node\n    command: ["node", "index.mjs"]\n`
+    : `  bot:\n    image: node:22-slim\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app\n      - ./state:/state\n    command: ["node", "index.mjs"]\n`;
+  const compose = `services:\n${engineService}`;
+  const redact = (l) => l.replace(/((?:SEED_HEX|_API_KEY)=).*/, "$1<hidden>");
 
   if (flags["dry-run"] === true) {
     console.log(`\n--- ${base}/docker-compose.yml ---\n${compose}`);
-    console.log(`--- ${base}/bot.env (secrets hidden) ---\n${envLines.map((l) => l.replace(/((?:SEED_HEX|ANTHROPIC_API_KEY)=).*/, "$1<hidden>")).join("\n")}`);
+    if (dockerfile) console.log(`--- ${base}/image/Dockerfile ---\n${dockerfile}`);
+    console.log(`--- ${base}/bot.env (secrets hidden) ---\n${envLines.map(redact).join("\n")}`);
     note(`\nDry run — nothing deployed.`);
     return;
   }
@@ -508,7 +537,9 @@ async function cmdDeploy(name, flags) {
   if (pf.status !== 0) fail(`Can't reach ${host} or Docker isn't available there.\n${(pf.stderr || "").trim()}`);
   ok(`Connected — Docker ${(pf.stdout || "").trim().replace(/\n/g, " / ")}`);
 
-  runLocal("ssh", [...sshOpts, host, `mkdir -p ${base}/app ${base}/state`]);
+  // node in node:22-slim is uid 1000; the bind-mounted volumes must be writable
+  // by it (the container runs as USER node). App code stays read-only.
+  runLocal("ssh", [...sshOpts, host, `mkdir -p ${base}/app ${base}/state ${base}/workspace ${base}/home ${base}/image && chown -R 1000:1000 ${base}/state ${base}/workspace ${base}/home 2>/dev/null || true`]);
   step("Uploading bot-core (code + dependencies)…");
   const rs = runLocal("rsync", ["-az", "--delete",
     "--exclude", "bots/", "--exclude", "*.log", "--exclude", "*.bak*", "--exclude", ".git",
@@ -519,12 +550,20 @@ async function cmdDeploy(name, flags) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pca-deploy-"));
   fs.writeFileSync(path.join(tmp, "bot.env"), `${envLines.join("\n")}\n`, { mode: 0o600 });
   fs.writeFileSync(path.join(tmp, "docker-compose.yml"), compose);
-  const cp = runLocal("scp", [...sshOpts, path.join(tmp, "bot.env"), path.join(tmp, "docker-compose.yml"), `${host}:${base}/`]);
+  if (dockerfile) fs.writeFileSync(path.join(tmp, "Dockerfile"), dockerfile);
+  const scpFiles = [path.join(tmp, "bot.env"), path.join(tmp, "docker-compose.yml")];
+  const cp = runLocal("scp", [...sshOpts, ...scpFiles, `${host}:${base}/`]);
+  if (dockerfile) runLocal("scp", [...sshOpts, path.join(tmp, "Dockerfile"), `${host}:${base}/image/`]);
   fs.rmSync(tmp, { recursive: true, force: true });
   if (cp.status !== 0) fail("Copying config (scp) failed.");
   // scp applies the remote umask, so restore 0600 on the env (it holds the seed).
   runLocal("ssh", [...sshOpts, host, `chmod 600 ${base}/bot.env`]);
 
+  if (dockerfile) {
+    step("Building the agent image (first run pulls the CLI — a few minutes)…");
+    const build = runLocal("ssh", [...sshOpts, host, `cd ${base} && docker compose -p ${cn} build`]);
+    if (build.status !== 0) fail("docker compose build failed.");
+  }
   step("Starting the container…");
   const up = runLocal("ssh", [...sshOpts, host, `cd ${base} && docker compose -p ${cn} up -d --force-recreate --remove-orphans`]);
   if (up.status !== 0) fail("docker compose up failed.");
@@ -795,7 +834,7 @@ function cmdStop(name, flags) {
 function usage() {
   console.log(`pca — Polkadot Chat Agents
 
-  pca create <botname> [--brain echo|codex|claude|gemini|grok|bridge] [--owner <your username or address>] [--public] [--network paseo] [--username name]
+  pca create <botname> [--brain echo|claude|codex|opencode|bridge] [--owner <your username or address>] [--public] [--network paseo] [--username name]
   pca register <name>                  finish/retry registration for an existing bot
   pca run <name> [--model <m>] [--greet]   start the bot locally (foreground)
   pca deploy <name> --host <ssh>       ship it to a server and run it in Docker
@@ -819,13 +858,17 @@ create flags:
   --wait <secs>    how long to wait for on-chain confirmation (default 180)
   --network <ep>   target network: paseo (default) or a full wss:// endpoint
 
-deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --anthropic-key <key> (claude brain)  ·  --model <m>  ·  --dry-run
-  Needs Docker on the server + SSH access. Direct brains (echo/claude) deploy as one
-  container; bridge bots deploy bot-core + the chosen agent framework as a two-container
-  stack (openclaw is fully headless if the server has Claude CLI creds).
-  logs/status/stop reuse the deploy host saved in the bot's config (override with --host).
+deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --anthropic-key/--openai-key/--openrouter-key/--gemini-key <key>  ·  --model <m>  ·  --safe-tools  ·  --dry-run
+  Needs Docker on the server + SSH access. Direct engines (echo/claude/codex/opencode)
+  deploy as one non-root container that bakes in the agent CLI, with a persistent
+  /workspace the agent works in; bridge bots deploy a two-container stack. The
+  container is the sandbox: agents run tools autonomously by default (--safe-tools
+  restricts to a read/write/edit/bash allowlist). logs/status/stop reuse the deploy
+  host saved in the bot's config (override with --host).
 
-Brains:  echo (test)  ·  codex/claude/gemini/grok (direct — shells to that CLI, which owns its own auth)  ·  bridge (hand off to an external agent harness; "hermes" is an alias)
+Brains:  echo (test)  ·  claude/codex/opencode (direct agent engines — verbatim prompts,
+  native session resume, tools in a container; opencode reaches many providers via
+  --model provider/model)  ·  bridge (hand off to an agent harness; "hermes" is an alias)
 
 Bots live in ${BOTS_DIR} (override with PCA_BOTS_DIR).`);
 }
@@ -837,7 +880,7 @@ const COMMAND_FLAGS = {
   create: ["brain", "owner", "allow", "public", "network", "endpoint", "backend", "username", "digits", "model", "port", "wait", "no-register"],
   register: ["username", "digits", "wait"],
   run: ["model", "greet"],
-  deploy: ["host", "harness", "anthropic-key", "model", "dry-run", "remote-dir", "greet"],
+  deploy: ["host", "harness", "anthropic-key", "openai-key", "openrouter-key", "gemini-key", "groq-key", "safe-tools", "model", "dry-run", "remote-dir", "greet"],
   logs: ["host", "follow", "tail"],
   status: ["host"],
   stop: ["host"],
