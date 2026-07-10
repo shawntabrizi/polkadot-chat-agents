@@ -471,6 +471,36 @@ test("live reply: bridge auto-upgrade finalizes the placeholder", async () => {
   }
 });
 
+test("live reply: an unanswered placeholder resolves to a timeout note", async () => {
+  const node = await startMockStatementNode();
+  const stateDir = tmpState();
+  // Bridge brain with NO harness attached: the answer never comes; the
+  // placeholder must finalize itself instead of ticking forever.
+  const bot = await startBot({
+    endpoint: node.url,
+    stateDir,
+    extraEnv: {
+      BOT_SUBSCRIBE: "0",
+      BOT_BRAIN: "bridge",
+      BOT_THINKING_TEXT: "⏳ thinking…",
+      BOT_THINKING_AFTER_MS: "1000",
+      BOT_LIVE_EDIT_MIN_MS: "300",
+      BOT_LIVE_TTL_MS: "4000",
+      BOT_LIVE_TIMEOUT_TEXT: "timed out, resend please",
+    },
+  });
+  try {
+    const r = await runClient(node.url, ["--wait-secs", "12"], ["never answered"]);
+    const placeholder = await bot.waitFor((e) => e.event === "BOT_LIVE_PLACEHOLDER", { label: "BOT_LIVE_PLACEHOLDER" });
+    await bot.waitFor((e) => e.event === "BOT_LIVE_TTL_EXPIRED", { label: "BOT_LIVE_TTL_EXPIRED" });
+    assert.match(r.out, new RegExp(`\\[BOT EDIT ${placeholder.messageId}\\] timed out, resend please`), `timeout note not seen:\n${r.out}`);
+  } finally {
+    await bot.stop();
+    await node.close();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("owed attachment survives kill -9 and re-processes after restart", async () => {
   const node = await startMockStatementNode();
   const hop = await startMockHopNode();

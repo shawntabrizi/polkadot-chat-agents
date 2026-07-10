@@ -72,6 +72,24 @@ export async function startPolkadotGatewayAccount(ctx: any): Promise<void> {
           await dispatchInbound(ctx, channelRuntime, account, bridge, msg);
         } catch (err) {
           ctx.log?.warn?.(`polkadot dispatch error: ${String(err)}`);
+          // "reply session initialization conflicted" is a pre-agent race in
+          // OpenClaw's session store (a lost optimistic commit right after a
+          // turn ends with a CLI-session restart) — the agent never ran, so a
+          // retry is idempotent and almost always wins the second time.
+          if (/initialization conflicted/i.test(String(err))) {
+            await new Promise((r) => setTimeout(r, 1000));
+            try {
+              await dispatchInbound(ctx, channelRuntime, account, bridge, msg);
+              continue;
+            } catch (retryErr) {
+              ctx.log?.warn?.(`polkadot dispatch retry failed: ${String(retryErr)}`);
+            }
+          }
+          // The message is already drained from the bridge (custody is ours),
+          // so a silent drop looks like a frozen chat — tell the user.
+          try {
+            await bridge.send(msg.chat_id, "⚠️ I hit a snag processing that message — please send it again.");
+          } catch { /* best effort */ }
         }
       }
     }

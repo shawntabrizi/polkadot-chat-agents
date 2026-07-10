@@ -32,7 +32,9 @@
 //   Live replies: BOT_LIVE_EDIT_MIN_MS (3000) / BOT_LIVE_EDIT_MAX_MS (15000)
 //   edit throttle, BOT_LIVE_HEARTBEAT_MS (15000) elapsed-clock frames,
 //   BOT_LIVE_ACK_TIMEOUT_MS (60000), BOT_LIVE_PROGRESS (1; 0 = placeholder and
-//   final only), BOT_AI_STREAM (force stream-json parsing for a custom CLI).
+//   final only), BOT_AI_STREAM (force stream-json parsing for a custom CLI),
+//   BOT_LIVE_TTL_MS (600000) + BOT_LIVE_TIMEOUT_TEXT — placeholder resolves to
+//   a timeout note if no answer finalized it in time.
 
 import http from "node:http";
 import fs from "node:fs";
@@ -103,6 +105,11 @@ const liveMaxEditMs = Number(env.BOT_LIVE_EDIT_MAX_MS ?? 15_000);
 const liveHeartbeatMs = Number(env.BOT_LIVE_HEARTBEAT_MS ?? 15_000);
 const liveAckTimeoutMs = Number(env.BOT_LIVE_ACK_TIMEOUT_MS ?? 60_000);
 const liveProgress = env.BOT_LIVE_PROGRESS !== "0";
+// A placeholder must never tick forever: if no answer finalized it within the
+// TTL (harness died, message dropped), it resolves to a visible timeout note.
+const liveTtlMs = Number(env.BOT_LIVE_TTL_MS ?? 600_000);
+const liveTimeoutText = env.BOT_LIVE_TIMEOUT_TEXT
+  ?? "⚠️ I lost track of this one — something went wrong on my end. Please send it again.";
 // Greet mode: on startup the bot opens the chat with each allowlisted owner it
 // has never talked to (once ever, persisted) — a liveness signal, so the owner
 // doesn't have to find and message the bot first. Only allowlisted peers are
@@ -416,8 +423,19 @@ const armThinking = (peerHex) => {
       // chat never looks stalled. Frames are throttled/coalesced downstream.
       const timer = setInterval(() => { if (!handle.finalized) handle.update(tracker.render()); }, liveHeartbeatMs);
       timer.unref?.();
+      // TTL: a turn whose answer never arrives (dropped harness dispatch,
+      // crashed brain) must not tick forever — resolve to a timeout note.
+      // takeLivePlaceholder consumes exactly once, so this races safely with
+      // the real delivery: whoever takes it first wins.
+      const ttl = setTimeout(async () => {
+        const lp = await takeLivePlaceholder(k);
+        if (!lp) return;
+        log("BOT_LIVE_TTL_EXPIRED", { to: k, messageId: lp.handle.messageId });
+        lp.handle.finalize(liveTimeoutText).catch((e) => log("BOT_LIVE_FINALIZE_FAILED", { to: k, error: String(e?.message ?? e) }));
+      }, liveTtlMs);
+      ttl.unref?.();
       log("BOT_LIVE_PLACEHOLDER", { to: k, messageId: handle.messageId });
-      return { handle, tracker, timer };
+      return { handle, tracker, timer, ttl };
     })().catch((e) => {
       log("BOT_THINKING_FAILED", { error: String(e?.message ?? e) });
       return null;
@@ -501,7 +519,7 @@ const takeLivePlaceholder = async (peerHex) => {
   if (!p) return null;
   livePlaceholders.delete(k);
   const lp = await p.catch(() => null);
-  if (lp) clearInterval(lp.timer);
+  if (lp) { clearInterval(lp.timer); clearTimeout(lp.ttl); }
   return lp;
 };
 const peekLivePlaceholder = (peerHex) => livePlaceholders.get(norm(peerHex)) ?? null;
