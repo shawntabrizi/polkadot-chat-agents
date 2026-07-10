@@ -6,20 +6,51 @@
 // act, unknown ones redirect to /help), and null for anything that is not
 // command-shaped — that text belongs to the model.
 
-const COMMAND_RE = /^\/([a-z]+)(?:\s+(\S+))?\s*$/i;
+import { parseProjectSpec } from "./workspaces.mjs";
 
-export function createCommandHandler({ clearResume, peerModelOverrides, defaultModel, username, chainConnected, trimOverrides = () => {} }) {
+const COMMAND_RE = /^\/([a-z][a-z0-9_-]*)(?:\s+(\S+))?\s*$/i;
+
+export function createCommandHandler({
+  clearResume,
+  peerModelOverrides,
+  defaultModel,
+  username,
+  chainConnected,
+  trimOverrides = () => {},
+  // Multi-project workspaces (null/empty when none are configured).
+  workspaces = null,
+  getPeerProject = () => null,
+  setPeerProject = () => {},
+}) {
+  const hasProjects = () => (workspaces?.size ?? 0) > 0;
+  const projectLabel = (p) => (p ? `${p.alias}${p.branch ? `@${p.branch}` : ""}` : null);
+  // Shared by "/project <spec>" and the bare "/<alias> [@branch]" shortcut.
+  // Switching changes the turn cwd, and a resume token is scoped to its cwd —
+  // so every switch starts a fresh engine session (setPeerProject clears it).
+  const switchProject = (peerKey, spec) => {
+    const parsed = parseProjectSpec(spec);
+    if (!parsed || !workspaces?.has(parsed.alias)) return `I don't know the project "${spec}" — /project lists what I have.`;
+    const current = getPeerProject(peerKey);
+    if (current && current.alias === parsed.alias && (current.branch ?? null) === parsed.branch) {
+      return `Already working in ${projectLabel(parsed)}.`;
+    }
+    setPeerProject(peerKey, parsed);
+    return `📁 Working in ${projectLabel(parsed)} from now on — fresh session${parsed.branch ? "; the branch worktree is prepared on your next message" : ""}. /project default to go back.`;
+  };
+
   return (peerKey, text) => {
     const m = COMMAND_RE.exec(text);
     if (!m) return null;
-    const [, cmd, argument] = m;
-    switch (cmd.toLowerCase()) {
+    const [, rawCmd, argument] = m;
+    const cmd = rawCmd.toLowerCase();
+    switch (cmd) {
       case "help":
         return [
           "Commands:",
           "/reset — start a fresh session (forget our conversation so far)",
           "/stop — stop what I'm currently working on",
           "/model — show the model answering you (/model <name> to switch, /model default to go back)",
+          ...(hasProjects() ? ["/project — pick the project I work in (/project <name>[@branch], /project default)"] : []),
           "/ping — check the bot is alive",
         ].join("\n");
       case "reset":
@@ -42,12 +73,32 @@ export function createCommandHandler({ clearResume, peerModelOverrides, defaultM
         trimOverrides();
         return `OK — answering you with ${argument} from now on (this chat only; /model default to undo).`;
       }
+      case "project": {
+        if (!hasProjects()) return "No projects are set up for me — my operator can add one with: pca project <bot> add <alias> <path>.";
+        if (!argument) {
+          return [
+            `Projects: ${workspaces.aliases().join(", ")}.`,
+            `Now: ${projectLabel(getPeerProject(peerKey)) ?? "the shared workspace"}.`,
+            "Switch with /project <name> (add @<branch> for an isolated worktree); /project default goes back.",
+          ].join("\n");
+        }
+        if (argument === "default" || argument === "off" || argument === "none") {
+          if (!getPeerProject(peerKey)) return "Already in the shared workspace.";
+          setPeerProject(peerKey, null);
+          return "📁 Back to the shared workspace — fresh session.";
+        }
+        return switchProject(peerKey, argument);
+      }
       default:
+        // Bare "/<alias> [@branch]" is a shortcut for /project <alias>[@branch].
+        if (workspaces?.has(cmd)) {
+          return switchProject(peerKey, argument?.startsWith("@") ? `${cmd}${argument}` : cmd);
+        }
         // Command-shaped but unknown (a typo like /rest, a habit like /start):
         // redirect to /help — the model answering a failed command as if it
         // were prose is baffling. Slash text that is NOT command-shaped never
         // matches COMMAND_RE and still goes to the model.
-        return `I don't know /${cmd.toLowerCase()} — try /help to see what I can do.`;
+        return `I don't know /${cmd} — try /help to see what I can do.`;
     }
   };
 }

@@ -329,6 +329,44 @@ function cmdDelete(name, flags) {
   ok(`Deleted "${name}"${cfg.username ? ` (${cfg.username} is gone for good)` : ""}.`);
 }
 
+// Project registry for direct-engine bots: named directories the agent can
+// work in (in chat: /project <alias>, or /project <alias>@<branch> for an
+// isolated git worktree). Stored in the bot's config; pca run hands it to the
+// bot as BOT_AI_PROJECTS. Paths are local to wherever the bot process runs, so
+// deployed (Docker) bots can't see them — deploy warns instead.
+function cmdProject(positional) {
+  const [name, action, alias, dir] = positional;
+  if (!name) fail("Usage: pca project <botname> [add <alias> <path> | rm <alias>]");
+  const cfg = readConfig(name);
+  const projects = cfg.projects ?? {};
+  const aliasRe = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+  if (action === "add") {
+    if (!alias || !dir) fail(`Usage: pca project ${name} add <alias> <path>`);
+    const key = alias.toLowerCase();
+    if (!aliasRe.test(key)) fail(`"${alias}" isn't a usable alias — lowercase letters/digits/dashes, e.g. "my-app".`);
+    const abs = path.resolve(dir);
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) fail(`${abs} is not a directory.`);
+    if (!fs.existsSync(path.join(abs, ".git"))) note(`Heads up: ${abs} isn't a git repo — /project ${key} works, but @branch worktrees won't.`);
+    projects[key] = abs;
+    saveConfig(name, { ...cfg, projects });
+    ok(`Project "${key}" -> ${abs}`);
+    note(`In chat: /project ${key}   (or /project ${key}@some-branch for an isolated worktree)`);
+    if (cfg.deploy?.host) warn(`"${name}" is deployed on ${cfg.deploy.host} — projects only work where the bot process can see the path (pca run).`);
+    return;
+  }
+  if (action === "rm" || action === "remove") {
+    if (!alias || !projects[alias.toLowerCase()]) fail(`No project "${alias}" on "${name}".`);
+    delete projects[alias.toLowerCase()];
+    saveConfig(name, { ...cfg, projects });
+    ok(`Removed project "${alias.toLowerCase()}".`);
+    return;
+  }
+  if (action) fail(`Unknown action "${action}" — use: pca project ${name} [add <alias> <path> | rm <alias>]`);
+  const entries = Object.entries(projects);
+  if (!entries.length) { note(`No projects on "${name}" yet. Add one:  pca project ${name} add <alias> <path>`); return; }
+  for (const [a, p] of entries) console.log(`  ${a}  ->  ${p}`);
+}
+
 // Short human form of an allowlist account hex when create didn't record what
 // was typed (older configs): the SS58 address, elided.
 function shortAllowEntry(hex) {
@@ -431,6 +469,10 @@ function cmdRun(name, flags = {}) {
   // which each direct brain passes to its CLI's own model flag).
   const model = flags.model ? String(flags.model) : cfg.model;
   if (model) env.BOT_AI_MODEL = model;
+  if (cfg.projects && Object.keys(cfg.projects).length) {
+    env.BOT_AI_PROJECTS = JSON.stringify(cfg.projects);
+    note(`Projects: ${Object.keys(cfg.projects).join(", ")} (switch in chat with /project <name>)`);
+  }
   if (flags.greet === true) {
     env.BOT_GREET = "1";
     note("Greet mode: the bot will message its owner(s) first — watch your phone.");
@@ -843,6 +885,8 @@ function usage() {
   pca stop <name>                      stop a deployed bot
   pca delete <name> --yes              delete a local bot (destroys its key — irreversible)
   pca list                             list your bots
+  pca project <name> [add <alias> <path> | rm <alias>]   projects a direct-engine bot can work in
+                                       (in chat: /project <alias>[@branch] — branches get isolated git worktrees)
   pca info <name>                      show address + how to message it
 
 create flags:
@@ -885,7 +929,7 @@ const COMMAND_FLAGS = {
   status: ["host"],
   stop: ["host"],
   delete: ["yes"],
-  list: [], info: [], help: [],
+  list: [], info: [], help: [], project: [],
 };
 
 const { flags, positional } = parseFlags(process.argv.slice(2));
@@ -916,6 +960,7 @@ try {
     case "stop": cmdStop(arg, flags); break;
     case "delete": cmdDelete(arg, flags); break;
     case "list": cmdList(); break;
+    case "project": cmdProject(positional.slice(1)); break;
     case "info": await cmdInfo(arg); break;
     case "help": usage(); break;
     default: usage(); if (command != null) process.exit(1);

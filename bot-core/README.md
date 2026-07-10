@@ -25,8 +25,14 @@ Highlights:
 
 - `pca deploy mybot --host root@server` ships the bot to any Docker+SSH box,
   including two-container agent-framework stacks (`--harness openclaw|hermes`).
-- In-chat commands (`/help`, `/reset`, `/model`, `/ping`), a "thinking"
-  acknowledgement for slow replies, and per-bot model pinning (`--model`).
+- In-chat commands (`/help`, `/reset`, `/model`, `/project`, `/ping`), a
+  "thinking" acknowledgement for slow replies, and per-bot model pinning
+  (`--model`).
+- Multi-project workspaces: `pca project <bot> add <alias> <path>`, then
+  `/project <alias>` in chat (or `/project <alias>@<branch>` for an isolated
+  git worktree) points the agent at that repo.
+- Long answers arrive as several ordered messages (split at paragraph and
+  code-fence boundaries), never as one failed oversized send.
 - Conversations survive restarts; state lives in `~/.pca/bots/<name>/`.
 
 Full documentation, architecture notes, and the framework plugins live in the

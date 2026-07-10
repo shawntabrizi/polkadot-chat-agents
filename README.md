@@ -106,8 +106,19 @@ a custom CLI that speaks claude-shaped stream-json.
 Because an AI brain spends your quota, `create` refuses to leave one open to
 arbitrary senders unless `--public` is passed.
 
-In chat, direct-brain bots answer `/help`, `/reset`, `/model <name>`, and `/ping`
-instantly themselves; bridge bots leave slash-commands to their framework.
+In chat, direct-brain bots answer `/help`, `/reset`, `/model <name>`,
+`/project`, and `/ping` instantly themselves; bridge bots leave slash-commands
+to their framework.
+
+**Projects.** `pca project <bot> add <alias> <path>` registers a directory the
+agent can work in (repeat for more). In chat, `/project <alias>` points your
+conversation at that repo, `/project <alias>@<branch>` gives it an isolated
+`git worktree` for that branch (created on first use under the bot's state
+dir), and `/project default` returns to the shared workspace. Each switch
+starts a fresh engine session — a resumed session is only valid in the
+directory it started in. Projects are per-peer: two people can work in
+different repos with the same bot. (Local `pca run` only: a Docker-deployed
+bot can't see paths on your machine.)
 
 `--greet` (on `run` or `deploy`) makes the bot message its owner first: on startup
 it opens the chat with each allowlisted owner it has never talked to — a proof of
