@@ -243,4 +243,5 @@ which is app-side, self-contained, and needs no protocol change to start.
 | §7 decentralized identity | #7–#10 | P0, partly blocked |
 | §9 encryption migration | #22 | P0, ready for development |
 | Group chat (bots in groups — future interest) | #48–#51 | P1, spec needed |
-| §1 markdown, §2 edit history, §6 delete/typing, §8 UX affordances | — | **not planned — this document's core asks** |
+| §6 delete/unsend | RFC-0003 (PR #5) | RFC opened from this document's asks |
+| §1 markdown, §2 edit history, §6 typing, §8 UX affordances | — | **not planned — this document's core asks** |
