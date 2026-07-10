@@ -8,7 +8,7 @@
 
 const COMMAND_RE = /^\/([a-z]+)(?:\s+(\S+))?\s*$/i;
 
-export function createCommandHandler({ aiHistory, peerModelOverrides, defaultModel, username, chainConnected, trimOverrides = () => {} }) {
+export function createCommandHandler({ clearResume, peerModelOverrides, defaultModel, username, chainConnected, trimOverrides = () => {} }) {
   return (peerKey, text) => {
     const m = COMMAND_RE.exec(text);
     if (!m) return null;
@@ -17,13 +17,16 @@ export function createCommandHandler({ aiHistory, peerModelOverrides, defaultMod
       case "help":
         return [
           "Commands:",
-          "/reset — forget our conversation so far",
+          "/reset — start a fresh session (forget our conversation so far)",
+          "/stop — stop what I'm currently working on",
           "/model — show the model answering you (/model <name> to switch, /model default to go back)",
           "/ping — check the bot is alive",
         ].join("\n");
       case "reset":
-        aiHistory.delete(peerKey);
-        return "🧹 Fresh start — I've forgotten our conversation.";
+        // Drop the native session token so the next turn starts a fresh
+        // conversation (the engine's own memory, not a rebuilt text history).
+        clearResume(peerKey);
+        return "🧹 Fresh start — new session.";
       case "ping":
         return `🏓 pong — ${username || "bot"} is alive (chain: ${chainConnected() ? "connected" : "reconnecting"}).`;
       case "model": {

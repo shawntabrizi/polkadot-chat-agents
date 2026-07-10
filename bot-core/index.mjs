@@ -32,9 +32,14 @@
 //   Live replies: BOT_LIVE_EDIT_MIN_MS (3000) / BOT_LIVE_EDIT_MAX_MS (15000)
 //   edit throttle, BOT_LIVE_HEARTBEAT_MS (15000) elapsed-clock frames,
 //   BOT_LIVE_ACK_TIMEOUT_MS (60000), BOT_LIVE_PROGRESS (1; 0 = placeholder and
-//   final only), BOT_AI_STREAM (force stream-json parsing for a custom CLI),
-//   BOT_LIVE_TTL_MS (600000) + BOT_LIVE_TIMEOUT_TEXT — placeholder resolves to
-//   a timeout note if no answer finalized it in time.
+//   final only), BOT_LIVE_TTL_MS (600000) + BOT_LIVE_TIMEOUT_TEXT — placeholder
+//   resolves to a timeout note if no answer finalized it in time.
+//   Direct engines (BOT_BRAIN=claude|codex|opencode): BOT_AI_MODEL (opencode
+//   takes a provider/model slug), BOT_AI_ALLOWED_TOOLS (Bash,Read,Edit,Write),
+//   BOT_AI_SKIP_PERMISSIONS (1 = full autonomy), BOT_AI_API_BILLING (1 = keep
+//   ANTHROPIC_API_KEY for claude), BOT_AI_IDLE_TIMEOUT_MS (600000, kills a
+//   silent/wedged turn), BOT_AI_MAX_MS (0 = no hard cap), BOT_AI_WORKSPACE
+//   (BOT_STATE_DIR/workspace), BOT_AI_CMD/BOT_AI_ARGS (custom stream-json CLI).
 
 import http from "node:http";
 import fs from "node:fs";
@@ -47,6 +52,7 @@ import { createCommandHandler } from "./lib/commands.mjs";
 import { downloadP2PFile } from "./lib/hop-client.mjs";
 import { createMediaStore } from "./lib/media-store.mjs";
 import { createLiveReplies, createProgressTracker } from "./lib/live-reply.mjs";
+import { RUNNERS, resolveEngine, ENGINES } from "./lib/runners.mjs";
 import { createClient as createPapiClient } from "polkadot-api";
 import { getWsProvider, WsEvent } from "polkadot-api/ws";
 import { paseoPeopleNext } from "./lib/descriptors.mjs";
@@ -89,7 +95,7 @@ const bridgePort = Number(env.BOT_BRIDGE_PORT ?? 8799);
 // the bot), so default to loopback. Container deploys that need cross-container
 // access set BOT_BRIDGE_HOST=0.0.0.0 explicitly (scoped to the compose network).
 const bridgeHost = env.BOT_BRIDGE_HOST ?? "127.0.0.1";
-const brain = (env.BOT_BRAIN ?? "bridge").trim().toLowerCase(); // bridge | hermes | echo | codex | claude | gemini | grok
+const brain = (env.BOT_BRAIN ?? "bridge").trim().toLowerCase(); // bridge | hermes | echo | claude | codex | opencode
 const ackText = env.BOT_ACK_TEXT ?? (brain === "bridge" || brain === "hermes" ? "Connecting you to the agent…" : "");
 // If a reply hasn't gone out within BOT_THINKING_AFTER_MS of receiving a message,
 // send a "thinking" ack so a slow answer (AI call, Hermes round-trip) doesn't feel
@@ -117,45 +123,45 @@ const liveTimeoutText = env.BOT_LIVE_TIMEOUT_TEXT
 const greet = env.BOT_GREET === "1" || env.BOT_GREET === "true";
 const greetText = env.BOT_GREET_TEXT ?? `👋 ${env.BOT_USERNAME || env.FAUCET_CHAT_SERVICE_USERNAME || "Your bot"} here — I'm alive! Say hi, or /help for what I can do.`;
 
-// Direct AI-CLI "brains": bot-core shells out to an agent CLI that owns its own
-// auth/token. The transport core stays model-agnostic — these are just hooks that
-// turn a (prompt, model) into argv. Each CLI must print its reply to stdout and exit 0.
-// BOT_AI_MODEL optionally pins a specific (e.g. low-cost) model per brain via its
-// own --model flag; leave unset to use the CLI's default model.
+// Direct engine "brains": bot-core runs a headless coding-agent CLI (claude /
+// codex / opencode) as an autonomous agent — verbatim prompt, native session
+// resume, tools on. The engine table (lib/runners.mjs) turns a
+// (prompt, model, resume) into argv and normalizes each CLI's JSONL stream; the
+// generic spawn/stream/idle-backstop loop lives here (runEngine). See
+// docs/DESIGN.md. BOT_AI_MODEL pins a model (for opencode this is a
+// provider/model slug — the many-providers path); per-peer /model overrides it.
 const aiModel = (env.BOT_AI_MODEL ?? "").trim();
-const m = (flag, model) => (model ? [flag, model] : []);
-const AI_BRAINS = {
-  codex:  { cmd: "codex",  args: (p, mo) => ["exec", "--sandbox", "read-only", "--skip-git-repo-check", ...m("-m", mo), p] },
-  claude: {
-    cmd: "claude",
-    args: (p, mo) => ["-p", ...m("--model", mo), p],   // Claude Code print mode
-    // stream-json emits one JSON event per line (assistant tool_use blocks,
-    // then a final {type:"result"}) — feeds Takopi-style progress lines.
-    streamArgs: (p, mo) => ["-p", "--output-format", "stream-json", "--verbose", ...m("--model", mo), p],
-  },
-  gemini: { cmd: "gemini", args: (p, mo) => [...m("-m", mo), "-p", p] },        // gemini-cli non-interactive
-  grok:   { cmd: "grok",   args: (p, mo) => [...m("-m", mo), "-p", p] },        // grok CLI (may need the generic override below)
+// Tools are on by default (the container is the sandbox). The allowlist is the
+// safe default; BOT_AI_SKIP_PERMISSIONS=1 grants full autonomy (all tools).
+const allowedTools = (env.BOT_AI_ALLOWED_TOOLS ?? "Bash,Read,Edit,Write").split(",").map((s) => s.trim()).filter(Boolean);
+const skipPermissions = env.BOT_AI_SKIP_PERMISSIONS === "1";
+const apiBilling = env.BOT_AI_API_BILLING === "1"; // keep ANTHROPIC_API_KEY for claude
+// No wall-clock timeout: a long agent turn (a big build/test) is legitimate.
+// Instead an idle-silence backstop kills a process that has emitted nothing for
+// this long — a wedge — and unblocks the peer's queue. /stop is the user lever.
+const aiIdleMs = Number(env.BOT_AI_IDLE_TIMEOUT_MS ?? 600_000);
+const aiMaxMs = Number(env.BOT_AI_MAX_MS ?? 0); // 0 = no hard cap
+// Where the agent works: one workspace shared by all peers, persisted so files
+// (and each peer's resume session) survive restarts.
+const aiWorkspace = env.BOT_AI_WORKSPACE ?? (env.BOT_STATE_DIR ? path.join(env.BOT_STATE_DIR, "workspace") : fs.mkdtempSync(path.join(os.tmpdir(), "bot-ws-")));
+
+// Escape hatch: BOT_AI_CMD=<bin> [+ BOT_AI_ARGS=<JSON array> with "__PROMPT__"]
+// runs a custom CLI that speaks claude-shaped stream-json (also how the offline
+// e2e drives the loop with a mock `sh` script). Otherwise the engine is the
+// named brain (claude/codex/opencode); null for echo/bridge/hermes.
+const customCmd = (env.BOT_AI_CMD ?? "").trim();
+let customArgsTmpl = null;
+if (customCmd && env.BOT_AI_ARGS) {
+  try { customArgsTmpl = JSON.parse(env.BOT_AI_ARGS); } catch { console.error("BOT_AI_ARGS must be a JSON array"); process.exit(2); }
+  if (!Array.isArray(customArgsTmpl)) { console.error("BOT_AI_ARGS must be a JSON array"); process.exit(2); }
+}
+const engine = customCmd ? RUNNERS.custom : resolveEngine(brain); // null unless a direct engine
+const engineCommand = customCmd || engine?.command;
+if (engine) fs.mkdirSync(aiWorkspace, { recursive: true, mode: 0o700 });
+const buildEngineArgs = ({ prompt, model, resume }) => {
+  if (customCmd) return customArgsTmpl ? customArgsTmpl.map((a) => (a === "__PROMPT__" ? prompt : a)) : [prompt];
+  return engine.buildArgs({ prompt, model, resume, allowedTools, skipPermissions });
 };
-// Escape hatch for any other/custom CLI (incl. a grok CLI with a different flag):
-// BOT_AI_CMD=<bin> and optional BOT_AI_ARGS=<JSON array> where the token
-// "__PROMPT__" is replaced by the built prompt (if absent, prompt is the sole arg).
-// Takes precedence over the presets so a preset can be overridden without code.
-const aiSpec = (() => {
-  const custom = (env.BOT_AI_CMD ?? "").trim();
-  if (custom) {
-    let tmpl = null;
-    if (env.BOT_AI_ARGS) {
-      try { tmpl = JSON.parse(env.BOT_AI_ARGS); } catch { console.error("BOT_AI_ARGS must be a JSON array"); process.exit(2); }
-      if (!Array.isArray(tmpl)) { console.error("BOT_AI_ARGS must be a JSON array"); process.exit(2); }
-    }
-    return { cmd: custom, args: (p) => (tmpl ? tmpl.map((a) => (a === "__PROMPT__" ? p : a)) : [p]) };
-  }
-  return AI_BRAINS[brain] ?? null;
-})();
-// Structured event streaming (Takopi-style "▸ action" progress lines): on by
-// default for the claude preset, opt-in for a custom CLI that emits the same
-// stream-json format (BOT_AI_STREAM=1), disabled with BOT_LIVE_PROGRESS=0.
-const aiStream = liveProgress && (env.BOT_AI_STREAM === "1" || (brain === "claude" && !(env.BOT_AI_CMD ?? "").trim()));
 const lookbackDays = Number(env.BOT_REQUEST_LOOKBACK_DAYS ?? 7);
 const futureDays = Number(env.BOT_REQUEST_FUTURE_DAYS ?? 2);
 const pollMs = Number(env.BOT_POLL_MS ?? 2000);
@@ -355,7 +361,7 @@ const buildSession = (peerHex, identifierKeyHex, extraDevices = []) => {
 const INBOUND_CAP = 1000;
 // True when handleInbound hands messages to the HTTP bridge queue (no direct
 // brain): backpressure must then watch inboundQueue, not the per-peer queues.
-const usesBridgeQueue = brain !== "echo" && !aiSpec;
+const usesBridgeQueue = brain !== "echo" && !engine;
 const inboundQueue = [];
 const waiters = [];
 const enqueueInbound = (item) => {
@@ -542,91 +548,100 @@ const sendReaction = async (peerHex, targetMessageId, emoji, removed = false) =>
   log("BOT_SENT_REACTION", { to: peerHex, removed, target: targetMessageId });
 };
 
-// ---------- brain: decide what to do with an inbound message ----------
-const aiHistory = new Map(); // peerHex -> [{role, text}]
-const AI_TURNS = 8;
-// Capped per peer below, but the peer count itself was unbounded — each entry
-// holds conversation plaintext, so idle peers' history must age out too.
-const AI_HISTORY_PEER_CAP = 500;
-// One-line Takopi-style titles for tool events surfaced in progress frames.
-const toolActionTitle = (name, input = {}) => {
-  const base = (p) => String(p ?? "").split("/").pop();
-  if (name === "Bash") return `$ ${String(input.command ?? "").slice(0, 80)}`;
-  if (name === "Read") return `reading ${base(input.file_path)}`;
-  if (name === "Write" || name === "Edit") return `editing ${base(input.file_path)}`;
-  if (name === "Grep" || name === "Glob") return `searching ${String(input.pattern ?? "")}`;
-  if (name === "WebSearch") return `searching: ${String(input.query ?? "")}`;
-  if (name === "WebFetch") return `fetching ${String(input.url ?? "")}`;
-  return String(name || "tool");
+// ---------- direct engine: run the agent CLI as one turn ----------
+const AI_PEER_CAP = 500; // bound the per-peer maps (idle peers age out)
+const peerResume = new Map();          // peerHex -> engine session id (native --resume)
+const peerModelOverrides = new Map();  // peerHex -> model chosen via /model
+const runningChildren = new Map();     // peerHex -> live child process (for /stop + idle kill)
+const stopRequested = new Set();       // peers whose turn /stop is cancelling
+
+// Kill a child's whole process group (SIGTERM, then SIGKILL after a grace
+// period) so agent-spawned subprocesses (bash, builds) are reaped too.
+const killProcessGroup = (child) => {
+  if (!child || child.exitCode != null || child.signalCode != null) return;
+  try { process.kill(-child.pid, "SIGTERM"); } catch { try { child.kill("SIGTERM"); } catch { /* gone */ } }
+  setTimeout(() => { try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch { /* gone */ } } }, 2000).unref?.();
+};
+// /stop lever: cancel a peer's in-flight turn. Returns true if one was running.
+const stopRun = (peerHex) => {
+  const k = norm(peerHex);
+  const child = runningChildren.get(k);
+  if (!child) return false;
+  stopRequested.add(k);
+  killProcessGroup(child);
+  return true;
 };
 
-const runAgentCli = (peerHex, userText, onAction = null) => new Promise((resolve) => {
-  const hist = (aiHistory.get(peerHex) ?? []).slice(-AI_TURNS * 2)
-    .map((t) => `${t.role === "user" ? "User" : "You"}: ${t.text}`).join("\n");
-  const prompt = [
-    "You are a warm, concise assistant chatting inside the Polkadot app. Reply in 1-3 short sentences. Output only your reply.",
-    hist ? `Conversation so far:\n${hist}` : "",
-    `User: ${userText}`, "You:",
-  ].filter(Boolean).join("\n\n");
-  const model = peerModelOverrides.get(norm(peerHex)) ?? aiModel;
-  const argv = aiStream && aiSpec.streamArgs ? aiSpec.streamArgs(prompt, model) : aiSpec.args(prompt, model);
-  // stdin MUST be ignored: a piped stdin makes some CLIs (e.g. codex) block on "Reading additional input".
-  const child = spawn(aiSpec.cmd, argv, { stdio: ["ignore", "pipe", "pipe"] });
-  let out = "", err = "", lineBuf = "";
-  let streamResult = null, lastAssistantText = null;
-  // stream-json mode: one JSON event per line — tool_use blocks become
-  // progress actions, the {type:"result"} event carries the final answer.
-  const onStreamLine = (line) => {
-    let ev;
-    try { ev = JSON.parse(line); } catch { return; }
-    if (ev?.type === "result" && typeof ev.result === "string") { streamResult = ev.result; return; }
-    if (ev?.type === "assistant") {
-      for (const block of ev.message?.content ?? []) {
-        if (block?.type === "tool_use") onAction?.(toolActionTitle(block.name, block.input));
-        else if (block?.type === "text" && block.text) lastAssistantText = block.text;
-      }
+// Run one agent turn. Streams the engine's JSONL: tool actions feed live-reply
+// progress frames, the session id is captured for --resume, the answer is
+// accumulated. No wall-clock limit — an idle-silence backstop kills a wedged
+// process (and unblocks the peer queue). Returns { answer }, { stopped:true }
+// (user /stop), or null on failure.
+const runEngine = (peerHex, userText, onAction = null) => new Promise((resolve) => {
+  const k = norm(peerHex);
+  const model = peerModelOverrides.get(k) ?? aiModel;
+  const resume = peerResume.get(k) ?? null;
+  const argv = buildEngineArgs({ prompt: userText, model, resume });
+  const childEnv = { ...process.env };
+  if (engine.stripApiKeyEnv && !apiBilling) delete childEnv.ANTHROPIC_API_KEY;
+  // Detached: a new process group, so killProcessGroup reaps the CLI's children.
+  // stdin ignored: some CLIs (codex) otherwise block on "Reading additional input".
+  const child = spawn(engineCommand, argv, { stdio: ["ignore", "pipe", "pipe"], cwd: aiWorkspace, env: childEnv, detached: true });
+  runningChildren.set(k, child);
+  let err = "", lineBuf = "", answer = "", resultText = null, errored = null, gotSession = false, settled = false;
+  let idle;
+  const bumpIdle = () => {
+    clearTimeout(idle);
+    idle = setTimeout(() => { log("BOT_AI_IDLE_TIMEOUT", { to: peerHex, idleMs: aiIdleMs }); killProcessGroup(child); }, aiIdleMs);
+    idle.unref?.();
+  };
+  const hardCap = aiMaxMs > 0 ? setTimeout(() => { log("BOT_AI_MAX_TIMEOUT", { to: peerHex, maxMs: aiMaxMs }); killProcessGroup(child); }, aiMaxMs) : null;
+  hardCap?.unref?.();
+  const finish = (value) => {
+    if (settled) return; settled = true;
+    clearTimeout(idle); if (hardCap) clearTimeout(hardCap);
+    if (runningChildren.get(k) === child) runningChildren.delete(k);
+    resolve(value);
+  };
+  bumpIdle();
+  const onLine = (line) => {
+    if (!line.trim()) return;
+    let obj; try { obj = JSON.parse(line); } catch { return; }
+    for (const ev of engine.parseEvent(obj)) {
+      if (ev.kind === "started") {
+        if (ev.sessionId && !gotSession) { gotSession = true; peerResume.set(k, ev.sessionId); trimMap(peerResume, AI_PEER_CAP); persist(); }
+      } else if (ev.kind === "action") onAction?.(ev.title);
+      else if (ev.kind === "text") answer += ev.text;
+      else if (ev.kind === "result") resultText = ev.text || null;
+      else if (ev.kind === "error") errored = ev.message;
     }
   };
-  const timer = setTimeout(() => { child.kill("SIGKILL"); log("BOT_AI_TIMEOUT", { to: peerHex }); resolve(null); }, 90_000);
-  child.stdout.on("data", (d) => {
-    out += d;
-    if (!aiStream) return;
-    lineBuf += d;
-    let nl;
-    while ((nl = lineBuf.indexOf("\n")) >= 0) { onStreamLine(lineBuf.slice(0, nl)); lineBuf = lineBuf.slice(nl + 1); }
-  });
-  child.stderr.on("data", (d) => { err += d; });
-  child.on("error", (e) => { clearTimeout(timer); log("BOT_AI_SPAWN_FAILED", { error: String(e?.message ?? e) }); resolve(null); });
+  child.stdout.on("data", (d) => { bumpIdle(); lineBuf += d; let nl; while ((nl = lineBuf.indexOf("\n")) >= 0) { onLine(lineBuf.slice(0, nl)); lineBuf = lineBuf.slice(nl + 1); } });
+  child.stderr.on("data", (d) => { err += d; bumpIdle(); });
+  child.on("error", (e) => { log("BOT_AI_SPAWN_FAILED", { error: String(e?.message ?? e) }); finish(null); });
   child.on("close", (code) => {
-    clearTimeout(timer);
-    if (code === 0) {
-      if (aiStream && lineBuf) onStreamLine(lineBuf);
-      // Prefer the structured result; fall back to the last assistant text or
-      // raw stdout so an older CLI without stream-json still answers.
-      return resolve(aiStream ? (streamResult ?? lastAssistantText ?? out.trim()) : out.trim());
-    }
+    if (lineBuf) onLine(lineBuf);
+    if (stopRequested.delete(k)) return finish({ stopped: true });
+    const finalAnswer = (resultText ?? answer).trim();
+    if (errored) { log("BOT_AI_FAILED", { to: peerHex, error: String(errored).slice(-300) }); return finish(null); }
+    if (code === 0 || finalAnswer) return finish({ answer: finalAnswer });
     // Classify the failure so the operator knows the remedy (re-auth vs. retry).
-    // Token management belongs to the codex CLI; we only surface *which* failure it is.
     const authRevoked = /401|unauthorized|refresh token|could not be refreshed|log ?out and sign in/i.test(err);
     log(authRevoked ? "BOT_AI_AUTH_REVOKED" : "BOT_AI_FAILED", { to: peerHex, code, stderr: err.trim().slice(-500) });
-    resolve(null);
+    finish(null);
   });
 });
 
-// In-chat commands, for the brains bot-core itself hosts. Commands are state
-// operations, so they run wherever the conversation state lives: here for the
-// direct CLI brains (bot-core owns aiHistory + model choice), but NEVER in
-// bridge mode — the harness owns that conversation and has its own command
-// system (e.g. OpenClaw's /new); intercepting would shadow it with a layer
-// that can't actually act on the harness's state.
-const peerModelOverrides = new Map(); // peerHex -> model chosen via /model (in-memory)
+// In-chat commands for the direct engines. State operations run where the state
+// lives (here — bot-core owns the resume token + model choice), but NEVER in
+// bridge mode: the harness owns that conversation and its own command system.
 const handleCommandFor = createCommandHandler({
-  aiHistory,
+  clearResume: (peerKey) => { if (peerResume.delete(peerKey)) persist(); },
   peerModelOverrides,
   defaultModel: aiModel,
   username,
   chainConnected,
-  trimOverrides: () => trimMap(peerModelOverrides, AI_HISTORY_PEER_CAP),
+  trimOverrides: () => trimMap(peerModelOverrides, AI_PEER_CAP),
 });
 const handleCommand = (peerHex, text) => handleCommandFor(norm(peerHex), text);
 
@@ -667,7 +682,7 @@ const handleInbound = async (peerHex, msg, owedId = null) => {
     await sendText(peerHex, `Echo: ${synthesizeText(msg.text, msg.attachments)}`).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
     return;
   }
-  if (aiSpec) {
+  if (engine) {
     const commandReply = handleCommand(peerHex, msg.text);
     if (commandReply) {
       log("BOT_COMMAND", { from: peerHex, command: msg.text.split(/\s/)[0] });
@@ -684,9 +699,12 @@ const handleInbound = async (peerHex, msg, owedId = null) => {
       }
       await sendText(peerHex, text);
     };
+    // Verbatim prompt — the engine keeps its own session; we only add the
+    // attachment/reply/edit CONTEXT the message carries (real content, not a
+    // persona wrapper).
     const userText = renderForBrain(msg);
-    armThinking(peerHex); // live placeholder if the model takes longer than thinkingAfterMs
-    // Tool events (claude stream-json) become "▸ action" lines on the placeholder.
+    armThinking(peerHex); // live placeholder if the turn takes longer than thinkingAfterMs
+    // Tool events become "▸ action" lines on the placeholder.
     const onAction = liveProgress ? (title) => {
       const p = peekLivePlaceholder(peerHex);
       p?.then((lp) => {
@@ -695,19 +713,16 @@ const handleInbound = async (peerHex, msg, owedId = null) => {
         lp.handle.update(lp.tracker.render());
       }).catch(() => {});
     } : null;
-    const reply = await runAgentCli(peerHex, userText, onAction);  // logs its own classified failure reason
-    if (!reply) {
+    const result = await runEngine(peerHex, userText, onAction);  // logs its own classified failure reason
+    if (result?.stopped) return; // /stop already finalized the placeholder
+    if (!result) {
       // Don't leave the user hanging after the "thinking" placeholder.
-      await deliverReply("Sorry — I couldn't reach my AI just now. Please try again in a moment.").catch(() => {});
+      await deliverReply("Sorry — I couldn't reach my agent just now. Please try again in a moment.").catch(() => {});
       return;
     }
-    const h = aiHistory.get(peerHex) ?? [];
-    h.push({ role: "user", text: userText }, { role: "bot", text: reply });
-    aiHistory.set(peerHex, h.slice(-AI_TURNS * 2));
-    trimMap(aiHistory, AI_HISTORY_PEER_CAP);
     // Discovery: the very first reply to a peer carries a one-time /help hint
     // (persisted, so a restart doesn't repeat it).
-    let outgoing = reply;
+    let outgoing = result.answer || "(no output)";
     if (!introducedPeers.has(norm(peerHex))) {
       introducedPeers.add(norm(peerHex));
       persist();
@@ -775,6 +790,10 @@ const settleOwed = (owedId) => { if (owedReplies.delete(owedId)) persist(); };
 // decode work; seenRequests is the semantic "already replied" guard.)
 const snapshotState = () => ({
   v: 1,
+  // Which engine + workspace these resume tokens belong to. A token resumes a
+  // session tied to a specific cwd and CLI, so a change to either invalidates
+  // them on restart (takopi's rule — resuming against the wrong tree corrupts).
+  agent: engine ? { engine: customCmd ? "custom" : brain, workspace: aiWorkspace } : undefined,
   peers: [...sessions.entries()].map(([peerHex, { session, identifierKeyHex }]) => ({
     peerHex,
     identifierKeyHex,
@@ -782,6 +801,7 @@ const snapshotState = () => ({
       s: norm(bytesToHex(d.statementAccountId)),
       e: norm(bytesToHex(d.encryptionPublicKey)),
     })),
+    ...(peerResume.has(norm(peerHex)) ? { rs: peerResume.get(norm(peerHex)) } : {}),
   })),
   seen: [...seenRequests].slice(-SEEN_CAP),
   // Additive optional fields (k/q/e/a) keep the snapshot readable by older
@@ -938,6 +958,26 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
       log("BOT_UNDECODABLE_MESSAGE", { from: peerHex, error: m.error });
       continue;
     }
+    // /stop: cancel the peer's in-flight turn. Handled synchronously HERE —
+    // before the per-peer work queue — because a queued /stop would sit behind
+    // the very turn it means to cancel. Direct engines only (bridge harnesses
+    // own their own stop). Deduped like any message so resends don't re-fire.
+    if (engine && m.kind === "text" && /^\s*\/stop\s*$/i.test(m.text ?? "")) {
+      if (!m.messageId) continue;
+      const id = messageDedupId(decoded.requestId, "stop", m.messageId);
+      if (seenRequests.has(id)) continue;
+      seenRequests.add(id); trimSet(seenRequests, SEEN_CAP);
+      const stopped = stopRun(peerHex);
+      log("BOT_STOP", { from: peerHex, stopped });
+      (async () => {
+        // The stopped turn returns early without touching its placeholder, so
+        // finalize it here; otherwise there may be none to take.
+        const lp = await takeLivePlaceholder(peerHex);
+        if (lp) await lp.handle.finalize("⏹ Stopped.").catch((e) => log("BOT_LIVE_FINALIZE_FAILED", { to: peerHex, error: String(e?.message ?? e) }));
+        else await sendText(peerHex, stopped ? "⏹ Stopped." : "Nothing to stop right now.").catch(() => {});
+      })();
+      continue;
+    }
     // Brain-run kinds. Text must be non-empty unless attachments carry the
     // content (a caption-less photo).
     const attachments = (m.richText?.attachments ?? []).filter((a) => a.kind === "p2pMixnetFile").map(toAttachmentMeta);
@@ -974,14 +1014,10 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
     seenRequests.add(id);
     trimSet(seenRequests, SEEN_CAP);
     if (m.kind === "reaction") {
+      // Logged + bridged as an event, never answered (a chat reply to a
+      // reaction is bizarre UX). Not fed into a direct engine's session:
+      // injecting it would require running a turn, which would reply.
       log("BOT_RECEIVED_REACTION", { from: peerHex, emoji: m.emoji, target: m.targetMessageId, removed: m.removed });
-      if (aiSpec) {
-        // Visible to the model on the next turn, without spawning a CLI run —
-        // replying to a reaction with a chat message would be bizarre UX.
-        const h = aiHistory.get(peerHex) ?? [];
-        h.push({ role: "user", text: `(reacted ${m.emoji}${m.removed ? " — then removed it" : ""} to your earlier message)` });
-        aiHistory.set(peerHex, h.slice(-AI_TURNS * 2));
-      }
       enqueueEvent({ chat_id: peerHex, kind: "reaction", message_id: m.messageId, target_message_id: m.targetMessageId, emoji: m.emoji, removed: m.removed, text: `[user ${m.removed ? "removed their reaction" : `reacted ${m.emoji}`}]` });
     } else if (m.kind === "coinageSend") {
       // Informational only: claiming the coins needs the full Coinage stack.
@@ -1333,6 +1369,13 @@ log("BOT_LISTENING", { account: `0x${accountIdHex}`, identifierKey: `0x${norm(by
 // rebuild each peer's (deterministic) session and resume watching its channel,
 // and reload the dedup set so we don't re-answer already-handled messages.
 const restored = stateStore?.load();
+// Resume tokens are only valid for the same engine + workspace they were
+// captured under; a change to either invalidates every token (resuming a
+// session against the wrong cwd/CLI corrupts it).
+const resumeValid = engine && restored?.agent
+  && restored.agent.engine === (customCmd ? "custom" : brain)
+  && restored.agent.workspace === aiWorkspace;
+if (engine && restored?.agent && !resumeValid) log("BOT_RESUME_INVALIDATED", { was: restored.agent, now: { engine: customCmd ? "custom" : brain, workspace: aiWorkspace } });
 let restoredPeers = 0;
 for (const p of restored?.peers ?? []) {
   // Per-peer guard: one malformed persisted entry must not crash startup and
@@ -1341,6 +1384,7 @@ for (const p of restored?.peers ?? []) {
     const devices = (p.devices ?? []).map((d) => ({ statementAccountId: hexToBytes(d.s), encryptionPublicKey: hexToBytes(d.e) }));
     buildSession(p.peerHex, p.identifierKeyHex, devices);
     addSessionWatch(p.peerHex);
+    if (resumeValid && p.rs) peerResume.set(norm(p.peerHex), p.rs);
     restoredPeers += 1;
   } catch (e) { log("BOT_STATE_PEER_SKIPPED", { peer: p?.peerHex, error: String(e?.message ?? e) }); }
 }

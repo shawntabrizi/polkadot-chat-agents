@@ -3,16 +3,16 @@ import assert from "node:assert/strict";
 import { createCommandHandler } from "../lib/commands.mjs";
 
 const make = (over = {}) => {
-  const aiHistory = new Map();
+  const resumeTokens = new Map();
   const peerModelOverrides = new Map();
   const handler = createCommandHandler({
-    aiHistory,
+    clearResume: (peerKey) => resumeTokens.delete(peerKey),
     peerModelOverrides,
     defaultModel: over.defaultModel ?? "",
     username: over.username ?? "testbot.01",
     chainConnected: over.chainConnected ?? (() => true),
   });
-  return { handler, aiHistory, peerModelOverrides };
+  return { handler, resumeTokens, peerModelOverrides };
 };
 
 test("non-command text goes to the model (null)", () => {
@@ -33,16 +33,16 @@ test("unknown but command-shaped input redirects to /help, never the model", () 
 test("/help lists every command", () => {
   const { handler } = make();
   const help = handler("peer", "/help");
-  for (const cmd of ["/reset", "/model", "/ping"]) assert.ok(help.includes(cmd), `missing ${cmd}`);
+  for (const cmd of ["/reset", "/stop", "/model", "/ping"]) assert.ok(help.includes(cmd), `missing ${cmd}`);
 });
 
-test("/reset clears only that peer's history", () => {
-  const { handler, aiHistory } = make();
-  aiHistory.set("alice", [{ role: "user", text: "hi" }]);
-  aiHistory.set("bob", [{ role: "user", text: "yo" }]);
+test("/reset clears only that peer's session token", () => {
+  const { handler, resumeTokens } = make();
+  resumeTokens.set("alice", "SID-A");
+  resumeTokens.set("bob", "SID-B");
   handler("alice", "/reset");
-  assert.equal(aiHistory.has("alice"), false);
-  assert.equal(aiHistory.has("bob"), true);
+  assert.equal(resumeTokens.has("alice"), false);
+  assert.equal(resumeTokens.has("bob"), true);
 });
 
 test("/ping reflects chain state and username", () => {
@@ -69,8 +69,8 @@ test("/model with no configured default says so", () => {
 });
 
 test("commands are case-insensitive and tolerate trailing space", () => {
-  const { handler, aiHistory } = make();
-  aiHistory.set("p", [{}]);
+  const { handler, resumeTokens } = make();
+  resumeTokens.set("p", "SID");
   assert.ok(handler("p", "/RESET ").includes("Fresh start"));
-  assert.equal(aiHistory.has("p"), false);
+  assert.equal(resumeTokens.has("p"), false);
 });
