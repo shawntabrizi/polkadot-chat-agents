@@ -51,10 +51,9 @@ import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
 import { blake2b } from "@noble/hashes/blake2.js";
 import { createStateStore } from "./lib/session-store.mjs";
-import { createCommandHandler } from "./lib/commands.mjs";
+import { createAgentRuntime } from "./lib/agent-runtime.mjs";
 import { splitMessageText } from "./lib/chunk.mjs";
 import { createOutboundLanes } from "./lib/outbound-lanes.mjs";
 import { createWorkspaces } from "./lib/workspaces.mjs";
@@ -139,10 +138,11 @@ const greetText = env.BOT_GREET_TEXT ?? `👋 ${env.BOT_USERNAME || env.FAUCET_C
 // Direct engine "brains": bot-core runs a headless coding-agent CLI (claude /
 // codex / opencode) as an autonomous agent — verbatim prompt, native session
 // resume, tools on. The engine table (lib/runners.mjs) turns a
-// (prompt, model, resume) into argv and normalizes each CLI's JSONL stream; the
-// generic spawn/stream/idle-backstop loop lives here (runEngine). See
-// docs/DESIGN.md. BOT_AI_MODEL pins a model (for opencode this is a
-// provider/model slug — the many-providers path); per-peer /model overrides it.
+// (prompt, model, resume) into argv and normalizes each CLI's JSONL stream;
+// the runtime around it (spawn/stream/idle-backstop, per-peer state, in-chat
+// commands) is lib/agent-runtime.mjs, driven through the `chat` surface
+// defined below. See docs/DESIGN.md. BOT_AI_MODEL pins a model (for opencode
+// this is a provider/model slug); per-peer /model overrides it.
 const aiModel = (env.BOT_AI_MODEL ?? "").trim();
 // Tools are on by default (the container is the sandbox). The allowlist is the
 // safe default; BOT_AI_SKIP_PERMISSIONS=1 grants full autonomy (all tools).
@@ -573,30 +573,39 @@ const sendReaction = async (peerHex, targetMessageId, emoji, removed = false) =>
   log("BOT_SENT_REACTION", { to: peerHex, removed, target: targetMessageId });
 };
 
-// ---------- direct engine: run the agent CLI as one turn ----------
-const AI_PEER_CAP = 500; // bound the per-peer maps (idle peers age out)
-const peerResume = new Map();          // peerHex -> engine session id (native --resume)
-const peerModelOverrides = new Map();  // peerHex -> model chosen via /model
-const peerEffortOverrides = new Map(); // peerHex -> reasoning effort chosen via /reasoning
-const peerProjects = new Map();        // peerHex -> { alias, branch|null } chosen via /project
-const peerUsage = new Map();           // peerHex -> cumulative { turns, inputTokens, outputTokens, costUsd }
-const runningChildren = new Map();     // peerHex -> live child process (for /stop + idle kill)
-const stopRequested = new Set();       // peers whose turn /stop is cancelling
+// ---------- direct engine: the agent runtime behind the chat surface ----------
+// The engine brain lives in lib/agent-runtime.mjs; the transport hands it
+// three capabilities and stays otherwise unaware of resume tokens, projects
+// or commands. This `chat` surface is the in-process twin of the HTTP bridge.
 
-// Token/cost usage: the engines already report it per turn — log it and keep
-// an in-memory per-peer tally for /usage (observability, not billing; resets
-// on restart).
-const recordUsage = (peerHex, usage) => {
-  if (!usage) return;
-  const k = norm(peerHex);
-  const t = peerUsage.get(k) ?? { turns: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 };
-  t.turns += 1;
-  t.inputTokens += usage.inputTokens ?? 0;
-  t.outputTokens += usage.outputTokens ?? 0;
-  t.costUsd += usage.costUsd ?? 0;
-  peerUsage.set(k, t);
-  trimMap(peerUsage, AI_PEER_CAP);
-  log("BOT_AI_USAGE", { to: peerHex, ...usage });
+// Deliver a final answer: a long one is split into parts — the live
+// placeholder becomes the first part, the rest follow as messages (the
+// outbound lane keeps them ordered).
+const deliverToChat = async (peerHex, text) => {
+  const parts = splitMessageText(text, replyChunkBytes);
+  if (parts.length > 1) log("BOT_REPLY_CHUNKED", { to: peerHex, parts: parts.length, chars: text.length });
+  const lp = await takeLivePlaceholder(peerHex);
+  let sentFirst = false;
+  if (lp) {
+    try { await lp.handle.finalize(parts[0]); sentFirst = true; }
+    catch (e) { log("BOT_LIVE_FINALIZE_FAILED", { to: peerHex, error: String(e?.message ?? e) }); }
+  }
+  for (const part of sentFirst ? parts.slice(1) : parts) await sendText(peerHex, part);
+};
+
+// A turn is starting: arm the "thinking" placeholder and hand back the
+// progress hook (tool events become "▸ action" lines on it).
+const beginTurnProgress = (peerHex) => {
+  armThinking(peerHex);
+  if (!liveProgress) return null;
+  return (title) => {
+    const p = peekLivePlaceholder(peerHex);
+    p?.then((lp) => {
+      if (!lp || lp.handle.finalized) return;
+      lp.tracker.add(title);
+      lp.handle.update(lp.tracker.render());
+    }).catch(() => {});
+  };
 };
 
 // Project registry (BOT_AI_PROJECTS): validated aliases -> dirs, plus lazy
@@ -607,119 +616,26 @@ const workspaces = engine ? createWorkspaces({
   log,
 }) : null;
 if (workspaces?.size) log("BOT_PROJECTS", { aliases: workspaces.aliases() });
-// A resume token is scoped to the cwd it was captured in, so a project switch
-// always starts a fresh engine session.
-const setPeerProject = (peerKey, value) => {
-  if (value) { peerProjects.set(peerKey, value); trimMap(peerProjects, AI_PEER_CAP); }
-  else peerProjects.delete(peerKey);
-  peerResume.delete(peerKey);
-  persist();
-};
-// The turn's cwd: the peer's project (root or branch worktree) or the shared
-// workspace. Throws a user-presentable error (unknown project, worktree
-// failure) — the caller answers with it instead of running the engine.
-const resolveTurnCwd = async (peerKey) => {
-  const proj = peerProjects.get(peerKey);
-  return proj ? workspaces.resolveCwd(proj) : aiWorkspace;
-};
 
-// Kill a child's whole process group (SIGTERM, then SIGKILL after a grace
-// period) so agent-spawned subprocesses (bash, builds) are reaped too.
-const killProcessGroup = (child) => {
-  if (!child || child.exitCode != null || child.signalCode != null) return;
-  try { process.kill(-child.pid, "SIGTERM"); } catch { try { child.kill("SIGTERM"); } catch { /* gone */ } }
-  setTimeout(() => { try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch { /* gone */ } } }, 2000).unref?.();
-};
-// /stop lever: cancel a peer's in-flight turn. Returns true if one was running.
-const stopRun = (peerHex) => {
-  const k = norm(peerHex);
-  const child = runningChildren.get(k);
-  if (!child) return false;
-  stopRequested.add(k);
-  killProcessGroup(child);
-  return true;
-};
-
-// Run one agent turn. Streams the engine's JSONL: tool actions feed live-reply
-// progress frames, the session id is captured for --resume, the answer is
-// accumulated. No wall-clock limit — an idle-silence backstop kills a wedged
-// process (and unblocks the peer queue). Returns { answer }, { stopped:true }
-// (user /stop), or null on failure.
-const runEngine = (peerHex, userText, onAction = null, cwd = aiWorkspace) => new Promise((resolve) => {
-  const k = norm(peerHex);
-  const model = peerModelOverrides.get(k) ?? aiModel;
-  const resume = peerResume.get(k) ?? null;
-  const effort = peerEffortOverrides.get(k) ?? aiReasoning ?? "";
-  const argv = buildEngineArgs({ prompt: userText, model, resume, effort: effort || null });
-  const childEnv = { ...process.env };
-  if (engine.stripApiKeyEnv && !apiBilling) delete childEnv.ANTHROPIC_API_KEY;
-  // Detached: a new process group, so killProcessGroup reaps the CLI's children.
-  // stdin ignored: some CLIs (codex) otherwise block on "Reading additional input".
-  const child = spawn(engineCommand, argv, { stdio: ["ignore", "pipe", "pipe"], cwd, env: childEnv, detached: true });
-  runningChildren.set(k, child);
-  let err = "", lineBuf = "", answer = "", resultText = null, errored = null, gotSession = false, settled = false, usage = null;
-  let idle;
-  const bumpIdle = () => {
-    clearTimeout(idle);
-    idle = setTimeout(() => { log("BOT_AI_IDLE_TIMEOUT", { to: peerHex, idleMs: aiIdleMs }); killProcessGroup(child); }, aiIdleMs);
-    idle.unref?.();
-  };
-  const hardCap = aiMaxMs > 0 ? setTimeout(() => { log("BOT_AI_MAX_TIMEOUT", { to: peerHex, maxMs: aiMaxMs }); killProcessGroup(child); }, aiMaxMs) : null;
-  hardCap?.unref?.();
-  const finish = (value) => {
-    if (settled) return; settled = true;
-    clearTimeout(idle); if (hardCap) clearTimeout(hardCap);
-    if (runningChildren.get(k) === child) runningChildren.delete(k);
-    resolve(value);
-  };
-  bumpIdle();
-  const onLine = (line) => {
-    if (!line.trim()) return;
-    let obj; try { obj = JSON.parse(line); } catch { return; }
-    for (const ev of engine.parseEvent(obj)) {
-      if (ev.kind === "started") {
-        if (ev.sessionId && !gotSession) { gotSession = true; peerResume.set(k, ev.sessionId); trimMap(peerResume, AI_PEER_CAP); persist(); }
-      } else if (ev.kind === "action") onAction?.(ev.title);
-      else if (ev.kind === "text") answer += ev.text;
-      else if (ev.kind === "result") { resultText = ev.text || null; if (ev.usage) usage = ev.usage; }
-      else if (ev.kind === "error") errored = ev.message;
-    }
-  };
-  child.stdout.on("data", (d) => { bumpIdle(); lineBuf += d; let nl; while ((nl = lineBuf.indexOf("\n")) >= 0) { onLine(lineBuf.slice(0, nl)); lineBuf = lineBuf.slice(nl + 1); } });
-  child.stderr.on("data", (d) => { err += d; bumpIdle(); });
-  child.on("error", (e) => { log("BOT_AI_SPAWN_FAILED", { error: String(e?.message ?? e) }); finish(null); });
-  child.on("close", (code) => {
-    if (lineBuf) onLine(lineBuf);
-    if (stopRequested.delete(k)) return finish({ stopped: true });
-    const finalAnswer = (resultText ?? answer).trim();
-    if (errored) { log("BOT_AI_FAILED", { to: peerHex, error: String(errored).slice(-300) }); return finish(null); }
-    if (code === 0 || finalAnswer) { recordUsage(peerHex, usage); return finish({ answer: finalAnswer }); }
-    // Classify the failure so the operator knows the remedy (re-auth vs. retry).
-    const authRevoked = /401|unauthorized|refresh token|could not be refreshed|log ?out and sign in/i.test(err);
-    log(authRevoked ? "BOT_AI_AUTH_REVOKED" : "BOT_AI_FAILED", { to: peerHex, code, stderr: err.trim().slice(-500) });
-    finish(null);
-  });
-});
-
-// In-chat commands for the direct engines. State operations run where the state
-// lives (here — bot-core owns the resume token + model choice), but NEVER in
-// bridge mode: the harness owns that conversation and its own command system.
-const handleCommandFor = createCommandHandler({
-  clearResume: (peerKey) => { if (peerResume.delete(peerKey)) persist(); },
-  peerModelOverrides,
-  defaultModel: aiModel,
+const agentRuntime = engine ? createAgentRuntime({
+  engine,
+  engineName: customCmd ? "custom" : brain,
+  engineCommand,
+  buildArgs: buildEngineArgs,
+  workspace: aiWorkspace,
+  workspaces,
+  model: aiModel,
+  reasoning: aiReasoning,
+  apiBilling,
+  idleMs: aiIdleMs,
+  maxMs: aiMaxMs,
+  renderMessage: (msg) => renderForBrain(msg),
+  chat: { sendText, deliver: deliverToChat, beginTurn: beginTurnProgress },
   username,
   chainConnected,
-  trimOverrides: () => { trimMap(peerModelOverrides, AI_PEER_CAP); trimMap(peerEffortOverrides, AI_PEER_CAP); },
-  workspaces,
-  getPeerProject: (peerKey) => peerProjects.get(peerKey) ?? null,
-  setPeerProject,
-  effortLevels: engine?.effortLevels ?? null,
-  defaultEffort: aiReasoning,
-  peerEffortOverrides,
-  getUsage: (peerKey) => peerUsage.get(peerKey) ?? null,
-});
-const handleCommand = (peerHex, text) => handleCommandFor(norm(peerHex), text);
+  log,
+  persist: () => persist(),
+}) : null;
 
 // Bridge-facing attachment shape: no claimTicket (key material stays inside
 // bot-core); the harness fetches bytes via GET /media/:id.
@@ -758,84 +674,7 @@ const handleInbound = async (peerHex, msg, owedId = null) => {
     await sendText(peerHex, `Echo: ${synthesizeText(msg.text, msg.attachments)}`).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
     return;
   }
-  if (engine) {
-    const commandReply = handleCommand(peerHex, msg.text);
-    if (commandReply) {
-      log("BOT_COMMAND", { from: peerHex, command: msg.text.split(/\s/)[0] });
-      await sendText(peerHex, commandReply).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
-      return;
-    }
-    // Deliver by finalizing the live placeholder when one was posted (the
-    // "thinking…" bubble BECOMES the answer); plain send otherwise. A long
-    // answer is split into parts — the placeholder becomes the first part,
-    // the rest follow as messages (the outbound lane keeps them ordered).
-    const deliverReply = async (text) => {
-      const parts = splitMessageText(text, replyChunkBytes);
-      if (parts.length > 1) log("BOT_REPLY_CHUNKED", { to: peerHex, parts: parts.length, chars: text.length });
-      const lp = await takeLivePlaceholder(peerHex);
-      let sentFirst = false;
-      if (lp) {
-        try { await lp.handle.finalize(parts[0]); sentFirst = true; }
-        catch (e) { log("BOT_LIVE_FINALIZE_FAILED", { to: peerHex, error: String(e?.message ?? e) }); }
-      }
-      for (const part of sentFirst ? parts.slice(1) : parts) await sendText(peerHex, part);
-    };
-    // The turn's cwd: shared workspace or the peer's chosen project/worktree.
-    // Worktree prep can fail (not a repo, bad branch) — answer with the error
-    // instead of running the engine somewhere the user didn't pick.
-    let turnCwd;
-    try { turnCwd = await resolveTurnCwd(norm(peerHex)); }
-    catch (e) {
-      const proj = peerProjects.get(norm(peerHex));
-      log("BOT_PROJECT_CWD_FAILED", { to: peerHex, project: proj?.alias, branch: proj?.branch ?? null, error: String(e?.message ?? e) });
-      await sendText(peerHex, `⚠️ I couldn't open ${proj ? `${proj.alias}${proj.branch ? `@${proj.branch}` : ""}` : "the workspace"}: ${String(e?.message ?? e)}. /project default switches back to the shared workspace.`).catch(() => {});
-      return;
-    }
-    // Stage downloaded attachments into the workspace (.attachments/) so the
-    // agent acts on a file inside its own cwd — media-store blobs live
-    // outside it. Failure falls back to the media-store path in the prompt.
-    for (const a of msg.attachments ?? []) {
-      if (!a.downloaded) continue;
-      try {
-        const stageDir = path.join(turnCwd, ".attachments");
-        fs.mkdirSync(stageDir, { recursive: true });
-        const dest = path.join(stageDir, path.basename(a.path));
-        fs.copyFileSync(a.path, dest);
-        a.path = dest;
-      } catch (e) { log("BOT_ATTACHMENT_STAGE_FAILED", { id: a.id.slice(0, 16), error: String(e?.message ?? e) }); }
-    }
-    // Verbatim prompt — the engine keeps its own session; we only add the
-    // attachment/reply/edit CONTEXT the message carries (real content, not a
-    // persona wrapper).
-    const userText = renderForBrain(msg);
-    armThinking(peerHex); // live placeholder if the turn takes longer than thinkingAfterMs
-    // Tool events become "▸ action" lines on the placeholder.
-    const onAction = liveProgress ? (title) => {
-      const p = peekLivePlaceholder(peerHex);
-      p?.then((lp) => {
-        if (!lp || lp.handle.finalized) return;
-        lp.tracker.add(title);
-        lp.handle.update(lp.tracker.render());
-      }).catch(() => {});
-    } : null;
-    const result = await runEngine(peerHex, userText, onAction, turnCwd);  // logs its own classified failure reason
-    if (result?.stopped) return; // /stop already finalized the placeholder
-    if (!result) {
-      // Don't leave the user hanging after the "thinking" placeholder.
-      await deliverReply("Sorry — I couldn't reach my agent just now. Please try again in a moment.").catch(() => {});
-      return;
-    }
-    // Discovery: the very first reply to a peer carries a one-time /help hint
-    // (persisted, so a restart doesn't repeat it).
-    let outgoing = result.answer || "(no output)";
-    if (!introducedPeers.has(norm(peerHex))) {
-      introducedPeers.add(norm(peerHex));
-      persist();
-      outgoing += "\n\n(Tip: send /help to see my commands.)";
-    }
-    await deliverReply(outgoing).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
-    return;
-  }
+  if (agentRuntime) return agentRuntime.handleMessage(peerHex, msg);
   // bridge / hermes / unknown: hand off to an external agent via the HTTP bridge.
   // The agent replies via POST /send -> sendMessage, which disarms the ack.
   armThinking(peerHex);
@@ -898,7 +737,7 @@ const snapshotState = () => ({
   // Which engine + workspace these resume tokens belong to. A token resumes a
   // session tied to a specific cwd and CLI, so a change to either invalidates
   // them on restart (takopi's rule — resuming against the wrong tree corrupts).
-  agent: engine ? { engine: customCmd ? "custom" : brain, workspace: aiWorkspace } : undefined,
+  agent: agentRuntime?.snapshotAgent(),
   peers: [...sessions.entries()].map(([peerHex, { session, identifierKeyHex }]) => ({
     peerHex,
     identifierKeyHex,
@@ -906,13 +745,9 @@ const snapshotState = () => ({
       s: norm(bytesToHex(d.statementAccountId)),
       e: norm(bytesToHex(d.encryptionPublicKey)),
     })),
-    ...(peerResume.has(norm(peerHex)) ? { rs: peerResume.get(norm(peerHex)) } : {}),
-    // Active project/branch (chosen via /project) — the resume token above is
-    // only valid in this cwd, so both restore together or not at all.
-    ...(peerProjects.has(norm(peerHex)) ? {
-      pj: peerProjects.get(norm(peerHex)).alias,
-      ...(peerProjects.get(norm(peerHex)).branch ? { br: peerProjects.get(norm(peerHex)).branch } : {}),
-    } : {}),
+    // Engine per-peer state (resume token rs + active project pj/br) — the
+    // runtime owns what these fields mean; see lib/agent-runtime.mjs.
+    ...(agentRuntime ? agentRuntime.peerSnapshot(norm(peerHex)) : {}),
   })),
   seen: [...seenRequests].slice(-SEEN_CAP),
   // Additive optional fields (k/q/e/a) keep the snapshot readable by older
@@ -938,10 +773,9 @@ const snapshotState = () => ({
     } : {}),
   })),
   greeted: [...greetedPeers],
-  intro: [...introducedPeers],
+  intro: agentRuntime?.introducedList() ?? [],
 });
 const greetedPeers = new Set(); // peers we've sent a first-contact greeting (once ever)
-const introducedPeers = new Set(); // peers whose first reply carried the /help hint
 const persist = () => { if (stateStore) stateStore.save(snapshotState()); };
 const fp = (data) => bytesToHex(data.subarray(0, 32)); // dedup key: first 32 bytes, no full-payload encode
 
@@ -1077,12 +911,12 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
     // before the per-peer work queue — because a queued /stop would sit behind
     // the very turn it means to cancel. Direct engines only (bridge harnesses
     // own their own stop). Deduped like any message so resends don't re-fire.
-    if (engine && m.kind === "text" && /^\s*\/stop\s*$/i.test(m.text ?? "")) {
+    if (agentRuntime && m.kind === "text" && /^\s*\/stop\s*$/i.test(m.text ?? "")) {
       if (!m.messageId) continue;
       const id = messageDedupId(decoded.requestId, "stop", m.messageId);
       if (seenRequests.has(id)) continue;
       seenRequests.add(id); trimSet(seenRequests, SEEN_CAP);
-      const stopped = stopRun(peerHex);
+      const stopped = agentRuntime.stop(peerHex);
       log("BOT_STOP", { from: peerHex, stopped });
       (async () => {
         // The stopped turn returns early without touching its placeholder, so
@@ -1485,14 +1319,9 @@ log("BOT_LISTENING", { account: `0x${accountIdHex}`, identifierKey: `0x${norm(by
 // rebuild each peer's (deterministic) session and resume watching its channel,
 // and reload the dedup set so we don't re-answer already-handled messages.
 const restored = stateStore?.load();
-// Resume tokens are scoped to the engine AND the cwd they were captured in
-// (resuming against the wrong tree/CLI corrupts the session). An engine
-// change invalidates every token; a workspace change invalidates tokens of
-// peers in the shared workspace — a project peer's cwd is the project itself,
-// validated against the registry below.
-const engineMatches = engine && restored?.agent && restored.agent.engine === (customCmd ? "custom" : brain);
-const defaultWorkspaceMatches = engineMatches && restored.agent.workspace === aiWorkspace;
-if (engine && restored?.agent && !defaultWorkspaceMatches) log("BOT_RESUME_INVALIDATED", { was: restored.agent, now: { engine: customCmd ? "custom" : brain, workspace: aiWorkspace } });
+// The runtime decides which persisted resume tokens are still valid (they're
+// scoped to the engine + the cwd they were captured in; see agent-runtime).
+agentRuntime?.noteRestoredAgent(restored?.agent ?? null);
 let restoredPeers = 0;
 for (const p of restored?.peers ?? []) {
   // Per-peer guard: one malformed persisted entry must not crash startup and
@@ -1501,16 +1330,13 @@ for (const p of restored?.peers ?? []) {
     const devices = (p.devices ?? []).map((d) => ({ statementAccountId: hexToBytes(d.s), encryptionPublicKey: hexToBytes(d.e) }));
     buildSession(p.peerHex, p.identifierKeyHex, devices);
     addSessionWatch(p.peerHex);
-    const proj = p.pj && workspaces?.has(p.pj) ? { alias: p.pj, branch: p.br ?? null } : null;
-    if (proj) peerProjects.set(norm(p.peerHex), proj);
-    else if (p.pj) log("BOT_PROJECT_DROPPED", { peer: p.peerHex, alias: p.pj, reason: "no longer registered" });
-    if (p.rs && engineMatches && (p.pj ? proj != null : defaultWorkspaceMatches)) peerResume.set(norm(p.peerHex), p.rs);
+    agentRuntime?.restorePeer(norm(p.peerHex), { rs: p.rs, pj: p.pj, br: p.br });
     restoredPeers += 1;
   } catch (e) { log("BOT_STATE_PEER_SKIPPED", { peer: p?.peerHex, error: String(e?.message ?? e) }); }
 }
 for (const id of restored?.seen ?? []) seenRequests.add(id);
 for (const id of restored?.greeted ?? []) greetedPeers.add(id);
-for (const id of restored?.intro ?? []) introducedPeers.add(id);
+agentRuntime?.restoreIntroduced(restored?.intro);
 // Re-run anything that was ACKed but not yet answered when the last process
 // died — the app will never resend these, the journal is their only way back.
 let restoredOwed = 0;

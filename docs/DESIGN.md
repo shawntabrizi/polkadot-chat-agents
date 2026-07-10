@@ -168,7 +168,8 @@ bot-core (Node)
   transport                      index.mjs: poll, decode, ACK, send
   session persistence            lib/session-store.mjs
   brains                         direct engine (claude/codex/opencode) or bridge
-  agent engines                  lib/runners.mjs (engine table) + index.mjs runEngine
+  agent runtime                  lib/agent-runtime.mjs (turns, per-peer state,
+                                 commands) over lib/runners.mjs (engine table)
   HTTP bridge                    for agent frameworks
   deploy + ops                   cli.mjs deploy / logs / status / stop
 
@@ -180,15 +181,19 @@ One transport, many brains. A **direct engine** runs a headless coding-agent CLI
 (claude/codex/opencode) as an autonomous agent: the message is passed verbatim
 (no injected persona), continuity is the CLI's native session via `--resume`
 (a token captured from its event stream, persisted per peer, invalidated on an
-engine/workspace change), and tools run in a persistent workspace. `lib/runners
-.mjs` holds each engine's argv builder + JSONL-event normalizer (to one
-started/action/text/result vocabulary); `runEngine` in index.mjs owns the shared
-loop — spawn in a process group, stream and normalize, feed live-reply progress
-frames, and enforce an idle-silence backstop (no wall-clock limit; a long build
-is legitimate, a wedge is killed and the peer queue unblocks). `/stop` cancels a
-turn (intercepted before the per-peer queue), `/reset` starts a fresh session.
-opencode reaches many providers through one `--model provider/model` flag, so
-there are no per-vendor brains.
+engine/workspace change), and tools run in a persistent workspace.
+`lib/runners.mjs` holds each engine's argv builder + JSONL-event normalizer (to
+one started/action/text/result vocabulary); `lib/agent-runtime.mjs` owns
+everything above it — the shared turn loop (spawn in a process group, stream
+and normalize, feed live-reply progress frames, idle-silence backstop: no
+wall-clock limit; a long build is legitimate, a wedge is killed and the peer
+queue unblocks), all per-peer agent state, and the in-chat commands. The
+runtime is transport-blind: index.mjs hands it a three-call `chat` surface
+(sendText / deliver / beginTurn) — the in-process twin of the HTTP bridge that
+serves out-of-process brains. `/stop` cancels a turn (intercepted before the
+per-peer queue), `/reset` starts a fresh session. opencode reaches many
+providers through one `--model provider/model` flag, so there are no
+per-vendor brains.
 
 Per-peer engine knobs: `/model` (any string, passed to the CLI's model flag),
 `/reasoning` (validated against the engine's levels — claude
