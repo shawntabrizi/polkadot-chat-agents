@@ -108,6 +108,19 @@ async function startPolkadotGatewayAccount(ctx) {
           await dispatchInbound(ctx, channelRuntime, account, bridge, msg);
         } catch (err) {
           ctx.log?.warn?.(`polkadot dispatch error: ${String(err)}`);
+          if (/initialization conflicted/i.test(String(err))) {
+            await new Promise((r) => setTimeout(r, 1e3));
+            try {
+              await dispatchInbound(ctx, channelRuntime, account, bridge, msg);
+              continue;
+            } catch (retryErr) {
+              ctx.log?.warn?.(`polkadot dispatch retry failed: ${String(retryErr)}`);
+            }
+          }
+          try {
+            await bridge.send(msg.chat_id, "\u26A0\uFE0F I hit a snag processing that message \u2014 please send it again.");
+          } catch {
+          }
         }
       }
     }
