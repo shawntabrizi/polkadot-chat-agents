@@ -29,6 +29,9 @@ function resolveDefaultPolkadotAccountId(cfg) {
 
 // src/gateway.ts
 import { randomUUID } from "node:crypto";
+import { promises as fsp } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 // src/bridge.ts
 function createBridge(baseUrl) {
@@ -55,14 +58,30 @@ function createBridge(baseUrl) {
 
 // src/gateway.ts
 var POLL_WAIT_SECS = 25;
-function attachmentNotes(msg, bridgeBaseUrl) {
+async function materializeAttachments(msg, bridgeBaseUrl) {
   if (!msg.attachments?.length) return "";
   const base = bridgeBaseUrl.replace(/\/+$/, "");
-  return msg.attachments.map(
-    (a) => a.downloaded && a.url ? `
-[attachment ${a.kind}: ${base}${a.url} (${a.mime}, ${a.size} bytes)]` : `
-[attachment ${a.kind} (${a.mime}) failed to download${a.error ? `: ${a.error}` : ""}]`
-  ).join("");
+  const notes = [];
+  for (const a of msg.attachments) {
+    if (!(a.downloaded && a.url)) {
+      notes.push(`
+[attachment ${a.kind} (${a.mime}) failed to download${a.error ? `: ${a.error}` : ""}]`);
+      continue;
+    }
+    try {
+      const res = await fetch(`${base}${a.url}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const ext = a.mime.split("/")[1]?.replace(/[^a-zA-Z0-9]/g, "") || "bin";
+      const filePath = path.join(os.tmpdir(), `polkadot-media-${a.id.slice(0, 16)}.${ext}`);
+      await fsp.writeFile(filePath, Buffer.from(await res.arrayBuffer()));
+      notes.push(`
+[attachment ${a.kind} from the user, saved at ${filePath} (${a.mime}, ${a.size} bytes) \u2014 read that file to view it]`);
+    } catch (err) {
+      notes.push(`
+[attachment ${a.kind}: could not be fetched from the bridge (${String(err)}); metadata: ${a.mime}, ${a.size} bytes]`);
+    }
+  }
+  return notes.join("");
 }
 async function startPolkadotGatewayAccount(ctx) {
   const account = resolvePolkadotAccount({ cfg: ctx.cfg, accountId: ctx.account?.accountId });
@@ -98,6 +117,7 @@ async function startPolkadotGatewayAccount(ctx) {
 }
 async function dispatchInbound(ctx, channelRuntime, account, bridge, msg) {
   const chatId = msg.chat_id;
+  const attachmentNotes = await materializeAttachments(msg, account.bridgeUrl);
   const route = channelRuntime.routing.resolveAgentRoute({
     cfg: ctx.cfg,
     channel: POLKADOT_CHANNEL_ID,
@@ -114,7 +134,7 @@ async function dispatchInbound(ctx, channelRuntime, account, bridge, msg) {
         id: msg.message_id || randomUUID(),
         timestamp: Date.now(),
         rawText: msg.text,
-        textForAgent: msg.text + attachmentNotes(msg, account.bridgeUrl),
+        textForAgent: msg.text + attachmentNotes,
         textForCommands: msg.text,
         raw: msg
       }),

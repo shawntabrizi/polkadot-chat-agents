@@ -8,23 +8,39 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { randomUUID } from "node:crypto";
+import { promises as fsp } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { createBridge, type InboundMsg } from "./bridge.js";
 import { POLKADOT_CHANNEL_ID, resolvePolkadotAccount, type ResolvedPolkadotAccount } from "./accounts.js";
 
 const POLL_WAIT_SECS = 25;
 
-// The agent only sees text, so attachments (already downloaded by bot-core)
-// surface as bracketed notes with an absolute /media URL the agent can fetch.
-function attachmentNotes(msg: InboundMsg, bridgeBaseUrl: string): string {
+// The agent only sees text, and the gateway container has no curl/wget for it
+// to fetch URLs with — so fetch each attachment from the bridge here (plain
+// Node fetch) and hand the agent a LOCAL file path. The Claude CLI's Read tool
+// renders image files natively, which is what actually gives the agent vision.
+async function materializeAttachments(msg: InboundMsg, bridgeBaseUrl: string): Promise<string> {
   if (!msg.attachments?.length) return "";
   const base = bridgeBaseUrl.replace(/\/+$/, "");
-  return msg.attachments
-    .map((a) =>
-      a.downloaded && a.url
-        ? `\n[attachment ${a.kind}: ${base}${a.url} (${a.mime}, ${a.size} bytes)]`
-        : `\n[attachment ${a.kind} (${a.mime}) failed to download${a.error ? `: ${a.error}` : ""}]`,
-    )
-    .join("");
+  const notes: string[] = [];
+  for (const a of msg.attachments) {
+    if (!(a.downloaded && a.url)) {
+      notes.push(`\n[attachment ${a.kind} (${a.mime}) failed to download${a.error ? `: ${a.error}` : ""}]`);
+      continue;
+    }
+    try {
+      const res = await fetch(`${base}${a.url}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const ext = a.mime.split("/")[1]?.replace(/[^a-zA-Z0-9]/g, "") || "bin";
+      const filePath = path.join(os.tmpdir(), `polkadot-media-${a.id.slice(0, 16)}.${ext}`);
+      await fsp.writeFile(filePath, Buffer.from(await res.arrayBuffer()));
+      notes.push(`\n[attachment ${a.kind} from the user, saved at ${filePath} (${a.mime}, ${a.size} bytes) — read that file to view it]`);
+    } catch (err) {
+      notes.push(`\n[attachment ${a.kind}: could not be fetched from the bridge (${String(err)}); metadata: ${a.mime}, ${a.size} bytes]`);
+    }
+  }
+  return notes.join("");
 }
 
 export async function startPolkadotGatewayAccount(ctx: any): Promise<void> {
@@ -72,6 +88,7 @@ async function dispatchInbound(
   msg: InboundMsg,
 ): Promise<void> {
   const chatId = msg.chat_id;
+  const attachmentNotes = await materializeAttachments(msg, account.bridgeUrl);
   const route = channelRuntime.routing.resolveAgentRoute({
     cfg: ctx.cfg,
     channel: POLKADOT_CHANNEL_ID,
@@ -89,7 +106,7 @@ async function dispatchInbound(
         id: msg.message_id || randomUUID(),
         timestamp: Date.now(),
         rawText: msg.text,
-        textForAgent: msg.text + attachmentNotes(msg, account.bridgeUrl),
+        textForAgent: msg.text + attachmentNotes,
         textForCommands: msg.text,
         raw: msg,
       }),
