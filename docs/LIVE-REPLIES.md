@@ -1,6 +1,8 @@
 # Live replies: one evolving message instead of "thinking…" + answer
 
-Status: proposal (researched, not implemented).
+Status: implemented (bot-core lifecycle + bridge auto-upgrade + Hermes
+`edit_message`; see "Implementation notes" at the bottom). This document keeps
+the research and constraints that produced the design.
 
 ## Problem
 
@@ -178,3 +180,26 @@ sender-generated via the notify relay). When either lands, revisit:
   inline buttons/cancel controls (no protocol surface — `/stop` command is the
   nearest equivalent), per-token streaming (edit-history + cadence constraints
   make it net-negative on this transport).
+
+## Implementation notes
+
+- `bot-core/lib/live-reply.mjs` — the outbox: ACK gate, escalating throttle
+  (`BOT_LIVE_EDIT_MIN_MS` doubling every 3 edits up to `BOT_LIVE_EDIT_MAX_MS`),
+  latest-wins coalescing, skip-identical, finalize-as-edit with plain-message
+  fallback (`BOT_LIVE_FINAL_ACK_WAIT_MS`), harness edit lanes. Progress
+  renderer: `⏳ working · 24s · step 3` + rolling `▸ action` lines.
+- `bot-core/index.mjs` — outbound ACK tracking (session responses previously
+  ignored), placeholder lifecycle in `armThinking`/`deliverReply`, heartbeat
+  frames (`BOT_LIVE_HEARTBEAT_MS`), claude brain in stream-json mode for tool
+  events (`BOT_AI_STREAM`, `BOT_LIVE_PROGRESS=0` to disable), bridge
+  auto-upgrade (first plain `/send` finalizes the open placeholder; a
+  `reply_to`/`edit_of` send retires it to `✓`), `edit_of` routed through the
+  throttled lane, `/health.live` capability advertisement.
+- Hermes adapter implements `edit_message`, which switches on Hermes's own
+  progressive streaming; bot-core down-samples its ~0.8s edit cadence.
+- OpenClaw needs no plugin change: its first block send is auto-upgraded.
+  (Its native draft/edit streaming interfaces are not exposed to simple
+  chat-channel plugins — revisit if that SDK surface appears.)
+- The mobile-app-shaped test client ACKs bot requests (`--no-ack` to simulate
+  an unreachable peer); e2e covers the full lifecycle, the no-ACK fallback,
+  and bridge auto-upgrade + throttled harness edits.

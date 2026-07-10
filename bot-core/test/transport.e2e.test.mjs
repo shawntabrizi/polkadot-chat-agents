@@ -274,7 +274,9 @@ test("bridge surface: /inbound shape, /media, reply/edit/react, events", async (
   const bot = await startBot({
     endpoint: node.url,
     stateDir,
-    extraEnv: { BOT_SUBSCRIBE: "0", BOT_BRAIN: "bridge", BOT_HOP_ALLOW_INSECURE: "1" },
+    // Thinking placeholder disabled: this test exercises the raw bridge
+    // contract; the live-reply lifecycle has its own dedicated test.
+    extraEnv: { BOT_SUBSCRIBE: "0", BOT_BRAIN: "bridge", BOT_HOP_ALLOW_INSECURE: "1", BOT_THINKING_TEXT: "" },
   });
   const base = `http://127.0.0.1:${bot.bridgePort}`;
   const post = (route, body) => fetch(`${base}${route}`, {
@@ -316,10 +318,11 @@ test("bridge surface: /inbound shape, /media, reply/edit/react, events", async (
     assert.equal(Buffer.compare(served, photo), 0, "served media differs from the uploaded photo");
 
     // Edit the earlier reply in place, then check the send path recorded it.
+    // (edit_of is throttled/coalesced through the live outbox, so the actual
+    // submit is asynchronous — wait for the log event.)
     const edited = await post("/send", { chat_id: opener.chat_id, text: "seen it (edited)", edit_of: sent.message_id });
     assert.equal(edited.success, true, JSON.stringify(edited));
-    const editEvent = bot.events.find((e) => e.event === "BOT_SENT_TEXT" && e.editOf === sent.message_id);
-    assert.ok(editEvent, "edit not sent");
+    await bot.waitFor((e) => e.event === "BOT_SENT_TEXT" && e.editOf === sent.message_id, { label: "edit submitted" });
     const both = await post("/send", { chat_id: opener.chat_id, text: "x", reply_to: "a", edit_of: "b" });
     assert.equal(both.success, false, "reply_to+edit_of must be rejected");
     await client1;
@@ -342,6 +345,128 @@ test("bridge surface: /inbound shape, /media, reply/edit/react, events", async (
     await bot.stop();
     await node.close();
     await hop.close();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+// Shared env for the live-replies tests: a mock "agent CLI" that emits
+// claude-style stream-json (one tool event, then the result) slowly enough
+// for the placeholder + progress machinery to engage.
+const liveBrainEnv = {
+  BOT_SUBSCRIBE: "0",
+  BOT_BRAIN: "claude",
+  BOT_AI_CMD: "sh",
+  BOT_AI_ARGS: JSON.stringify(["-c",
+    "sleep 3; printf '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"npm test\"}}]}}\\n'; sleep 4; printf '{\"type\":\"result\",\"result\":\"live final answer\"}\\n'"]),
+  BOT_AI_STREAM: "1",
+  BOT_THINKING_TEXT: "⏳ thinking…",
+  BOT_THINKING_AFTER_MS: "1000",
+  BOT_LIVE_EDIT_MIN_MS: "300",
+  BOT_LIVE_HEARTBEAT_MS: "1500",
+  BOT_LIVE_FINAL_ACK_WAIT_MS: "4000",
+};
+
+test("live reply: placeholder becomes progress frames, then the answer", async () => {
+  const node = await startMockStatementNode();
+  const stateDir = tmpState();
+  const bot = await startBot({ endpoint: node.url, stateDir, extraEnv: liveBrainEnv });
+  try {
+    // Two texts: the follow-up rides the device channel and earns the client
+    // its exit-0 ACK; both turns are slow enough to get a placeholder.
+    const r = await runClient(node.url, ["--wait-secs", "16"], ["live question", "again please"]);
+    assert.equal(r.code, 0, `client failed:\n${r.out}`);
+    const placeholders = bot.events.filter((e) => e.event === "BOT_LIVE_PLACEHOLDER").map((e) => e.messageId);
+    assert.ok(placeholders.length >= 1, "no live placeholder was posted");
+    // The placeholder bubble was seen, then edited — same message id.
+    assert.match(r.out, new RegExp(`\\[BOT ${placeholders[0]}\\] ⏳ thinking…`), `placeholder not seen:\n${r.out}`);
+    const edits = [...r.out.matchAll(/\[BOT EDIT ([0-9A-F-]+)\] (.*)/g)];
+    assert.ok(edits.length >= 2, `expected progress + final edits, got:\n${r.out}`);
+    assert.ok(edits.every((m) => placeholders.includes(m[1])), `edits must target placeholders:\n${r.out}`);
+    // A progress frame carried the tool action line; a final edit carried the answer.
+    assert.match(r.out, /▸ \$ npm test/, `no tool action frame:\n${r.out}`);
+    assert.match(r.out, /\[BOT EDIT [0-9A-F-]+\] live final answer/, `final-as-edit missing:\n${r.out}`);
+    // The ONLY plain sends are the placeholders themselves — answers arrived
+    // as edits, never as second bubbles.
+    const plainSends = bot.events.filter((e) => e.event === "BOT_SENT_TEXT" && !e.editOf);
+    assert.equal(plainSends.length, placeholders.length, `unexpected plain sends: ${JSON.stringify(plainSends)}`);
+  } finally {
+    await bot.stop();
+    await node.close();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("live reply: a peer that never ACKs gets a plain final message", async () => {
+  const node = await startMockStatementNode();
+  const stateDir = tmpState();
+  const bot = await startBot({ endpoint: node.url, stateDir, extraEnv: liveBrainEnv });
+  try {
+    const r = await runClient(node.url, ["--no-ack", "1", "--wait-secs", "18"], ["silent question", "still here"]);
+    assert.equal(r.code, 0, `client failed:\n${r.out}`);
+    assert.equal(r.out.includes("[BOT EDIT"), false, `no edits may reach a non-ACKing peer:\n${r.out}`);
+    assert.ok([...r.out.matchAll(/\[BOT [0-9A-F-]+\] live final answer/g)].length >= 1, `plain final missing:\n${r.out}`);
+    await bot.waitFor((e) => e.event === "BOT_LIVE_FALLBACK", { label: "BOT_LIVE_FALLBACK" });
+  } finally {
+    await bot.stop();
+    await node.close();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("live reply: bridge auto-upgrade finalizes the placeholder", async () => {
+  const node = await startMockStatementNode();
+  const stateDir = tmpState();
+  const bot = await startBot({
+    endpoint: node.url,
+    stateDir,
+    extraEnv: {
+      BOT_SUBSCRIBE: "0",
+      BOT_BRAIN: "bridge",
+      BOT_THINKING_TEXT: "⏳ thinking…",
+      BOT_THINKING_AFTER_MS: "1000",
+      BOT_LIVE_EDIT_MIN_MS: "300",
+      BOT_LIVE_FINAL_ACK_WAIT_MS: "4000",
+    },
+  });
+  const base = `http://127.0.0.1:${bot.bridgePort}`;
+  const post = (route, body) => fetch(`${base}${route}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }).then((r) => r.json());
+  try {
+    // BOT_LISTENING is logged before the bridge socket finishes binding, so
+    // wait for the bridge itself before fetching (and retry transient
+    // connection errors inside the deadline).
+    await bot.waitFor((e) => e.event === "BOT_BRIDGE_LISTENING", { label: "BOT_BRIDGE_LISTENING" });
+    const clientP = runClient(node.url, ["--wait-secs", "14"], ["bridge live question"]);
+    const item = await (async () => {
+      const until = Date.now() + 20_000;
+      while (Date.now() < until) {
+        try {
+          const items = await fetch(`${base}/inbound?wait=2`).then((r) => r.json());
+          const hit = items.find((i) => i.text === "bridge live question");
+          if (hit) return hit;
+        } catch { await new Promise((r) => setTimeout(r, 250)); }
+      }
+      throw new Error("inbound item never arrived");
+    })();
+    // Wait for the placeholder, then answer with a PLAIN send: it must be
+    // auto-upgraded into the placeholder's final edit.
+    const placeholder = await bot.waitFor((e) => e.event === "BOT_LIVE_PLACEHOLDER", { label: "BOT_LIVE_PLACEHOLDER" });
+    const sent = await post("/send", { chat_id: item.chat_id, text: "answer from harness" });
+    assert.equal(sent.success, true, JSON.stringify(sent));
+    assert.equal(sent.message_id, placeholder.messageId, "plain send must finalize the open placeholder");
+    // Follow-up streaming edit from the harness flows through the throttled lane.
+    const revised = await post("/send", { chat_id: item.chat_id, text: "answer from harness (revised)", edit_of: sent.message_id });
+    assert.equal(revised.success, true, JSON.stringify(revised));
+    await bot.waitFor((e) => e.event === "BOT_SENT_TEXT" && e.editOf === sent.message_id && e.chars > 20, { label: "revised edit submitted", timeoutMs: 10_000 });
+    // No exit-code assertion: the client's exit rule expects a session ACK,
+    // which opener-only runs never get (the opener is ACKed via the accept
+    // message). The observable behavior is what matters here.
+    const r = await clientP;
+    assert.match(r.out, new RegExp(`\\[BOT EDIT ${placeholder.messageId}\\] answer from harness`), `upgrade edit not seen:\n${r.out}`);
+  } finally {
+    await bot.stop();
+    await node.close();
     fs.rmSync(stateDir, { recursive: true, force: true });
   }
 });

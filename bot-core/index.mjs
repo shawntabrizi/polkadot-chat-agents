@@ -489,6 +489,7 @@ const liveReplies = createLiveReplies({
   awaitAck: (requestId) => awaitOutboundAck(requestId),
   minIntervalMs: liveMinEditMs,
   maxIntervalMs: liveMaxEditMs,
+  finalAckWaitMs: Number(env.BOT_LIVE_FINAL_ACK_WAIT_MS ?? 10_000),
   log,
 });
 // peerHex -> Promise<{handle, tracker, timer} | null> for the current turn's
@@ -1201,6 +1202,12 @@ const startBridge = () => {
               log("BOT_LIVE_FINALIZE_FAILED", { to: chatId, error: String(e?.message ?? e) });
             }
           }
+        } else {
+          // The answer went out as a quote/edit, which cannot BE the
+          // placeholder — retire the placeholder to a terminal glyph so it
+          // never dangles (a later unrelated send must not "upgrade" it).
+          const lp = await takeLivePlaceholder(chatId);
+          if (lp) lp.handle.finalize("✓").catch((e) => log("BOT_LIVE_FINALIZE_FAILED", { to: chatId, error: String(e?.message ?? e) }));
         }
         // Harness-driven edits go through the live outbox: throttled,
         // latest-wins, so a streaming harness (Hermes edits every 0.8s) can't

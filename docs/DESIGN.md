@@ -158,7 +158,15 @@ messages to an external agent framework instead, so the language boundary betwee
 the Node transport and a Python or TypeScript agent is one HTTP hop.
 
 If no reply has gone out within `BOT_THINKING_AFTER_MS` (default 5s) of receiving
-a message, the bot sends a "thinking" acknowledgement; any real reply cancels it.
+a message, the bot posts a "thinking" placeholder — a LIVE message that is then
+edited in place (elapsed clock, Takopi-style `▸ action` lines from claude's
+stream-json tool events) until the answer finalizes it. Edits are gated on the
+peer's session ACK for the placeholder (channel replacement would otherwise
+orphan them), throttled with an escalating interval, and coalesced latest-wins;
+a peer that never ACKs gets the answer as a plain message instead. See
+docs/LIVE-REPLIES.md for the research and the full constraint set. This also
+means the bot now consumes the app's session-response ACKs (it previously
+ignored them).
 
 ## Bridge contract
 

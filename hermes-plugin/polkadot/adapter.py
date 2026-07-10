@@ -204,6 +204,36 @@ class PolkadotAdapter(BasePlatformAdapter):
         except Exception as exc:  # noqa: BLE001
             return SendResult(success=False, error=str(exc), retryable=True)
 
+    async def edit_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        content: str,
+        *,
+        finalize: bool = False,
+    ) -> SendResult:
+        """Edit a previously sent message in place (bot-core kind-12 edit).
+
+        Overriding this switches on Hermes's progressive streaming machinery
+        (placeholder message edited with the growing answer). bot-core
+        throttles and coalesces edits server-side to the statement-store-safe
+        cadence, so Hermes's ~0.8s edit rate is safe to pass through.
+        """
+        if not self._session:
+            return SendResult(success=False, error="Polkadot bridge not connected")
+        try:
+            async with self._session.post(
+                f"{self.bridge_url}/send",
+                json={"chat_id": chat_id, "text": content, "edit_of": message_id},
+                timeout=60,
+            ) as resp:
+                data = await resp.json()
+                if resp.status == 200 and data.get("success"):
+                    return SendResult(success=True, message_id=data.get("message_id") or message_id)
+                return SendResult(success=False, error=data.get("error") or f"HTTP {resp.status}")
+        except Exception as exc:  # noqa: BLE001
+            return SendResult(success=False, error=str(exc), retryable=True)
+
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         # Best-effort; the bridge may ignore this. Never fail the turn on it.
         if not self._session:

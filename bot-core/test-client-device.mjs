@@ -30,6 +30,7 @@ import {
   encodeOpaqueReactionMessage,
   encodeOpaqueReplyMessage,
   encodeSessionRequestPayload,
+  encodeSessionResponsePayload,
   makeAppUuid,
   makePeerSession,
   p256PublicKeyFromPrivateKey,
@@ -37,6 +38,7 @@ import {
   submitAppStatement,
 } from "./vendor/app-chat-codec.mjs";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
+import { withTimeout } from "./vendor/lib/async-utils.mjs";
 
 const hexToBytes = (h) => Uint8Array.from(String(h).replace(/^0x/i, "").match(/../g).map((b) => parseInt(b, 16)));
 const bytesToHex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
@@ -97,7 +99,10 @@ const declinedOffers = [];
 const drain = async () => {
   for (const topic of [identitySession.peerSessionId]) {
     let stmts = [];
-    try { stmts = await Promise.resolve(store.queryStatements({ matchAll: [topic] }).match((v) => v, (e) => { throw e; })); } catch { continue; }
+    // Bound every RPC: papi buffers requests forever on a stalled socket
+    // instead of rejecting, which would freeze the poll loop (same reason
+    // bot-core wraps all chain calls in withTimeout).
+    try { stmts = await withTimeout(Promise.resolve(store.queryStatements({ matchAll: [topic] }).match((v) => v, (e) => { throw e; })), 8000, "query"); } catch { continue; }
     for (const st of stmts) {
       const data = typeof st.data === "string" ? hexToBytes(st.data) : st.data;
       const k = bytesToHex(data).slice(0, 48);
@@ -108,9 +113,26 @@ const drain = async () => {
         try { d = decodeSessionStatementPayload(data, sess, botAccountId); break; } catch (e) { d = { err: e.message }; }
       }
       if (d?.err) { console.log(`  [recv-decode-fail] ${d.err}`); continue; }
-      if (d?.kind === "request") for (const m of d.messages ?? []) {
-        if (m.text) { replies += 1; lastBotMessageId = m.messageId ?? lastBotMessageId; console.log(`  [BOT] ${m.text}`); }
-        if (m.kind === "dataChannelClosed") { declinedOffers.push(m.offerId); console.log(`  [CALL CLOSED] offerId=${m.offerId}`); }
+      if (d?.kind === "request") {
+        for (const m of d.messages ?? []) {
+          if (m.kind === "edited") { console.log(`  [BOT EDIT ${m.targetMessageId}] ${m.text}`); continue; }
+          if (m.text) { replies += 1; lastBotMessageId = m.messageId ?? lastBotMessageId; console.log(`  [BOT ${m.messageId}] ${m.text}`); }
+          if (m.kind === "dataChannelClosed") { declinedOffers.push(m.offerId); console.log(`  [CALL CLOSED] offerId=${m.offerId}`); }
+        }
+        // Mirror the app: ACK every bot request with a session response (the
+        // bot's live-reply edits are gated on this). Disable with --no-ack to
+        // exercise the never-fetched-placeholder fallback.
+        if (!opt("no-ack")) {
+          try {
+            await withTimeout(submitAppStatement(requestRpc, {
+              walletPair: wallet,
+              channel: identitySession.responseChannel,
+              topics: [identitySession.ownSessionId],
+              scaleEncodedPayload: encodeSessionResponsePayload(identitySession, d.requestId),
+              expiryFactory,
+            }), 8000, "ack submit");
+          } catch (e) { console.log(`  [ack-send-fail] ${e?.message ?? e}`); }
+        }
       }
       if (d?.kind === "response") { acked.push(d.requestId); console.log(`  [ACK] requestId=${d.requestId} code=${d.responseCode}`); }
     }
