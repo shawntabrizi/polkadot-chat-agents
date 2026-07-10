@@ -157,6 +157,21 @@ error   final edit: placeholder becomes the error/apology
 - Push spam — non-issue today (bot sends no pushes); documented as a guard for
   the day push support lands.
 
+## Long-term: notify-on-final (blocked on protocol support)
+
+Takopi's default is the better end state: progress stays silent, the FINAL
+answer arrives as a fresh message that pings the user once, and the
+placeholder is deleted. We cannot do that today — the protocol has no message
+delete, and the bot does not send push notifications at all (pushes are
+sender-generated via the notify relay). When either lands, revisit:
+
+- bot gains push support -> keep final-as-edit but have the bot call the
+  notify relay once per turn (for the final only; edits must stay excluded
+  from notification or streaming breaks).
+- protocol gains delete -> full Takopi pattern becomes available: delete the
+  placeholder, send the final fresh (new bubble, one ping, no "edited" badge,
+  no edit-history residue).
+
 ## Explicitly out of scope
 
 - Typing indicators (no protocol surface), message deletion (no kind),
