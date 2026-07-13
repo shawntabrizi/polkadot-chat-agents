@@ -351,6 +351,10 @@ async function dispatchInbound(
   signal: AbortSignal,
 ): Promise<void> {
   const chatId = msg.chat_id;
+  const threadRootId = typeof msg.thread_root_id === "string" ? msg.thread_root_id : undefined;
+  const isChannel = msg.conversation_type === "channel";
+  const senderId = typeof msg.sender_xid === "string" ? msg.sender_xid : chatId;
+  const senderName = typeof msg.sender_name === "string" && msg.sender_name ? msg.sender_name : senderId;
   const materialized = await materializeAttachments(msg, bridge);
   try {
     const route = channelRuntime.routing.resolveAgentRoute({
@@ -382,9 +386,9 @@ async function dispatchInbound(
             surface: POLKADOT_CHANNEL_ID,
             messageId: input.id,
             timestamp: input.timestamp,
-            from: `polkadot:${chatId}`,
-            sender: { id: chatId, name: chatId },
-            conversation: { kind: "direct", id: chatId, label: chatId },
+            from: `polkadot:${senderId}`,
+            sender: { id: senderId, name: senderName },
+            conversation: { kind: isChannel ? "group" : "direct", id: chatId, label: chatId },
             route: {
               agentId: route.agentId,
               accountId: account.accountId,
@@ -410,7 +414,10 @@ async function dispatchInbound(
                 if (signal.aborted) throw new Error("polkadot dispatcher stopped");
                 const text = String(payload?.text ?? "").trim();
                 if (!text) return { visibleReplySent: false };
-                const result = await bridge.send(chatId, text);
+                const result = await bridge.send(chatId, text, {
+                  replyTo: msg.message_id,
+                  threadRootId,
+                });
                 if (!result.success) throw new Error(`polkadot /send failed: ${result.error ?? "unknown"}`);
                 return { visibleReplySent: true };
               },

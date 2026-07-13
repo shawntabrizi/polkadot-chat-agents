@@ -66,6 +66,22 @@ test("a plain message runs a turn and delivers the answer with the one-time tip"
   assert.equal(h.delivered[1], "the answer");
 });
 
+test("a durable transport can opt into reply-delivery failures propagating to its ingress journal", async () => {
+  const h = makeRuntime({
+    throwOnReplyFailure: true,
+    chat: {
+      sendText: async () => {},
+      deliver: async () => { throw new Error("statement submission unavailable"); },
+      beginTurn: () => null,
+    },
+  });
+  await assert.rejects(
+    h.runtime.handleMessage("peer", { text: "hi", messageId: "M1", kind: "text" }),
+    /statement submission unavailable/,
+  );
+  assert.ok(h.events.some((event) => event.event === "BOT_REPLY_FAILED"));
+});
+
 test("introduced-peer state is bounded with the other per-peer runtime maps", async () => {
   const h = makeRuntime({ peerCap: 2 });
   for (const peer of ["one", "two", "three"]) {
@@ -93,6 +109,19 @@ test("commands answer via sendText without spawning the engine", async () => {
   assert.match(h.sent[0], /pong/);
   await h.runtime.handleMessage("peer", { text: "/usage", messageId: "M2", kind: "text" });
   assert.match(h.sent[1], /No usage recorded/);
+});
+
+test("a transport-supplied command candidate handles mentioned channel commands without spawning the engine", async () => {
+  const h = makeRuntime({ script: "exit 9" }); // would fail loudly if spawned
+  await h.runtime.handleMessage("peer", {
+    text: "@dotbot /help",
+    commandText: "/help",
+    messageId: "M1",
+    kind: "text",
+  });
+  assert.equal(h.delivered.length, 0);
+  assert.match(h.sent[0], /^Commands:/);
+  assert.ok(h.events.some((event) => event.event === "BOT_COMMAND" && event.command === "/help"));
 });
 
 test("model overrides are persisted and removed with /model default", async () => {

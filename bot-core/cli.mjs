@@ -5,7 +5,7 @@
 // (override with PCA_BOTS_DIR). Blockchain details (keys, addresses, topics)
 // are handled for you; you just pick a name and a brain.
 //
-//   pca create <botname> [--brain echo|claude|codex|opencode|bridge|hermes] [--network paseo] [--allow 0x..,0x..]
+//   pca create <botname> [--brain echo|claude|codex|opencode|bridge|hermes] [--transport polkadot-app|t3ams] [--network paseo] [--allow 0x..,0x..]
 //   pca run <name>                  start the bot locally (foreground)
 //   pca deploy <name> --host <ssh>  ship it to a server and run it in Docker
 //   pca list                        list your bots
@@ -28,6 +28,7 @@ import { getWsProvider } from "polkadot-api/ws";
 import { paseoPeopleNext } from "./lib/descriptors.mjs";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
 import { deriveP256PrivateKey, p256PublicKeyFromPrivateKey } from "./vendor/app-chat-codec.mjs";
+import { entrypointForTransport } from "./lib/transport-entrypoint.mjs";
 import { registerIdentity, waitForAttestation, withTimeout, DEFAULT_BACKENDS } from "./lib/register.mjs";
 import {
   PaseoAllowanceFinalizationUnknownError,
@@ -71,6 +72,8 @@ const HERMES_IMAGE = "nousresearch/hermes-agent@sha256:9c841866021c54c4596849f61
 // Cap container log growth on a VPS (json-file grows unbounded by default).
 const LOG_OPTS = `    logging:\n      driver: json-file\n      options: { max-size: "10m", max-file: "3" }\n`;
 const BRAINS = ["echo", "claude", "codex", "opencode", "bridge", "hermes"];
+const DEFAULT_TRANSPORT = "polkadot-app";
+const TRANSPORTS = [DEFAULT_TRANSPORT, "t3ams"];
 // Brains that call a model and therefore spend your quota — never left open by default.
 const PAID_BRAINS = new Set(["claude", "codex", "opencode", "bridge", "hermes"]);
 // Direct engines shell out to a same-named CLI on this machine. Warn (don't fail —
@@ -126,7 +129,7 @@ const fail = (s) => { console.error(`${c("✗", "31")} ${s}`); process.exit(1); 
 
 // Flags that are always boolean — they must never consume the following token,
 // or `pca create --public mybot` would swallow the bot name into --public.
-const BOOLEAN_FLAGS = new Set(["public", "dry-run", "no-register", "follow", "greet", "yes", "help", "version"]);
+const BOOLEAN_FLAGS = new Set(["public", "dry-run", "no-register", "follow", "greet", "yes", "help", "version", "t3ams-auto-accept-workspaces", "t3ams-no-auto-accept-workspaces"]);
 const SHORT_FLAGS = { "-f": "follow", "-h": "help", "-V": "version" };
 function parseFlags(argv) {
   const flags = {};
@@ -316,6 +319,92 @@ function configuredModelPolicy(cfg) {
 }
 
 const isPublicBot = (cfg) => !Array.isArray(cfg.allow) || cfg.allow.length === 0;
+const TAGGED_T3AMS_KEY_RE = /^(?:0x)?[0-9a-f]{2,4096}$/i;
+
+function normalizeT3amsDisplayName(value) {
+  const name = String(value ?? "").trim();
+  if (!name || name.length > 128 || /[\u0000-\u001f\u007f]/.test(name)) {
+    fail("--t3ams-display-name must be 1–128 printable characters.");
+  }
+  return name;
+}
+
+function normalizeT3amsSigningKey(value, label = "T3ams signing key") {
+  const raw = String(value ?? "").trim();
+  if (!TAGGED_T3AMS_KEY_RE.test(raw)) {
+    fail(`${label} must be an even-length tagged-CBOR hexadecimal public key.`);
+  }
+  const key = raw.replace(/^0x/i, "").toLowerCase();
+  if (key.length % 2 !== 0) fail(`${label} must be an even-length tagged-CBOR hexadecimal public key.`);
+  return key;
+}
+
+async function requestedT3amsTrustedSigningKeys(value, backendUrl) {
+  if (value == null) return {};
+  if (typeof value === "boolean" || String(value).trim() === "") {
+    fail("--t3ams-peer-key requires owner=tagged-cbor-public-key (comma-separate multiple pins).");
+  }
+  const keys = {};
+  for (const entry of String(value).split(",").map((item) => item.trim()).filter(Boolean)) {
+    const at = entry.indexOf("=");
+    if (at <= 0 || at === entry.length - 1 || entry.indexOf("=", at + 1) !== -1) {
+      fail(`Invalid --t3ams-peer-key entry "${entry}". Use owner=tagged-cbor-public-key.`);
+    }
+    const account = await resolvePeer(entry.slice(0, at), backendUrl);
+    if (keys[account] != null) fail(`Duplicate T3ams signing-key pin for ${entry.slice(0, at)}.`);
+    keys[account] = normalizeT3amsSigningKey(entry.slice(at + 1), `T3ams signing key for ${entry.slice(0, at)}`);
+  }
+  return keys;
+}
+
+// Existing bot configs predate explicit transport selection. Treat them as
+// Polkadot-app bots so upgrades preserve their current behavior.
+function configuredTransport(cfg) {
+  const transport = cfg.transport ?? DEFAULT_TRANSPORT;
+  if (typeof transport !== "string" || !TRANSPORTS.includes(transport)) {
+    fail(`Invalid transport in config.json for "${cfg.name ?? "this bot"}": ${String(transport)}. Expected one of: ${TRANSPORTS.join(", ")}.`);
+  }
+  return transport;
+}
+
+function configuredT3amsTrustedSigningKeys(cfg, transport = configuredTransport(cfg)) {
+  if (transport !== "t3ams") return {};
+  const raw = cfg.t3amsTrustedSigningKeys ?? {};
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    fail(`Invalid t3amsTrustedSigningKeys in config.json for "${cfg.name ?? "this bot"}".`);
+  }
+  const keys = {};
+  for (const [account, signingKey] of Object.entries(raw)) {
+    const normalizedAccount = toAccountHex(account);
+    if (keys[normalizedAccount] != null) fail(`Duplicate T3ams signing-key pin for ${normalizedAccount} in config.json.`);
+    keys[normalizedAccount] = normalizeT3amsSigningKey(signingKey, `T3ams signing key for ${normalizedAccount}`);
+  }
+  const allow = Array.isArray(cfg.allow) ? cfg.allow.map((account) => toAccountHex(account)) : [];
+  const missing = allow.filter((account) => keys[account] == null);
+  if (missing.length > 0) {
+    fail(`Private T3ams bot "${cfg.name ?? "this bot"}" needs an immutable tagged-CBOR signing-key pin for every allowlisted account. Recreate it with --t3ams-peer-key <owner>=<tagged-key>, or add t3amsTrustedSigningKeys to its private config.json.`);
+  }
+  return keys;
+}
+
+function t3amsEnvironment(cfg, transport = configuredTransport(cfg)) {
+  if (transport !== "t3ams") return {};
+  const values = { BOT_T3AMS_TRUSTED_SIGNING_KEYS: JSON.stringify(configuredT3amsTrustedSigningKeys(cfg, transport)) };
+  if (cfg.t3amsDisplayName != null) values.BOT_T3AMS_DISPLAY_NAME = normalizeT3amsDisplayName(cfg.t3amsDisplayName);
+  if (cfg.t3amsAutoAcceptWorkspaces != null) {
+    if (typeof cfg.t3amsAutoAcceptWorkspaces !== "boolean") {
+      fail(`Invalid t3amsAutoAcceptWorkspaces in config.json for "${cfg.name ?? "this bot"}".`);
+    }
+    values.BOT_T3AMS_AUTO_ACCEPT_WORKSPACES = cfg.t3amsAutoAcceptWorkspaces ? "1" : "0";
+  }
+  return values;
+}
+
+function requireT3amsSdkForDeploy(transport) {
+  if (transport !== "t3ams") return;
+  if (fs.existsSync(path.join(HERE, "node_modules", "@t3ams", "bcts", "package.json"))) return;
+  fail("T3ams transport requires a local T3ams SDK package. Install it in bot-core, for example: npm install /path/to/t3ams-bcts-*.tgz");
+}
 
 function configuredFileDelivery(cfg) {
   if (cfg.fileDelivery == null) return null;
@@ -597,6 +686,21 @@ const printReachLine = (accountIdHex, username) => {
   if (username) note(`${link ? "or search" : "search"}: ${username}`);
 };
 
+function printT3amsReachLine({ name, username, registered }) {
+  const dotnsUsername = typeof username === "string" ? username.trim() : "";
+  const registerCommand = `pca register ${name ?? "<botname>"}`;
+  if (dotnsUsername && registered) {
+    note(`Search or invite ${dotnsUsername} in T3ams.`);
+    return;
+  }
+  if (dotnsUsername) {
+    warn(`This T3ams bot's DotNS username (${dotnsUsername}) is not confirmed yet.`);
+  } else {
+    warn("This T3ams bot has no registered DotNS username yet.");
+  }
+  note(`Register it before people can search or invite it in T3ams:  ${registerCommand}`);
+}
+
 async function cmdCreate(name, flags) {
   if (!name) fail("Usage: pca create <botname>   (the first argument is your bot's name, e.g. pca create mycoolbot)");
   // A `.NN` suffix requests that username number (e.g. `create mycoolbot.69` =
@@ -610,6 +714,8 @@ async function cmdCreate(name, flags) {
   if (fs.existsSync(botDir(name))) fail(`Bot "${name}" already exists (${botDir(name)}). Use a different name.`);
   const brain = String(flags.brain ?? "echo").toLowerCase();
   if (!BRAINS.includes(brain)) fail(`--brain must be one of: ${BRAINS.join(", ")}`);
+  const transport = String(flags.transport ?? DEFAULT_TRANSPORT).toLowerCase();
+  if (!TRANSPORTS.includes(transport)) fail(`--transport must be one of: ${TRANSPORTS.join(", ")}`);
   warnMissingBrainCli(brain);
   const networkProfile = flags.network == null || flags.network === "paseo" ? "paseo" : null;
   const endpoint = networkProfile === "paseo" ? DEFAULT_ENDPOINT : String(flags.endpoint ?? flags.network);
@@ -624,6 +730,31 @@ async function cmdCreate(name, flags) {
     const hex = await resolvePeer(input, backendUrl);
     allow.push(hex);
     allowLabels[hex] = String(input).trim().replace(/^@/, "");
+  }
+  if (transport !== "t3ams" && flags["t3ams-peer-key"] != null) {
+    fail("--t3ams-peer-key is only valid with --transport t3ams.");
+  }
+  if (transport !== "t3ams" && (flags["t3ams-display-name"] != null
+      || flags["t3ams-auto-accept-workspaces"] != null || flags["t3ams-no-auto-accept-workspaces"] != null)) {
+    fail("T3ams display-name and workspace-enrollment flags require --transport t3ams.");
+  }
+  if (flags["t3ams-auto-accept-workspaces"] === true && flags["t3ams-no-auto-accept-workspaces"] === true) {
+    fail("Use only one of --t3ams-auto-accept-workspaces or --t3ams-no-auto-accept-workspaces.");
+  }
+  const t3amsDisplayName = flags["t3ams-display-name"] == null
+    ? null
+    : normalizeT3amsDisplayName(flagValue(flags["t3ams-display-name"], "t3ams-display-name"));
+  const t3amsAutoAcceptWorkspaces = flags["t3ams-auto-accept-workspaces"] === true
+    ? true
+    : flags["t3ams-no-auto-accept-workspaces"] === true
+      ? false
+      : null;
+  const t3amsTrustedSigningKeys = transport === "t3ams"
+    ? await requestedT3amsTrustedSigningKeys(flags["t3ams-peer-key"], backendUrl)
+    : {};
+  const missingT3amsPins = allow.filter((account) => t3amsTrustedSigningKeys[account] == null);
+  if (transport === "t3ams" && missingT3amsPins.length > 0) {
+    fail("A private T3ams bot requires a tagged-CBOR signing-key pin for every --owner/--allow account. Add --t3ams-peer-key <owner>=<tagged-key>; account-derived XIDs alone are not an authenticated first-contact binding.");
   }
   const isPublic = flags.public === true;
   // Safety: a paid brain (codex/claude/gemini/grok/hermes) left open to everyone can burn your quota.
@@ -662,7 +793,10 @@ async function cmdCreate(name, flags) {
   fs.mkdirSync(botDir(name), { recursive: true, mode: 0o700 });
   fs.writeFileSync(secretPath(name), `${JSON.stringify({ mnemonic, seedHex: bytesToHex(seed) }, null, 2)}\n`, { mode: 0o600 });
   const config = {
-    name, endpoint, backendUrl, brain, allow, allowLabels,
+    name, endpoint, backendUrl, brain, transport, allow, allowLabels,
+    ...(Object.keys(t3amsTrustedSigningKeys).length > 0 ? { t3amsTrustedSigningKeys } : {}),
+    ...(t3amsDisplayName != null ? { t3amsDisplayName } : {}),
+    ...(t3amsAutoAcceptWorkspaces != null ? { t3amsAutoAcceptWorkspaces } : {}),
     ...(networkProfile ? { networkProfile } : {}),
     // Testnet uploads can spend a finite Bulletin allowance. Configure the
     // known HOP profile only for an allowlisted bot, never a public one.
@@ -703,11 +837,16 @@ async function cmdCreate(name, flags) {
     : null;
 
   console.log();
-  console.log(allow.length ? `Locked to ${allow.length} allowlisted address${allow.length > 1 ? "es" : ""} — only they can message it.`
+  console.log(allow.length ? `Locked to ${allow.length} allowlisted address${allow.length > 1 ? "es" : ""}${transport === "t3ams" ? " with pinned T3ams signing keys" : ""} — only they can message it.`
                    : "Open — anyone can message it.");
-  console.log("Message your bot in the Polkadot app:");
-  console.log(`  ${c(deeplink(accountIdHex), "36")}`);
-  if (config.username) note(`or search: ${config.username}`);
+  if (transport === "t3ams") {
+    console.log("Message your bot in T3ams:");
+    printT3amsReachLine(config);
+  } else {
+    console.log("Message your bot in the Polkadot app:");
+    console.log(`  ${c(deeplink(accountIdHex), "36")}`);
+    if (config.username) note(`or search: ${config.username}`);
+  }
   console.log();
   note(`Start it:  pca run ${name}`);
   if (config.fileDelivery) {
@@ -948,6 +1087,7 @@ function cmdList() {
 
 async function cmdInfo(name) {
   const cfg = readConfig(name);
+  const transport = configuredTransport(cfg);
   // Live re-check: has the network confirmed (attested) the bot yet?
   let messageable = cfg.registered;
   let reachedNetwork = true;
@@ -966,6 +1106,7 @@ async function cmdInfo(name) {
     : c(`username claimed, confirmation pending — check again or run: pca register ${name}`, "33");
   console.log(`${c(name, "1")}${cfg.username ? ` (${cfg.username})` : ""}`);
   console.log(`  brain:    ${cfg.brain}`);
+  console.log(`  transport: ${transport}`);
   console.log(`  network:  ${cfg.endpoint}`);
   console.log(`  address:  ${cfg.address}`);
   const allowShown = (cfg.allow ?? []).map((hex) => cfg.allowLabels?.[hex] ?? shortAllowEntry(hex));
@@ -985,8 +1126,13 @@ async function cmdInfo(name) {
   }
   if (cfg.deploy?.host) console.log(`  deployed: ${cfg.deploy.host} (container ${cfg.deploy.container}) — pca status ${name}`);
   console.log();
-  console.log(`  Message this bot in the Polkadot app:`);
-  printReachLine(cfg.account, cfg.username);
+  if (transport === "t3ams") {
+    console.log("  Reach this bot in T3ams:");
+    printT3amsReachLine({ ...cfg, registered: messageable });
+  } else {
+    console.log("  Message this bot in the Polkadot app:");
+    printReachLine(cfg.account, cfg.username);
+  }
 }
 
 function storageCommandUsage(name = "<botname>") {
@@ -1059,6 +1205,8 @@ function cmdRun(name, flags = {}) {
   const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
   const bridgeToken = ensureBridgeToken(name, cfg);
   const bridgePort = bridgePortFor(cfg);
+  const transport = configuredTransport(cfg);
+  const transportEnv = t3amsEnvironment(cfg, transport);
   // Keep agent work away from the bot state directory. Local runs still share
   // the invoking user's permissions, so run them only on trusted machines.
   const workspace = path.join(BOTS_DIR, `${name}-workspace`);
@@ -1076,6 +1224,8 @@ function cmdRun(name, flags = {}) {
     BOT_BRIDGE_TOKEN: bridgeToken,
     BOT_ALLOWED_PEERS: (cfg.allow ?? []).join(","),
     BOT_BRAIN: cfg.brain,
+    BOT_TRANSPORT: transport,
+    ...transportEnv,
     BOT_USERNAME: cfg.username ?? "",
     BOT_STATE_DIR: botDir(name),   // persist sessions so a restart keeps open threads
     BOT_AI_WORKSPACE: workspace,
@@ -1099,7 +1249,7 @@ function cmdRun(name, flags = {}) {
     env.BOT_GREET = "1";
     note("Greet mode: the bot will message its owner(s) first — watch your phone.");
   }
-  const child = spawn(process.execPath, [path.join(HERE, "index.mjs")], { env, stdio: "inherit" });
+  const child = spawn(process.execPath, [path.join(HERE, entrypointForTransport(transport))], { env, stdio: "inherit" });
   child.on("exit", (code) => process.exit(code ?? 0));
 }
 
@@ -1128,6 +1278,7 @@ async function cmdDeploy(name, flags) {
   const cfg = readConfig(name);
   if (!fs.existsSync(secretPath(name))) fail(`No secret found for "${name}".`);
   const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
+  const transport = configuredTransport(cfg);
   const suppliedKeyFlag = Object.values(KEY_FLAGS).find((key) => flags[key] != null);
   if (suppliedKeyFlag) {
     fail(`--${suppliedKeyFlag} is no longer accepted: API keys are not injected into autonomous agents. Authenticate the selected CLI or framework through its own persistent credential store instead.`);
@@ -1137,7 +1288,6 @@ async function cmdDeploy(name, flags) {
     if (harness !== "openclaw" && harness !== "hermes") {
       fail(`"${name}" is a bridge-mode bot — pick which agent framework drives it:\n  pca deploy ${name} --host ${host} --harness openclaw   (fully headless if the server has Claude creds)\n  pca deploy ${name} --host ${host} --harness hermes     (one interactive codex login after deploy)`);
     }
-    if (flags["dry-run"] !== true) await provisionTestnetFileAllowance(name, cfg);
     return deployHarnessStack(name, cfg, secret, flags, host, harness);
   }
   const spec = DEPLOY_ENGINES[cfg.brain];
@@ -1145,7 +1295,6 @@ async function cmdDeploy(name, flags) {
   if (!fs.existsSync(path.join(HERE, "node_modules")) || !fs.existsSync(path.join(HERE, ".papi"))) {
     fail(`bot-core dependencies missing. Run:  (cd ${HERE} && npm ci)  then retry.`);
   }
-  if (flags["dry-run"] !== true) await provisionTestnetFileAllowance(name, cfg);
   if (spec.pkg && Object.keys(KEY_FLAGS).some((key) => process.env[key])) {
     warn("Provider API keys from this shell are intentionally not copied into the container. Use the deployed CLI's OAuth login instead.");
   }
@@ -1162,10 +1311,14 @@ async function cmdDeploy(name, flags) {
   // Generate env + compose + Dockerfile locally, then (unless dry-run) ship & launch.
   const bridgeToken = ensureBridgeToken(name, cfg);
   const bridgePort = bridgePortFor(cfg);
+  const entrypoint = entrypointForTransport(transport);
+  const transportEnv = t3amsEnvironment(cfg, transport);
   const envLines = [
     envLine("BOT_SEED_HEX", secret.seedHex),
     envLine("BOT_ENDPOINT", cfg.endpoint),
     envLine("BOT_BRAIN", cfg.brain),
+    envLine("BOT_TRANSPORT", transport),
+    ...Object.entries(transportEnv).map(([key, value]) => envLine(key, value)),
     envLine("BOT_ALLOWED_PEERS", (cfg.allow ?? []).join(",")),
     envLine("BOT_USERNAME", cfg.username ?? ""),
     envLine("BOT_STATE_DIR", "/state"),
@@ -1195,11 +1348,11 @@ async function cmdDeploy(name, flags) {
   // echo needs no CLI; direct engines get a fixed CLI image. Keep the bot as
   // root so it can read `/state`, then let agent-runtime setuid to node.
   const dockerfile = spec.pkg
-    ? `FROM ${NODE_IMAGE}\nRUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates ripgrep && rm -rf /var/lib/apt/lists/*\nRUN npm install --global --no-audit --no-fund ${spec.pkg} && npm cache clean --force\nRUN mkdir -p /home/node /workspace /state && chown -R 1000:1000 /home/node /workspace && chmod 700 /home/node /workspace /state\nENV HOME=/home/node\nWORKDIR /app\nCMD ["node", "index.mjs"]\n`
+    ? `FROM ${NODE_IMAGE}\nRUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates ripgrep && rm -rf /var/lib/apt/lists/*\nRUN npm install --global --no-audit --no-fund ${spec.pkg} && npm cache clean --force\nRUN mkdir -p /home/node /workspace /state && chown -R 1000:1000 /home/node /workspace && chmod 700 /home/node /workspace /state\nENV HOME=/home/node\nWORKDIR /app\nCMD ["node", "${entrypoint}"]\n`
     : null;
   const engineService = spec.pkg
-    ? `  bot:\n    build: ./image\n    user: "0:0"\n    init: true\n    read_only: true\n    pids_limit: 256\n    mem_limit: 2g\n    cpus: "2.0"\n    security_opt:\n      - no-new-privileges:true\n    tmpfs:\n      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n      - ./workspace:/workspace\n      - ./home:/home/node\n    command: ["node", "index.mjs"]\n`
-    : `  bot:\n    image: ${NODE_IMAGE}\n    user: "1000:1000"\n    init: true\n    read_only: true\n    pids_limit: 128\n    mem_limit: 512m\n    cpus: "1.0"\n    security_opt:\n      - no-new-privileges:true\n    tmpfs:\n      - /tmp:rw,noexec,nosuid,nodev,size=128m,mode=1777\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n    command: ["node", "index.mjs"]\n`;
+    ? `  bot:\n    build: ./image\n    user: "0:0"\n    init: true\n    read_only: true\n    pids_limit: 256\n    mem_limit: 2g\n    cpus: "2.0"\n    security_opt:\n      - no-new-privileges:true\n    tmpfs:\n      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n      - ./workspace:/workspace\n      - ./home:/home/node\n    command: ["node", "${entrypoint}"]\n`
+    : `  bot:\n    image: ${NODE_IMAGE}\n    user: "1000:1000"\n    init: true\n    read_only: true\n    pids_limit: 128\n    mem_limit: 512m\n    cpus: "1.0"\n    security_opt:\n      - no-new-privileges:true\n    tmpfs:\n      - /tmp:rw,noexec,nosuid,nodev,size=128m,mode=1777\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n    command: ["node", "${entrypoint}"]\n`;
   const compose = `services:\n${engineService}`;
 
   if (flags["dry-run"] === true) {
@@ -1209,6 +1362,9 @@ async function cmdDeploy(name, flags) {
     note(`\nDry run — nothing deployed.`);
     return;
   }
+
+  requireT3amsSdkForDeploy(transport);
+  await provisionTestnetFileAllowance(name, cfg);
 
   step(`Checking ${host}…`);
   const pf = runLocal("ssh", [...sshOpts, host, "docker version --format '{{.Server.Version}}' && docker compose version --short"], { capture: true });
@@ -1264,8 +1420,13 @@ async function cmdDeploy(name, flags) {
   if (/BOT_LISTENING/.test(logs)) {
     ok(`"${name}" is live on ${host} (container ${cn}).`);
     console.log();
-    console.log("Message it in the Polkadot app:");
-    printReachLine(cfg.account, cfg.username);
+    if (transport === "t3ams") {
+      console.log("Message it in T3ams:");
+      printT3amsReachLine(cfg);
+    } else {
+      console.log("Message it in the Polkadot app:");
+      printReachLine(cfg.account, cfg.username);
+    }
     console.log();
     note(`Logs:  ssh ${host} 'docker logs -f ${cn}'`);
     note(`Stop:  ssh ${host} 'docker rm -f ${cn}'`);
@@ -1302,11 +1463,16 @@ async function deployHarnessStack(name, cfg, secret, flags, host, harness) {
   const bridgePort = bridgePortFor(cfg);
   const bridgeToken = ensureBridgeToken(name, cfg);
   const bridgeUrl = `http://bot:${bridgePort}`;
+  const transport = configuredTransport(cfg);
+  const entrypoint = entrypointForTransport(transport);
+  const transportEnv = t3amsEnvironment(cfg, transport);
 
   const botEnv = [
     envLine("BOT_SEED_HEX", secret.seedHex),
     envLine("BOT_ENDPOINT", cfg.endpoint),
     envLine("BOT_BRAIN", "bridge"),
+    envLine("BOT_TRANSPORT", transport),
+    ...Object.entries(transportEnv).map(([key, value]) => envLine(key, value)),
     envLine("BOT_ALLOWED_PEERS", allow.join(",")),
     envLine("BOT_USERNAME", cfg.username ?? ""),
     envLine("BOT_STATE_DIR", "/state"),
@@ -1320,7 +1486,7 @@ async function deployHarnessStack(name, cfg, secret, flags, host, harness) {
   ].join("\n");
   // State mounts at top-level /state, NOT nested under the read-only ./app:ro
   // mount — Docker cannot create a mountpoint inside a read-only bind.
-  const botService = `  bot:\n    image: ${NODE_IMAGE}\n    user: "1000:1000"\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n    env_file:\n      - ./bot.env\n    command: ["node", "index.mjs"]\n`;
+  const botService = `  bot:\n    image: ${NODE_IMAGE}\n    user: "1000:1000"\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n    env_file:\n      - ./bot.env\n    command: ["node", "${entrypoint}"]\n`;
 
   const files = { "bot.env": `${botEnv}\n` };  // path (relative to base) -> content
   let compose, setup, afterUp;
@@ -1330,7 +1496,13 @@ async function deployHarnessStack(name, cfg, secret, flags, host, harness) {
     files["gateway.env"] = `${envLine("OPENCLAW_GATEWAY_TOKEN", randomBytes(32).toString("base64url"))}\n${envLine("POLKADOT_BRIDGE_TOKEN", bridgeToken)}\n`;
     // Runs inside the one-off setup container (home volume mounted) after `models set`
     // has created the config; merges in gateway mode + our channel.
-    const channel = allow.length
+    const channel = transport === "t3ams"
+      // T3ams group deliveries are addressed to a workspace-channel session,
+      // not an owner's account ID. bot-core has already authenticated and
+      // allowlisted the actual T3ams sender, so do not make OpenClaw's
+      // legacy DM-only gate reject that channel key a second time.
+      ? { enabled: true, bridgeUrl, dmPolicy: "open", allowFrom: ["*"] }
+      : allow.length
       ? { enabled: true, bridgeUrl, dmPolicy: "allowlist", allowFrom: allow }
       : { enabled: true, bridgeUrl, dmPolicy: "open", allowFrom: ["*"] };
     files["openclaw-home/setup-config.cjs"] = `const fs = require("fs");
@@ -1369,7 +1541,10 @@ docker compose -p ${cn} run --rm openclaw sh -lc ${shellQuote(`openclaw plugins 
       }
     };
   } else {
-    compose = `services:\n${botService}\n  hermes:\n    image: ${HERMES_IMAGE}\n    container_name: ${hn}\n    restart: unless-stopped\n${LOG_OPTS}    command: ["gateway", "run"]\n    env_file:\n      - ./hermes.env\n    environment:\n      - HERMES_UID=0\n      - HERMES_GID=0\n      - POLKADOT_BRIDGE_URL=${bridgeUrl}\n      - POLKADOT_ALLOWED_USERS=${allow.join(",")}\n    volumes:\n      - hermes-data:/opt/data\n      - ./plugin:/opt/data/plugins/polkadot:ro\n    depends_on: [bot]\n\nvolumes:\n  hermes-data:\n`;
+    const hermesAccess = transport === "t3ams"
+      ? "      - POLKADOT_ALLOW_ALL_USERS=1\n"
+      : `      - POLKADOT_ALLOWED_USERS=${allow.join(",")}\n`;
+    compose = `services:\n${botService}\n  hermes:\n    image: ${HERMES_IMAGE}\n    container_name: ${hn}\n    restart: unless-stopped\n${LOG_OPTS}    command: ["gateway", "run"]\n    env_file:\n      - ./hermes.env\n    environment:\n      - HERMES_UID=0\n      - HERMES_GID=0\n      - POLKADOT_BRIDGE_URL=${bridgeUrl}\n${hermesAccess}    volumes:\n      - hermes-data:/opt/data\n      - ./plugin:/opt/data/plugins/polkadot:ro\n    depends_on: [bot]\n\nvolumes:\n  hermes-data:\n`;
     files["hermes.env"] = `${envLine("POLKADOT_BRIDGE_TOKEN", bridgeToken)}\n`;
     setup = `cd ${base}\nchown -R root:root plugin 2>/dev/null || true\necho SETUP_OK`;
     afterUp = () => {
@@ -1389,6 +1564,9 @@ docker compose -p ${cn} run --rm openclaw sh -lc ${shellQuote(`openclaw plugins 
     note("Dry run — nothing deployed.");
     return;
   }
+
+  requireT3amsSdkForDeploy(transport);
+  await provisionTestnetFileAllowance(name, cfg);
 
   step(`Checking ${host}…`);
   const pf = runLocal("ssh", [...sshOpts, host, "docker version --format '{{.Server.Version}}' >/dev/null && echo docker-ok"], { capture: true });
@@ -1436,8 +1614,13 @@ docker compose -p ${cn} run --rm openclaw sh -lc ${shellQuote(`openclaw plugins 
   if (/BOT_LISTENING/.test(wait.stdout || "")) {
     ok(`"${name}" is live on ${host} (${cn} + ${hn}).`);
     console.log();
-    console.log("Message it in the Polkadot app:");
-    printReachLine(cfg.account, cfg.username);
+    if (transport === "t3ams") {
+      console.log("Message it in T3ams:");
+      printT3amsReachLine(cfg);
+    } else {
+      console.log("Message it in the Polkadot app:");
+      printReachLine(cfg.account, cfg.username);
+    }
     afterUp(credsSeeded);
     console.log();
     note(`Logs:   pca logs ${name} -f   (bridge)  ·  ssh ${host} 'docker logs -f ${hn}'  (${harness})`);
@@ -1549,7 +1732,7 @@ function cmdStop(name, flags) {
 function usage() {
   console.log(`pca — Polkadot Chat Agents
 
-  pca create <botname> [--brain echo|claude|codex|opencode|bridge] [--owner <your username or address>] [--public] [--network paseo] [--username name]
+  pca create <botname> [--brain echo|claude|codex|opencode|bridge|hermes] [--transport polkadot-app|t3ams] [--owner <your username or address>] [--public] [--network paseo] [--username name]
   pca register <name>                  finish/retry registration for an existing bot
   pca run <name> [--model <m>] [--greet]   start the bot locally (foreground)
   pca deploy <name> --host <ssh>       ship it to a server and run it in Docker
@@ -1565,8 +1748,17 @@ function usage() {
   pca info <name>                      show address + how to message it
 
 create flags:
+  --transport <name> select the message transport: polkadot-app (default) or t3ams
   --owner <who>    lock the bot to you — your app username (myname.42), address, or 0x hex (recommended)
   --allow a,b      allowlist several owners (usernames/addresses/hex, comma-separated)
+  --t3ams-peer-key owner=hex[,owner=hex]
+                   required for each private T3ams owner: immutable tagged-CBOR signing-key pin
+  --t3ams-display-name <name>
+                   name shown by a T3ams bot (defaults to its registered username)
+  --t3ams-auto-accept-workspaces
+                   allow public T3ams workspace enrollment; private bots default to allowed inviters
+  --t3ams-no-auto-accept-workspaces
+                   disable automatic T3ams workspace enrollment, including for private bots
   --public         let anyone message it (required to leave an AI/hermes bot open)
   --username <u>   network username base if different from the bot name (6+ lowercase letters)
   --digits <NN>    request a specific username number (mybot.NN); omit to auto-assign a free one
@@ -1599,7 +1791,7 @@ Bots live in ${BOTS_DIR} (override with PCA_BOTS_DIR).`);
 // typo (--modle) or a misplaced flag (--greet on create) — and silently
 // ignoring it means the user believes a setting took effect when it didn't.
 const COMMAND_FLAGS = {
-  create: ["brain", "owner", "allow", "public", "network", "endpoint", "backend", "username", "digits", "model", "port", "wait", "no-register"],
+  create: ["brain", "transport", "owner", "allow", "t3ams-peer-key", "t3ams-display-name", "t3ams-auto-accept-workspaces", "t3ams-no-auto-accept-workspaces", "public", "network", "endpoint", "backend", "username", "digits", "model", "port", "wait", "no-register"],
   register: ["username", "digits", "wait"],
   run: ["model", "greet"],
   deploy: ["host", "harness", "anthropic-key", "openai-key", "openrouter-key", "gemini-key", "groq-key", "safe-tools", "model", "dry-run", "remote-dir", "greet"],

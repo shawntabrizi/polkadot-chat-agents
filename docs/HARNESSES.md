@@ -50,6 +50,19 @@ it in the framework's secret environment only, never expose the bridge through
 a host port, and make a framework use the `chat_id` from its own inbound work
 when calling `/files` or `file_path` delivery.
 
+### T3ams transport fields
+
+`BOT_TRANSPORT=t3ams` keeps the same leased-array bridge API. Its text
+deliveries use `chat_id` values beginning with `t3ams:` and add
+`conversation_type`, `sender_xid`, `sender_name`, and, for workspace traffic,
+`workspace_id` and `channel_id`. A threaded input also carries
+`thread_root_id`. Preserve that value on `POST /send` so the reply stays in the
+same T3ams thread (or send `reply_to` with the inbound `message_id`). T3ams v1
+does not implement bridge file delivery, edits, reactions, or typing; adapters
+should send plain text only. The included OpenClaw and Hermes adapters forward
+the thread root and rely on bot-core's authenticated T3ams peer/workspace policy
+(including private account-to-device key pins) as the authorization gate.
+
 ## Hermes
 
 Hermes (NousResearch/hermes-agent) is a Python agent with a platform-plugin

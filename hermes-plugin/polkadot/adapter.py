@@ -135,6 +135,10 @@ class PolkadotAdapter(BasePlatformAdapter):
         self._recv_task: Optional[asyncio.Task] = None
         self._dispatcher: Optional[_BoundedKeyedDispatcher] = None
         self._attachment_dirs: Set[str] = set()
+        # A T3ams bridge delivery may carry a thread root. The dispatcher is
+        # ordered per chat, so this short-lived context safely routes Hermes's
+        # synchronous answer (and command/error replies) back to that thread.
+        self._active_thread_roots: Dict[str, Optional[str]] = {}
         self._running = False
         self._bot_account: Optional[str] = None
 
@@ -458,12 +462,20 @@ class PolkadotAdapter(BasePlatformAdapter):
         if not isinstance(attachments, list):
             raise RuntimeError("bridge delivery attachments must be an array")
         media_paths, media_types, temp_dir = await self._fetch_attachments(attachments)
+        thread_root = msg.get("thread_root_id")
+        if not isinstance(thread_root, str) or not thread_root:
+            thread_root = None
+        had_previous_root = chat_id in self._active_thread_roots
+        previous_root = self._active_thread_roots.get(chat_id)
+        self._active_thread_roots[chat_id] = thread_root
         try:
+            sender_id = msg.get("sender_xid") or chat_id
+            sender_name = msg.get("sender_name") or msg.get("user_name") or str(sender_id)[:8]
             source = self.build_source(
                 chat_id=chat_id,
-                chat_type="dm",
-                user_id=chat_id,
-                user_name=msg.get("user_name") or chat_id[:8],
+                chat_type="group" if msg.get("conversation_type") == "channel" else "dm",
+                user_id=sender_id,
+                user_name=sender_name,
                 message_id=msg.get("message_id"),
             )
             is_photo = any(t.startswith("image/") for t in media_types)
@@ -474,20 +486,30 @@ class PolkadotAdapter(BasePlatformAdapter):
                 message_id=msg.get("message_id"),
                 media_urls=media_paths,
                 media_types=media_types,
-                reply_to_message_id=msg.get("reply_to"),
+                reply_to_message_id=thread_root or msg.get("reply_to"),
             )
             await self.handle_message(event)
             return True
         finally:
+            if had_previous_root:
+                self._active_thread_roots[chat_id] = previous_root
+            else:
+                self._active_thread_roots.pop(chat_id, None)
             await self._cleanup_attachments(temp_dir)
 
     async def send(self, chat_id: str, content: str, reply_to=None, metadata=None) -> SendResult:
         if not self._session:
             return SendResult(success=False, error="Polkadot bridge not connected")
         try:
+            body: Dict[str, Any] = {"chat_id": chat_id, "text": content}
+            thread_root = self._active_thread_roots.get(chat_id)
+            if thread_root:
+                body["thread_root_id"] = thread_root
+            if reply_to:
+                body["reply_to"] = str(reply_to)
             async with self._session.post(
                 f"{self.bridge_url}/send",
-                json={"chat_id": chat_id, "text": content},
+                json=body,
                 timeout=60,
             ) as resp:
                 data = await resp.json()

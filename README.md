@@ -95,6 +95,21 @@ framework as a two-container stack: `--harness openclaw` requires no interactive
 steps if the server has Claude CLI credentials, and `--harness hermes` prints
 the one login command it cannot automate. See [docs/HARNESSES.md](docs/HARNESSES.md).
 
+## T3ams bots
+
+T3ams is an optional transport for bots that should receive DMs and workspace
+mentions from the T3ams SPA. Create one with `--transport t3ams`; it uses the
+same brains, account, and Statement Store connection as the default transport.
+The BCTS SDK is currently a **local package**, not a public npm dependency: build
+and pack it from `t3ams-spa/packages/bcts`, install that tarball into
+`bot-core`, then run or deploy the bot. Do not use `npm install @t3ams/bcts`.
+
+The operator flow—DotNS registration, local SDK packaging, Statement Store
+allowance, private account-to-device signing-key pins, auto-accepted DM pairs,
+workspace invitations, mention-only channel replies, and private-channel key
+grants—is documented in
+[docs/T3AMS.md](docs/T3AMS.md).
+
 ## Brains
 
 Direct engines run a headless coding-agent CLI as an autonomous agent — verbatim

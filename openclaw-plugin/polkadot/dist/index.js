@@ -97,11 +97,17 @@ function createBridge(baseUrl, token) {
       const data = await requireSuccess(res, "inbound lease renewal");
       if (data.renewed !== 1) throw new Error("inbound lease renewal lost its lease");
     },
-    send: async (chatId, text) => {
+    send: async (chatId, text, options = {}) => {
+      const body = {
+        chat_id: chatId,
+        text,
+        ...typeof options.replyTo === "string" ? { reply_to: options.replyTo } : {},
+        ...typeof options.threadRootId === "string" ? { thread_root_id: options.threadRootId } : {}
+      };
       const res = await fetch(`${base}/send`, {
         method: "POST",
         headers: { ...headers, "content-type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId, text })
+        body: JSON.stringify(body)
       });
       const data = await responseJson(res);
       if (!res.ok || data.success !== true) return { success: false, error: data.error ?? `HTTP ${res.status}` };
@@ -419,6 +425,10 @@ async function acknowledgeWithRetry(bridge, deliveryId, leaseId) {
 }
 async function dispatchInbound(ctx, channelRuntime, account, bridge, msg, signal) {
   const chatId = msg.chat_id;
+  const threadRootId = typeof msg.thread_root_id === "string" ? msg.thread_root_id : void 0;
+  const isChannel = msg.conversation_type === "channel";
+  const senderId = typeof msg.sender_xid === "string" ? msg.sender_xid : chatId;
+  const senderName = typeof msg.sender_name === "string" && msg.sender_name ? msg.sender_name : senderId;
   const materialized = await materializeAttachments(msg, bridge);
   try {
     const route = channelRuntime.routing.resolveAgentRoute({
@@ -449,9 +459,9 @@ async function dispatchInbound(ctx, channelRuntime, account, bridge, msg, signal
             surface: POLKADOT_CHANNEL_ID,
             messageId: input.id,
             timestamp: input.timestamp,
-            from: `polkadot:${chatId}`,
-            sender: { id: chatId, name: chatId },
-            conversation: { kind: "direct", id: chatId, label: chatId },
+            from: `polkadot:${senderId}`,
+            sender: { id: senderId, name: senderName },
+            conversation: { kind: isChannel ? "group" : "direct", id: chatId, label: chatId },
             route: {
               agentId: route.agentId,
               accountId: account.accountId,
@@ -477,7 +487,10 @@ async function dispatchInbound(ctx, channelRuntime, account, bridge, msg, signal
                 if (signal.aborted) throw new Error("polkadot dispatcher stopped");
                 const text = String(payload?.text ?? "").trim();
                 if (!text) return { visibleReplySent: false };
-                const result = await bridge.send(chatId, text);
+                const result = await bridge.send(chatId, text, {
+                  replyTo: msg.message_id,
+                  threadRootId
+                });
                 if (!result.success) throw new Error(`polkadot /send failed: ${result.error ?? "unknown"}`);
                 return { visibleReplySent: true };
               },

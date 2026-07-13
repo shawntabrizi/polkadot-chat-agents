@@ -149,6 +149,11 @@ export const createAgentRuntime = ({
   parentEnv = process.env,
   renderMessage, // (msg) -> verbatim prompt text (transport owns message shape)
   chat,
+  // Most transports acknowledge an inbound message before their outgoing
+  // statement is durably submitted, so preserving historical best-effort
+  // reply behavior is the default. A transport with its own durable ingress
+  // journal (T3ams) can opt in and retry the turn when reply delivery fails.
+  throwOnReplyFailure = false,
   username = "",
   chainConnected = () => true,
   log = () => {},
@@ -175,6 +180,14 @@ export const createAgentRuntime = ({
   const activeTurnPromises = new Set();
   let activeTurnCount = 0;
   let shuttingDown = false;
+  const sendReply = async (method, peerHex, text) => {
+    try {
+      await chat[method](peerHex, text);
+    } catch (error) {
+      log("BOT_REPLY_FAILED", { error: String(error?.message ?? error) });
+      if (throwOnReplyFailure) throw error;
+    }
+  };
   // The root transport must never create/chown files below an agent-writable
   // workspace. A root-owned, traversal-only parent lets the child reach the
   // per-turn directory after it is handed off without being able to rename it
@@ -519,10 +532,14 @@ export const createAgentRuntime = ({
     // ({ text, messageId, kind, attachments?, replyTo?, editOf? }).
     async handleMessage(peerHex, msg) {
       const k = norm(peerHex);
-      const commandReply = handleCommandFor(k, msg.text);
+      // T3ams channel messages preserve their raw `@bot …` prompt for the
+      // model, but may supply the slash-command suffix separately. Other
+      // transports and DMs continue to use their raw text as before.
+      const commandInput = typeof msg.commandText === "string" ? msg.commandText : msg.text;
+      const commandReply = handleCommandFor(k, commandInput);
       if (commandReply) {
-        log("BOT_COMMAND", { from: peerHex, command: msg.text.split(/\s/)[0] });
-        await chat.sendText(peerHex, commandReply).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
+        log("BOT_COMMAND", { from: peerHex, command: commandInput.split(/\s/)[0] });
+        await sendReply("sendText", peerHex, commandReply);
         return true;
       }
       // The turn's cwd: shared workspace or the peer's chosen project/
@@ -534,7 +551,7 @@ export const createAgentRuntime = ({
       catch (e) {
         const proj = peerProjects.get(k);
         log("BOT_PROJECT_CWD_FAILED", { to: peerHex, project: proj?.alias, branch: proj?.branch ?? null, error: String(e?.message ?? e) });
-        await chat.sendText(peerHex, `⚠️ I couldn't open ${proj ? `${proj.alias}${proj.branch ? `@${proj.branch}` : ""}` : "the workspace"}: ${String(e?.message ?? e)}. /project default switches back to the shared workspace.`).catch(() => {});
+        await sendReply("sendText", peerHex, `⚠️ I couldn't open ${proj ? `${proj.alias}${proj.branch ? `@${proj.branch}` : ""}` : "the workspace"}: ${String(e?.message ?? e)}. /project default switches back to the shared workspace.`);
         return true;
       }
       const onAction = chat.beginTurn(peerHex); // arms the "thinking" placeholder
@@ -552,13 +569,13 @@ export const createAgentRuntime = ({
       // leave the durable owed record for the next process to resume.
       if (result?.stopped) return !shuttingDown;
       if (result?.busy) {
-        await chat.deliver(peerHex, "I'm busy with other requests right now. Please try again in a moment.").catch(() => {});
+        await sendReply("deliver", peerHex, "I'm busy with other requests right now. Please try again in a moment.");
         return true;
       }
       if (!result) {
         if (shuttingDown) return false;
         // Don't leave the user hanging after the "thinking" placeholder.
-        await chat.deliver(peerHex, "Sorry — I couldn't reach my agent just now. Please try again in a moment.").catch(() => {});
+        await sendReply("deliver", peerHex, "Sorry — I couldn't reach my agent just now. Please try again in a moment.");
         return true;
       }
       // Discovery: the very first reply to a peer carries a one-time /help
@@ -570,7 +587,7 @@ export const createAgentRuntime = ({
         persist();
         outgoing += "\n\n(Tip: send /help to see my commands.)";
       }
-      await chat.deliver(peerHex, outgoing).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
+      await sendReply("deliver", peerHex, outgoing);
       return true;
     },
 

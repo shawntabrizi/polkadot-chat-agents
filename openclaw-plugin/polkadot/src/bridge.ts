@@ -1,6 +1,6 @@
 // Thin HTTP client for the bot-core bridge (the Polkadot transport daemon).
 // Contract: authenticated GET /health, leased GET /inbound?wait=<secs>,
-// POST /inbound/ack, POST /send {chat_id,text,reply_to?,edit_of?}, and
+// POST /inbound/ack, POST /send {chat_id,text,reply_to?,thread_root_id?}, and
 // GET /media/:id (downloaded attachments).
 
 // Attachment metadata as bot-core exposes it: bytes are already downloaded on
@@ -34,10 +34,19 @@ export type InboundMsg = {
   // present for non-plain-text kinds: "richText" | "reply" | "edited"
   kind?: string;
   reply_to?: string;
+  // T3ams carries this for a threaded prompt. It is optional on the legacy
+  // Polkadot-app transport and safe for adapters to forward unchanged.
+  thread_root_id?: string;
+  conversation_type?: "dm" | "channel";
+  sender_xid?: string;
+  sender_name?: string;
+  workspace_id?: string;
+  channel_id?: string;
   edit_of?: string;
   attachments?: InboundAttachment[];
 };
 export type SendResult = { success: boolean; message_id?: string; error?: string };
+export type SendOptions = { replyTo?: string; threadRootId?: string | null };
 
 export type BridgeClient = ReturnType<typeof createBridge>;
 
@@ -102,11 +111,17 @@ export function createBridge(baseUrl: string, token: string) {
       if (data.renewed !== 1) throw new Error("inbound lease renewal lost its lease");
     },
 
-    send: async (chatId: string, text: string): Promise<SendResult> => {
+    send: async (chatId: string, text: string, options: SendOptions = {}): Promise<SendResult> => {
+      const body = {
+        chat_id: chatId,
+        text,
+        ...(typeof options.replyTo === "string" ? { reply_to: options.replyTo } : {}),
+        ...(typeof options.threadRootId === "string" ? { thread_root_id: options.threadRootId } : {}),
+      };
       const res = await fetch(`${base}/send`, {
         method: "POST",
         headers: { ...headers, "content-type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId, text }),
+        body: JSON.stringify(body),
       });
       const data = await responseJson<SendResult>(res);
       if (!res.ok || data.success !== true) return { success: false, error: data.error ?? `HTTP ${res.status}` };
