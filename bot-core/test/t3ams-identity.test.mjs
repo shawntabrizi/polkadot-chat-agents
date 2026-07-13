@@ -3,10 +3,13 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   T3AMS_ACCOUNT_XID_DOMAIN,
+  T3AMS_BULLETIN_UPLOAD_DERIVATION,
   T3AMS_IDENTITY_AGREEMENT_DOMAIN,
   T3AMS_IDENTITY_SIGN_DOMAIN,
   botSeedFromHex,
   bytesToHex,
+  deriveT3amsBulletinUploadSigner,
+  deriveT3amsBulletinUploadSignerFromSeed,
   deriveT3amsIdentity,
   deriveT3amsIdentityFromSeed,
 } from "../lib/t3ams-identity.mjs";
@@ -51,4 +54,18 @@ test("T3ams bot identity rejects malformed BOT_SEED_HEX without exposing it", ()
     assert.throws(() => botSeedFromHex(value), /exactly 32 bytes/);
   }
   assert.throws(() => deriveT3amsIdentityFromSeed(new Uint8Array(31)), /exactly 32 bytes/);
+});
+
+test("T3ams Bulletin uploads use the dedicated allowance signer, not the bot wallet", () => {
+  const seedHex = `0x${"22".repeat(32)}`;
+  const seed = botSeedFromHex(seedHex);
+  const wallet = deriveSr25519PairFromSeed(seed, "//wallet");
+  const expected = deriveSr25519PairFromSeed(seed, "//allowance//bulletin//chat");
+  const fromSeed = deriveT3amsBulletinUploadSignerFromSeed(seed);
+  const fromHex = deriveT3amsBulletinUploadSigner(seedHex);
+
+  assert.equal(T3AMS_BULLETIN_UPLOAD_DERIVATION, "//allowance//bulletin//chat");
+  assert.deepEqual(fromSeed.publicKey, expected.publicKey);
+  assert.deepEqual(fromHex.publicKey, expected.publicKey);
+  assert.notDeepEqual(fromSeed.publicKey, wallet.publicKey);
 });

@@ -17,7 +17,7 @@ import { createKeyedDispatcher } from "./lib/keyed-dispatcher.mjs";
 import { createFileStore } from "./lib/file-store.mjs";
 import { createFileCommandHandler } from "./lib/file-commands.mjs";
 import { RUNNERS, resolveEngine } from "./lib/runners.mjs";
-import { deriveT3amsIdentity } from "./lib/t3ams-identity.mjs";
+import { deriveT3amsBulletinUploadSigner, deriveT3amsIdentity } from "./lib/t3ams-identity.mjs";
 import { createT3amsProtocol, hexToBytes, bareHex } from "./lib/t3ams-protocol.mjs";
 import { createT3amsMedia } from "./lib/t3ams-media.mjs";
 import { createT3amsMediaAnalyzer, mediaAnalyzerKind, renderUntrustedAttachmentAnalysis } from "./lib/t3ams-media-analyzer.mjs";
@@ -126,6 +126,7 @@ const identity = bcts.restoreIdentity(material.signingPrivateKey, material.agree
 identity.xid = material.xid;
 const selfXidHex = bareHex(bcts.formatXID(identity.xid));
 const wallet = deriveSr25519PairFromSeed(hexToBytes(seedHex), "//wallet");
+const bulletinUploadSigner = deriveT3amsBulletinUploadSigner(seedHex);
 const username = (env.BOT_USERNAME ?? "").trim();
 const displayName = (env.BOT_T3AMS_DISPLAY_NAME ?? username ?? "Polkadot AI").trim() || "Polkadot AI";
 const bridgePort = numberEnv("BOT_BRIDGE_PORT", 8799, { min: 0, max: 65_535 });
@@ -2454,7 +2455,7 @@ try {
   t3amsMedia = createT3amsMedia({
     bcts,
     bulletinUrl: bulletinRpc,
-    uploadSigner: wallet,
+    uploadSigner: bulletinUploadSigner,
     dir: path.join(stateDir, "media"),
     attachmentOptions,
     ttlHours: t3amsMediaTtlHours,

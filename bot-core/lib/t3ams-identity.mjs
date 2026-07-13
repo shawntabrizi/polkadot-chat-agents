@@ -12,6 +12,11 @@ import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
 export const T3AMS_IDENTITY_SIGN_DOMAIN = "t3ams:identity:sign:v1";
 export const T3AMS_IDENTITY_AGREEMENT_DOMAIN = "t3ams:identity:agree:v1";
 export const T3AMS_ACCOUNT_XID_DOMAIN = "bcts:xid:v2:acct:";
+// Bulletin uploads are paid by the same dedicated PCA allowance account as the
+// normal chat transport. Keep this derivation separate from `//wallet`: that
+// account signs Statement Store writes, while HOP/Bulletin authorizations are
+// granted to this account instead.
+export const T3AMS_BULLETIN_UPLOAD_DERIVATION = "//allowance//bulletin//chat";
 
 const encoder = new TextEncoder();
 
@@ -72,7 +77,17 @@ export function deriveT3amsIdentityFromSeed(seed) {
   };
 }
 
+/** Derive the dedicated Bulletin/HOP upload signer for a T3ams bot. */
+export function deriveT3amsBulletinUploadSignerFromSeed(seed) {
+  return deriveSr25519PairFromSeed(requireSeed(seed), T3AMS_BULLETIN_UPLOAD_DERIVATION);
+}
+
 /** Convenience wrapper for BOT_SEED_HEX / secret.json seedHex values. */
 export function deriveT3amsIdentity(seedHex) {
   return deriveT3amsIdentityFromSeed(botSeedFromHex(seedHex));
+}
+
+/** Convenience wrapper for BOT_SEED_HEX / secret.json seedHex values. */
+export function deriveT3amsBulletinUploadSigner(seedHex) {
+  return deriveT3amsBulletinUploadSignerFromSeed(botSeedFromHex(seedHex));
 }
