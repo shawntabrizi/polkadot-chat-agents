@@ -1,5 +1,5 @@
 // Account resolution for the polkadot channel. Reads cfg.channels.polkadot
-// (single default account, or accounts.<id>) and the POLKADOT_BRIDGE_URL env.
+// (single default account, or accounts.<id>) and the bridge URL/token env.
 // Kept self-contained (no SDK account-helper coupling) for portability.
 
 export const POLKADOT_CHANNEL_ID = "polkadot";
@@ -10,6 +10,7 @@ export type ResolvedPolkadotAccount = {
   enabled: boolean;
   configured: boolean;
   bridgeUrl: string;
+  bridgeToken: string;
   dmPolicy: "open" | "pairing" | "allowlist" | "closed";
   allowFrom: string[];
 };
@@ -23,10 +24,20 @@ export function resolvePolkadotAccount({ cfg, accountId }: { cfg: any; accountId
   const id = accountId ?? root.defaultAccount ?? "default";
   const acct = root.accounts?.[id] ?? {};
   const bridgeUrl = acct.bridgeUrl ?? root.bridgeUrl ?? process.env.POLKADOT_BRIDGE_URL ?? "http://127.0.0.1:8799";
+  const bridgeToken = String(acct.bridgeToken ?? root.bridgeToken ?? process.env.POLKADOT_BRIDGE_TOKEN ?? "").trim();
   const dmPolicy = (acct.dmPolicy ?? root.dmPolicy ?? "pairing") as ResolvedPolkadotAccount["dmPolicy"];
   const allowFrom = (acct.allowFrom ?? root.allowFrom ?? []).map(normId);
   const enabled = acct.enabled ?? root.enabled ?? true;
-  return { accountId: id, name: acct.name ?? root.name, enabled, configured: Boolean(bridgeUrl), bridgeUrl, dmPolicy, allowFrom };
+  return {
+    accountId: id,
+    name: acct.name ?? root.name,
+    enabled,
+    configured: Boolean(bridgeUrl && bridgeToken),
+    bridgeUrl,
+    bridgeToken,
+    dmPolicy,
+    allowFrom,
+  };
 }
 
 export function listPolkadotAccountIds(cfg: any): string[] {

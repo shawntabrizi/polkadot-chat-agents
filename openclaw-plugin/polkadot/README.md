@@ -2,8 +2,9 @@
 
 Lets an [OpenClaw](https://github.com/openclaw/openclaw) agent chat over the
 **Polkadot app**. It's a thin channel plugin over the `bot-core` HTTP bridge:
-it long-polls `GET /inbound`, dispatches each message into OpenClaw's agent, and
-sends the agent's reply back with `POST /send`.
+it authenticates to and long-polls `GET /inbound`, dispatches each leased
+message into OpenClaw's agent, acknowledges the lease after a successful
+handoff, and sends replies back with `POST /send`.
 
 ```
 Polkadot app ⇄ bot-core (--brain hermes) ⇄ HTTP bridge ⇄ this plugin ⇄ OpenClaw agent
@@ -27,6 +28,7 @@ Polkadot app ⇄ bot-core (--brain hermes) ⇄ HTTP bridge ⇄ this plugin ⇄ O
      "polkadot": {
        "enabled": true,
        "bridgeUrl": "http://127.0.0.1:8799",   // or set POLKADOT_BRIDGE_URL
+       "bridgeToken": "<BOT_BRIDGE_TOKEN>",    // or set POLKADOT_BRIDGE_TOKEN
        "dmPolicy": "closed",                    // open | pairing | closed
        "allowFrom": ["<peer account-id hex>"]   // who may DM the agent
      }
@@ -36,6 +38,10 @@ Polkadot app ⇄ bot-core (--brain hermes) ⇄ HTTP bridge ⇄ this plugin ⇄ O
 
 `allowFrom` here is defense-in-depth; `bot-core`'s own `--owner` allowlist already
 gates senders before they reach the bridge.
+
+`bridgeToken` must match `BOT_BRIDGE_TOKEN` for the bot-core process. Keep it
+in the gateway secret store or `POLKADOT_BRIDGE_TOKEN`, not in a checked-in
+configuration file.
 
 ## Status
 

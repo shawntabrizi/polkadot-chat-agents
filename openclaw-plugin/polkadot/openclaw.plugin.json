@@ -15,6 +15,7 @@
           "name": { "type": "string" },
           "enabled": { "type": "boolean" },
           "bridgeUrl": { "type": "string", "description": "Base URL of the bot-core bridge, e.g. http://127.0.0.1:8799" },
+          "bridgeToken": { "type": "string", "format": "password", "description": "Bearer token for the bot-core bridge" },
           "dmPolicy": { "type": "string", "enum": ["open", "pairing", "allowlist", "closed"] },
           "allowFrom": { "type": "array", "items": { "type": "string" }, "description": "Allowed peer chat ids (account-id hex)" },
           "defaultAccount": { "type": "string" },
@@ -23,6 +24,6 @@
       }
     }
   },
-  "channelEnvVars": { "polkadot": ["POLKADOT_BRIDGE_URL"] },
+  "channelEnvVars": { "polkadot": ["POLKADOT_BRIDGE_URL", "POLKADOT_BRIDGE_TOKEN"] },
   "configSchema": { "type": "object", "additionalProperties": false, "properties": {} }
 }

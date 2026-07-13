@@ -8,7 +8,7 @@
     "build": "esbuild index.ts --bundle --format=esm --platform=node --target=node20 --external:openclaw --external:'openclaw/*' --outfile=dist/index.js"
   },
   "devDependencies": {
-    "esbuild": "^0.25.0"
+    "esbuild": "0.25.12"
   },
   "openclaw": {
     "extensions": ["./dist/index.js"],

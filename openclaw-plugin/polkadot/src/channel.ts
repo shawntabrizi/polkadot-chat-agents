@@ -64,7 +64,7 @@ export const polkadotPlugin: ChannelPlugin<ResolvedPolkadotAccount> = createChat
       channel: POLKADOT_CHANNEL_ID,
       sendText: async ({ cfg, to, text, accountId }: { cfg: unknown; to: string; text: string; accountId?: string | null }) => {
         const account = resolvePolkadotAccount({ cfg, accountId });
-        const res = await createBridge(account.bridgeUrl).send(to, text);
+        const res = await createBridge(account.bridgeUrl, account.bridgeToken).send(to, text);
         if (!res.success) throw new Error(`polkadot /send failed for ${to}: ${res.error ?? "unknown"}`);
         const messageId = String(res.message_id ?? Date.now());
         return {
