@@ -4,6 +4,7 @@ import {
   decodeStatementData,
   decodeOpaqueMessageAt,
   encodeOpaqueTextMessage,
+  encodeOpaqueRichTextMessage,
   encodeOpaqueReactionMessage,
   encodeOpaqueReplyMessage,
   encodeOpaqueEditedMessage,
@@ -89,6 +90,29 @@ test("round-trip: plain text still decodes", () => {
   const m = decodeOne(encodeOpaqueTextMessage({ text: "hello" }));
   assert.equal(m.kind, "text");
   assert.equal(m.text, "hello");
+});
+
+test("round-trip: outgoing richText carries a general file attachment", () => {
+  const m = decodeOne(encodeOpaqueRichTextMessage({
+    text: "report.txt",
+    attachments: [{
+      identifier: new Uint8Array(32).fill(7),
+      claimTicket: new Uint8Array(32).fill(9),
+      wssUrl: "wss://hop.example",
+      mime: "text/plain",
+      size: 42,
+      fileKind: "general",
+    }],
+  }));
+  assert.equal(m.kind, "richText");
+  assert.equal(m.text, "report.txt");
+  const [attachment] = m.richText.attachments;
+  assert.equal(attachment.fileKind, "general");
+  assert.equal(attachment.mimeType, "text/plain");
+  assert.equal(attachment.fileSize, 42);
+  assert.equal(attachment.wssUrl, "wss://hop.example");
+  assert.deepEqual([...attachment.identifier], Array(32).fill(7));
+  assert.deepEqual([...attachment.claimTicket], Array(32).fill(9));
 });
 
 test("richText with image attachment decodes every field", () => {

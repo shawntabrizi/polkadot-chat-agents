@@ -306,6 +306,18 @@ function scaleEncodeUInt64(value) {
   return encoded;
 }
 
+function scaleEncodeUInt32(value) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff) {
+    throw new Error(`Invalid SCALE u32: ${value}`);
+  }
+  return Uint8Array.of(
+    value & 0xff,
+    (value >> 8) & 0xff,
+    (value >> 16) & 0xff,
+    (value >> 24) & 0xff,
+  );
+}
+
 function scaleDecodeUInt32At(bytes, offset = 0) {
   if (offset + 4 > bytes.length) {
     throw new Error(`SCALE u32 exceeds buffer at ${offset}`);
@@ -845,13 +857,93 @@ export function encodeOpaqueTextMessage({ messageId = makeAppUuid(), timestamp =
 }
 
 // RichText on the wire: Option<String> text, Option<Vec<FileVariant>> attachments.
-// The bot only sends text (attachments always None — outbound files need the HOP
-// upload path, which is not implemented).
-function encodeRichText(text) {
+// Only the p2pMixnetFile variant currently exists in the mobile clients. Keep
+// this encoder strict: a malformed outgoing attachment would be encrypted and
+// accepted by the statement store but become unreadable to the recipient.
+function encodeFileVariant(attachment) {
+  const identifier = attachment?.identifier;
+  const claimTicket = attachment?.claimTicket;
+  if (!(identifier instanceof Uint8Array) || identifier.length !== 32) {
+    throw new Error("outgoing attachment identifier must be 32 bytes");
+  }
+  if (!(claimTicket instanceof Uint8Array) || claimTicket.length !== 32) {
+    throw new Error("outgoing attachment claim ticket must be 32 bytes");
+  }
+  const wssUrl = String(attachment?.wssUrl ?? "");
+  if (!wssUrl || textEncoder.encode(wssUrl).length > MAX_URL_BYTES) {
+    throw new Error("outgoing attachment node URL is invalid");
+  }
+  const mimeType = String(attachment?.mimeType ?? attachment?.mime ?? "");
+  if (!mimeType || textEncoder.encode(mimeType).length > MAX_MIME_BYTES) {
+    throw new Error("outgoing attachment MIME type is invalid");
+  }
+  const fileSize = Number(attachment?.fileSize ?? attachment?.size);
+  if (!Number.isSafeInteger(fileSize) || fileSize < 0 || fileSize > 0xffff_ffff) {
+    throw new Error("outgoing attachment size is invalid");
+  }
+  const base = [
+    Uint8Array.of(0), // FileVariant::P2PMixnetFile
+    scaleEncodeBytes(identifier),
+    scaleEncodeBytes(claimTicket),
+    Uint8Array.of(0), // NodeEndpoint::Url
+    scaleEncodeString(wssUrl),
+  ];
+  const fileKind = attachment?.fileKind ?? "general";
+  if (fileKind === "general") {
+    return concatBytes(...base, Uint8Array.of(0), scaleEncodeString(mimeType), scaleEncodeUInt32(fileSize));
+  }
+  const thumbnail = attachment?.thumbnail;
+  const encodedThumbnail = thumbnail == null
+    ? Uint8Array.of(0)
+    : thumbnail instanceof Uint8Array && thumbnail.length <= MAX_THUMBNAIL_BYTES
+      ? scaleEncodeOption(scaleEncodeBytes(thumbnail))
+      : (() => { throw new Error("outgoing attachment thumbnail is invalid"); })();
+  if (fileKind === "image") {
+    const width = Number(attachment?.width);
+    const height = Number(attachment?.height);
+    return concatBytes(
+      ...base,
+      Uint8Array.of(1), scaleEncodeString(mimeType), scaleEncodeUInt32(fileSize),
+      scaleEncodeUInt32(width), scaleEncodeUInt32(height), encodedThumbnail,
+    );
+  }
+  if (fileKind === "video") {
+    const duration = Number(attachment?.duration);
+    return concatBytes(
+      ...base,
+      Uint8Array.of(2), scaleEncodeString(mimeType), scaleEncodeUInt32(fileSize),
+      scaleEncodeUInt32(duration), encodedThumbnail,
+    );
+  }
+  throw new Error(`unsupported outgoing attachment kind: ${fileKind}`);
+}
+
+function encodeRichText(text, attachments = null) {
+  if (text != null && typeof text !== "string") throw new Error("rich text must be a string or null");
+  if (text != null && textEncoder.encode(text).length > MAX_TEXT_BYTES) throw new Error("rich text exceeds maximum length");
+  if (attachments != null && (!Array.isArray(attachments) || attachments.length > MAX_ATTACHMENTS_PER_MESSAGE)) {
+    throw new Error("outgoing attachments exceed maximum");
+  }
   return concatBytes(
     scaleEncodeOption(text == null ? null : scaleEncodeString(text)),
-    Uint8Array.of(0),
+    scaleEncodeOption(attachments == null ? null : scaleEncodeArray(attachments.map(encodeFileVariant))),
   );
+}
+
+export function encodeOpaqueRichTextMessage({
+  messageId = makeAppUuid(),
+  timestamp = chatTimestampNow(),
+  text = null,
+  attachments = [],
+}) {
+  if (!Array.isArray(attachments) || attachments.length === 0) {
+    throw new Error("outgoing rich text requires at least one attachment");
+  }
+  return encodeOpaqueRemoteMessage({
+    messageId,
+    timestamp,
+    content: concatBytes(Uint8Array.of(15), encodeRichText(text, attachments)),
+  });
 }
 
 export function encodeOpaqueReactionMessage({

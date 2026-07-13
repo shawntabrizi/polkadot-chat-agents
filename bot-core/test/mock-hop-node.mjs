@@ -13,6 +13,7 @@ const textEncoder = new TextEncoder();
 const blake2b32 = (data, key) => blake2b(data, { dkLen: 32, key });
 const toHex = (bytes) => `0x${Buffer.from(bytes).toString("hex")}`;
 const fromHex = (hex) => new Uint8Array(Buffer.from(String(hex).replace(/^0x/i, ""), "hex"));
+const SUBMIT_CONTEXT = textEncoder.encode("hop-submit-v1:");
 
 const aesGcmEncrypt = (rawKey, plain) => {
   const nonce = crypto.randomBytes(12);
@@ -33,6 +34,12 @@ const u64le = (n) => {
   for (let i = 0; i < 8; i += 1) { out[i] = Number(v & 0xffn); v >>= 8n; }
   return out;
 };
+const concat = (...parts) => {
+  const out = new Uint8Array(parts.reduce((size, part) => size + part.length, 0));
+  let offset = 0;
+  for (const part of parts) { out.set(part, offset); offset += part.length; }
+  return out;
+};
 const encodeUploadedFile = (totalSize, chunkHashes) => {
   const parts = [u64le(totalSize), compactLen(chunkHashes.length)];
   for (const h of chunkHashes) parts.push(compactLen(h.length), h);
@@ -42,7 +49,8 @@ const encodeUploadedFile = (totalSize, chunkHashes) => {
 export const startMockHopNode = async () => {
   const store = new Map(); // hashHex -> { blob, recipientPub }
   const acked = new Set(); // hashHex
-  const failures = { claim: 0, ack: false, dropConnections: 0, oversizedFrameBytes: 0 };
+  const submissions = [];
+  const failures = { claim: 0, submit: 0, ack: false, dropConnections: 0, oversizedFrameBytes: 0 };
 
   const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await new Promise((resolve) => wss.once("listening", resolve));
@@ -53,6 +61,24 @@ export const startMockHopNode = async () => {
     if (sig.length !== 65 || sig[0] !== 1) return false; // MultiSignature: sr25519
     const payload = blake2b32(new Uint8Array([...textEncoder.encode(context), ...rawHash]));
     return verify(payload, sig.subarray(1), entry.recipientPub);
+  };
+
+  const checkSubmission = (params) => {
+    const data = fromHex(params?.data);
+    const signer = fromHex(params?.signer);
+    const signature = fromHex(params?.signature);
+    const recipients = params?.recipients;
+    const timestamp = Number(params?.submit_timestamp);
+    if (signer.length !== 33 || signer[0] !== 1) throw new Error("invalid submit signer");
+    if (signature.length !== 65 || signature[0] !== 1) throw new Error("invalid submit signature");
+    if (!Array.isArray(recipients) || recipients.length !== 1) throw new Error("invalid submit recipients");
+    const recipient = fromHex(recipients[0]);
+    if (recipient.length !== 33 || recipient[0] !== 1) throw new Error("invalid submit recipient");
+    if (!Number.isSafeInteger(timestamp) || timestamp < 0) throw new Error("invalid submit timestamp");
+    const hash = blake2b32(data);
+    const proof = blake2b32(concat(SUBMIT_CONTEXT, hash, u64le(timestamp)));
+    if (!verify(proof, signature.subarray(1), signer.subarray(1))) throw new Error("bad submit proof");
+    return { data, hash, recipientPub: recipient.subarray(1), signer: signer.subarray(1) };
   };
 
   wss.on("connection", (ws) => {
@@ -68,6 +94,13 @@ export const startMockHopNode = async () => {
       const reply = (body) => ws.send(JSON.stringify({ jsonrpc: "2.0", id: req.id, ...body }));
       const err = (message) => reply({ error: { code: -32000, message } });
       try {
+        if (req.method === "hop_submit") {
+          if (failures.submit > 0) { failures.submit -= 1; return err("simulated submit failure"); }
+          const submitted = checkSubmission(req.params);
+          store.set(toHex(submitted.hash), { blob: submitted.data, recipientPub: submitted.recipientPub });
+          submissions.push({ hash: toHex(submitted.hash), signer: toHex(submitted.signer), bytes: submitted.data.length });
+          return reply({ result: { poolStatus: { entryCount: store.size, totalBytes: 0, maxBytes: 10_000_000 } } });
+        }
         if (req.method === "hop_claim") {
           if (failures.oversizedFrameBytes > 0) {
             const bytes = failures.oversizedFrameBytes;
@@ -133,6 +166,7 @@ export const startMockHopNode = async () => {
     url,
     putFile,
     acked,
+    submissions,
     failures,
     close: () => new Promise((resolve) => wss.close(resolve)),
   };

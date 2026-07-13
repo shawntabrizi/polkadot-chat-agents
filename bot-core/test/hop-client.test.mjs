@@ -1,7 +1,11 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { downloadP2PFile, validateHopUrl } from "../lib/hop-client.mjs";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { downloadP2PFile, uploadP2PFile, validateHopUrl } from "../lib/hop-client.mjs";
+import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
 import { startMockHopNode } from "./mock-hop-node.mjs";
 
 const nodes = [];
@@ -20,6 +24,22 @@ const download = (node, file, extra = {}) =>
     allowInsecure: true, // mock node is plain ws on loopback
     ...extra,
   });
+
+const uploadSender = deriveSr25519PairFromSeed(new Uint8Array(32).fill(3), "//allowance//bulletin//chat");
+const upload = (node, filePath, extra = {}) =>
+  uploadP2PFile({
+    filePath,
+    wssUrl: node.url,
+    sender: uploadSender,
+    allowInsecure: true,
+    ...extra,
+  });
+
+const temporaryFile = (bytes) => {
+  const filePath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "hop-upload-test-")), "file.bin");
+  fs.writeFileSync(filePath, bytes, { mode: 0o600 });
+  return filePath;
+};
 
 const compactLength = (value) => {
   if (value < 64) return Uint8Array.of(value << 2);
@@ -56,6 +76,32 @@ test("happy path: multi-chunk file round-trips byte-exact and gets acked", async
   assert.equal(Buffer.compare(got, original), 0);
   // metadata + all chunks acknowledged
   assert.equal(node.acked.size, 4);
+});
+
+test("upload signs, encrypts, and publishes a file the recipient can claim", async () => {
+  const node = await startNode();
+  const original = new Uint8Array(crypto.randomBytes(4_000_123));
+  const filePath = temporaryFile(original);
+  try {
+    const uploaded = await upload(node, filePath);
+    const got = await download(node, uploaded);
+    assert.equal(Buffer.compare(got, original), 0);
+    assert.equal(node.submissions.length, 4, "three chunks plus metadata expected");
+    assert.equal(node.submissions[0].signer, `0x${Buffer.from(uploadSender.publicKey).toString("hex")}`);
+  } finally {
+    fs.rmSync(path.dirname(filePath), { recursive: true, force: true });
+  }
+});
+
+test("upload rejects a source that exceeds its configured cap", async () => {
+  const node = await startNode();
+  const filePath = temporaryFile(new Uint8Array(64));
+  try {
+    await assert.rejects(() => upload(node, filePath, { maxBytes: 32 }), /exceeds upload cap/);
+    assert.equal(node.submissions.length, 0);
+  } finally {
+    fs.rmSync(path.dirname(filePath), { recursive: true, force: true });
+  }
 });
 
 test("tampered ciphertext fails the chunk hash check", async () => {
