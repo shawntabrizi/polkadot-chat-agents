@@ -1,8 +1,9 @@
 # Architecture
 
 How the framework works and why it is shaped this way. For setup instructions see
-the [README](../README.md); for framework integrations see
-[HARNESSES.md](HARNESSES.md).
+the [README](../README.md); for every configuration variable and annotated
+`bot.env` examples see [CONFIGURATION.md](CONFIGURATION.md); for framework
+integrations see [HARNESSES.md](HARNESSES.md).
 
 ## Transport
 
@@ -196,8 +197,9 @@ per-peer queue), `/reset` starts a fresh session. opencode reaches many
 providers through one `--model provider/model` flag, so there are no
 per-vendor brains.
 
-Per-peer engine knobs: `/model` (any string, passed to the CLI's model flag),
-`/reasoning` (validated against the engine's levels — claude
+Per-peer engine knobs: `/model` (operator-locked by default; an explicitly
+approved set or explicit non-public open policy permits switching), `/reasoning`
+(validated against the engine's levels — claude
 `--effort low|medium|high|xhigh|max`, codex `-c model_reasoning_effort=…`;
 opencode has none), `/project` (see workspaces below). Each turn's token/cost
 usage from the CLI's result event is logged as `BOT_AI_USAGE` and tallied

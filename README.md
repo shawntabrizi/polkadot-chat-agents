@@ -105,11 +105,12 @@ dials thinking depth (claude/codex), `/usage` shows tokens and cost spent.
 set it at `create` (saved) or override per run. `BOT_AI_CMD`/`BOT_AI_ARGS` wire in
 a custom CLI that speaks claude-shaped stream-json.
 Because an AI brain spends your quota, `create` refuses to leave one open to
-arbitrary senders unless `--public` is passed. For the same reason, in-chat
-`/model` switching is open by default on an allowlisted bot (only trusted peers
-reach it) but locked on a `--public` bot, so a stranger can't select an
-expensive model on your quota; `BOT_AI_ALLOWED_MODELS=a,b` sets an explicit
-switchable set (and re-opens it on a public bot).
+arbitrary senders unless `--public` is passed. `/model` always shows the active
+model, but chat-side switching is locked by default. The operator can approve a
+small set with `pca model <bot> allow model-a,model-b`, or explicitly open it
+for an allowlisted bot with `pca model <bot> open`. Public bots can only use an
+approved set (`BOT_AI_ALLOWED_MODELS=a,b`); unrestricted switching is never
+allowed for them.
 
 In chat, direct-brain bots answer `/help`, `/reset`, `/model <name>`,
 `/reasoning <level>`, `/project`, `/usage`, and `/ping` instantly themselves;
@@ -177,6 +178,7 @@ All are created with mode 0600. Back them up; do not commit them.
   wasm build is committed at `bot-core/vendor/summit-bandersnatch-cli.wasm`;
   rebuild with `cargo build --release --target wasm32-wasip1`.
 - `docs/` — [DESIGN.md](docs/DESIGN.md) (architecture),
+  [CONFIGURATION.md](docs/CONFIGURATION.md) (every env var + `bot.env` examples),
   [HARNESSES.md](docs/HARNESSES.md) (framework integrations),
   [TESTING.md](docs/TESTING.md) (headless verification).
 
