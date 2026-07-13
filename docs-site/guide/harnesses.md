@@ -194,8 +194,9 @@ Hermes integration is a practical template.
 Without a framework, bot-core runs a headless AI-agent CLI itself — as an
 autonomous agent, not a chat wrapper: the user's message is passed verbatim (no
 injected persona), conversation continuity is the CLI's own native session
-(`--resume`), and tools are on. bot-core invokes the selected CLI and presents
-its progress and answer in the chat.
+(`--resume`), and bot-core presents its progress and answer in the chat. A
+direct Claude engine starts with no model tools; tools are a deliberate
+private-deployment choice, not the default.
 
 | Engine | Invokes | Reaches | Authentication |
 |---|---|---|---|
@@ -221,11 +222,16 @@ Related settings:
   Switching is locked by default. `allow` persists an approved list;
   `open` is an explicit option for allowlisted bots only. Public bots cannot
   allow unrestricted switching.
-- Claude uses `BOT_AI_ALLOWED_TOOLS` (default `Bash,Read,Edit,Write`) when it
-  is not in full-autonomy mode. `BOT_AI_SKIP_PERMISSIONS=1` grants full autonomy
-  to a deployed engine inside its container. Codex uses `workspace-write` and
-  OpenCode follows its own CLI mode when that flag is disabled; neither consumes
-  the Claude allowlist.
+- Claude has no built-in tools unless `BOT_AI_ALLOWED_TOOLS` is deliberately
+  set. For a private, trusted deployment, `--safe-tools` writes the conventional
+  `Bash,Read,Edit,Write` list and `--allowed-tools Read,...` writes an exact
+  Claude list. `--full-autonomy` writes `BOT_AI_SKIP_PERMISSIONS=1`; it cannot
+  be combined with either tool-list flag.
+- Public built-in AI direct deployment supports Claude's hardened no-tools profile
+  only. It rejects `--safe-tools`, non-empty `--allowed-tools`, and
+  `--full-autonomy`; use an externally isolated bridge runtime for public file
+  analysis or tools. Codex and OpenCode do not consume Claude's allowlist and
+  need their own private, isolated runtime controls.
 - The agent works in a persistent non-secret workspace (`BOT_AI_WORKSPACE`,
   defaulting to a sibling of `BOT_STATE_DIR`) that survives restarts.
 - `BOT_AI_CMD`/`BOT_AI_ARGS` wire in a custom CLI that speaks claude-shaped
@@ -252,18 +258,22 @@ Related settings:
 
 ### Safety model for containerized agents
 
-A deployed engine runs its tools autonomously, so the boundary is the
-**container**, not a permission prompt. `pca deploy` runs the transport as root
-only to own `/state` (the signing seed, session keys, and bridge token), then
-spawns the agent as the non-root `node` user with only persistent `/workspace`
-and `/home/node` access plus private per-turn attachment directories. The source
-mount is read-only; the container uses an init reaper, no-new-privileges, and
-process/memory/CPU ceilings. Provider API keys are not injected into the agent
-process; authenticate the CLI once through its native OAuth login in `/home/node`.
-An agent with tool access can still use its own provider credentials, so restrict
-senders with `--owner`/`--allow`. `--safe-tools` applies Claude's configured
-allowlist; Codex and OpenCode still need a disposable workspace or their own
-engine-specific controls. Sessions and the workspace persist across redeploys.
+`pca deploy` keeps the transport as root only to own `/state` (the signing seed,
+session keys, and bridge token), then spawns the agent as the non-root `node`
+user with persistent `/workspace`, `/home/node`, and private per-turn attachment
+directories. The source mount is read-only; the container uses an init reaper,
+no-new-privileges, and process/memory/CPU ceilings. This protects the chat
+identity from the agent process.
+
+It is not a safe provider-credential boundary for a tool-enabled agent. The
+same non-root agent must read its OAuth home in `/home/node` to authenticate, so
+filesystem or shell tools can read or misuse that login and use the network.
+Keep the default no-tools profile for public direct bots. If a public bot needs
+tools or attachment analysis, put its tool worker and model authentication behind
+an independently designed isolation boundary, such as a bridge harness. A
+private, allowlisted operator may opt into Claude tools with `--safe-tools` or
+`--allowed-tools`, or explicitly choose `--full-autonomy`, accepting that trust
+boundary. Sessions and the workspace persist across redeploys.
 
 An AI brain spends quota, so `create` requires an allowlist or an explicit
 `--public`.

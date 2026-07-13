@@ -37,5 +37,7 @@ agent framework connected through a small HTTP bridge.
 - For an AI brain: the model's CLI installed and logged in on the machine the
   bot runs on. `bot-core` invokes the CLI without forwarding its own secret
   environment; a deployed CLI authenticates through its persistent OAuth home.
+  That home is not a safe boundary for a tool-enabled agent, so public built-in
+  AI direct bots use Claude's hardened no-tools profile.
 
 Continue to [Create your first bot](/guide/first-bot).

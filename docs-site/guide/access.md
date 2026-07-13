@@ -46,6 +46,12 @@ tight storage, queue, and model limits. The
 [public deployment profile](/reference/configuration#public-bot-deliberately-bounded)
 has a conservative starting point.
 
+A public built-in AI direct bot is currently **Claude only** and runs Claude's
+hardened no-tools profile. It can answer text, but the model cannot inspect
+staged attachment bytes or write generated files. Use a bridge runtime with an
+independent tool-and-credential boundary when a public bot needs file analysis
+or tools.
+
 ## What changes between the two
 
 The private/public choice isn't just who gets in — it changes what the bot
@@ -58,33 +64,46 @@ allows in chat:
 | `/model` switching | Can be opened (`pca model <bot> open`) — trusted peers only | Never unrestricted; at most an approved set (`pca model <bot> allow a,b`) |
 | Returning saved files | Ready automatically on the default Paseo testnet profile | No automatic finite-allowance profile |
 | Sensible model | Your call | Pin a cheaper model |
+| Built-in direct-agent tools | Claude starts with no tools; a trusted operator may opt in deliberately | Claude's hardened no-tools profile only |
 
 The model-switching rule exists because switching to an expensive model spends
 *your* quota: a stranger on a public bot must never be able to pick the
 priciest model. See [Brains & engines](/guide/brains#model-switching-in-chat)
 for the full policy.
 
-## The security model behind "open tools"
+## Direct-agent tools and the trust boundary
 
-A `pca deploy` AI direct engine runs its agent with real tools and full autonomy
-by default through its engine-specific bypass flag. That relies on how the
-deployment is built, not on trust in the agent:
+A direct Claude deployment starts with no model tools. That is the default for
+both `pca run` and `pca deploy`, rather than a permission prompt the model can
+talk its way around. For a **private, trusted** bot, the deploy choices are:
 
-- **The deployment is the boundary.** A deployed engine runs in a non-root
-  container with its own filesystem and no access to the host. The agent can do
-  what it likes *inside* that box. `pca run` does not set the full-autonomy flag,
-  but it uses the local machine, so reserve local runs for trusted senders.
-- **The agent never sees the chat identity.** The signing seed and session
-  state stay with the transport process; the agent CLI is dropped to a non-root
-  user that cannot read them. The agent does retain its own provider login and
-  normal network access, which is why the sender allowlist remains essential.
-- **The bridge is authenticated.** The local HTTP control surface requires a
-  32+ character `BOT_BRIDGE_TOKEN`, so nothing on the box can drive the bot
-  just by reaching the port.
+| Choice | Effect |
+|---|---|
+| no tool flag | Claude has no built-in tools |
+| `--safe-tools` | opt in to the conventional `Bash,Read,Edit,Write` list |
+| `--allowed-tools Read,...` | opt in to exactly the named Claude tools |
+| `--full-autonomy` | explicitly bypass engine permission controls; cannot be combined with either tool-list flag |
 
-For Claude, `--safe-tools` enables the configured `BOT_AI_ALLOWED_TOOLS`
-allowlist. Codex and OpenCode do not consume that setting; use a disposable
-workspace or container and their engine-specific controls for those engines.
+`BOT_AI_ALLOWED_TOOLS` is a Claude tool-availability setting, not a general
+sandbox. It does not make a public prompt safe. Public built-in AI direct bots
+must stay on Claude's hardened no-tools profile; built-in Codex and OpenCode
+are rejected for public direct deployment until their tool execution and model
+authentication can be isolated separately.
+
+The deployed transport still protects the chat identity: it owns `/state`, the
+signing seed, session keys, and bridge token, while the agent CLI runs as a
+non-root user. That separation does **not** protect the agent's provider
+credentials. The same agent process needs its mounted OAuth home to log in; if
+it has filesystem or shell tools, it can read or misuse those credentials and
+use its normal network access. An OAuth home is therefore not a safe boundary
+for a tool-enabled agent.
+
+Keep tool-enabled deployments private and allowlisted, and treat `pca run` as
+even more sensitive because it uses your local machine. For public tool or file
+analysis, use a bridge runtime with a genuinely separate tool-and-credential
+boundary. The local HTTP bridge itself still requires a 32+ character
+`BOT_BRIDGE_TOKEN`, so nothing on the box can drive the transport just by
+reaching its port.
 
 ## Attachments are hostile input
 
@@ -104,7 +123,9 @@ The decisions on this page map to these settings, all detailed in
 - `BOT_ALLOWED_PEERS` — the allowlist (empty = public).
 - `BOT_AI_ALLOWED_MODELS` / `BOT_AI_MODEL_SWITCHING` — the `/model` policy.
 - `BOT_BRIDGE_TOKEN` — bridge authentication.
-- `BOT_AI_SKIP_PERMISSIONS` — full tool autonomy; Claude can also use
-  `BOT_AI_ALLOWED_TOOLS` when it is disabled.
+- `BOT_AI_ALLOWED_TOOLS` — empty by default; a deliberate Claude-only tool
+  list for a private, trusted bot.
+- `BOT_AI_SKIP_PERMISSIONS` — explicit full autonomy for a private, trusted
+  deployment only.
 - `BOT_T3AMS_ATTACHMENT_MIME_TYPES` / `BOT_T3AMS_ATTACHMENT_MAX_*` — T3ams
   attachment admission policy and media bounds.

@@ -40,13 +40,15 @@ framework integration.
 For Claude, Codex, and OpenCode bots, `pca deploy` separates the chat transport
 from the agent CLI. The transport retains the signing seed and session state;
 the agent runs as a non-root user with its own workspace and provider-login
-home. The container is the main security boundary, not a model permission
-prompt.
+home. That split protects the chat identity, but the provider-login home is
+readable by the same agent that needs it to authenticate. It is not a safe
+credential boundary once that agent has filesystem or shell tools.
 
-An agent can still use its provider credentials and network access inside that
-container. Use `--owner` or `--allow` for personal and coding bots, and give a
-public bot a disposable workspace, a constrained model, and explicit resource
-limits. See [Private & public bots](/guide/access) for the recommended profiles.
+Direct Claude starts with no model tools. A public built-in AI direct bot is limited
+to Claude's hardened no-tools profile; a public bot that needs tools or file
+analysis needs an externally isolated bridge runtime instead. Use `--owner` or
+`--allow` before deliberately enabling Claude tools for a personal or coding
+bot. See [Private & public bots](/guide/access) for the deployment profiles.
 
 ## Files and attachments
 
@@ -74,7 +76,8 @@ The [Bridge HTTP API](/reference/bridge) documents the integration contract.
 ## Operational implications
 
 - Keep the bot's state volume and `bot.env` private and backed up.
-- Restrict message senders before they can spend model quota or direct tools.
+- Restrict message senders before they can spend model quota or deliberately
+  enabled tools; do not treat a mounted OAuth home as a tool sandbox.
 - Keep the bridge token and provider login separate from source control.
 - Treat a public bot as an internet-facing workload: use a dedicated container
   or VM, disk limits, a low-cost model, and trusted attachment nodes.

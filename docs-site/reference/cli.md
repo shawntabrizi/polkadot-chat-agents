@@ -37,10 +37,19 @@ every command, including `project`, `model`, and `storage`.
 | `--wait <seconds>` | create, register | How long to wait for on-chain registration confirmation. |
 | `--host <ssh>` | deploy, logs, status, stop | Target server (saved after first deploy). |
 | `--harness openclaw or hermes` | deploy | Agent framework for a bridge bot. |
-| `--safe-tools` | deploy | Disable full autonomy. Claude then uses its configured allowlist; Codex and OpenCode need their own sandbox or workspace controls. |
+| `--safe-tools` | deploy | For a private, trusted Claude bot, opt in to the conventional `Bash,Read,Edit,Write` tool list. |
+| `--allowed-tools <list>` | deploy | For a private, trusted Claude bot, opt in to this exact comma-separated tool list (for example `Read`). |
+| `--full-autonomy` | deploy | For a private, trusted direct bot, explicitly bypass the engine's permission controls. Cannot be combined with `--safe-tools` or `--allowed-tools`. |
 | `--dry-run` | deploy | Print the generated files without deploying. |
 
 Bots live in `~/.pca/bots/<name>/` (override with `PCA_BOTS_DIR`).
+
+Direct Claude deployments start with no model tools. A public built-in AI direct
+bot is limited to Claude's hardened no-tools profile: it rejects
+`--safe-tools`, non-empty `--allowed-tools`, and `--full-autonomy`. Use a
+private allowlist before enabling tools, or an externally isolated bridge
+runtime when a public bot must analyze files or use tools. See
+[Private & public bots](/guide/access) for the trust boundary.
 
 ## Private Paseo file allowance
 

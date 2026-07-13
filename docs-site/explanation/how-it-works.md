@@ -68,10 +68,12 @@ needs no central storage and no account anywhere.
 The bot itself is just a process you run. It holds its own signing key — the
 key *is* the identity. In a deployed direct bot, the transport keeps that key
 and the session state while the AI-agent CLI runs as a non-root user in its own
-container. The agent can use its provider login and normal network access, so
-the allowlist still matters; it does not receive the signing key or chat session
-state. A local `pca run` uses your local environment, so reserve it for trusted
-senders.
+container. The agent does not receive the signing key or chat session state,
+but its provider-login home is readable by that same process when it has tools.
+That protects the chat identity, not the provider credential. Direct Claude
+therefore starts with no tools, and public built-in AI direct bots stay on
+Claude's hardened no-tools profile. A local `pca run` uses your local environment, so
+reserve tool-enabled runs for trusted senders.
 
 ## How the promises map to the mechanism
 

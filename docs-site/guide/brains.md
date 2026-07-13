@@ -3,10 +3,13 @@
 A bot's **brain** is what produces its replies. Pick it with `--brain` at
 `create`.
 
-Direct engines run a headless AI-agent CLI as an autonomous agent — verbatim
-prompts, native session memory (`--resume`), and real tools (bash, read, edit,
-and write). A deployed bot runs those tools in a container; `pca run` uses the
-local machine, so do not use it with untrusted senders.
+Direct engines run a headless AI-agent CLI with verbatim prompts and native
+session memory (`--resume`). Direct Claude starts with no model tools. Tool
+access is an explicit option for a private, trusted deployment; it is not safe
+to give a public prompt access to the same OAuth home the CLI uses to log in.
+Public built-in AI direct deployment supports only Claude's hardened no-tools
+profile. Use a separately isolated bridge runtime for public file analysis or
+tool use.
 
 | `--brain` | Replies come from | Reaches | Authentication |
 |---|---|---|---|
@@ -18,6 +21,20 @@ local machine, so do not use it with untrusted senders.
 
 `opencode` is the many-models path — one engine reaches Anthropic, OpenAI,
 Google, xAI, OpenRouter, local models, and more.
+
+## Tool policy
+
+For a private, allowlisted Claude bot, `pca deploy --safe-tools` enables the
+conventional `Bash,Read,Edit,Write` list, while
+`pca deploy --allowed-tools Read,...` selects an exact Claude list.
+`pca deploy --full-autonomy` is the explicit unrestricted override and cannot
+be combined with either tool-list flag. The default is no Claude tools.
+
+`BOT_AI_ALLOWED_TOOLS` is not a general sandbox, and its OAuth home is readable
+by the same tool-enabled process. Keep tool-enabled bots private and trusted.
+Codex and OpenCode need their own isolation controls; built-in public AI direct
+deployment rejects them for now. See [Private & public bots](/guide/access) for
+the boundary.
 
 ## Pinning a model
 

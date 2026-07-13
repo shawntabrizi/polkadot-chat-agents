@@ -31,10 +31,23 @@ spawns is dropped to a non-root user that can only touch its `/workspace` and
 OAuth home — it can't read the seed or the session state. The container is
 read-only except for those volumes and a size-capped `tmpfs`.
 
+The seed split protects the chat identity, but the mounted OAuth home is not a
+safe boundary for an agent with filesystem or shell tools: that same agent
+needs to read it to authenticate. A direct Claude deployment starts with no
+model tools. A public built-in AI direct bot must remain Claude's hardened
+no-tools profile; use an externally isolated bridge runtime for public tools or
+file analysis.
+
+For a private, allowlisted Claude bot, choose tool access deliberately at
+deploy time: `--safe-tools` opts into `Bash,Read,Edit,Write`,
+`--allowed-tools Read,...` selects an exact list, and `--full-autonomy` is the
+explicit unrestricted override. Do not combine `--full-autonomy` with either
+tool-list flag.
+
 After a direct deployment, run the printed one-time CLI login command (for a
 Claude bot, `claude login` through the printed `docker exec` command) so the
 agent can authenticate through its mounted OAuth home. Those credentials survive
-restarts and redeploys.
+restarts and redeploys; keep a tool-enabled deployment private and allowlisted.
 
 `echo` also deploys as a single container, but it does not spawn an AI CLI and
 needs no provider login.

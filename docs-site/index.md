@@ -34,8 +34,9 @@ features:
       or bot reconnects later, the conversation catches up.
   - title: Real work, not just chat
     details: >
-      Choose an agent with the tools you need. A direct agent can read, edit,
-      and work in its own workspace instead of only talking about a task.
+      In a trusted private deployment, choose an agent with explicitly enabled
+      tools to read, edit, and work in its own workspace instead of only talking
+      about a task.
   - title: Your AI, your keys
     details: >
       Bring the AI you already use — Claude, Codex, OpenCode, and more. In a

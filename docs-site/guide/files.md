@@ -41,16 +41,19 @@ the hard limit of 16. `BOT_T3AMS_ATTACHMENT_MAX_DURATION_MS` bounds declared
 audio/video duration metadata (seven days by default). See
 [Configuration](/reference/configuration#t3ams-media-and-file-vault).
 
-A direct brain receives a staged private copy for the current turn, not the
-media-cache path. A bridge framework gets safe metadata and an authenticated,
-opaque `/media/<id>` URL; it can fetch that URL when it needs the bytes. The
-bridge may download and verify the attachment on demand, so `downloaded: false`
-is only a cache hint, not a reason to discard the URL.
+A tool-enabled private direct brain can inspect a staged private copy for the
+current turn, not the media-cache path. Claude's default no-tools profile — and
+therefore every public built-in AI direct bot — cannot inspect those staged bytes.
+A bridge framework gets safe metadata and an authenticated, opaque `/media/<id>`
+URL; it can fetch that URL when it needs the bytes. The bridge may download and
+verify the attachment on demand, so `downloaded: false` is only a cache hint,
+not a reason to discard the URL.
 
-Direct Claude, Codex, and OpenCode turns can return their own generated files
-too. bot-core gives a turn a private `PCA_OUTPUT_DIR` and attaches only bounded,
+A tool-enabled private direct turn can return its own generated files too.
+bot-core gives a turn a private `PCA_OUTPUT_DIR` and attaches only bounded,
 top-level regular files written there; it ignores symlinks and nested paths,
-then deletes the directory after delivery. Set
+then deletes the directory after delivery. The default and public Claude
+no-tools profiles cannot write those files. Set
 `BOT_T3AMS_AGENT_OUTPUT_MAX_ARTIFACTS=0` to disable that return path.
 `BOT_T3AMS_AGENT_OUTPUT_MAX_TOTAL_BYTES` caps the batch as well as the normal
 per-file attachment limit. The transport first copies accepted output into a
