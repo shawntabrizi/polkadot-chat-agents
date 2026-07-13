@@ -3,7 +3,7 @@
   "private": true,
   "description": "Run AI chat bots inside the Polkadot app. The runnable package is in bot-core/.",
   "scripts": {
-    "postinstall": "npm --prefix bot-core install",
+    "postinstall": "npm --prefix bot-core ci",
     "test": "npm --prefix bot-core test",
     "start": "node bot-core/cli.mjs run",
     "pca": "node bot-core/cli.mjs",

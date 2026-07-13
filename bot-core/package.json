@@ -14,19 +14,19 @@
     "prepublishOnly": "[ -n \"$SKIP_TESTS\" ] && echo 'SKIP_TESTS set, skipping tests before publish' || npm test"
   },
   "dependencies": {
-    "@noble/curves": "^2.2.0",
-    "@noble/hashes": "^2.2.0",
-    "@novasamatech/statement-store": "^0.7.9",
-    "@novasamatech/substrate-slot-sr25519-wasm": "^0.8.2",
-    "@polkadot-labs/hdkd-helpers": "^0.0.30",
-    "@scure/sr25519": "^2.2.0",
-    "polkadot-api": "^2.1.1"
+    "@noble/curves": "2.2.0",
+    "@noble/hashes": "2.2.0",
+    "@novasamatech/statement-store": "0.7.9",
+    "@novasamatech/substrate-slot-sr25519-wasm": "0.8.10",
+    "@polkadot-labs/hdkd-helpers": "0.0.30",
+    "@scure/sr25519": "2.2.0",
+    "polkadot-api": "2.1.7"
   },
   "engines": {
     "node": ">=22"
   },
   "devDependencies": {
-    "ws": "^8.21.0"
+    "ws": "8.21.0"
   },
   "license": "MIT",
   "repository": {
