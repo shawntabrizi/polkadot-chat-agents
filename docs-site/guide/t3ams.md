@@ -52,11 +52,11 @@ you have set tight model, file, and queue limits.
 4. For a private channel, grant the bot the channel key through T3ams's normal
    key-grant flow. Workspace membership alone is not enough to decrypt it.
 
-One T3ams DM and one workspace channel each have an independent conversation
-session. Threads in a channel share that channel session and replies preserve a
-thread root where one exists. An optional bounded channel-context cache can
-give a later explicit mention the recent authenticated text without making the
-bot listen or reply to every room message.
+One T3ams DM and each workspace channel have independent conversation sessions.
+Top-level channel prompts use that channel session, while every reply thread has
+its own isolated native session; replies preserve their thread root. An optional
+bounded channel-context cache can give a later explicit mention the recent
+authenticated text without making the bot listen or reply to every room message.
 
 ## A live, collaborative chat experience
 

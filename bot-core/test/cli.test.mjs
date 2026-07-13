@@ -11,6 +11,9 @@ import { entrypointForTransport } from "../lib/transport-entrypoint.mjs";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CLI = path.join(HERE, "..", "cli.mjs");
 const ACCOUNT = "ab".repeat(32);
+const HAS_LOCAL_T3AMS_SDK = fs.existsSync(
+  path.join(HERE, "..", "node_modules", "@t3ams", "bcts", "package.json"),
+);
 
 const runCli = (botsDir, args, extraEnv = {}) => spawnSync(process.execPath, [CLI, ...args], {
   cwd: path.join(HERE, ".."),
@@ -87,11 +90,6 @@ test("create persists the selected transport and deployment passes it to the run
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /command: \["node", "t3ams\.mjs"\]/);
 
-    result = runCli(botsDir, ["deploy", "t3amsbot", "--host", "root@example.test"]);
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /T3ams transport requires a local T3ams SDK package/);
-    assert.match(result.stderr, /npm install \/path\/to\/t3ams-bcts-\*\.tgz/);
-
     const moduleOverride = "./vendor/t3ams-bcts.mjs";
     result = runCli(botsDir, ["deploy", "t3amsbot", "--host", "root@example.test", "--dry-run"], {
       BOT_T3AMS_BCTS_MODULE: moduleOverride,
@@ -99,11 +97,22 @@ test("create persists the selected transport and deployment passes it to the run
     assert.equal(result.status, 0, result.stderr);
     assert.doesNotMatch(result.stdout, /BOT_T3AMS_BCTS_MODULE=/);
 
-    result = runCli(botsDir, ["deploy", "t3amsbot", "--host", "root@example.test"], {
-      BOT_T3AMS_BCTS_MODULE: moduleOverride,
-    });
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /T3ams transport requires a local T3ams SDK package/);
+    // The repository deliberately installs BCTS from a local tarball. Exercise
+    // the missing-SDK guard only in a checkout where that optional package is
+    // absent; a developer checkout with it present must not try real SSH just
+    // to assert a condition that cannot occur there.
+    if (!HAS_LOCAL_T3AMS_SDK) {
+      result = runCli(botsDir, ["deploy", "t3amsbot", "--host", "root@example.test"]);
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /T3ams transport requires a local T3ams SDK package/);
+      assert.match(result.stderr, /npm install \/path\/to\/t3ams-bcts-\*\.tgz/);
+
+      result = runCli(botsDir, ["deploy", "t3amsbot", "--host", "root@example.test"], {
+        BOT_T3AMS_BCTS_MODULE: moduleOverride,
+      });
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /T3ams transport requires a local T3ams SDK package/);
+    }
 
     result = runCli(botsDir, ["deploy", "t3amsbot", "--host", "root@example.test", "--dry-run"]);
     assert.equal(result.status, 0, result.stderr);
@@ -184,6 +193,61 @@ test("create persists the selected transport and deployment passes it to the run
     assert.equal(result.status, 1);
     assert.match(result.stderr, /--transport must be one of: polkadot-app, t3ams/);
     assert.equal(fs.existsSync(path.join(botsDir, "invalidbot")), false);
+  } finally {
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
+});
+
+test("T3ams deploys use authenticated bridge health for readiness", () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
+  const bridgeToken = "a-long-enough-bridge-token-for-tests";
+  try {
+    writeBot(botsDir, "t3amshealth", {
+      name: "t3amshealth",
+      endpoint: "ws://127.0.0.1:9944",
+      brain: "echo",
+      transport: "t3ams",
+      allow: [],
+      bridgePort: 8799,
+      bridgeToken,
+    });
+    let result = runCli(botsDir, ["deploy", "t3amshealth", "--host", "root@example.test", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /healthcheck:\n      test: \["CMD", "node", "-e", ".*BOT_BRIDGE_TOKEN.*"\]/);
+    assert.match(result.stdout, /h\?\.ok===true.*h\.transport==='t3ams'.*h\.subscriptions.*>0/);
+    assert.match(result.stdout, /interval: 5s\n      timeout: 5s\n      retries: 3\n      start_period: 20s/);
+    assert.doesNotMatch(result.stdout, new RegExp(bridgeToken));
+
+    writeBot(botsDir, "plainhealth", {
+      name: "plainhealth",
+      endpoint: "ws://127.0.0.1:9944",
+      brain: "echo",
+      transport: "polkadot-app",
+      allow: [],
+      bridgePort: 8799,
+      bridgeToken,
+    });
+    result = runCli(botsDir, ["deploy", "plainhealth", "--host", "root@example.test", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, /healthcheck:/);
+
+    writeBot(botsDir, "t3amsharnesshealth", {
+      name: "t3amsharnesshealth",
+      endpoint: "ws://127.0.0.1:9944",
+      brain: "bridge",
+      transport: "t3ams",
+      allow: [],
+      bridgePort: 8799,
+      bridgeToken,
+    });
+    result = runCli(botsDir, [
+      "deploy", "t3amsharnesshealth", "--host", "root@example.test",
+      "--harness", "openclaw", "--dry-run",
+    ]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /healthcheck:\n      test: \["CMD", "node", "-e", ".*BOT_BRIDGE_TOKEN.*"\]/);
+    assert.match(result.stdout, /openclaw:[\s\S]*depends_on:\n      bot:\n        condition: service_healthy/);
+    assert.doesNotMatch(result.stdout, new RegExp(bridgeToken));
   } finally {
     fs.rmSync(botsDir, { recursive: true, force: true });
   }

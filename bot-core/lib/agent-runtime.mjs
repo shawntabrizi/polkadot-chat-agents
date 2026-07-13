@@ -12,18 +12,18 @@
 // out-of-process brains (hermes/openclaw).
 //
 // chat surface:
-//   sendText(peerHex, text)  — plain message (command replies, errors)
-//   deliver(peerHex, text)   — final answer (chunking + live-placeholder
+//   sendText(peerHex, text, context?)  — plain message (command replies, errors)
+//   deliver(peerHex, text, context?)   — final answer (chunking + live-placeholder
 //                              finalize live transport-side)
-//   deliverArtifacts(peerHex, artifacts) — optional final-turn files. Each
+//   deliverArtifacts(peerHex, artifacts, context?) — optional final-turn files. Each
 //                              artifact is { filePath, filename, size }; the
 //                              callback consumes a transport-owned immutable
 //                              snapshot before this runtime removes it.
-//   deliverTurn(peerHex, { text, artifacts }) — optional atomic final-turn
+//   deliverTurn(peerHex, { text, artifacts }, context?) — optional atomic final-turn
 //                              handoff for a transport with a durable outbox.
 //                              When supplied it replaces the separate
 //                              deliverArtifacts + deliver calls below.
-//   beginTurn(peerHex)       — a turn is starting: arm the "thinking"
+//   beginTurn(peerHex, context?) — a turn is starting: arm the "thinking"
 //                              placeholder; returns an onAction(title)
 //                              progress callback or null
 
@@ -219,35 +219,35 @@ export const createAgentRuntime = ({
   const activeReplyHandoffs = new Set();
   let activeTurnCount = 0;
   let shuttingDown = false;
-  const sendReply = async (method, peerHex, text) => {
+  const sendReply = async (method, peerHex, text, deliveryContext = null) => {
     try {
-      await chat[method](peerHex, text);
+      await chat[method](peerHex, text, deliveryContext);
     } catch (error) {
       log("BOT_REPLY_FAILED", { error: String(error?.message ?? error) });
       if (throwOnReplyFailure) throw error;
     }
   };
-  const sendArtifacts = async (peerHex, artifacts) => {
+  const sendArtifacts = async (peerHex, artifacts, deliveryContext = null) => {
     if (!artifacts.length || !supportsArtifactDelivery) return;
     try {
-      await chat.deliverArtifacts(peerHex, artifacts);
+      await chat.deliverArtifacts(peerHex, artifacts, deliveryContext);
     } catch (error) {
       log("BOT_ARTIFACT_DELIVERY_FAILED", { to: peerHex, count: artifacts.length, error: String(error?.message ?? error) });
       if (throwOnReplyFailure) throw error;
     }
   };
-  const sendTurn = async (peerHex, text, artifacts) => {
+  const sendTurn = async (peerHex, text, artifacts, deliveryContext = null) => {
     if (typeof chat?.deliverTurn === "function") {
       try {
-        await chat.deliverTurn(peerHex, { text, artifacts });
+        await chat.deliverTurn(peerHex, { text, artifacts }, deliveryContext);
       } catch (error) {
         log("BOT_TURN_DELIVERY_FAILED", { to: peerHex, artifacts: artifacts.length, error: String(error?.message ?? error) });
         if (throwOnReplyFailure) throw error;
       }
       return;
     }
-    await sendArtifacts(peerHex, artifacts);
-    await sendReply("deliver", peerHex, text);
+    await sendArtifacts(peerHex, artifacts, deliveryContext);
+    await sendReply("deliver", peerHex, text, deliveryContext);
   };
   const runReplyHandoff = async (operation) => {
     const handoff = Promise.resolve().then(operation);
@@ -785,6 +785,12 @@ export const createAgentRuntime = ({
     async handleMessage(peerHex, msg) {
       const k = norm(msg?.sessionKey ?? peerHex);
       const deliveryKey = norm(peerHex);
+      // A transport may attach an opaque immutable delivery context (for
+      // example a T3ams thread lane). It is never rendered into the model
+      // prompt, but follows every reply/progress callback so concurrent model
+      // sessions sharing one delivery conversation cannot cross-route output.
+      const deliveryContext = msg?.deliveryContext ?? null;
+      const { deliveryContext: _ignoredDeliveryContext, ...messageForPrompt } = msg ?? {};
       // T3ams channel messages preserve their raw `@bot …` prompt for the
       // model, but may supply the slash-command suffix separately. Other
       // transports and DMs continue to use their raw text as before.
@@ -792,7 +798,7 @@ export const createAgentRuntime = ({
       const commandReply = handleCommandFor(k, commandInput);
       if (commandReply) {
         log("BOT_COMMAND", { from: peerHex, command: commandInput.split(/\s/)[0] });
-        await sendReply("sendText", peerHex, commandReply);
+        await sendReply("sendText", peerHex, commandReply, deliveryContext);
         return true;
       }
       // The turn's cwd: shared workspace or the peer's chosen project/
@@ -804,10 +810,10 @@ export const createAgentRuntime = ({
       catch (e) {
         const proj = peerProjects.get(k);
         log("BOT_PROJECT_CWD_FAILED", { to: peerHex, project: proj?.alias, branch: proj?.branch ?? null, error: String(e?.message ?? e) });
-        await sendReply("sendText", peerHex, `⚠️ I couldn't open ${proj ? `${proj.alias}${proj.branch ? `@${proj.branch}` : ""}` : "the workspace"}: ${String(e?.message ?? e)}. /project default switches back to the shared workspace.`);
+        await sendReply("sendText", peerHex, `⚠️ I couldn't open ${proj ? `${proj.alias}${proj.branch ? `@${proj.branch}` : ""}` : "the workspace"}: ${String(e?.message ?? e)}. /project default switches back to the shared workspace.`, deliveryContext);
         return true;
       }
-      const turnProgress = chat.beginTurn(peerHex); // arms the "thinking" placeholder
+      const turnProgress = chat.beginTurn(peerHex, deliveryContext); // arms the "thinking" placeholder
       // Preserve the historical function-shaped beginTurn API while allowing
       // transports to hang a second, presentation-only partial-text callback
       // from that same turn. A non-function object form is also accepted for
@@ -828,7 +834,7 @@ export const createAgentRuntime = ({
             // renderer only adds attachment/reply/edit context, not a persona.
             // `outputDir` is transport-owned capability context, so surface it
             // to a renderer only for the turn in which it actually exists.
-            const promptMessage = outputDir == null ? msg : { ...msg, outputDir };
+            const promptMessage = outputDir == null ? messageForPrompt : { ...messageForPrompt, outputDir };
             const engineResult = await runEngine(peerHex, renderMessage(promptMessage), onAction, onPartial, turnCwd, job, outputDir, k);
             if (engineResult && !engineResult.stopped && outputDir) {
               // The callback must never receive a path still writable by the
@@ -846,13 +852,13 @@ export const createAgentRuntime = ({
         // leave the durable owed record for the next process to resume.
         if (result?.stopped) return !shuttingDown;
         if (result?.busy) {
-          await sendReply("deliver", peerHex, "I'm busy with other requests right now. Please try again in a moment.");
+          await sendReply("deliver", peerHex, "I'm busy with other requests right now. Please try again in a moment.", deliveryContext);
           return true;
         }
         if (!result) {
           if (shuttingDown) return false;
           // Don't leave the user hanging after the "thinking" placeholder.
-          await sendReply("deliver", peerHex, "Sorry — I couldn't reach my agent just now. Please try again in a moment.");
+          await sendReply("deliver", peerHex, "Sorry — I couldn't reach my agent just now. Please try again in a moment.", deliveryContext);
           return true;
         }
         // A shutdown that happens after the child exits but before a reply
@@ -869,7 +875,7 @@ export const createAgentRuntime = ({
             persist();
             outgoing += "\n\n(Tip: send /help to see my commands.)";
           }
-          await sendTurn(peerHex, outgoing, artifactHandoff?.artifacts ?? []);
+          await sendTurn(peerHex, outgoing, artifactHandoff?.artifacts ?? [], deliveryContext);
         });
         return true;
       } finally {

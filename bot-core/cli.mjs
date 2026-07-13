@@ -1282,6 +1282,22 @@ const DEPLOY_ENGINES = {
 };
 const KEY_FLAGS = { ANTHROPIC_API_KEY: "anthropic-key", OPENAI_API_KEY: "openai-key", OPENROUTER_API_KEY: "openrouter-key", GEMINI_API_KEY: "gemini-key", GROQ_API_KEY: "groq-key" };
 
+// A T3ams process can emit BOT_LISTENING before its websocket is connected or
+// before it has rebuilt its retained inbox/workspace subscriptions. Keep the
+// readiness check inside the container: it authenticates to the loopback-only
+// bridge with the container's token, without exposing either the port or token
+// on the VPS. The endpoint's `ok` means the chain is connected; a nonzero
+// subscription count proves the bot is also listening for messages.
+const t3amsBotHealthcheck = (transport) =>
+  transport === "t3ams"
+    ? `    healthcheck:\n      test: ["CMD", "node", "-e", "const port=process.env.BOT_BRIDGE_PORT||'8799';fetch('http://127.0.0.1:'+port+'/health',{headers:{authorization:'Bearer '+(process.env.BOT_BRIDGE_TOKEN||'')},signal:AbortSignal.timeout(4000)}).then(async(r)=>{let h;try{h=await r.json()}catch{process.exit(1);return}process.exit(r.ok&&h?.ok===true&&h.transport==='t3ams'&&Number.isInteger(h.subscriptions)&&h.subscriptions>0?0:1)}).catch(()=>process.exit(1))"]\n      interval: 5s\n      timeout: 5s\n      retries: 3\n      start_period: 20s\n`
+    : "";
+
+// This waits on the healthcheck above rather than on a log line. Keep the
+// final logs in the command output so a failed deploy remains diagnosable.
+const t3amsHealthWaitCommand = (container, tail = 30) =>
+  `status=unknown; for i in $(seq 1 45); do status="$(docker inspect --format '{{.State.Health.Status}}' ${container} 2>/dev/null || true)"; [ "$status" = healthy ] && break; sleep 2; done; echo "T3AMS_BOT_HEALTH=$status"; docker logs --tail ${tail} ${container} 2>&1; [ "$status" = healthy ]`;
+
 async function cmdDeploy(name, flags) {
   if (!name) fail("Usage: pca deploy <name> --host <ssh-target> [--harness openclaw|hermes] [--model <m>] [--safe-tools|--allowed-tools <list>|--full-autonomy] [--media-analyzer] [--dry-run]");
   const host = flags.host ? sshTarget(flags.host) : null;
@@ -1397,9 +1413,10 @@ async function cmdDeploy(name, flags) {
   const mediaDependsOn = mediaAnalyzerEnabled
     ? "    depends_on:\n      media-analyzer:\n        condition: service_healthy\n"
     : "";
+  const botHealthcheck = t3amsBotHealthcheck(transport);
   const engineService = spec.pkg
-    ? `  bot:\n    build: ./image\n    user: "0:0"\n    init: true\n    read_only: true\n    pids_limit: 256\n    mem_limit: 2g\n    cpus: "2.0"\n    security_opt:\n      - no-new-privileges:true\n    tmpfs:\n      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777\n    container_name: ${cn}\n    restart: unless-stopped\n${mediaDependsOn}${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n      - ./workspace:/workspace\n      - ./home:/home/node\n    command: ["node", "${entrypoint}"]\n`
-    : `  bot:\n    image: ${NODE_IMAGE}\n    user: "1000:1000"\n    init: true\n    read_only: true\n    pids_limit: 128\n    mem_limit: 512m\n    cpus: "1.0"\n    security_opt:\n      - no-new-privileges:true\n    tmpfs:\n      - /tmp:rw,noexec,nosuid,nodev,size=128m,mode=1777\n    container_name: ${cn}\n    restart: unless-stopped\n${mediaDependsOn}${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n    command: ["node", "${entrypoint}"]\n`;
+    ? `  bot:\n    build: ./image\n    user: "0:0"\n    init: true\n    read_only: true\n    pids_limit: 256\n    mem_limit: 2g\n    cpus: "2.0"\n    security_opt:\n      - no-new-privileges:true\n    tmpfs:\n      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777\n    container_name: ${cn}\n    restart: unless-stopped\n${mediaDependsOn}${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n      - ./workspace:/workspace\n      - ./home:/home/node\n${botHealthcheck}    command: ["node", "${entrypoint}"]\n`
+    : `  bot:\n    image: ${NODE_IMAGE}\n    user: "1000:1000"\n    init: true\n    read_only: true\n    pids_limit: 128\n    mem_limit: 512m\n    cpus: "1.0"\n    security_opt:\n      - no-new-privileges:true\n    tmpfs:\n      - /tmp:rw,noexec,nosuid,nodev,size=128m,mode=1777\n    container_name: ${cn}\n    restart: unless-stopped\n${mediaDependsOn}${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n${botHealthcheck}    command: ["node", "${entrypoint}"]\n`;
   const mediaContainer = mediaAnalyzerEnabled ? containerName(`${cn}-media`) : null;
   // This service has no bot state, workspace, OAuth home, host port, or Docker
   // socket. Its `media.env` is intentionally provisioned by the operator on
@@ -1496,11 +1513,16 @@ async function cmdDeploy(name, flags) {
   cfg.deploy = { host, dir: base, container: cn, at: new Date().toISOString() };
   saveConfig(name, cfg);
 
-  step("Waiting for the bot to come online…");
+  step(transport === "t3ams" ? "Waiting for authenticated T3ams health and subscriptions…" : "Waiting for the bot to come online…");
   const wait = runLocal("ssh", [...sshOpts, host,
-    `for i in $(seq 1 20); do docker logs ${cn} 2>&1 | grep -q BOT_LISTENING && break; sleep 2; done; docker logs --tail 30 ${cn} 2>&1`], { capture: true });
+    transport === "t3ams"
+      ? t3amsHealthWaitCommand(cn)
+      : `for i in $(seq 1 20); do docker logs ${cn} 2>&1 | grep -q BOT_LISTENING && break; sleep 2; done; docker logs --tail 30 ${cn} 2>&1`], { capture: true });
   const logs = wait.stdout || "";
-  if (/BOT_LISTENING/.test(logs)) {
+  const botReady = transport === "t3ams"
+    ? wait.status === 0 && /T3AMS_BOT_HEALTH=healthy/.test(logs)
+    : /BOT_LISTENING/.test(logs);
+  if (botReady) {
     ok(`"${name}" is live on ${host} (container ${cn}).`);
     console.log();
     if (transport === "t3ams") {
@@ -1529,7 +1551,9 @@ async function cmdDeploy(name, flags) {
       note(`Model login (once): ssh ${host} 'docker exec -it --user 1000:1000 ${cn} ${login}'`);
     }
   } else {
-    warn("Container started, but I didn't see BOT_LISTENING. Recent logs:");
+    warn(transport === "t3ams"
+      ? "Container started, but it did not become healthy with a connected T3ams chain and active subscriptions. Recent logs:"
+      : "Container started, but I didn't see BOT_LISTENING. Recent logs:");
     console.log(logs.split("\n").slice(-15).join("\n"));
     note(`Check:  ssh ${host} 'docker logs -f ${cn}'`);
   }
@@ -1580,12 +1604,19 @@ async function deployHarnessStack(name, cfg, secret, flags, host, harness) {
   ].join("\n");
   // State mounts at top-level /state, NOT nested under the read-only ./app:ro
   // mount — Docker cannot create a mountpoint inside a read-only bind.
-  const botService = `  bot:\n    image: ${NODE_IMAGE}\n    user: "1000:1000"\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n    env_file:\n      - ./bot.env\n    command: ["node", "${entrypoint}"]\n`;
+  const botHealthcheck = t3amsBotHealthcheck(transport);
+  // A T3ams harness should not start consuming bridge work before the bot has
+  // connected to the chain and installed its subscriptions. Legacy transport
+  // deployments retain their existing start-only dependency.
+  const harnessBotDependency = transport === "t3ams"
+    ? "    depends_on:\n      bot:\n        condition: service_healthy\n"
+    : "    depends_on: [bot]\n";
+  const botService = `  bot:\n    image: ${NODE_IMAGE}\n    user: "1000:1000"\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n    env_file:\n      - ./bot.env\n${botHealthcheck}    command: ["node", "${entrypoint}"]\n`;
 
   const files = { "bot.env": `${botEnv}\n` };  // path (relative to base) -> content
   let compose, setup, afterUp;
   if (harness === "openclaw") {
-    compose = `services:\n${botService}\n  openclaw:\n    build: ./image\n    container_name: ${hn}\n    restart: unless-stopped\n${LOG_OPTS}    env_file:\n      - ./gateway.env\n    volumes:\n      - ./openclaw-home:/home/node\n      - ./plugin:/plugin:ro\n    depends_on: [bot]\n    command: ["openclaw", "gateway"]\n`;
+    compose = `services:\n${botService}\n  openclaw:\n    build: ./image\n    container_name: ${hn}\n    restart: unless-stopped\n${LOG_OPTS}    env_file:\n      - ./gateway.env\n    volumes:\n      - ./openclaw-home:/home/node\n      - ./plugin:/plugin:ro\n${harnessBotDependency}    command: ["openclaw", "gateway"]\n`;
     files["image/Dockerfile"] = `FROM ${NODE_IMAGE}\nRUN npm install --global --no-audit --no-fund openclaw@2026.6.11 @anthropic-ai/claude-code@2.1.207 && npm cache clean --force\nENV HOME=/home/node\nWORKDIR /home/node\nUSER node\nCMD ["openclaw", "gateway"]\n`;
     files["gateway.env"] = `${envLine("OPENCLAW_GATEWAY_TOKEN", randomBytes(32).toString("base64url"))}\n${envLine("POLKADOT_BRIDGE_TOKEN", bridgeToken)}\n`;
     // Runs inside the one-off setup container (home volume mounted) after `models set`
@@ -1638,7 +1669,7 @@ docker compose -p ${cn} run --rm openclaw sh -lc ${shellQuote(`openclaw plugins 
     const hermesAccess = transport === "t3ams"
       ? "      - POLKADOT_ALLOW_ALL_USERS=1\n"
       : `      - POLKADOT_ALLOWED_USERS=${allow.join(",")}\n`;
-    compose = `services:\n${botService}\n  hermes:\n    image: ${HERMES_IMAGE}\n    container_name: ${hn}\n    restart: unless-stopped\n${LOG_OPTS}    command: ["gateway", "run"]\n    env_file:\n      - ./hermes.env\n    environment:\n      - HERMES_UID=0\n      - HERMES_GID=0\n      - POLKADOT_BRIDGE_URL=${bridgeUrl}\n${hermesAccess}    volumes:\n      - hermes-data:/opt/data\n      - ./plugin:/opt/data/plugins/polkadot:ro\n    depends_on: [bot]\n\nvolumes:\n  hermes-data:\n`;
+    compose = `services:\n${botService}\n  hermes:\n    image: ${HERMES_IMAGE}\n    container_name: ${hn}\n    restart: unless-stopped\n${LOG_OPTS}    command: ["gateway", "run"]\n    env_file:\n      - ./hermes.env\n    environment:\n      - HERMES_UID=0\n      - HERMES_GID=0\n      - POLKADOT_BRIDGE_URL=${bridgeUrl}\n${hermesAccess}    volumes:\n      - hermes-data:/opt/data\n      - ./plugin:/opt/data/plugins/polkadot:ro\n${harnessBotDependency}\nvolumes:\n  hermes-data:\n`;
     files["hermes.env"] = `${envLine("POLKADOT_BRIDGE_TOKEN", bridgeToken)}\n`;
     setup = `cd ${base}\nchown -R root:root plugin 2>/dev/null || true\necho SETUP_OK`;
     afterUp = () => {
@@ -1702,10 +1733,15 @@ docker compose -p ${cn} run --rm openclaw sh -lc ${shellQuote(`openclaw plugins 
   cfg.deploy = { host, dir: base, container: cn, harness, at: new Date().toISOString() };
   saveConfig(name, cfg);
 
-  step("Waiting for the bot to come online…");
+  step(transport === "t3ams" ? "Waiting for authenticated T3ams health and subscriptions…" : "Waiting for the bot to come online…");
   const wait = runLocal("ssh", [...sshOpts, host,
-    `for i in $(seq 1 25); do docker logs ${cn} 2>&1 | grep -q BOT_LISTENING && break; sleep 2; done; docker logs --tail 5 ${cn} 2>&1`], { capture: true });
-  if (/BOT_LISTENING/.test(wait.stdout || "")) {
+    transport === "t3ams"
+      ? t3amsHealthWaitCommand(cn, 5)
+      : `for i in $(seq 1 25); do docker logs ${cn} 2>&1 | grep -q BOT_LISTENING && break; sleep 2; done; docker logs --tail 5 ${cn} 2>&1`], { capture: true });
+  const stackReady = transport === "t3ams"
+    ? wait.status === 0 && /T3AMS_BOT_HEALTH=healthy/.test(wait.stdout || "")
+    : /BOT_LISTENING/.test(wait.stdout || "");
+  if (stackReady) {
     ok(`"${name}" is live on ${host} (${cn} + ${hn}).`);
     console.log();
     if (transport === "t3ams") {
@@ -1720,7 +1756,9 @@ docker compose -p ${cn} run --rm openclaw sh -lc ${shellQuote(`openclaw plugins 
     note(`Logs:   pca logs ${name} -f   (bridge)  ·  ssh ${host} 'docker logs -f ${hn}'  (${harness})`);
     note(`Status: pca status ${name}   ·  Stop: pca stop ${name}`);
   } else {
-    warn("Stack started, but the bot didn't report BOT_LISTENING. Recent logs:");
+    warn(transport === "t3ams"
+      ? "Stack started, but the bot did not become healthy with a connected T3ams chain and active subscriptions. Recent logs:"
+      : "Stack started, but the bot didn't report BOT_LISTENING. Recent logs:");
     console.log((wait.stdout || "").split("\n").slice(-6).join("\n"));
   }
 }

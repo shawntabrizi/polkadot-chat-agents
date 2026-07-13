@@ -26,6 +26,21 @@ export const agentSessionKeyForT3ams = (chatId, threadRootId) => {
   return `${chatId}${THREAD_MARKER}${encodeURIComponent(root)}`;
 };
 
+// Ingress must preserve ordering for one model session, not for every thread
+// in a channel. This deliberately shares the canonical native-session
+// encoding: a top-level conversation keeps its base key and each valid thread
+// gets a stable child lane. Keeping the scheduler and model on the same key
+// means a thread cannot race its own resume state, while unrelated threads do
+// not occupy each other's worker slot.
+export const ingressLaneKeyForT3ams = (chatId, threadRootId) =>
+  agentSessionKeyForT3ams(chatId, threadRootId);
+
+// A bridge lease names one immutable ingress lane. Request routing hints are
+// only meaningful for manual/proactive sends; a claimed worker must always
+// deliver in the thread recorded by its lease (including top-level `null`).
+export const bridgeReplyThreadRootForT3ams = (leasedTurnContext, requestedThreadRootId = null) =>
+  leasedTurnContext == null ? requestedThreadRootId : leasedTurnContext.threadRootId ?? null;
+
 /** Return the valid delivery conversation encoded by a native session key. */
 export const conversationForAgentSessionKey = (sessionKey) => {
   if (isT3amsConversationKey(sessionKey)) return sessionKey;

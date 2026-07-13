@@ -41,7 +41,9 @@ import { createT3amsKnownChats } from "./lib/t3ams-known-chats.mjs";
 import { deliverAgentReplyBeforeArtifacts } from "./lib/t3ams-agent-turn.mjs";
 import {
   agentSessionKeyForT3ams,
+  bridgeReplyThreadRootForT3ams,
   conversationForAgentSessionKey,
+  ingressLaneKeyForT3ams,
   isT3amsConversationKey,
 } from "./lib/t3ams-agent-session.mjs";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
@@ -890,35 +892,77 @@ const dispatcher = createKeyedDispatcher({
   concurrency: numberEnv("BOT_T3AMS_DISPATCH_CONCURRENCY", 4, { min: 1, max: 64 }),
   maxQueued: numberEnv("BOT_T3AMS_DISPATCH_QUEUE_CAP", 1000, { min: 1, max: 100_000 }),
 });
-// agent-runtime's transport-neutral chat API is keyed only by the stable
-// conversation/session ID. The keyed dispatcher guarantees one active turn
-// per such ID, so this short-lived map safely preserves the exact incoming
-// thread root for commands, errors, and a model's eventual answer.
-const activeReplyThreads = new Map();
-// Bridge workers do not execute inside the direct-runtime dispatcher, so hold
-// their trigger's thread root until the worker ACKs its lease. Per-chat bridge
-// leasing below guarantees that this never races two active turns.
-const bridgeReplyThreads = new Map();
-const replyThreadFor = (chatId) => activeReplyThreads.has(chatId)
-  ? activeReplyThreads.get(chatId)
-  : bridgeReplyThreads.get(chatId) ?? null;
+// A channel's top-level lane and every thread lane deliberately share the
+// same canonical form as the direct agent's native session key. This keeps
+// turn ordering aligned with model memory: one thread stays serial, while two
+// unrelated threads are free to use the bounded global worker pool together.
+const ingressLaneFor = (chatId, threadRootId = null) =>
+  ingressLaneKeyForT3ams(chatId, threadRootId) ?? chatId;
+const ingressLaneForRouted = (routed) => ingressLaneFor(
+  routed?.conversationKey,
+  routed?.message?.threadRootId ?? routed?.replyTarget?.threadRootId ?? null,
+);
+const ingressLaneForEntry = (entry) => ingressLaneForRouted(entry?.routed);
+const createTurnContext = (chatId, threadRootId = null) => {
+  const laneKey = ingressLaneKeyForT3ams(chatId, threadRootId);
+  return Object.freeze({
+    chatId,
+    laneKey: laneKey ?? chatId,
+    threadRootId: laneKey == null ? null : threadRootId ?? null,
+  });
+};
+const turnContextForRouted = (routed) => createTurnContext(
+  routed?.conversationKey,
+  routed?.message?.threadRootId ?? routed?.replyTarget?.threadRootId ?? null,
+);
+// The direct runtime receives an opaque, immutable context with each turn.
+// Keep callbacks backwards compatible (a transport that does not pass one
+// simply uses the top-level lane), but never let a malformed caller select a
+// different thread's live reply or durable artifact handoff.
+const turnContextFor = (chatId, supplied = null) => {
+  if (supplied?.chatId === chatId) {
+    const laneKey = ingressLaneKeyForT3ams(chatId, supplied.threadRootId);
+    if (laneKey != null && supplied.laneKey === laneKey) return supplied;
+  }
+  return createTurnContext(chatId);
+};
+// Agent callbacks retain the delivery chat ID for transport submission, but
+// their presentation and outbox state are lane-scoped. That is what makes it
+// safe for two direct-agent threads in one channel to overlap.
+const activeReplyThreads = new Map(); // laneKey -> threadRootId|null
+// Bridge workers do not execute inside the direct runtime. Hold their trigger
+// root by leased lane, so another thread's worker cannot steal its placeholder.
+const bridgeReplyThreads = new Map(); // laneKey -> threadRootId|null
+const replyThreadFor = (chatId, supplied = null) => {
+  const context = turnContextFor(chatId, supplied);
+  if (activeReplyThreads.has(context.laneKey)) return activeReplyThreads.get(context.laneKey);
+  if (bridgeReplyThreads.has(context.laneKey)) return bridgeReplyThreads.get(context.laneKey);
+  return context.threadRootId;
+};
 // The bridge may only request an edit of a message this process issued. The
 // client independently enforces author matching, but this local guard avoids
-// signing pointless or surprising operations for arbitrary message IDs.
-const botIssuedMessages = new Map(); // chatId -> Set<messageId>
-const noteBotIssuedMessage = (chatId, messageId) => {
+// signing pointless or surprising operations for arbitrary message IDs. Keep
+// its delivery lane too: a worker holding a claimed thread lease must not
+// mutate a bot bubble from a different thread in the same chat.
+const botIssuedMessages = new Map(); // chatId -> Map<messageId, laneKey>
+const noteBotIssuedMessage = (chatId, messageId, suppliedTurnContext = null) => {
   const id = bareHex(messageId);
   if (!/^[0-9a-f]{64}$/.test(id)) return false;
-  const ids = botIssuedMessages.get(chatId) ?? new Set();
+  const context = turnContextFor(chatId, suppliedTurnContext);
+  const ids = botIssuedMessages.get(chatId) ?? new Map();
   ids.delete(id);
-  ids.add(id);
-  while (ids.size > 256) ids.delete(ids.values().next().value);
+  ids.set(id, context.laneKey);
+  while (ids.size > 256) ids.delete(ids.keys().next().value);
   botIssuedMessages.delete(chatId);
   botIssuedMessages.set(chatId, ids);
   while (botIssuedMessages.size > knownChatCap) botIssuedMessages.delete(botIssuedMessages.keys().next().value);
   return true;
 };
-const isBotIssuedMessage = (chatId, messageId) => botIssuedMessages.get(chatId)?.has(bareHex(messageId)) === true;
+const isBotIssuedMessage = (chatId, messageId, suppliedTurnContext = undefined) => {
+  const laneKey = botIssuedMessages.get(chatId)?.get(bareHex(messageId));
+  if (laneKey == null) return false;
+  return suppliedTurnContext === undefined || laneKey === turnContextFor(chatId, suppliedTurnContext).laneKey;
+};
 
 // ---------- attachments and durable files ----------
 // File-store namespaces must be 32-byte hex, while T3ams conversation IDs
@@ -958,6 +1002,7 @@ const sendT3amsAttachment = async (chatId, {
   text = null,
   filename = null,
   threadRootId = undefined,
+  turnContext = null,
   // Durable direct-agent delivery can resume after Bulletin upload without
   // buying/uploading the same encrypted blob again. The ref stays private in
   // BOT_STATE_DIR and is never returned by the bridge API.
@@ -993,13 +1038,13 @@ const sendT3amsAttachment = async (chatId, {
   }
   if (typeof beforeSend === "function") await beforeSend(uploaded);
   const body = typeof text === "string" ? text : uploaded.attachment.filename;
-  const root = threadRootId === undefined ? replyThreadFor(chatId) : threadRootId;
+  const root = threadRootId === undefined ? replyThreadFor(chatId, turnContext) : threadRootId;
   const sent = await protocol.sendRichText(chatId, body, {
     ...(root == null ? {} : { threadRootId: root }),
     attachments: [uploaded.ref],
     guard,
   });
-  noteBotIssuedMessage(chatId, sent.messageId);
+  noteBotIssuedMessage(chatId, sent.messageId, createTurnContext(chatId, root));
   log("T3AMS_SENT_FILE", { chatId, mime: uploaded.attachment.mime, bytes: uploaded.attachment.size });
   return { ...sent, attachment: uploaded.attachment };
 };
@@ -1028,7 +1073,7 @@ const mimeForT3amsFilename = (filename) => {
 // statement or HOP upload, so a retry drains this exact output and never asks
 // the model/tools to produce a second answer. The textual answer drains first:
 // an unavailable optional attachment must not hide the useful final response.
-const activeAgentArtifactDeliveries = new Map(); // chatId -> { id, revision }
+const activeAgentArtifactDeliveries = new Map(); // laneKey -> { id, revision, turnContext }
 // Snapshot copies happen outside the journal mutex so a large PDF does not
 // block ingress bookkeeping. Reserve their global capacity first, otherwise
 // several concurrent turns could all pass the quota check before any one
@@ -1382,7 +1427,7 @@ const markAgentArtifactSent = async (context, outbox, file, messageId) => {
 };
 const deliverPersistedAgentArtifacts = async (chatId, context, outbox) => {
   if (outbox == null) return;
-  const threadRootId = replyThreadFor(chatId);
+  const threadRootId = replyThreadFor(chatId, context.turnContext);
   for (const file of outbox.files) {
     if (!ingressEntryCurrent(context.id, context.revision)) throw artifactHandoffSuperseded();
     if (file.sent) continue;
@@ -1394,6 +1439,7 @@ const deliverPersistedAgentArtifacts = async (chatId, context, outbox) => {
       mime: file.mime,
       text: `Generated file: ${file.filename}`,
       threadRootId,
+      turnContext: context.turnContext,
       uploaded: file.uploaded,
       onUploaded: async (uploaded) => markAgentArtifactUploaded(context, outbox, file, uploaded),
       beforeSend: async () => {
@@ -1417,18 +1463,18 @@ const markAgentReplyPart = async (context, reply, nextPart) => {
   }
 };
 const deliverPersistedAgentReply = async (chatId, context, reply) => {
-  disarmThinking(chatId);
+  disarmThinking(chatId, context.turnContext);
   if (reply.parts.length > 1) log("T3AMS_REPLY_CHUNKED", { chatId, parts: reply.parts.length, chars: reply.text.length });
   while (reply.nextPart < reply.parts.length) {
     if (!ingressEntryCurrent(context.id, context.revision)) throw artifactHandoffSuperseded();
     const index = reply.nextPart;
     const part = reply.parts[index];
     if (index === 0) {
-      const placeholder = await takeLivePlaceholder(chatId);
+      const placeholder = await takeLivePlaceholder(chatId, context.turnContext);
       if (placeholder != null) await placeholder.handle.finalize(part);
-      else await sendAgentReply(chatId, part);
+      else await sendAgentReply(chatId, part, context.turnContext);
     } else {
-      await sendAgentReply(chatId, part);
+      await sendAgentReply(chatId, part, context.turnContext);
     }
     await markAgentReplyPart(context, reply, index + 1);
   }
@@ -1437,8 +1483,9 @@ const deliverPersistedAgentTurn = async (chatId, context, { artifacts, reply }) 
   deliverReply: () => deliverPersistedAgentReply(chatId, context, reply),
   deliverArtifacts: () => deliverPersistedAgentArtifacts(chatId, context, artifacts),
 });
-const deliverAgentTurn = async (chatId, { text, artifacts = [] } = {}) => {
-  const context = activeAgentArtifactDeliveries.get(chatId) ?? null;
+const deliverAgentTurn = async (chatId, { text, artifacts = [] } = {}, suppliedTurnContext = null) => {
+  const turnContext = turnContextFor(chatId, suppliedTurnContext);
+  const context = activeAgentArtifactDeliveries.get(turnContext.laneKey) ?? null;
   if (context == null) {
     // Keep the generic runtime surface usable outside the journal. T3ams's
     // deployed direct brains always take the durable branch below.
@@ -1449,19 +1496,21 @@ const deliverAgentTurn = async (chatId, { text, artifacts = [] } = {}) => {
         size: artifact.size,
         mime: mimeForT3amsFilename(artifact.filename),
         text: `Generated file: ${artifact.filename}`,
+        turnContext,
       });
     }
-    await deliverAgentReply(chatId, text);
+    await deliverAgentReply(chatId, text, turnContext);
     return;
   }
   const prepared = await prepareAgentTurnOutbox(context, { text, artifacts });
   await deliverPersistedAgentTurn(chatId, context, prepared);
 };
-const deliverAgentArtifacts = async (chatId, artifacts) => {
+const deliverAgentArtifacts = async (chatId, artifacts, suppliedTurnContext = null) => {
   // Legacy callback retained for an embedding that has not moved to
   // deliverTurn(). The T3ams runtime itself advertises deliverTurn, so this
   // path never participates in a durable direct-agent ingress turn.
-  if (activeAgentArtifactDeliveries.has(chatId)) {
+  const turnContext = turnContextFor(chatId, suppliedTurnContext);
+  if (activeAgentArtifactDeliveries.has(turnContext.laneKey)) {
     throw new Error("direct agent artifact delivery requires atomic deliverTurn");
   }
   for (const artifact of artifacts) {
@@ -1471,6 +1520,7 @@ const deliverAgentArtifacts = async (chatId, artifacts) => {
       size: artifact.size,
       mime: mimeForT3amsFilename(artifact.filename),
       text: `Generated file: ${artifact.filename}`,
+      turnContext,
     });
   }
 };
@@ -1552,44 +1602,56 @@ const sweepAgentArtifactOutboxes = () => {
   if (changed) persist();
 };
 sweepAgentArtifactOutboxes();
-const fileCommandChats = new Map();
 // The durable file store is configured only after the authenticated protocol
-// is restored below. Defer this binding so module initialization never reads
-// `fileStore` while it is still in its temporal-dead-zone.
-let fileCommandHandler = null;
-const handleT3amsFileCommand = async (chatId, message) => {
-  if (fileCommandHandler == null) throw new Error("T3ams file commands are not initialized");
+// is restored below. A handler is created per turn so concurrent threads in
+// the same channel cannot overwrite a mutable channel -> reply-root mapping.
+let fileCommandHandlerForTurn = null;
+const handleT3amsFileCommand = async (chatId, message, suppliedTurnContext = null) => {
+  if (fileCommandHandlerForTurn == null) throw new Error("T3ams file commands are not initialized");
+  const turnContext = turnContextFor(chatId, suppliedTurnContext);
   const namespace = fileNamespaceForChat(chatId);
-  fileCommandChats.set(namespace, chatId);
-  try {
-    // A mentioned channel invocation carries a trimmed commandText, whereas
-    // its raw text remains useful to a model. The vault command is transport
-    // owned, so it must consume the explicit slash form.
-    return await fileCommandHandler(namespace, {
-      ...message,
-      text: typeof message.commandText === "string" ? message.commandText : message.text,
-    });
-  } finally {
-    fileCommandChats.delete(namespace);
-  }
+  const handler = fileCommandHandlerForTurn(turnContext);
+  // A mentioned channel invocation carries a trimmed commandText, whereas
+  // its raw text remains useful to a model. The vault command is transport
+  // owned, so it must consume the explicit slash form.
+  return handler(namespace, {
+    ...message,
+    text: typeof message.commandText === "string" ? message.commandText : message.text,
+  });
 };
 
 // ---------- live replies and typing ----------
 // T3ams ops are independently retained and the SPA buffers an edit which
 // arrives before its original message. Unlike the legacy session slot, an
 // explicit peer ACK is not required before we may edit the placeholder.
+const liveReplyTargets = new Map(); // laneKey -> immutable { chatId, threadRootId }
+const bindLiveReplyTarget = (supplied) => {
+  const context = turnContextFor(supplied?.chatId, supplied);
+  if (!isT3amsConversationKey(context.chatId)) return context;
+  liveReplyTargets.delete(context.laneKey);
+  liveReplyTargets.set(context.laneKey, context);
+  while (liveReplyTargets.size > knownChatCap + ingressCap) {
+    liveReplyTargets.delete(liveReplyTargets.keys().next().value);
+  }
+  return context;
+};
+const liveReplyTargetFor = (laneKey) => liveReplyTargets.get(laneKey) ?? null;
 const liveReplies = createLiveReplies({
-  send: async ({ peerHex: chatId, text, editOf, guard = null }) => {
+  send: async ({ peerHex: laneKey, text, editOf, guard = null }) => {
+    const target = liveReplyTargetFor(laneKey);
+    if (target == null) throw new Error("live reply target is no longer available");
+    const { chatId } = target;
     const submitGuard = claimSubmissionGuard(guard);
     if (editOf != null) {
       const edited = await protocol.editText(chatId, editOf, text, { guard: submitGuard });
       return { messageId: edited.messageId, delivered: true };
     }
+    const root = replyThreadFor(chatId, target);
     const sent = await protocol.sendText(chatId, text, {
-      threadRootId: replyThreadFor(chatId),
+      threadRootId: root,
       guard: submitGuard,
     });
-    noteBotIssuedMessage(chatId, sent.messageId);
+    noteBotIssuedMessage(chatId, sent.messageId, createTurnContext(chatId, root));
     return { messageId: sent.messageId, delivered: true };
   },
   awaitAck: async () => true,
@@ -1598,30 +1660,30 @@ const liveReplies = createLiveReplies({
   finalAckWaitMs: liveFinalAckWaitMs,
   log,
 });
-const thinkingTimers = new Map(); // chatId -> timeout
-const livePlaceholders = new Map(); // chatId -> Promise<{handle, tracker, timer, ttl} | null>
+const thinkingTimers = new Map(); // laneKey -> timeout
+const livePlaceholders = new Map(); // laneKey -> Promise<{handle, tracker, timer, ttl} | null>
 // Tool actions and media retrieval can start before the delayed visible
-// placeholder exists. Keep their compact activity state per serialized chat
+// placeholder exists. Keep their compact activity state per serialized lane
 // so the first frame is useful instead of a blank generic spinner.
-const pendingProgressTrackers = new Map(); // chatId -> deferred progress tracker
-const progressTrackerFor = (chatId) => {
-  let tracker = pendingProgressTrackers.get(chatId);
+const pendingProgressTrackers = new Map(); // laneKey -> deferred progress tracker
+const progressTrackerFor = (laneKey) => {
+  let tracker = pendingProgressTrackers.get(laneKey);
   if (tracker == null) {
     tracker = createDeferredProgressTracker({ label: "working" });
-    pendingProgressTrackers.set(chatId, tracker);
+    pendingProgressTrackers.set(laneKey, tracker);
   }
   return tracker;
 };
-const disposeProgressTracker = (chatId) => {
-  const tracker = pendingProgressTrackers.get(chatId);
+const disposeProgressTracker = (laneKey) => {
+  const tracker = pendingProgressTrackers.get(laneKey);
   if (tracker == null) return;
-  pendingProgressTrackers.delete(chatId);
+  pendingProgressTrackers.delete(laneKey);
   tracker.dispose();
 };
 // A framework can stream `edit_of` frames without labeling the final frame.
-// Per-chat bridge leasing lets its eventual ACK safely promote this latest
+// Per-lane bridge leasing lets its eventual ACK safely promote this latest
 // value into a terminal edit.
-const bridgePendingEdits = new Map(); // chatId -> { messageId, text, deliveryId, leaseId }
+const bridgePendingEdits = new Map(); // laneKey -> { messageId, text, deliveryId, leaseId }
 // Keep every bridge side effect bound to the exact lease that produced it.
 // In particular, a live edit is often deliberately delayed by the throttle,
 // so checking only when /send is received would let a revoked worker publish
@@ -1631,34 +1693,36 @@ const bridgeLeaseIsActive = (chatId, deliveryId, leaseId, current = Date.now()) 
   && entry.leaseId === leaseId
   && entry.routed.conversationKey === chatId
   && Number(entry.leaseUntil) > current);
-const bridgePendingEditIsActive = (chatId, edit) => bridgePendingEdits.get(chatId) === edit
-  && bridgeLeaseIsActive(chatId, edit.deliveryId, edit.leaseId);
-const cancelBridgePendingEdit = (chatId, expected = null) => {
-  const edit = bridgePendingEdits.get(chatId);
+const bridgePendingEditIsActive = (laneKey, edit) => bridgePendingEdits.get(laneKey) === edit
+  && bridgeLeaseIsActive(edit.chatId, edit.deliveryId, edit.leaseId);
+const cancelBridgePendingEdit = (laneKey, expected = null) => {
+  const edit = bridgePendingEdits.get(laneKey);
   if (edit == null || (expected != null && edit !== expected)) return false;
-  bridgePendingEdits.delete(chatId);
-  liveReplies.cancelExisting(chatId, edit.messageId);
+  bridgePendingEdits.delete(laneKey);
+  liveReplies.cancelExisting(laneKey, edit.messageId);
   return true;
 };
-const disarmThinking = (chatId) => {
-  const timer = thinkingTimers.get(chatId);
+const disarmThinking = (chatId, supplied = null) => {
+  const context = turnContextFor(chatId, supplied);
+  const timer = thinkingTimers.get(context.laneKey);
   if (timer != null) clearTimeout(timer);
-  thinkingTimers.delete(chatId);
-  disposeProgressTracker(chatId);
+  thinkingTimers.delete(context.laneKey);
+  disposeProgressTracker(context.laneKey);
 };
-const takeLivePlaceholder = async (chatId) => {
-  const pending = livePlaceholders.get(chatId);
+const takeLivePlaceholder = async (chatId, supplied = null) => {
+  const context = turnContextFor(chatId, supplied);
+  const pending = livePlaceholders.get(context.laneKey);
   if (pending == null) return null;
-  livePlaceholders.delete(chatId);
+  livePlaceholders.delete(context.laneKey);
   const placeholder = await pending.catch(() => null);
   if (placeholder != null) {
     clearInterval(placeholder.timer);
     clearTimeout(placeholder.ttl);
   }
-  disposeProgressTracker(chatId);
+  disposeProgressTracker(context.laneKey);
   return placeholder;
 };
-const peekLivePlaceholder = (chatId) => livePlaceholders.get(chatId) ?? null;
+const peekLivePlaceholder = (chatId, supplied = null) => livePlaceholders.get(turnContextFor(chatId, supplied).laneKey) ?? null;
 const bestEffortTyping = (chatId, { guard = null } = {}) => {
   if (guard != null && !guard()) return;
   void protocol.sendTyping(chatId, { guard: claimSubmissionGuard(guard) }).catch((error) => {
@@ -1666,15 +1730,17 @@ const bestEffortTyping = (chatId, { guard = null } = {}) => {
     log("T3AMS_TYPING_FAILED", { chatId, error: String(error?.message ?? error) });
   });
 };
-const armThinking = (chatId, { guard = null } = {}) => {
-  if (!thinkingText || thinkingAfterMs <= 0 || thinkingTimers.has(chatId) || livePlaceholders.has(chatId)) return;
+const armThinking = (chatId, { guard = null, turnContext = null } = {}) => {
+  const context = bindLiveReplyTarget(turnContextFor(chatId, turnContext));
+  const laneKey = context.laneKey;
+  if (!thinkingText || thinkingAfterMs <= 0 || thinkingTimers.has(laneKey) || livePlaceholders.has(laneKey)) return;
   const timer = setTimeout(() => {
-    thinkingTimers.delete(chatId);
+    thinkingTimers.delete(laneKey);
     if (guard != null && !guard()) return;
-    if (livePlaceholders.has(chatId)) return;
-    livePlaceholders.set(chatId, (async () => {
-      const handle = await liveReplies.begin(chatId, thinkingText, { guard });
-      const tracker = progressTrackerFor(chatId);
+    if (livePlaceholders.has(laneKey)) return;
+    livePlaceholders.set(laneKey, (async () => {
+      const handle = await liveReplies.begin(laneKey, thinkingText, { guard });
+      const tracker = progressTrackerFor(laneKey);
       tracker.attach(handle);
       const heartbeat = setInterval(() => {
         bestEffortTyping(chatId, { guard });
@@ -1682,41 +1748,44 @@ const armThinking = (chatId, { guard = null } = {}) => {
       }, liveHeartbeatMs);
       heartbeat.unref?.();
       const ttl = setTimeout(async () => {
-        const placeholder = await takeLivePlaceholder(chatId);
+        const placeholder = await takeLivePlaceholder(chatId, context);
         if (placeholder == null) return;
-        log("T3AMS_LIVE_TTL_EXPIRED", { chatId, messageId: placeholder.handle.messageId });
+        log("T3AMS_LIVE_TTL_EXPIRED", { chatId, lane: laneKey, messageId: placeholder.handle.messageId });
         // TTL expiry is transport-owned cleanup, not an action by the worker
         // which created the placeholder.  Its lease can legitimately have
         // expired or been reissued by now, so bypass that old worker fence
         // rather than leaving a permanently spinning message behind.
         placeholder.handle.finalize(liveTimeoutText, { guard: null }).catch((error) => {
-          log("T3AMS_LIVE_FINALIZE_FAILED", { chatId, error: String(error?.message ?? error) });
+          log("T3AMS_LIVE_FINALIZE_FAILED", { chatId, lane: laneKey, error: String(error?.message ?? error) });
         });
       }, liveTtlMs);
       ttl.unref?.();
       bestEffortTyping(chatId, { guard });
-      log("T3AMS_LIVE_PLACEHOLDER", { chatId, messageId: handle.messageId });
+      log("T3AMS_LIVE_PLACEHOLDER", { chatId, lane: laneKey, messageId: handle.messageId });
       return { handle, tracker, timer: heartbeat, ttl };
     })().catch((error) => {
-      log("T3AMS_THINKING_FAILED", { chatId, error: String(error?.message ?? error) });
-      disposeProgressTracker(chatId);
+      log("T3AMS_THINKING_FAILED", { chatId, lane: laneKey, error: String(error?.message ?? error) });
+      disposeProgressTracker(laneKey);
       return null;
     }));
   }, thinkingAfterMs);
   timer.unref?.();
-  thinkingTimers.set(chatId, timer);
+  thinkingTimers.set(laneKey, timer);
 };
-const sendAgentReply = async (chatId, text) => {
-  disarmThinking(chatId);
-  const sent = await protocol.sendText(chatId, text, { threadRootId: replyThreadFor(chatId) });
-  noteBotIssuedMessage(chatId, sent.messageId);
+const sendAgentReply = async (chatId, text, suppliedTurnContext = null) => {
+  const turnContext = turnContextFor(chatId, suppliedTurnContext);
+  disarmThinking(chatId, turnContext);
+  const root = replyThreadFor(chatId, turnContext);
+  const sent = await protocol.sendText(chatId, text, { threadRootId: root });
+  noteBotIssuedMessage(chatId, sent.messageId, createTurnContext(chatId, root));
   return sent;
 };
-const deliverAgentReply = async (chatId, text) => {
-  disarmThinking(chatId);
+const deliverAgentReply = async (chatId, text, suppliedTurnContext = null) => {
+  const turnContext = turnContextFor(chatId, suppliedTurnContext);
+  disarmThinking(chatId, turnContext);
   const parts = splitMessageText(text, replyChunkBytes);
   if (parts.length > 1) log("T3AMS_REPLY_CHUNKED", { chatId, parts: parts.length, chars: text.length });
-  const placeholder = await takeLivePlaceholder(chatId);
+  const placeholder = await takeLivePlaceholder(chatId, turnContext);
   let deliveredFirst = false;
   if (placeholder != null) {
     // Finalization is intentionally not best-effort: a final-answer delivery
@@ -1725,12 +1794,13 @@ const deliverAgentReply = async (chatId, text) => {
     await placeholder.handle.finalize(parts[0]);
     deliveredFirst = true;
   }
-  for (const part of deliveredFirst ? parts.slice(1) : parts) await sendAgentReply(chatId, part);
+  for (const part of deliveredFirst ? parts.slice(1) : parts) await sendAgentReply(chatId, part, turnContext);
 };
-const beginTurnProgress = (chatId) => {
+const beginTurnProgress = (chatId, suppliedTurnContext = null) => {
+  const turnContext = bindLiveReplyTarget(turnContextFor(chatId, suppliedTurnContext));
   bestEffortTyping(chatId);
-  const tracker = progressTrackerFor(chatId);
-  armThinking(chatId);
+  const tracker = progressTrackerFor(turnContext.laneKey);
+  armThinking(chatId, { turnContext });
   if (!liveProgress) return null;
   const onAction = (title) => tracker.add(title);
   // Claude's stream-json deltas contain user-visible final prose, not hidden
@@ -2009,7 +2079,7 @@ const reconcileQueuedIngressOperation = async (operation, lifecycle) => mutateIn
   };
   const removed = [];
   const invalidatedOutboxes = [];
-  const revokedBridgeChats = new Map();
+  const revokedBridgeLanes = new Map();
   for (let index = ingress.length - 1; index >= 0; index -= 1) {
     const entry = ingress[index];
     const message = entry?.routed?.message;
@@ -2052,7 +2122,8 @@ const reconcileQueuedIngressOperation = async (operation, lifecycle) => mutateIn
     // combination with claim-bound /send below, prevents an old worker from
     // replying after an edit or mention removal.
     if (entry.kind === "bridge" && entry.leaseId != null) {
-      revokedBridgeChats.set(entry.routed.conversationKey, "✎ Message updated — restarting.");
+      const turnContext = turnContextForRouted(entry.routed);
+      revokedBridgeLanes.set(turnContext.laneKey, { turnContext, status: "✎ Message updated — restarting." });
       entry.leaseId = null;
       entry.leaseUntil = 0;
     }
@@ -2067,21 +2138,23 @@ const reconcileQueuedIngressOperation = async (operation, lifecycle) => mutateIn
     for (const id of invalidatedOutboxes) removeAgentArtifactOutbox(id);
     for (const entry of removed) {
       if (entry.kind === "bridge" && entry.leaseId != null) {
-        revokedBridgeChats.set(entry.routed.conversationKey, "🗑️ Message deleted.");
+        const turnContext = turnContextForRouted(entry.routed);
+        revokedBridgeLanes.set(turnContext.laneKey, { turnContext, status: "🗑️ Message deleted." });
       }
     }
-    for (const [chatId, status] of revokedBridgeChats) {
-      bridgeReplyThreads.delete(chatId);
-      cancelBridgePendingEdit(chatId);
-      disarmThinking(chatId);
-      void takeLivePlaceholder(chatId).then((placeholder) => {
+    for (const { turnContext, status } of revokedBridgeLanes.values()) {
+      const { chatId } = turnContext;
+      bridgeReplyThreads.delete(turnContext.laneKey);
+      cancelBridgePendingEdit(turnContext.laneKey);
+      disarmThinking(chatId, turnContext);
+      void takeLivePlaceholder(chatId, turnContext).then((placeholder) => {
         if (placeholder == null) return;
         // This status belongs to the transport after it durably revoked the
         // worker's claim, not to that old worker. Explicitly bypass the
         // placeholder's lease guard so the stale turn cannot leave a forever
         // spinning message behind.
         return placeholder.handle.finalize(status, { guard: null });
-      }).catch((error) => log("T3AMS_BRIDGE_REVOKE_FINALIZE_FAILED", { chatId, error: String(error?.message ?? error) }));
+      }).catch((error) => log("T3AMS_BRIDGE_REVOKE_FINALIZE_FAILED", { chatId, lane: turnContext.laneKey, error: String(error?.message ?? error) }));
     }
     knownChats.trim();
     ingressDurable = true;
@@ -2455,13 +2528,12 @@ const fileStore = createFileStore({
   maxPeerEntries: fileMaxPeerEntries,
   log,
 });
-fileCommandHandler = createFileCommandHandler({
+fileCommandHandlerForTurn = (turnContext) => createFileCommandHandler({
   fileStore,
-  sendAttachment: async (namespace, payload) => {
-    const chatId = fileCommandChats.get(namespace);
-    if (chatId == null) throw new Error("file command lost its T3ams conversation scope");
-    return sendT3amsAttachment(chatId, payload);
-  },
+  sendAttachment: async (_namespace, payload) => sendT3amsAttachment(turnContext.chatId, {
+    ...payload,
+    turnContext,
+  }),
   log,
 });
 const bridgeFileMaxBytes = numberEnv("BOT_BRIDGE_FILE_MAX_BYTES", fileMaxBytes, { min: 1, max: fileMaxBytes });
@@ -2979,6 +3051,7 @@ const executeIngressTurn = async (entry, expectedRevision) => {
     throw artifactOutboxError("T3AMS_AGENT_OUTBOX_CORRUPT", "generated-turn outbox metadata is invalid");
   }
   const routed = entry.routed;
+  const turnContext = turnContextForRouted(routed);
   if (!protocol.restoreInboundConversation(routed)) {
     const error = new Error("invalid durable T3ams ingress route");
     error.code = "T3AMS_INVALID_INGRESS";
@@ -2999,7 +3072,11 @@ const executeIngressTurn = async (entry, expectedRevision) => {
     // This affects only native model/session state. The delivery target stays
     // `routed.conversationKey`, so replies and typing remain in the same
     // T3ams thread/channel lane.
-    sessionKey: agentSessionKeyForT3ams(routed.conversationKey, routed.message.threadRootId) ?? routed.conversationKey,
+    sessionKey: turnContext.laneKey,
+    // This opaque route is never included in the model prompt. It travels
+    // only through the direct runtime's optional callback context, fencing
+    // progress, replies, and generated artifacts to this exact thread lane.
+    deliveryContext: turnContext,
     ...(Array.isArray(routed.message.attachments) ? { attachments: routed.message.attachments } : {}),
     ...(typeof routed.message.attachmentError === "string" ? { attachmentError: routed.message.attachmentError } : {}),
     ...(Array.isArray(routed.message.channelContext) ? { channelContext: routed.message.channelContext } : {}),
@@ -3011,9 +3088,9 @@ const executeIngressTurn = async (entry, expectedRevision) => {
     sessionKey: message.sessionKey,
   });
   const turnCurrent = () => !turnController.signal.aborted && ingressEntryCurrent(entry.id, expectedRevision);
-  const hadPrevious = activeReplyThreads.has(routed.conversationKey);
-  const previous = activeReplyThreads.get(routed.conversationKey);
-  activeReplyThreads.set(routed.conversationKey, routed.replyTarget.threadRootId);
+  const hadPrevious = activeReplyThreads.has(turnContext.laneKey);
+  const previous = activeReplyThreads.get(turnContext.laneKey);
+  activeReplyThreads.set(turnContext.laneKey, turnContext.threadRootId);
   try {
     const commandInput = typeof message.commandText === "string" ? message.commandText : message.text;
     if (agentRuntime != null && /^\/stop\s*$/i.test(commandInput)) {
@@ -3021,23 +3098,24 @@ const executeIngressTurn = async (entry, expectedRevision) => {
       // inbound command arrived. Do not download its attachments or wait for
       // a sidecar queue merely to deliver the ordered confirmation.
       if (!turnCurrent()) return null;
-      await sendAgentReply(routed.conversationKey, "⏹️ Stopped any active work for this conversation.");
+      await sendAgentReply(routed.conversationKey, "⏹️ Stopped any active work for this conversation.", turnContext);
       return turnCurrent() ? expectedRevision : null;
     }
     // A complete persisted handoff means the model already ran. Drain the
     // exact files/text/chunks only; this is the key recovery boundary that
     // prevents a failed final delivery from rerunning tools or Claude.
     if (entry.replyOutbox != null) {
-      const priorArtifactContext = activeAgentArtifactDeliveries.get(routed.conversationKey);
-      activeAgentArtifactDeliveries.set(routed.conversationKey, { id: entry.id, revision: expectedRevision });
+      const priorArtifactContext = activeAgentArtifactDeliveries.get(turnContext.laneKey);
+      const artifactContext = { id: entry.id, revision: expectedRevision, turnContext };
+      activeAgentArtifactDeliveries.set(turnContext.laneKey, artifactContext);
       try {
-        await deliverPersistedAgentTurn(routed.conversationKey, { id: entry.id, revision: expectedRevision }, {
+        await deliverPersistedAgentTurn(routed.conversationKey, artifactContext, {
           artifacts: entry.artifactOutbox,
           reply: entry.replyOutbox,
         });
       } finally {
-        if (priorArtifactContext == null) activeAgentArtifactDeliveries.delete(routed.conversationKey);
-        else activeAgentArtifactDeliveries.set(routed.conversationKey, priorArtifactContext);
+        if (priorArtifactContext == null) activeAgentArtifactDeliveries.delete(turnContext.laneKey);
+        else activeAgentArtifactDeliveries.set(turnContext.laneKey, priorArtifactContext);
       }
       return turnCurrent() ? expectedRevision : null;
     }
@@ -3049,28 +3127,28 @@ const executeIngressTurn = async (entry, expectedRevision) => {
       // this one deferred tracker rather than replacing its history.
       attachmentProgress = agentRuntime == null
         ? null
-        : beginTurnProgress(routed.conversationKey);
+        : beginTurnProgress(routed.conversationKey, turnContext);
       message.attachments = await fetchT3amsAttachments(message.attachments, {
         onProgress: attachmentProgress,
       });
     }
     if (!turnCurrent()) return null;
-    const fileResult = await handleT3amsFileCommand(routed.conversationKey, message);
+    const fileResult = await handleT3amsFileCommand(routed.conversationKey, message, turnContext);
     if (fileResult?.handled) {
       if (!turnCurrent()) return null;
-      if (fileResult.reply) await sendAgentReply(routed.conversationKey, fileResult.reply);
+      if (fileResult.reply) await sendAgentReply(routed.conversationKey, fileResult.reply, turnContext);
       return expectedRevision;
     }
     if (brain === "echo") {
       if (!turnCurrent()) return null;
-      await sendAgentReply(routed.conversationKey, `Echo: ${message.text}`);
+      await sendAgentReply(routed.conversationKey, `Echo: ${message.text}`, turnContext);
       return expectedRevision;
     }
     if (agentRuntime == null) throw new Error("no direct T3ams agent runtime is configured");
     if (stateChangingChannelCommand(commandInput) && !canControlChannel(message)) {
       const label = channelControlRole === "mod" ? "a workspace moderator" : "a workspace owner or admin";
       if (!turnCurrent()) return null;
-      await sendAgentReply(routed.conversationKey, `Only ${label} can change this channel bot's session settings.`);
+      await sendAgentReply(routed.conversationKey, `Only ${label} can change this channel bot's session settings.`, turnContext);
       return expectedRevision;
     }
     const cachedMediaAnalysis = entry.mediaAnalysisRevision === expectedRevision
@@ -3105,7 +3183,7 @@ const executeIngressTurn = async (entry, expectedRevision) => {
           log("T3AMS_MEDIA_ANALYZER_BUDGET", { reason: reservation.reason, retryAfterMs: reservation.retryAfterMs });
           message.mediaAnalysis = restoreMediaAnalysis(entry.mediaAnalysis) ?? compactMediaAnalysis(null, "budget");
         } else {
-          const analysisProgress = attachmentProgress ?? beginTurnProgress(routed.conversationKey);
+          const analysisProgress = attachmentProgress ?? beginTurnProgress(routed.conversationKey, turnContext);
           activeMediaAnalyses.set(entry.id, {
             controller: turnController,
             chatId: routed.conversationKey,
@@ -3141,14 +3219,15 @@ const executeIngressTurn = async (entry, expectedRevision) => {
       }
     }
     if (!turnCurrent()) return null;
-    const priorArtifactContext = activeAgentArtifactDeliveries.get(routed.conversationKey);
-    activeAgentArtifactDeliveries.set(routed.conversationKey, { id: entry.id, revision: expectedRevision });
+    const priorArtifactContext = activeAgentArtifactDeliveries.get(turnContext.laneKey);
+    const artifactContext = { id: entry.id, revision: expectedRevision, turnContext };
+    activeAgentArtifactDeliveries.set(turnContext.laneKey, artifactContext);
     let handled;
     try {
       handled = await agentRuntime.handleMessage(routed.conversationKey, message);
     } finally {
-      if (priorArtifactContext == null) activeAgentArtifactDeliveries.delete(routed.conversationKey);
-      else activeAgentArtifactDeliveries.set(routed.conversationKey, priorArtifactContext);
+      if (priorArtifactContext == null) activeAgentArtifactDeliveries.delete(turnContext.laneKey);
+      else activeAgentArtifactDeliveries.set(turnContext.laneKey, priorArtifactContext);
     }
     if (!turnCurrent()) return null;
     if (handled !== true) throw new Error("agent turn was interrupted before completion");
@@ -3156,30 +3235,30 @@ const executeIngressTurn = async (entry, expectedRevision) => {
   } finally {
     const activeTurn = activeIngressTurns.get(entry.id);
     if (activeTurn?.controller === turnController) activeIngressTurns.delete(entry.id);
-    if (hadPrevious) activeReplyThreads.set(routed.conversationKey, previous);
-    else activeReplyThreads.delete(routed.conversationKey);
+    if (hadPrevious) activeReplyThreads.set(turnContext.laneKey, previous);
+    else activeReplyThreads.delete(turnContext.laneKey);
   }
 };
 pumpIngress = () => {
   if (!ingressDurable) return;
   const current = Date.now();
-  const blockedChats = new Set();
+  const blockedLanes = new Set();
   let nextRetryAt = null;
   for (const entry of ingress) {
     if (entry.kind !== "turn") continue;
-    const chatId = entry.routed.conversationKey;
-    if (blockedChats.has(chatId)) continue;
+    const laneKey = ingressLaneForEntry(entry);
+    if (blockedLanes.has(laneKey)) continue;
     if (runningIngress.has(entry.id)) {
-      blockedChats.add(chatId);
+      blockedLanes.add(laneKey);
       continue;
     }
     if (Number(entry.retryAt) > current) {
-      blockedChats.add(chatId);
+      blockedLanes.add(laneKey);
       nextRetryAt = nextRetryAt == null ? entry.retryAt : Math.min(nextRetryAt, entry.retryAt);
       continue;
     }
     const scheduledRevision = ingressRevision(entry);
-    const task = dispatcher.run(chatId, async () => {
+    const task = dispatcher.run(laneKey, async () => {
       try {
         let completedRevision = scheduledRevision;
         if (!Number.isSafeInteger(entry.completedAt) || entry.completedAt <= 0) {
@@ -3205,7 +3284,7 @@ pumpIngress = () => {
       break;
     }
     runningIngress.add(entry.id);
-    blockedChats.add(chatId);
+    blockedLanes.add(laneKey);
     task.catch(() => {}).finally(() => {
       runningIngress.delete(entry.id);
       pumpIngress();
@@ -3222,24 +3301,25 @@ const leaseBridgeIngress = async (limit) => mutateIngress(async () => {
   if (!ingressDurable) return [];
   const current = Date.now();
   const leased = [];
-  // One framework turn per native chat at a time. Besides preserving ordered
-  // model semantics, this prevents two workers from competing for one live
-  // placeholder/thread-root map in a busy group channel.
-  const occupiedChats = new Set(ingress
+  // One framework turn per native thread/session lane at a time. The live
+  // placeholder and reply-root state use that same key, so workers in two
+  // channel threads can safely overlap without cross-finalizing a bubble.
+  const occupiedLanes = new Set(ingress
     .filter((entry) => entry.kind === "bridge" && Number(entry.leaseUntil) > current)
-    .map((entry) => entry.routed.conversationKey));
+    .map((entry) => ingressLaneForEntry(entry)));
   for (const entry of ingress) {
     if (leased.length >= limit) break;
     if (entry.kind !== "bridge" || Number(entry.leaseUntil) > current) continue;
-    if (occupiedChats.has(entry.routed.conversationKey)) continue;
+    const laneKey = ingressLaneForEntry(entry);
+    if (occupiedLanes.has(laneKey)) continue;
     entry.leaseId = randomUUID();
     entry.leaseUntil = current + leaseMs;
-    const pending = bridgePendingEdits.get(entry.routed.conversationKey);
+    const pending = bridgePendingEdits.get(laneKey);
     if (pending != null && (pending.deliveryId !== entry.id || pending.leaseId !== entry.leaseId)) {
-      cancelBridgePendingEdit(entry.routed.conversationKey, pending);
+      cancelBridgePendingEdit(laneKey, pending);
     }
     leased.push(entry);
-    occupiedChats.add(entry.routed.conversationKey);
+    occupiedLanes.add(laneKey);
   }
   if (leased.length === 0) return [];
   const saved = await persistCritical();
@@ -3256,10 +3336,11 @@ const leaseBridgeIngress = async (limit) => mutateIngress(async () => {
   ingressDurable = true;
   for (const entry of leased) {
     const chatId = entry.routed.conversationKey;
+    const turnContext = bindLiveReplyTarget(turnContextForRouted(entry.routed));
     const guard = () => bridgeLeaseIsActive(chatId, entry.id, entry.leaseId);
-    bridgeReplyThreads.set(chatId, entry.routed.replyTarget.threadRootId ?? null);
+    bridgeReplyThreads.set(turnContext.laneKey, turnContext.threadRootId);
     bestEffortTyping(chatId, { guard });
-    armThinking(chatId, { guard });
+    armThinking(chatId, { guard, turnContext });
   }
   return leased.map((entry) => ({
     ...bridgeInboundWithMedia(entry.routed),
@@ -3293,12 +3374,13 @@ const updateBridgeLeases = async (claims, acknowledge) => mutateIngress(async ()
     for (const entry of acknowledged) protocol.unpinConversation(entry.routed.conversationKey);
     for (const entry of acknowledged) {
       const chatId = entry.routed.conversationKey;
+      const turnContext = turnContextForRouted(entry.routed);
       const stillLeased = ingress.some((candidate) => candidate.kind === "bridge"
-        && candidate.routed.conversationKey === chatId
+        && ingressLaneForEntry(candidate) === turnContext.laneKey
         && Number(candidate.leaseUntil) > Date.now());
       if (!stillLeased) {
-        bridgeReplyThreads.delete(chatId);
-        disarmThinking(chatId);
+        bridgeReplyThreads.delete(turnContext.laneKey);
+        disarmThinking(chatId, turnContext);
       }
     }
     knownChats.trim();
@@ -3313,7 +3395,7 @@ const updateBridgeLeases = async (claims, acknowledge) => mutateIngress(async ()
   return { changed: 0, durable: false };
 });
 const finalizeBridgeEdits = async (claims) => {
-  const chats = new Set();
+  const pendingClaims = [];
   const current = Date.now();
   for (const claim of claims) {
     if (claim == null || typeof claim.delivery_id !== "string" || typeof claim.lease_id !== "string") continue;
@@ -3321,20 +3403,21 @@ const finalizeBridgeEdits = async (claims) => {
       && candidate.id === claim.delivery_id
       && candidate.leaseId === claim.lease_id
       && Number(candidate.leaseUntil) > current);
-    if (entry != null) chats.add(`${entry.routed.conversationKey}\u0000${claim.delivery_id}\u0000${claim.lease_id}`);
+    if (entry != null) pendingClaims.push(entry);
   }
-  for (const packed of chats) {
-    const [chatId, deliveryId, leaseId] = packed.split("\u0000");
-    const edit = bridgePendingEdits.get(chatId);
-    // A chat may be re-leased after a worker expires. Never let the old
+  for (const entry of pendingClaims) {
+    const chatId = entry.routed.conversationKey;
+    const turnContext = turnContextForRouted(entry.routed);
+    const edit = bridgePendingEdits.get(turnContext.laneKey);
+    // A lane may be re-leased after a worker expires. Never let the old
     // worker's ACK promote a frame belonging to a different claim.
-    if (edit == null || edit.deliveryId !== deliveryId || edit.leaseId !== leaseId
-        || !bridgePendingEditIsActive(chatId, edit)) continue;
-    const placeholder = await takeLivePlaceholder(chatId);
+    if (edit == null || edit.deliveryId !== entry.id || edit.leaseId !== entry.leaseId
+        || !bridgePendingEditIsActive(turnContext.laneKey, edit)) continue;
+    const placeholder = await takeLivePlaceholder(chatId, turnContext);
     // `takeLivePlaceholder` can await its delayed creation; the lease may
     // have changed while it did so. Do not even retire a placeholder on
     // behalf of an old worker.
-    if (!bridgePendingEditIsActive(chatId, edit)) continue;
+    if (!bridgePendingEditIsActive(turnContext.laneKey, edit)) continue;
     if (placeholder != null && bareHex(placeholder.handle.messageId) !== bareHex(edit.messageId)) {
       // The framework chose to stream an earlier bot message rather than the
       // current placeholder. Retire the placeholder so it never dangles.
@@ -3344,10 +3427,10 @@ const finalizeBridgeEdits = async (claims) => {
       // default guard and leave the bubble dangling.
       await placeholder.handle.finalize("✓", { guard: null });
     }
-    await liveReplies.finalizeExisting(chatId, edit.messageId, edit.text, {
-      guard: () => bridgePendingEditIsActive(chatId, edit),
+    await liveReplies.finalizeExisting(turnContext.laneKey, edit.messageId, edit.text, {
+      guard: () => bridgePendingEditIsActive(turnContext.laneKey, edit),
     });
-    cancelBridgePendingEdit(chatId, edit);
+    cancelBridgePendingEdit(turnContext.laneKey, edit);
   }
 };
 // A bridge must never receive the encrypted HOP ticket. Give each capability
@@ -3499,6 +3582,9 @@ const validateBridgeOutboundClaim = (body, chatId, request) => {
 const bridgeClaimGuard = (claim, chatId) => claim?.entry == null
   ? null
   : () => bridgeLeaseIsActive(chatId, claim.entry.id, claim.entry.leaseId);
+const bridgeTurnContextForClaim = (claim, chatId, threadRootId = null) => claim?.entry == null
+  ? createTurnContext(chatId, threadRootId)
+  : turnContextForRouted(claim.entry.routed);
 const staleBridgeClaimError = () => {
   const error = new Error("delivery lease is stale or has been revoked");
   error.code = "T3AMS_BRIDGE_LEASE_STALE";
@@ -3658,6 +3744,10 @@ const bridge = http.createServer(async (request, response) => {
       if (body.thread_root_id != null && typeof body.thread_root_id !== "string") {
         return json(response, 400, { success: false, error: "thread_root_id must be a string" });
       }
+      const requestedRoot = body.thread_root_id == null ? null : bareHex(body.thread_root_id);
+      if (requestedRoot != null && !/^[0-9a-f]{64}$/.test(requestedRoot)) {
+        return json(response, 400, { success: false, error: "thread_root_id must be a 32-byte hexadecimal message ID" });
+      }
       const editOf = body.edit_of == null ? null : bareHex(body.edit_of);
       if (editOf != null && !/^[0-9a-f]{64}$/.test(editOf)) {
         return json(response, 400, { success: false, error: "edit_of must be a 32-byte hexadecimal message ID" });
@@ -3674,37 +3764,51 @@ const bridge = http.createServer(async (request, response) => {
       }
       if (editOf != null) {
         if (!hasText || filePath != null) return json(response, 400, { success: false, error: "edits require text and cannot include a file" });
-        if (!isBotIssuedMessage(chatId, editOf)) {
+        const turnContext = bindLiveReplyTarget(bridgeTurnContextForClaim(claim, chatId, requestedRoot));
+        // Manual/proactive bridge calls retain their historical ability to
+        // edit any bot-issued message in the chat. A delivery lease is
+        // narrower: its worker may only edit a bubble issued in that lane.
+        if (!isBotIssuedMessage(chatId, editOf, claim.entry == null ? undefined : turnContext)) {
           return json(response, 409, { success: false, error: "edit_of must name a message issued by this bot process" });
         }
-        disarmThinking(chatId);
+        disarmThinking(chatId, turnContext);
         const pending = {
           messageId: editOf,
           text,
+          chatId,
           deliveryId: claim.entry?.id ?? null,
           leaseId: claim.entry?.leaseId ?? null,
         };
-        bridgePendingEdits.set(chatId, pending);
-        liveReplies.throttledEdit(chatId, editOf, text, {
+        bridgePendingEdits.set(turnContext.laneKey, pending);
+        liveReplies.throttledEdit(turnContext.laneKey, editOf, text, {
           // Native/manual bridge calls retain their historical no-lease
           // behavior; harness brains always have the claim captured above.
-          guard: claim.entry == null ? null : () => bridgePendingEditIsActive(chatId, pending),
+          guard: claim.entry == null ? null : () => bridgePendingEditIsActive(turnContext.laneKey, pending),
         });
         return json(response, 200, { success: true, message_id: editOf, coalesced: true });
       }
-      const root = body.thread_root_id == null
+      const requestedReplyRoot = requestedRoot == null
         ? protocol.replyThreadFor(chatId, replyToId)
-        : bareHex(body.thread_root_id);
-      if (root != null && !/^[0-9a-f]{64}$/.test(root)) return json(response, 400, { success: false, error: "thread_root_id must be a 32-byte hexadecimal message ID" });
-      disarmThinking(chatId);
-      cancelBridgePendingEdit(chatId);
+        : requestedRoot;
+      // A claimed worker owns one durable ingress lane.  Its optional
+      // `reply_to`/`thread_root_id` fields are useful for proactive/manual
+      // bridge calls, but must not let a worker holding a thread-A lease
+      // publish into thread B.  Keep the route from the immutable claim and
+      // use the request only when no lease is involved.
+      const turnContext = bindLiveReplyTarget(bridgeTurnContextForClaim(claim, chatId, requestedReplyRoot));
+      const root = bridgeReplyThreadRootForT3ams(
+        claim.entry == null ? null : turnContext,
+        requestedReplyRoot,
+      );
+      disarmThinking(chatId, turnContext);
+      cancelBridgePendingEdit(turnContext.laneKey);
       if (filePath != null) {
         let file;
         try { file = fileStore.get(fileNamespaceForChat(chatId), filePath); }
         catch (error) { return json(response, fileBridgeStatus(error), { success: false, error: String(error?.message ?? error).slice(0, 300) }); }
         if (file == null) return json(response, 404, { success: false, error: "file not found" });
         assertBridgeClaimCurrent(claimGuard);
-        const placeholder = await takeLivePlaceholder(chatId);
+        const placeholder = await takeLivePlaceholder(chatId, turnContext);
         if (placeholder != null) {
           // Attachments cannot be added by an edit, so keep the live message
           // as a clear delivery status while the actual rich-file message is
@@ -3719,6 +3823,7 @@ const bridge = http.createServer(async (request, response) => {
             size: file.size,
             text: hasText ? text : file.path,
             threadRootId: root,
+            turnContext,
             beforeSend: async () => assertBridgeClaimCurrent(claimGuard),
             guard: claimSubmissionGuard(claimGuard),
           });
@@ -3740,14 +3845,14 @@ const bridge = http.createServer(async (request, response) => {
       if (parts.length > 1) log("T3AMS_REPLY_CHUNKED", { chatId, parts: parts.length, chars: text.length });
       let firstId = null;
       assertBridgeClaimCurrent(claimGuard);
-      const placeholder = await takeLivePlaceholder(chatId);
+      const placeholder = await takeLivePlaceholder(chatId, turnContext);
       if (placeholder != null) {
         // A bridge lease records the triggering thread before the harness
         // begins work, so the placeholder is already in the correct T3ams
         // reply/thread. `reply_to` is normally supplied by both shipped
         // adapters and must not force a redundant \"✓\" plus a second bubble.
         firstId = (await placeholder.handle.finalize(parts[0], { guard: claimGuard })).messageId;
-        noteBotIssuedMessage(chatId, firstId);
+        noteBotIssuedMessage(chatId, firstId, turnContext);
       }
       for (const [index, part] of parts.entries()) {
         if (index === 0 && firstId != null) continue;
@@ -3756,7 +3861,7 @@ const bridge = http.createServer(async (request, response) => {
           threadRootId: root,
           guard: claimSubmissionGuard(claimGuard),
         });
-        noteBotIssuedMessage(chatId, sent.messageId);
+        noteBotIssuedMessage(chatId, sent.messageId, createTurnContext(chatId, root));
         if (index === 0) firstId = sent.messageId;
       }
       return json(response, 200, { success: true, message_id: firstId, ...(parts.length > 1 ? { parts: parts.length } : {}) });

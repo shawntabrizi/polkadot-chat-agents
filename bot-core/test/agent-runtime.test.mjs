@@ -147,6 +147,40 @@ test("a transport can isolate model sessions while keeping one delivery target",
   assert.doesNotMatch(deliveries[1].text, /\/help/);
 });
 
+test("an opaque delivery context follows one turn without entering the model prompt", async () => {
+  const began = [];
+  const delivered = [];
+  const prompts = [];
+  const context = Object.freeze({ chatId: "t3ams:channel:one", laneKey: "lane:thread-a", threadRootId: "a" });
+  const h = makeRuntime({
+    renderMessage: (message) => {
+      prompts.push(message);
+      return message.text;
+    },
+    chat: {
+      sendText: async () => {},
+      deliver: async (peer, text, supplied) => delivered.push({ peer, text, supplied }),
+      beginTurn: (peer, supplied) => {
+        began.push({ peer, supplied });
+        return null;
+      },
+    },
+  });
+
+  await h.runtime.handleMessage("t3ams:channel:one", {
+    text: "reply in the first thread",
+    messageId: "M1",
+    kind: "text",
+    sessionKey: "lane:thread-a",
+    deliveryContext: context,
+  });
+
+  assert.deepEqual(began.map((call) => call.supplied), [context]);
+  assert.deepEqual(delivered.map((call) => call.supplied), [context]);
+  assert.equal(prompts[0]?.deliveryContext, undefined);
+  assert.equal(prompts[0]?.text, "reply in the first thread");
+});
+
 test("commands answer via sendText without spawning the engine", async () => {
   const h = makeRuntime({ script: "exit 9" }); // would fail loudly if spawned
   await h.runtime.handleMessage("peer", { text: "/ping", messageId: "M1", kind: "text" });
