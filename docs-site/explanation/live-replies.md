@@ -4,17 +4,17 @@ Status: implemented (bot-core lifecycle + bridge auto-upgrade + Hermes
 `edit_message`; see "Implementation notes" at the bottom). This document keeps
 the research and constraints that produced the design.
 
-## Problem
+## Problem this solved
 
-Today a slow turn produces two messages: a throwaway "thinking…" text after
+Before live replies, a slow turn produced a throwaway "thinking..." text after
 `BOT_THINKING_AFTER_MS`, then the answer as a separate bubble. The thinking
-message never resolves — it just sits there — and between the two the chat
-looks stalled. Mature bridges (Takopi, Hermes, OpenClaw, Claude's own remote
-surfaces) all converge on the same fix: post one placeholder immediately and
-edit it in place through the turn's lifecycle until it *becomes* the answer.
+message never resolved, and the conversation looked stalled between the two.
+Mature bridges (Takopi, Hermes, OpenClaw, Claude's own remote surfaces) converge
+on one better pattern: post a placeholder and edit it through the turn until it
+becomes the answer.
 
-We now have the primitive (message edits, content kind 12), so this proposes
-the Polkadot-native version of that pattern.
+bot-core now implements the Polkadot-native version. The rest of this page
+records the constraints that shaped it.
 
 ## What the research established
 
@@ -37,15 +37,12 @@ facts:
   is stored but invisible; no placeholder is created).
 
 **What edits cost on the statement store:**
-- One statement per (signer, channel); a new statement replaces the previous
-  slot (priority/expiry must strictly increase). The bot sends every message
-  for a peer on one request channel, one message per statement, with **no
-  unacked-backlog batching** (unlike the app, which resends its whole unacked
-  batch in every statement).
-- Therefore a burst of edits collapses to "latest wins" for free — but it also
-  means **an edit submitted before the app fetched the placeholder replaces
-  the placeholder**, the original bubble never exists, and every later edit is
-  invisible (dangling). The placeholder must be ACKed before the first edit.
+- One current statement occupies each (signer, channel) slot. Before an ACK,
+  bot-core can losslessly extend that statement into a superset batch; later
+  messages queue behind it.
+- An edit sent before the app fetched its placeholder can still replace the
+  placeholder in that slot, leaving an invisible dangling edit. A bot-created
+  placeholder therefore waits for its ACK before the first edit.
 - Submitting faster than the app's fetch cadence is pure waste; ~one edit per
   few seconds is the useful ceiling.
 
@@ -67,17 +64,17 @@ facts:
 - *Claude remote*: always show what's happening now; stream, don't batch;
   collapse detail, surface decisions; notify only on completion/blocked.
 
-## Proposed design
+## Implemented design
 
 ### Turn lifecycle (bot-core, all brains)
 
 ```
 t=0     inbound message ACKed (existing), brain starts
 t<5s    brain finishes fast -> ONE normal message, no machinery (most turns)
-t=5s    placeholder sent:  "⏳ working…"           (replaces BOT_THINKING_TEXT)
+t=5s    placeholder sent: the configured BOT_THINKING_TEXT
         -> record its messageId + requestId, await the app's session ACK
 ACKed   edits unlocked
-t=5s+   progress edits, coarse:  "⏳ working · 24s · step 3
+t=5s+   heartbeat and tool progress may edit it to: "⏳ working · 24s · step 3
                                   ▸ reading the docs you sent
                                   ▸ searching my notes"
 done    final edit: placeholder becomes the answer text (spinner dropped)
@@ -100,25 +97,23 @@ error   final edit: placeholder becomes the error/apology
   the parts ride the per-peer outbound lane (`lib/outbound-lanes.mjs`) so they
   arrive in order and never clobber each other in the channel slot.
 
-### Edit budget and cadence (protocol guardrails, enforced in bot-core)
+### Edit cadence (protocol guardrails, enforced in bot-core)
 
-- Min interval between edit submits per peer: **3s** (config
+- Min interval between edit submits for one target message: **3s** (config
   `BOT_LIVE_EDIT_MIN_MS`), latest-wins coalescing (a newer frame replaces the
-  queued one), skip-if-unchanged.
-- Hard cap per turn: **~6 edits** (config `BOT_LIVE_EDIT_MAX`) — bounds the
-  app-side edit-history rows. When the cap is hit, only the final edit
-  remains allowed.
-- Edits gated on placeholder ACK (see below). All limits live in bot-core so
-  no harness can violate protocol constraints.
+  queued one), skip-if-unchanged. The interval doubles every three edits up to
+  `BOT_LIVE_EDIT_MAX_MS` (15s by default); there is no fixed edit-count cap.
+- Bot-created placeholders are gated on their own ACK. A bridge edit of an
+  existing message is treated as already deliverable, so its lane is throttled
+  but does not wait for a new ACK.
 
-### New bot-core plumbing
+### Implementation
 
-1. **Outbound ACK tracking** (the one new protocol piece): the bot currently
-   ignores session `response` payloads from the peer. Track submitted
-   requestIds -> on matching response, resolve. Used to unlock edits; also
-   generally useful (delivery state).
+1. **Outbound ACK tracking:** outbound lanes resolve a submitted request once
+   the matching session response arrives. Live placeholders use that signal to
+   unlock edits.
 2. **Live-message outbox**: per-peer single-flight editor with the throttle,
-   coalescing, budget, and ACK gate above. `sendMessage` and the bridge both
+   coalescing, and ACK gate above. `sendMessage` and the bridge both
    route edits through it.
 3. **Thinking-ack replacement**: `armThinking` sends the placeholder via the
    outbox and hands the turn a live-message handle; direct brains finish by
@@ -127,37 +122,35 @@ error   final edit: placeholder becomes the error/apology
 ### Bridge surface (harnesses)
 
 - `POST /send { chat_id, text, edit_of }` already exists; edits now pass
-  through the outbox (throttled/coalesced/gated — harnesses may fire at
-  Hermes' native 0.8s cadence and bot-core down-samples safely).
-- `GET /health` advertises `{ supports_edit: true, live_edit_min_ms, ... }` so
-  adapters can gate features (OpenClaw-style capability flag).
-- Optional convenience: `POST /send { ..., live: "progress" | "final" }` to
-  let bot-core mark frames (progress frames may be dropped under budget;
-  final never is).
+  through the outbox (throttled/coalesced; bot-created placeholders are
+  ACK-gated — harnesses may fire at Hermes' native 0.8s cadence and bot-core
+  down-samples safely).
+- `GET /health` advertises
+  `live: { supportsEdit: true, minEditMs, placeholderAfterMs }` so adapters can
+  gate features.
 
-### Harness phases
+### Framework behavior
 
-- **Phase A — bot-core lifecycle (direct brains + all harnesses benefit):**
-  placeholder -> final edit for every slow turn, error states resolve the
-  placeholder. This alone kills the two-message pattern everywhere.
-- **Phase B — Hermes:** implement `edit_message` in the adapter (maps to
-  `/send` + `edit_of`). That single method switches on Hermes' entire
-  progressive-streaming machinery (placeholder, streamed partials with cursor,
-  tool-progress bubbles) with bot-core's outbox enforcing safe cadence.
-- **Phase C — OpenClaw:** declare edit capability in the plugin and wire the
-  progress-draft/partial mode to bridge edits.
-- **Phase D (optional) — richer direct-brain progress:** run `claude` with
-  `--output-format stream-json` to surface tool-step lines Takopi-style
-  (`▸ running tests…`) in the progress frames.
+- **bot-core lifecycle:** direct brains and harnesses get a placeholder that
+  becomes a final edit for slow turns; error states resolve it too.
+- **Hermes:** its adapter implements `edit_message` through `/send` plus
+  `edit_of`, so Hermes can stream progress while bot-core applies the safe
+  cadence.
+- **OpenClaw:** its channel currently sends plain replies only. Its first plain
+  send still auto-upgrades the bot-core placeholder into the final answer, but
+  it does not expose native edit streaming yet.
+- **Direct brains:** stream-json tool actions become the short progress lines
+  shown above.
 
 ## Failure modes addressed
 
-- Thinking message that never resolves (today's behavior) — placeholder always
+- Thinking message that never resolves — placeholder always
   reaches a terminal state (answer, error, or timeout text).
 - App offline mid-stream — channel replacement converges to the latest frame;
   un-ACKed placeholder degrades to a plain final message.
-- Harness spamming edits — bot-core outbox throttles/coalesces/caps.
-- Edit-history bloat — hard per-turn budget.
+- Harness spamming edits — bot-core outbox throttles and coalesces.
+- Edit-history bloat — escalating cadence and latest-wins coalescing reduce
+  intermediate frames, though there is not yet a fixed per-turn count cap.
 - Push spam — non-issue today (bot sends no pushes); documented as a guard for
   the day push support lands.
 
@@ -194,7 +187,7 @@ sender-generated via the notify relay). When either lands, revisit:
   `deliverToChat`/`beginTurnProgress` (the direct-engine brain reaches these
   through the agent runtime's `chat` surface), heartbeat frames
   (`BOT_LIVE_HEARTBEAT_MS`), tool events as progress lines
-  (`BOT_LIVE_PROGRESS=0` to disable), bridge auto-upgrade (first plain
+  (`BOT_LIVE_PROGRESS=0` disables tool-action frames), bridge auto-upgrade (first plain
   `/send` finalizes the open placeholder; a `reply_to`/`edit_of` send retires
   it to `✓`), `edit_of` routed through the throttled lane, `/health.live`
   capability advertisement. The peer's session-response ACKs are consumed by

@@ -1,6 +1,7 @@
 # Deploy to a server
 
-`deploy` targets any machine reachable over SSH that has Docker installed:
+Run `deploy` from a machine with `ssh`, `scp`, and `rsync`. It targets a
+reachable server with Docker Engine and the Docker Compose plugin:
 
 ```bash
 pca deploy mycoolbot --host root@your-server
@@ -31,9 +32,9 @@ OAuth home — it can't read the seed or the session state. The container is
 read-only except for those volumes and a size-capped `tmpfs`.
 
 After a direct deployment, run the printed one-time CLI login command (for a
-claude bot, `claude setup-token` inside the container) so the agent can
-authenticate through its mounted OAuth home. Those credentials survive restarts
-and redeploys.
+Claude bot, `claude login` through the printed `docker exec` command) so the
+agent can authenticate through its mounted OAuth home. Those credentials survive
+restarts and redeploys.
 
 ## Bridge bots
 
@@ -52,3 +53,7 @@ See [Agent frameworks](/guide/harnesses) for the full setup.
 Whoever has that file is the bot. It also generates a mandatory
 `BOT_BRIDGE_TOKEN` so the local HTTP bridge is authenticated even on loopback.
 Every field is documented in [Configuration](/reference/configuration).
+
+Stopping a deployment stops its containers but retains its server-side state
+volume and `bot.env`. Back it up before moving a bot; remove the remote state
+directory deliberately when retiring one.

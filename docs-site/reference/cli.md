@@ -29,7 +29,7 @@ every command, including `project`, `model`, and `storage`.
 | `--owner <who>` | create | Lock to one account (username, SS58, or hex). |
 | `--allow a,b` | create | Allowlist several accounts. |
 | `--public` | create | Allow anyone to message it (required for a paid brain left open). |
-| `--username <u>` / `--digits NN` | create | Network username base / requested discriminator. |
+| `--username <u>` / `--digits NN` | create | Network username base (six or more lowercase letters) / requested discriminator. A separate `--username` is required when the bot name contains digits or hyphens. |
 | `--model <m>` | create, run, deploy | Pin the model (saved at create; overrides per run/deploy). |
 | `--greet` | run, deploy | Message allowlisted owners once on startup. |
 | `--network paseo` | create | Use the named default network. Private bots on this profile receive automatic testnet file-delivery setup. |
@@ -37,7 +37,7 @@ every command, including `project`, `model`, and `storage`.
 | `--wait <seconds>` | create, register | How long to wait for on-chain registration confirmation. |
 | `--host <ssh>` | deploy, logs, status, stop | Target server (saved after first deploy). |
 | `--harness openclaw or hermes` | deploy | Agent framework for a bridge bot. |
-| `--safe-tools` | deploy | Restrict a direct engine to a read/write/edit/bash allowlist. |
+| `--safe-tools` | deploy | Disable full autonomy. Claude then uses its configured allowlist; Codex and OpenCode need their own sandbox or workspace controls. |
 | `--dry-run` | deploy | Print the generated files without deploying. |
 
 Bots live in `~/.pca/bots/<name>/` (override with `PCA_BOTS_DIR`).

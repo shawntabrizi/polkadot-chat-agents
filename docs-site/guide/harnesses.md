@@ -60,6 +60,13 @@ The bridge never accepts an arbitrary host path for delivery. `GET /health`
 reports the derived file-delivery allowance account and whether upload is
 configured.
 
+## Bundled framework deployments
+
+The generated Hermes and OpenClaw deployments use the bundled sibling plugin
+directories. Run `pca deploy ... --harness hermes` or `--harness openclaw` from
+a full source checkout with its dependencies installed; a global or npm-only
+installation does not include those plugin source directories.
+
 ## Hermes
 
 Hermes (NousResearch/hermes-agent) is a Python agent with a platform-plugin
@@ -184,9 +191,11 @@ Related settings:
   Switching is locked by default. `allow` persists an approved list;
   `open` is an explicit option for allowlisted bots only. Public bots cannot
   allow unrestricted switching.
-- Tools are on by default (`BOT_AI_ALLOWED_TOOLS`, default `Bash,Read,Edit,Write`).
-  `BOT_AI_SKIP_PERMISSIONS=1` grants full autonomy (all tools) — safe because a
-  deployed engine runs inside its own container (see the safety model below).
+- Claude uses `BOT_AI_ALLOWED_TOOLS` (default `Bash,Read,Edit,Write`) when it
+  is not in full-autonomy mode. `BOT_AI_SKIP_PERMISSIONS=1` grants full autonomy
+  to a deployed engine inside its container. Codex uses `workspace-write` and
+  OpenCode follows its own CLI mode when that flag is disabled; neither consumes
+  the Claude allowlist.
 - The agent works in a persistent non-secret workspace (`BOT_AI_WORKSPACE`,
   defaulting to a sibling of `BOT_STATE_DIR`) that survives restarts.
 - `BOT_AI_CMD`/`BOT_AI_ARGS` wire in a custom CLI that speaks claude-shaped
@@ -196,9 +205,10 @@ Related settings:
   in-chat commands are direct-engine-only: /help, /reset (start a fresh
   session), /stop (cancel the current turn), /model [name|default], /ping.
   Bridge bots pass those remaining slash commands through to the framework.
-- No wall-clock timeout — a long build/test is legitimate. An idle-silence
-  backstop (`BOT_AI_IDLE_TIMEOUT_MS`, default 10 min of zero output) kills a
-  wedged turn and unblocks the peer; `/stop` is the user's cancel lever.
+- A direct turn has a configurable hard cap (`BOT_AI_MAX_MS`, default one
+  hour) as well as an idle-silence backstop (`BOT_AI_IDLE_TIMEOUT_MS`, default
+  10 min of zero output). Either one kills a wedged turn and unblocks the peer;
+  `/stop` is the user's cancel lever.
 - `BOT_THINKING_AFTER_MS` (default 5000) and `BOT_THINKING_TEXT` control the
   live placeholder posted when a reply is slow (see docs/LIVE-REPLIES.md);
   setting the text empty disables it.
@@ -221,8 +231,9 @@ mount is read-only; the container uses an init reaper, no-new-privileges, and
 process/memory/CPU ceilings. Provider API keys are not injected into the agent
 process; authenticate the CLI once through its native OAuth login in `/home/node`.
 An agent with tool access can still use its own provider credentials, so restrict
-senders with `--owner`/`--allow` and use `--safe-tools` when full autonomy is not
-appropriate. Sessions and the workspace persist across redeploys.
+senders with `--owner`/`--allow`. `--safe-tools` applies Claude's configured
+allowlist; Codex and OpenCode still need a disposable workspace or their own
+engine-specific controls. Sessions and the workspace persist across redeploys.
 
 An AI brain spends quota, so `create` requires an allowlist or an explicit
 `--public`.

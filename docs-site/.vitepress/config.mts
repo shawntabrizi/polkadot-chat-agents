@@ -24,7 +24,7 @@ export default defineConfig({
     nav: [
       { text: "Guide", link: "/guide/introduction", activeMatch: "/guide/" },
       { text: "Reference", link: "/reference/configuration", activeMatch: "/reference/" },
-      { text: "Explanation", link: "/explanation/architecture", activeMatch: "/explanation/" },
+      { text: "Explanation", link: "/explanation/how-it-works", activeMatch: "/explanation/" },
       { text: "npm", link: "https://www.npmjs.com/package/polkadot-chat-agents" },
     ],
 

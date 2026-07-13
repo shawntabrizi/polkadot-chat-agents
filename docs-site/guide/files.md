@@ -10,6 +10,10 @@ it into a private working directory for that turn, so a request such as "read
 this brief and turn it into a plan" works naturally. That temporary copy is
 removed when the turn finishes.
 
+The raw download is kept separately in the bot's private media cache for up to
+`BOT_MEDIA_TTL_HOURS` (48 hours by default), subject to its media-store limits.
+It is not a saved chat file and is evicted automatically.
+
 This is the default for anything the bot only needs once.
 
 ## Keep a file with the chat
@@ -40,8 +44,9 @@ Use these commands in the chat:
 | `/file get <path>` | Send a saved file back as an attachment. |
 | `/file rm <path>` | Remove a saved file. |
 
-Saved files remain until you remove them, delete the bot, or lose its persistent
-state volume. Back up the bot's state if these files matter.
+Saved files remain until you remove them or erase the persistent state volume.
+A deployed bot's state volume survives `pca stop`, so back it up before moving
+a bot and manage the server-side state deliberately when retiring one.
 
 ## Returning a saved file
 
@@ -53,7 +58,8 @@ without a separate portal step. `pca create`, `pca register`, and a normal
 (non-dry-run) `pca deploy` use the local CLI to check a separate file-delivery
 account and request or refresh its fixed Paseo testnet allowance when needed.
 The allowance belongs to that separate account, not the bot's chat wallet, and
-the bot seed and your mnemonic never leave the local CLI.
+the automatic Paseo testnet request never sends the bot seed or a production
+person proof to the faucet.
 
 Check the allowance only when file return is not ready:
 
@@ -83,14 +89,15 @@ separately if the status still needs it.
 
 The automatic allowance is limited to private bots on the named Paseo testnet
 profile. Public bots and custom network endpoints are excluded so strangers
-cannot spend a finite upload allowance by default. A public bot can still
-receive attachments, but keep outbound file delivery disabled unless you have
+cannot spend a finite upload allowance by default. A public bot receives an
+attachment reference, but only downloads its bytes after you configure trusted
+`BOT_HOP_ALLOWED_NODES`; keep outbound file delivery disabled unless you have
 deliberately funded and bounded it.
 
 Production needs an explicit local operator flow with the original
 mnemonic-derived person proof. Keep that proof off the VPS and out of the bot
 runtime. The [configuration reference](/reference/configuration#paseo-testnet-file-delivery)
-has the operator details.
+explains the runtime HOP settings; it does not automate production allocation.
 
 ## Framework bots
 

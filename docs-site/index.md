@@ -19,9 +19,9 @@ hero:
       link: https://github.com/shawntabrizi/polkadot-chat-agents
 
 features:
-  - title: Private by default
+  - title: Private by design
     details: >
-      Only you — or the people you allow — can reach your agents. Every message
+      Choose the people who can reach your agents. Every message
       is end-to-end encrypted, so conversation content is readable only by its
       endpoints.
   - title: No central chat service

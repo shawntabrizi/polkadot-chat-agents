@@ -94,8 +94,9 @@ These were all learned by debugging against the real mobile app:
   statements, and falls back to full cadence (`BOT_POLL_MS`) whenever the
   subscription is unhealthy or disabled (`BOT_SUBSCRIBE=0`). Sweep queries use
   the same chunked `matchAny` batches, so RPC count stays roughly constant as
-  peers accumulate. All dispatch — pages and sweep results — runs through one
-  serial chain, so per-session handling order never interleaves.
+  peers accumulate. Pages and sweep results run through a bounded keyed
+  dispatcher: handling stays ordered within each session while independent
+  sessions can use the configured global worker budget.
 
 ## Messages beyond text
 
@@ -215,9 +216,9 @@ engine/workspace change), and tools run in a persistent workspace.
 `lib/runners.mjs` holds each engine's argv builder + JSONL-event normalizer (to
 one started/action/text/result vocabulary); `lib/agent-runtime.mjs` owns
 everything above it — the shared turn loop (spawn in a process group, stream
-and normalize, feed live-reply progress frames, idle-silence backstop: no
-wall-clock limit; a long build is legitimate, a wedge is killed and the peer
-queue unblocks), all per-peer agent state, and the in-chat commands. The
+and normalize, feed live-reply progress frames, idle-silence backstop, and a
+configurable hard turn cap; a wedge is killed and the peer queue unblocks), all
+per-peer agent state, and the in-chat commands. The
 runtime is transport-blind: index.mjs hands it a three-call `chat` surface
 (sendText / deliver / beginTurn) — the in-process twin of the HTTP bridge that
 serves out-of-process brains. `/stop` cancels a turn (intercepted before the
@@ -315,5 +316,6 @@ app username) or an explicit `--public` for any brain that costs money.
   `/workspace`, `/home/node`, and private per-turn attachment directories. The
   container has an init reaper, no-new-privileges, and process/memory/CPU limits.
   The container remains the tool boundary (open egress, nothing from the host);
-  the allowlist gates who can drive it.
-  `--safe-tools` restricts to a read/write/edit/bash allowlist.
+  the allowlist gates who can drive it. For Claude, `--safe-tools` enables its
+  configured allowlist. Codex and OpenCode need a disposable workspace or
+  container and their engine-specific controls instead.

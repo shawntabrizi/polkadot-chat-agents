@@ -1,7 +1,7 @@
 # Brains & engines
 
 A bot's **brain** is what produces its replies. Pick it with `--brain` at
-`create`, or change it later.
+`create`.
 
 Direct engines run a headless AI-agent CLI as an autonomous agent — verbatim
 prompts, native session memory (`--resume`), and real tools (bash, read, edit,

@@ -37,9 +37,10 @@ deploy that identity.
 
 ## What `create` does
 
-`create` generates the bot's identity, registers a username on the network, and
-restricts the bot so only the `--owner` account can message it. The owner can be
-an app username, an SS58 address, or a 32-byte account id in hex.
+`create` generates the bot's identity and registers a username on the network.
+In the command above, `--owner` restricts the bot so only that account can
+message it. The owner can be an app username, an SS58 address, or a 32-byte
+account id in hex.
 
 It prints a link and a username (for example `mycoolbot.07`). Open the link, or
 search the username in the Polkadot app, and send a message. Registration is
@@ -49,6 +50,12 @@ The number suffix is a network-assigned discriminator, since base names are not
 unique. Pass `--digits NN` to request a specific one; if it is taken, `create`
 says so before registering anything.
 
+The local bot name can include lowercase letters, digits, and hyphens, but a
+registered network username base must be at least six lowercase letters. When a
+bot name contains digits or hyphens, provide a separate valid base such as
+`--username mycoolbot`; use `--no-register` only when you intend to register
+later.
+
 For a private bot on the default Paseo network, `create` also prepares a
 separate testnet account used only to return saved files. The local CLI checks
 and provisions its allowance automatically; no portal visit is part of the
@@ -57,10 +64,11 @@ what to do only if that automatic check is interrupted.
 
 ## Access and cost
 
-Because an AI brain spends your quota, `create` locks the bot to you by default
-— `--owner <who>` or `--allow a,b`, enforced before a message ever reaches the
-brain. Opening it to anyone takes an explicit `--public`, with real cost and
-policy consequences. That decision has its own page:
+Because an AI brain spends your quota, `create` requires `--owner <who>` or
+`--allow a,b`, enforced before a message ever reaches the brain, or an explicit
+`--public`. An `echo` bot can be created open with an empty allowlist. Opening a
+paid bot to anyone has real cost and policy consequences. That decision has its
+own page:
 [Private & public bots](/guide/access).
 
 ## First reply

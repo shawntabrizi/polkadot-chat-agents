@@ -24,5 +24,5 @@ with `/` but isn't command-shaped still goes to the model.
 
 ## Discovery
 
-The very first reply a bot sends a new peer carries a one-time `/help` hint, so
-a user learns the commands exist without having to ask.
+The very first reply a direct-engine bot sends a new peer carries a one-time
+`/help` hint, so a user learns the commands exist without having to ask.

@@ -14,7 +14,7 @@ pca project mybot rm sdk     # remove
 ```
 
 Each registered directory becomes an alias the bot can work in. Aliases are
-validated (lowercase letters, digits, dashes).
+validated (lowercase letters, digits, dashes, and underscores).
 
 ## Switching in chat
 

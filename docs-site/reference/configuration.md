@@ -51,7 +51,7 @@ BOT_BRIDGE_PORT=8799            # port the bridge listens on
 BOT_BRIDGE_TOKEN=Xk3…≥32chars   # shared secret; every bridge request must present it. MANDATORY (process exits without it)
 
 # agent sandboxing (direct engines)
-BOT_AI_SKIP_PERMISSIONS=1       # full tool autonomy (the container IS the sandbox); omit for a read/write/edit/bash allowlist
+BOT_AI_SKIP_PERMISSIONS=1       # full tool autonomy (the container IS the sandbox); see the engine-specific note below for the non-autonomous mode
 BOT_AI_AGENT_UID=1000           # spawned agent CLI is dropped to this uid — cannot read /state or the seed
 BOT_AI_AGENT_GID=1000           # …and this gid (transport stays root solely to hold the seed)
 
@@ -139,6 +139,8 @@ BOT_ALLOWED_PEERS=
 BOT_AI_MODEL=<pinned-low-cost-model>
 BOT_AI_ALLOWED_MODELS=<pinned-low-cost-model>,<second-low-cost-model>
 BOT_AI_SKIP_PERMISSIONS=0
+# Claude honors this allowlist. Codex and OpenCode do not; use a disposable
+# workspace or container and their own engine controls for those engines.
 BOT_AI_ALLOWED_TOOLS=Read
 BOT_AI_MAX_CONCURRENT_TURNS=2
 BOT_AI_MAX_QUEUED_TURNS=20
@@ -154,6 +156,11 @@ BOT_MEDIA_MAX_BYTES=10485760
 BOT_MEDIA_MAX_TOTAL_MB=128
 BOT_MEDIA_MAX_CONCURRENT_DOWNLOADS=1
 BOT_MEDIA_DOWNLOAD_QUEUE_CAP=20
+BOT_MEDIA_MAX_INFLIGHT_BYTES=33554432
+
+# Required before a production bot can download attachment bytes. Use only
+# trusted HOP host suffixes.
+BOT_HOP_ALLOWED_NODES=<trusted-hop-host>
 
 # Keep outbound HOP file delivery disabled. Private Paseo's automatic grant
 # intentionally does not apply to public bots.
@@ -166,6 +173,11 @@ low-privilege model account with spending limits, and firewall management ports.
 Do not publish the authenticated bridge port. The deploy container and resource
 limits help, but they cannot make a sensitive host mount or exposed bridge token
 safe.
+
+`BOT_AI_ALLOWED_TOOLS` is a Claude setting, not a general sandbox. With
+`BOT_AI_SKIP_PERMISSIONS=0`, Codex uses its `workspace-write` sandbox and
+OpenCode follows its own normal permission mode. Keep either one in a disposable
+workspace or container when the bot is public.
 
 ---
 
@@ -237,8 +249,8 @@ variables `pca deploy` writes into `bot.env` automatically.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BOT_AI_ALLOWED_TOOLS` | `Bash,Read,Edit,Write` | Tool allowlist used when permissions are not skipped. |
-| `BOT_AI_SKIP_PERMISSIONS` | `0` | `1` = full tool autonomy (the container is the sandbox). **gen unless --safe-tools** |
+| `BOT_AI_ALLOWED_TOOLS` | `Bash,Read,Edit,Write` | Claude-only `--allowedTools` list when permissions are not skipped. Codex and OpenCode do not consume it. |
+| `BOT_AI_SKIP_PERMISSIONS` | `0` | `1` = full tool autonomy (the container is the sandbox). With `0`, Claude uses its allowlist, Codex uses `workspace-write`, and OpenCode uses its normal CLI mode. **gen unless --safe-tools** |
 | `BOT_AI_AGENT_UID` / `BOT_AI_AGENT_GID` | unset | Drop the spawned agent to this uid/gid so it can't read `/state` or the seed. **gen (deploy: 1000)** |
 | `BOT_AI_IDLE_TIMEOUT_MS` | 600000 | Kill a turn that has emitted nothing for this long (wedge backstop). |
 | `BOT_AI_MAX_MS` | 3600000 | Hard per-turn wall-clock cap. |
@@ -281,6 +293,7 @@ variables `pca deploy` writes into `bot.env` automatically.
 | `BOT_MEDIA_TTL_HOURS` | 48 | Downloaded-blob TTL. |
 | `BOT_MEDIA_MAX_CONCURRENT_DOWNLOADS` | 2 | Concurrent HOP downloads. |
 | `BOT_MEDIA_DOWNLOAD_QUEUE_CAP` | 100 | Download queue depth. |
+| `BOT_MEDIA_MAX_INFLIGHT_BYTES` | max(2 x single-file cap + 4 MiB, 64 MiB) | Reserved in-memory budget across attachment downloads. |
 | `BOT_HOP_TIMEOUT_MS` | 120000 | Per-download deadline. |
 | `BOT_HOP_RPC_FRAME_MAX_BYTES` | 4.5 MB | Max HOP RPC frame. |
 | `BOT_HOP_ALLOW_INSECURE` | `0` | Tests only: permit `ws://` and IP-literal hosts. |
@@ -353,6 +366,7 @@ provisioning. Production allocation remains an explicit local operator flow.
 | `BOT_TOPIC_BATCH` | 16 | Topics per `matchAny` query batch. |
 | `BOT_DISPATCH_CONCURRENCY` | 4 | Global keyed-dispatcher worker budget. |
 | `BOT_DISPATCH_QUEUE_CAP` | 1000 | Dispatcher queue depth. |
+| `BOT_DISPATCH_INPUT_CAP` | `BOT_DISPATCH_QUEUE_CAP` | Maximum statements accepted from one ingress batch before excess are deferred for resend/sweep. |
 | `BOT_WORK_CAP` | 20 | Per-peer in-flight work cap (backpressure). |
 
 ---
