@@ -184,6 +184,72 @@ function flagValue(value, name) {
   return String(value);
 }
 
+// Model identifiers are passed through to the selected agent CLI, so keep the
+// accepted syntax deliberately narrow and reject ambiguous comma-separated
+// values outside of `pca model <bot> allow`.
+const MODEL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$/;
+const MAX_ALLOWED_MODELS = 32;
+function modelName(value, label = "model") {
+  if (value == null || typeof value === "boolean") fail(`${label} requires a value.`);
+  const name = String(value).trim();
+  if (!MODEL_NAME_RE.test(name)) {
+    fail(`Invalid ${label} "${String(value)}". Model names may use letters, digits, ., _, :, /, @, +, and -.`);
+  }
+  return name;
+}
+
+function modelList(value, label = "allowed models") {
+  if (value == null || typeof value === "boolean" || String(value).trim() === "") {
+    fail(`${label} requires one or more comma-separated model names.`);
+  }
+  const models = String(value).split(",").map((entry) => modelName(entry, "model"));
+  if (models.length > MAX_ALLOWED_MODELS) fail(`At most ${MAX_ALLOWED_MODELS} models may be allowed.`);
+  if (new Set(models).size !== models.length) fail("Allowed models must not contain duplicates.");
+  return models;
+}
+
+// `allowedModels` is absent for the default locked policy, [] for an explicit
+// lock, and a non-empty array for a restricted set. `modelSwitching: "open"`
+// is intentionally separate: only that explicit marker opens switching.
+function configuredModelPolicy(cfg) {
+  let allowedModels = null;
+  if (cfg.allowedModels != null) {
+    if (!Array.isArray(cfg.allowedModels)) fail(`Invalid allowedModels in config.json for "${cfg.name ?? "this bot"}".`);
+    if (cfg.allowedModels.length > MAX_ALLOWED_MODELS) fail(`Invalid allowedModels in config.json: at most ${MAX_ALLOWED_MODELS} entries are supported.`);
+    allowedModels = cfg.allowedModels.map((entry) => modelName(entry, "configured model"));
+    if (new Set(allowedModels).size !== allowedModels.length) fail("Invalid allowedModels in config.json: duplicate entries.");
+  }
+  const mode = cfg.modelSwitching ?? null;
+  if (mode != null && mode !== "open") fail(`Invalid modelSwitching in config.json for "${cfg.name ?? "this bot"}".`);
+  if (mode === "open" && allowedModels != null) {
+    fail(`Invalid model policy in config.json for "${cfg.name ?? "this bot"}": open switching cannot also have an allowlist.`);
+  }
+  return { allowedModels, open: mode === "open" };
+}
+
+const isPublicBot = (cfg) => !Array.isArray(cfg.allow) || cfg.allow.length === 0;
+
+function modelPolicyEnvironment(cfg) {
+  const policy = configuredModelPolicy(cfg);
+  if (policy.open) {
+    if (isPublicBot(cfg)) {
+      fail(`"${cfg.name ?? "This bot"}" is public, so unrestricted model switching is not allowed. Use an approved model list or lock switching.`);
+    }
+    return { BOT_AI_MODEL_SWITCHING: "open" };
+  }
+  // Always emit a policy for direct model engines. This makes an old config
+  // with no model fields safely locked instead of inheriting a runtime default.
+  return { BOT_AI_ALLOWED_MODELS: (policy.allowedModels ?? []).join(",") };
+}
+
+function applyModelPolicyEnvironment(env, cfg) {
+  // Local runs begin with the caller's environment. Never let a shell-level
+  // setting silently change the policy saved for this bot.
+  delete env.BOT_AI_ALLOWED_MODELS;
+  delete env.BOT_AI_MODEL_SWITCHING;
+  Object.assign(env, modelPolicyEnvironment(cfg));
+}
+
 function envLine(key, value) {
   const text = String(value ?? "");
   if (/[\0\r\n]/.test(text)) fail(`${key} cannot contain a newline or NUL byte.`);
@@ -463,6 +529,75 @@ function cmdProject(positional) {
   for (const [a, p] of entries) console.log(`  ${a}  ->  ${p}`);
 }
 
+function modelCommandUsage(name = "<botname>") {
+  return `Usage: pca model ${name} [show | set <model> | allow <model-a,model-b> | lock | open]`;
+}
+
+// Operator-owned model configuration for direct CLI engines. Chat users only
+// ever receive the policy this command persists; they cannot broaden it.
+function cmdModel(positional) {
+  const [name, rawAction = "show", value, ...extra] = positional;
+  if (!name) fail(modelCommandUsage());
+  const cfg = readConfig(name);
+  if (!DIRECT_BRAIN_CLIS.has(cfg.brain)) {
+    fail(`Model controls apply only to direct claude, codex, or opencode bots. "${name}" uses the ${cfg.brain} brain.`);
+  }
+  const action = String(rawAction).toLowerCase();
+  const policy = configuredModelPolicy(cfg);
+  const save = (message) => {
+    saveConfig(name, cfg);
+    ok(message);
+    if (cfg.deploy?.host) note(`Redeploy to apply it:  pca deploy ${name} --host ${cfg.deploy.host}`);
+    else note(`Takes effect the next time it runs:  pca run ${name}`);
+  };
+
+  if (action === "show") {
+    if (value || extra.length) fail(modelCommandUsage(name));
+    console.log(`${c(name, "1")} model settings`);
+    console.log(`  default:   ${cfg.model ?? "(CLI default)"}`);
+    if (policy.open) console.log("  switching: open to allowlisted peers");
+    else if (policy.allowedModels?.length) console.log(`  switching: approved models only (${policy.allowedModels.join(", ")})`);
+    else console.log(`  switching: locked${policy.allowedModels == null ? " (default)" : ""}`);
+    return;
+  }
+
+  if (action === "set") {
+    if (!value || extra.length) fail(modelCommandUsage(name));
+    cfg.model = modelName(value);
+    save(`Default model for "${name}" set to ${cfg.model}.`);
+    return;
+  }
+
+  if (action === "allow") {
+    if (!value || extra.length) fail(modelCommandUsage(name));
+    cfg.allowedModels = modelList(value);
+    delete cfg.modelSwitching;
+    save(`Model switching for "${name}" is limited to: ${cfg.allowedModels.join(", ")}.`);
+    return;
+  }
+
+  if (action === "lock") {
+    if (value || extra.length) fail(modelCommandUsage(name));
+    cfg.allowedModels = [];
+    delete cfg.modelSwitching;
+    save(`Model switching for "${name}" is locked.`);
+    return;
+  }
+
+  if (action === "open") {
+    if (value || extra.length) fail(modelCommandUsage(name));
+    if (isPublicBot(cfg)) {
+      fail(`Cannot open model switching for public bot "${name}". Add an allowlist first, or use: pca model ${name} allow <model-a,model-b>`);
+    }
+    delete cfg.allowedModels;
+    cfg.modelSwitching = "open";
+    save(`Model switching for "${name}" is open to its allowlisted peers.`);
+    return;
+  }
+
+  fail(`Unknown model action "${rawAction}". ${modelCommandUsage(name)}`);
+}
+
 // Short human form of an allowlist account hex when create didn't record what
 // was typed (older configs): the SS58 address, elided.
 function shortAllowEntry(hex) {
@@ -572,6 +707,7 @@ function cmdRun(name, flags = {}) {
   // which each direct brain passes to its CLI's own model flag).
   const model = flags.model != null ? flagValue(flags.model, "model") : cfg.model;
   if (model) env.BOT_AI_MODEL = model;
+  if (DIRECT_BRAIN_CLIS.has(cfg.brain)) applyModelPolicyEnvironment(env, cfg);
   if (cfg.projects && Object.keys(cfg.projects).length) {
     env.BOT_AI_PROJECTS = JSON.stringify(cfg.projects);
     note(`Projects: ${Object.keys(cfg.projects).join(", ")} (switch in chat with /project <name>)`);
@@ -654,6 +790,11 @@ async function cmdDeploy(name, flags) {
   ];
   const deployModel = flags.model != null ? flagValue(flags.model, "model") : cfg.model;
   if (deployModel) envLines.push(envLine("BOT_AI_MODEL", deployModel));
+  if (DIRECT_BRAIN_CLIS.has(cfg.brain)) {
+    for (const [key, value] of Object.entries(modelPolicyEnvironment(cfg))) {
+      envLines.push(envLine(key, value));
+    }
+  }
   if (skipPerms) envLines.push("BOT_AI_SKIP_PERMISSIONS=1");
   if (flags.greet === true) envLines.push("BOT_GREET=1");
   if (spec.pkg) {
@@ -1030,6 +1171,7 @@ function usage() {
   pca list                             list your bots
   pca project <name> [add <alias> <path> | rm <alias>]   projects a direct-engine bot can work in
                                        (in chat: /project <alias>[@branch] — branches get isolated git worktrees)
+  pca model <name> [show|set|allow|lock|open]            inspect or set a direct bot's model policy
   pca info <name>                      show address + how to message it
 
 create flags:
@@ -1044,6 +1186,9 @@ create flags:
   --no-register    create the identity locally without registering (finish later with pca register)
   --wait <secs>    how long to wait for on-chain confirmation (default 180)
   --network <ep>   target network: paseo (default) or a full wss:// endpoint
+
+model controls:  show current policy  ·  set <model> pins the default model  ·  allow <a,b>
+  restricts chat-side switching  ·  lock disables it  ·  open permits it only for allowlisted bots
 
 deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --model <m>  ·  --safe-tools  ·  --dry-run
   Needs Docker on the server + SSH access. Direct engines (echo/claude/codex/opencode)
@@ -1072,7 +1217,7 @@ const COMMAND_FLAGS = {
   status: ["host"],
   stop: ["host"],
   delete: ["yes"],
-  list: [], info: [], help: [], project: [],
+  list: [], info: [], help: [], project: [], model: [],
 };
 
 const { flags, positional } = parseFlags(process.argv.slice(2));
@@ -1104,6 +1249,7 @@ try {
     case "delete": cmdDelete(arg, flags); break;
     case "list": cmdList(); break;
     case "project": cmdProject(positional.slice(1)); break;
+    case "model": cmdModel(positional.slice(1)); break;
     case "info": await cmdInfo(arg); break;
     case "help": usage(); break;
     default: usage(); if (command != null) process.exit(1);

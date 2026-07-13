@@ -164,6 +164,10 @@ Related settings:
 - `--model` on `create` (saved) or `run`/`deploy` (override) selects the model —
   `BOT_AI_MODEL`. For opencode it's a `provider/model` slug (the provider
   selector); for claude/codex a plain model name.
+- `pca model <bot> show|set|allow|lock|open` controls chat-side `/model`.
+  Switching is locked by default. `allow` persists an approved list;
+  `open` is an explicit option for allowlisted bots only. Public bots cannot
+  allow unrestricted switching.
 - Tools are on by default (`BOT_AI_ALLOWED_TOOLS`, default `Bash,Read,Edit,Write`).
   `BOT_AI_SKIP_PERMISSIONS=1` grants full autonomy (all tools) — safe because a
   deployed engine runs inside its own container (see the safety model below).
