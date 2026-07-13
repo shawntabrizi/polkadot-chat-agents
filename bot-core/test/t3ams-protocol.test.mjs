@@ -336,3 +336,172 @@ test("public TOFU peer admission reclaims a stale unpinned peer but preserves co
   assert.equal(pinned.addPeer(newPeer, { signingPubKeyHex: "22" }), null);
   assert.deepEqual(pinned.peerIds(), [oldPeer]);
 });
+
+function outboundOperationFixture({ kind = "dm", isPrivate = false, privateKey = true } = {}) {
+  const self = bytes(0xa1);
+  const peer = bytes(0xb2);
+  const workspaceId = xid(bytes(0xc3));
+  const channelId = xid(bytes(0xd4));
+  const inboundMessageId = xid(bytes(0xe5));
+  const targetId = xid(bytes(0xf6));
+  const calls = [];
+  const submitted = [];
+  const tag = (value) => (value instanceof Uint8Array ? xid(value) : value);
+  let encoded = 0;
+  const bcts = {
+    formatXID: xid,
+    createGSTPRequest: (expression) => {
+      calls.push(["request", expression]);
+      return { envelope: { expression } };
+    },
+    signGSTPRequest: (envelope, signingKey) => {
+      calls.push(["sign", envelope, tag(signingKey)]);
+      return { signed: envelope };
+    },
+    encryptDMEnvelope: (signed, from, to) => {
+      calls.push(["encrypt-dm", signed, tag(from), tag(to)]);
+      return { encrypted: signed };
+    },
+    encryptWorkspaceChannelEnvelope: (signed, key) => {
+      calls.push(["encrypt-workspace", signed, tag(key)]);
+      return { encrypted: signed };
+    },
+    envelopeToBytes: (envelope) => {
+      calls.push(["bytes", envelope]);
+      encoded += 1;
+      return Uint8Array.of(encoded);
+    },
+    derivePersonalDMChannel: (from, to) => `dm:${tag(from)}:${tag(to)}`,
+    derivePersonalDMOpsChannel: (from, to) => `dm-ops:${tag(from)}:${tag(to)}`,
+    derivePersonalDMTypingChannel: (from, to) => `dm-typing:${tag(from)}:${tag(to)}`,
+    createDMTopics: (channel, from, selfSend) => [`dm-topic:${channel}:${tag(from)}:${selfSend}`],
+    editMessageExpression: (...args) => ({ functionName: "editMessage", args }),
+    addReactionExpression: (...args) => ({ functionName: "addReaction", args }),
+    removeReactionExpression: (...args) => ({ functionName: "removeReaction", args }),
+    typingIndicatorExpression: (...args) => ({ functionName: "typing", args }),
+    deriveWorkspaceKey: (ws) => Uint8Array.of(0x11, String(ws).length),
+    derivePublicChannelOpsChannel: (id) => `public-ops:${tag(id)}`,
+    derivePrivateChannelOpsChannel: (id) => `private-ops:${tag(id)}`,
+    derivePublicChannelTypingChannel: (id) => `public-typing:${tag(id)}`,
+    derivePrivateChannelTypingChannel: (id) => `private-typing:${tag(id)}`,
+    createPublicChannelTopics: (id, from, selfSend) => [`public-topic:${tag(id)}:${tag(from)}:${selfSend}`],
+    createPrivateChannelTopics: (id, from, type, selfSend) => [`private-topic:${tag(id)}:${tag(from)}:${type}:${selfSend}`],
+    channelEditMessageExpression: (...args) => ({ functionName: "channelEdit", args }),
+    channelAddReactionExpression: (...args) => ({ functionName: "channelReaction", args }),
+    channelRemoveReactionExpression: (...args) => ({ functionName: "channelUnreaction", args }),
+    channelTypingExpression: (...args) => ({ functionName: "channelTyping", args }),
+  };
+  const state = kind === "channel" ? {
+    v: T3AMS_STATE_VERSION,
+    workspaces: {
+      [workspaceId]: {
+        doc: {
+          wsId: workspaceId,
+          creatorXid: xid(self),
+          version: 1,
+          members: [{ xid: xid(self), role: "member" }],
+          admins: [],
+        },
+        channels: [{ idHex: channelId, creatorXid: xid(self), isPrivate, kind: "standard" }],
+      },
+    },
+    ...(isPrivate && privateKey ? {
+      keys: { [`${workspaceId}:${channelId}`]: { current: { keyHex: "aa".repeat(32), version: 1 }, previous: [] } },
+    } : {}),
+  } : undefined;
+  const protocol = createT3amsProtocol({
+    bcts,
+    identity: { xid: self, signingPrivateKey: bytes(0x99) },
+    displayName: "Atlas",
+    state,
+    submit: async (statement) => { submitted.push(statement); },
+  });
+  const chatId = kind === "dm"
+    ? t3amsConversationKey({ kind: "dm", peerXidHex: xid(peer) })
+    : t3amsConversationKey({ kind: "channel", wsId: workspaceId, channelIdHex: channelId });
+  assert.equal(protocol.restoreInboundConversation({
+    accepted: true,
+    conversationKey: chatId,
+    message: {
+      messageId: inboundMessageId,
+      conversationType: kind,
+      senderXid: kind === "dm" ? xid(peer) : xid(peer),
+      ...(kind === "channel" ? { workspaceId, channelId } : {}),
+      threadRootId: null,
+    },
+  }), true);
+  return { protocol, self, peer, workspaceId, channelId, chatId, targetId, calls, submitted };
+}
+
+test("DM edits, reactions, and typing use recipient-bound encrypted operation channels", async () => {
+  const fixture = outboundOperationFixture();
+  const { protocol, chatId, targetId, peer, self, calls, submitted } = fixture;
+
+  assert.deepEqual(await protocol.editText(chatId, targetId, "replacement"), { messageId: targetId, edited: true });
+  await protocol.sendReaction(chatId, targetId, "👍");
+  assert.deepEqual(await protocol.sendTyping(chatId), { sent: true, throttled: false });
+  assert.deepEqual(await protocol.sendTyping(chatId), { sent: false, throttled: true });
+
+  assert.equal(submitted.length, 3);
+  assert.equal(submitted[0].channel, `dm-ops:${xid(self)}:${xid(peer)}`);
+  assert.deepEqual(submitted[0].topics, [`dm-topic:dm-ops:${xid(self)}:${xid(peer)}:${xid(self)}:true`]);
+  assert.equal(submitted[1].channel, `dm-ops:${xid(self)}:${xid(peer)}`);
+  assert.equal(submitted[2].channel, `dm-typing:${xid(self)}:${xid(peer)}`);
+
+  const expressions = calls.filter(([kind]) => kind === "request").map(([, expression]) => expression);
+  assert.equal(expressions[0].functionName, "editMessage");
+  assert.equal(xid(expressions[0].args[0]), targetId);
+  assert.equal(expressions[0].args[1], "replacement");
+  assert.equal(xid(expressions[0].args[3]), xid(peer), "DM edit must bind the peer as recipient");
+  assert.equal(expressions[1].functionName, "addReaction");
+  assert.equal(xid(expressions[1].args[3]), xid(peer), "DM reaction must bind the peer as recipient");
+  assert.equal(expressions[2].functionName, "typing");
+  assert.equal(expressions[2].args[1], true);
+  assert.equal(xid(expressions[2].args[3]), xid(peer), "DM typing must bind the peer as recipient");
+  assert.deepEqual(calls.filter(([kind]) => kind === "encrypt-dm").map(([, , from, to]) => [from, to]), [
+    [xid(self), xid(peer)], [xid(self), xid(peer)], [xid(self), xid(peer)],
+  ]);
+});
+
+test("workspace operations use operation channels but retain the original message-topic family", async () => {
+  for (const isPrivate of [false, true]) {
+    const fixture = outboundOperationFixture({ kind: "channel", isPrivate });
+    const { protocol, chatId, targetId, self, channelId, calls, submitted } = fixture;
+    await protocol.editText(chatId, targetId, "replacement");
+    await protocol.sendReaction(chatId, targetId, "✅", { removed: true });
+    await protocol.sendTyping(chatId);
+
+    const prefix = isPrivate ? "private" : "public";
+    assert.deepEqual(submitted.map((statement) => statement.channel), [
+      `${prefix}-ops:${channelId}`, `${prefix}-ops:${channelId}`, `${prefix}-typing:${channelId}`,
+    ]);
+    const expectedTopic = isPrivate
+      ? `private-topic:${channelId}:${xid(self)}:message:true`
+      : `public-topic:${channelId}:${xid(self)}:true`;
+    assert.ok(submitted.every((statement) => statement.topics[0] === expectedTopic));
+    const expressions = calls.filter(([kind]) => kind === "request").map(([, expression]) => expression);
+    assert.deepEqual(expressions.map((expression) => expression.functionName), ["channelEdit", "channelUnreaction", "channelTyping"]);
+    const encrypted = calls.filter(([kind]) => kind === "encrypt-workspace");
+    assert.equal(encrypted.length, 3);
+    if (isPrivate) assert.equal(encrypted[0][2], "aa".repeat(32));
+    else assert.equal(encrypted[0][2], xid(Uint8Array.of(0x11, fixture.workspaceId.length)));
+  }
+});
+
+test("workspaceRole exposes only the authenticated state-document role", () => {
+  const fixture = outboundOperationFixture({ kind: "channel" });
+  assert.equal(fixture.protocol.workspaceRole(fixture.workspaceId, xid(fixture.self)), "member");
+  assert.equal(fixture.protocol.workspaceRole(fixture.workspaceId, xid(fixture.peer)), null);
+  assert.equal(fixture.protocol.workspaceRole("not-a-workspace", xid(fixture.self)), null);
+});
+
+test("outbound operations reject malformed targets, reactions, and unavailable private channel keys", async () => {
+  const dm = outboundOperationFixture();
+  await assert.rejects(dm.protocol.editText(dm.chatId, "not-an-id", "x"), { code: "T3AMS_INVALID_MESSAGE_ID" });
+  await assert.rejects(dm.protocol.sendReaction(dm.chatId, dm.targetId, "\u0000"), { code: "T3AMS_INVALID_REACTION" });
+  assert.equal(dm.submitted.length, 0);
+
+  const unavailable = outboundOperationFixture({ kind: "channel", isPrivate: true, privateKey: false });
+  await assert.rejects(unavailable.protocol.sendTyping(unavailable.chatId), { code: "T3AMS_CHANNEL_KEY_MISSING" });
+  assert.equal(unavailable.submitted.length, 0);
+});

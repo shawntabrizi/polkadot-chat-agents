@@ -110,6 +110,13 @@ workspace invitations, mention-only channel replies, and private-channel key
 grants—is documented in
 [docs/T3AMS.md](docs/T3AMS.md).
 
+T3ams direct brains keep a single message bubble live while they think, report
+tool progress, and finish. Its authenticated framework bridge can do the same
+through message edits, reactions, and typing signals. Rich-text attachment
+references are authenticated and constrained before they reach a brain or a
+bridge; see the T3ams guide for Bulletin media, private-state, and file-vault
+requirements.
+
 ## Brains
 
 Direct engines run a headless coding-agent CLI as an autonomous agent — verbatim

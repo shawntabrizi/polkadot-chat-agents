@@ -46,10 +46,35 @@ const encodeUploadedFile = (totalSize, chunkHashes) => {
   return new Uint8Array(Buffer.concat(parts));
 };
 
+// PCA's historical HOP endpoint accepts one named object, while the T3ams
+// Bulletin endpoint uses the same values as positional JSON-RPC parameters.
+// Normalize at the mock boundary so both client dialects exercise the exact
+// same signature and encryption checks below.
+const submitRequest = (params) => {
+  if (Array.isArray(params)) {
+    if (params.length !== 5) throw new Error("invalid positional submit params");
+    const [data, recipients, signature, signer, submitTimestamp] = params;
+    return { data, recipients, signature, signer, submit_timestamp: submitTimestamp };
+  }
+  if (params == null || typeof params !== "object") throw new Error("invalid submit params");
+  return params;
+};
+
+const claimRequest = (params) => {
+  if (Array.isArray(params)) {
+    if (params.length !== 2) throw new Error("invalid positional claim params");
+    const [rawHash, signature] = params;
+    return { raw_hash: rawHash, signature };
+  }
+  if (params == null || typeof params !== "object") throw new Error("invalid claim params");
+  return params;
+};
+
 export const startMockHopNode = async () => {
   const store = new Map(); // hashHex -> { blob, recipientPub }
   const acked = new Set(); // hashHex
   const submissions = [];
+  const rpcCalls = [];
   const failures = { claim: 0, submit: 0, ack: false, dropConnections: 0, oversizedFrameBytes: 0 };
 
   const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
@@ -91,12 +116,13 @@ export const startMockHopNode = async () => {
     ws.on("message", (data) => {
       let req;
       try { req = JSON.parse(data.toString()); } catch { return; }
+      rpcCalls.push({ method: req.method, positional: Array.isArray(req.params) });
       const reply = (body) => ws.send(JSON.stringify({ jsonrpc: "2.0", id: req.id, ...body }));
       const err = (message) => reply({ error: { code: -32000, message } });
       try {
         if (req.method === "hop_submit") {
           if (failures.submit > 0) { failures.submit -= 1; return err("simulated submit failure"); }
-          const submitted = checkSubmission(req.params);
+          const submitted = checkSubmission(submitRequest(req.params));
           store.set(toHex(submitted.hash), { blob: submitted.data, recipientPub: submitted.recipientPub });
           submissions.push({ hash: toHex(submitted.hash), signer: toHex(submitted.signer), bytes: submitted.data.length });
           return reply({ result: { poolStatus: { entryCount: store.size, totalBytes: 0, maxBytes: 10_000_000 } } });
@@ -108,18 +134,20 @@ export const startMockHopNode = async () => {
             return reply({ result: "x".repeat(bytes) });
           }
           if (failures.claim > 0) { failures.claim -= 1; return err("simulated failure"); }
-          const rawHash = fromHex(req.params.raw_hash);
+          const params = claimRequest(req.params);
+          const rawHash = fromHex(params.raw_hash);
           const entry = store.get(toHex(rawHash));
           if (!entry) return err("no such entry");
-          if (!checkProof(entry, rawHash, req.params.signature, "hop-claim-v1:")) return err("bad claim proof");
+          if (!checkProof(entry, rawHash, params.signature, "hop-claim-v1:")) return err("bad claim proof");
           return reply({ result: toHex(entry.blob) });
         }
         if (req.method === "hop_ack") {
           if (failures.ack) return err("simulated ack failure");
-          const rawHash = fromHex(req.params.raw_hash);
+          const params = claimRequest(req.params);
+          const rawHash = fromHex(params.raw_hash);
           const entry = store.get(toHex(rawHash));
           if (!entry) return err("no such entry");
-          if (!checkProof(entry, rawHash, req.params.signature, "hop-ack-v1:")) return err("bad ack proof");
+          if (!checkProof(entry, rawHash, params.signature, "hop-ack-v1:")) return err("bad ack proof");
           acked.add(toHex(rawHash));
           return reply({ result: null });
         }
@@ -167,6 +195,7 @@ export const startMockHopNode = async () => {
     putFile,
     acked,
     submissions,
+    rpcCalls,
     failures,
     close: () => new Promise((resolve) => wss.close(resolve)),
   };

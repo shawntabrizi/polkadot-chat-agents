@@ -7,14 +7,23 @@ import { createMessageReceiptFromOutboundResults } from "openclaw/plugin-sdk/cha
 
 // src/accounts.ts
 var POLKADOT_CHANNEL_ID = "polkadot";
+var DEFAULT_OUTBOUND_FILE_MAX_BYTES = 25 * 1024 * 1024;
 var channelCfg = (cfg) => cfg?.channels?.[POLKADOT_CHANNEL_ID] ?? {};
 var normId = (s) => String(s).trim().replace(/^0x/i, "").toLowerCase();
+var positiveBytes = (value, fallback) => {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= DEFAULT_OUTBOUND_FILE_MAX_BYTES ? parsed : fallback;
+};
 function resolvePolkadotAccount({ cfg, accountId }) {
   const root = channelCfg(cfg);
   const id = accountId ?? root.defaultAccount ?? "default";
   const acct = root.accounts?.[id] ?? {};
   const bridgeUrl = acct.bridgeUrl ?? root.bridgeUrl ?? process.env.POLKADOT_BRIDGE_URL ?? "http://127.0.0.1:8799";
   const bridgeToken = String(acct.bridgeToken ?? root.bridgeToken ?? process.env.POLKADOT_BRIDGE_TOKEN ?? "").trim();
+  const outboundFileMaxBytes = positiveBytes(
+    acct.outboundFileMaxBytes ?? root.outboundFileMaxBytes ?? process.env.POLKADOT_OUTBOUND_FILE_MAX_BYTES,
+    DEFAULT_OUTBOUND_FILE_MAX_BYTES
+  );
   const dmPolicy = acct.dmPolicy ?? root.dmPolicy ?? "pairing";
   const allowFrom = (acct.allowFrom ?? root.allowFrom ?? []).map(normId);
   const enabled = acct.enabled ?? root.enabled ?? true;
@@ -25,6 +34,7 @@ function resolvePolkadotAccount({ cfg, accountId }) {
     configured: Boolean(bridgeUrl && bridgeToken),
     bridgeUrl,
     bridgeToken,
+    outboundFileMaxBytes,
     dmPolicy,
     allowFrom
   };
@@ -42,6 +52,7 @@ import { randomUUID } from "node:crypto";
 import { promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 // src/bridge.ts
 var responseJson = async (response) => {
@@ -62,6 +73,11 @@ function createBridge(baseUrl, token) {
   const base = baseUrl.replace(/\/+$/, "");
   if (!token?.trim()) throw new Error("polkadot bridge token is required");
   const headers = { authorization: `Bearer ${token}` };
+  const fileUrl = (chatId, filePath) => {
+    if (!chatId) throw new Error("cannot access a file vault with an empty chat id");
+    if (!filePath) throw new Error("cannot access an empty file path");
+    return `${base}/files/${encodeURIComponent(chatId)}/${encodeURIComponent(filePath)}`;
+  };
   return {
     health: async () => {
       const response = await fetch(`${base}/health`, { headers });
@@ -101,6 +117,7 @@ function createBridge(baseUrl, token) {
       const body = {
         chat_id: chatId,
         text,
+        ...typeof options.filePath === "string" ? { file_path: options.filePath } : {},
         ...typeof options.replyTo === "string" ? { reply_to: options.replyTo } : {},
         ...typeof options.threadRootId === "string" ? { thread_root_id: options.threadRootId } : {}
       };
@@ -112,6 +129,26 @@ function createBridge(baseUrl, token) {
       const data = await responseJson(res);
       if (!res.ok || data.success !== true) return { success: false, error: data.error ?? `HTTP ${res.status}` };
       return data;
+    },
+    // Store raw bytes under the bridge's conversation-scoped artifact vault.
+    // This is deliberately separate from /send so a harness can never hand
+    // bot-core a path from the OpenClaw host filesystem.
+    putFile: async (chatId, filePath, bytes, mime = "application/octet-stream", { overwrite = false } = {}) => {
+      const url = `${fileUrl(chatId, filePath)}${overwrite ? "?overwrite=1" : ""}`;
+      const res = await fetch(url, {
+        method: "PUT",
+        headers: { ...headers, "content-type": mime },
+        body: bytes
+      });
+      const data = await responseJson(res);
+      if (!res.ok || data.success !== true) {
+        throw new Error(`file upload failed: ${String(data.error ?? `HTTP ${res.status}`)}`);
+      }
+      return data;
+    },
+    removeFile: async (chatId, filePath) => {
+      const res = await fetch(fileUrl(chatId, filePath), { method: "DELETE", headers });
+      await requireSuccess(res, "file removal");
     },
     react: async (chatId, messageId, emoji, remove = false) => {
       const res = await fetch(`${base}/react`, {
@@ -137,6 +174,7 @@ var MAX_PENDING_DISPATCHES = 100;
 var MAX_ATTACHMENTS_PER_MESSAGE = 8;
 var MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 var MAX_TOTAL_ATTACHMENT_BYTES = 32 * 1024 * 1024;
+var MAX_OUTBOUND_MEDIA_PER_REPLY = 4;
 var DISPATCH_SHUTDOWN_WAIT_MS = 3e4;
 var delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 var BoundedKeyedDispatcher = class {
@@ -235,10 +273,26 @@ var extensionForMime = (mime) => {
   const suffix = mime.split("/", 2)[1]?.replace(/[^a-zA-Z0-9]/g, "").slice(0, 16);
   return suffix || "bin";
 };
-var attachmentKind = (value) => value === "image" || value === "video" || value === "general" ? value : "file";
-var attachmentMime = (value) => {
+var attachmentKind = (value) => value === "image" || value === "document" || value === "video" || value === "general" ? value : "file";
+var validMime = (value) => {
   const mime = String(value ?? "").trim();
-  return /^[A-Za-z0-9][A-Za-z0-9.+-]{0,63}\/[A-Za-z0-9][A-Za-z0-9.+-]{0,63}$/.test(mime) ? mime : "application/octet-stream";
+  return /^[A-Za-z0-9][A-Za-z0-9.+-]{0,63}\/[A-Za-z0-9][A-Za-z0-9.+-]{0,63}$/.test(mime) ? mime.toLowerCase() : null;
+};
+var attachmentMime = (value) => validMime(value) ?? "application/octet-stream";
+var channelContextNotes = (value) => {
+  if (!Array.isArray(value)) return "";
+  const lines = [];
+  for (const record of value.slice(0, 64)) {
+    if (!record || typeof record !== "object") continue;
+    const item = record;
+    if (typeof item.text !== "string" || !item.text) continue;
+    const sender = typeof item.sender_name === "string" && item.sender_name ? item.sender_name : typeof item.sender_xid === "string" && item.sender_xid ? item.sender_xid : "channel member";
+    const thread = typeof item.thread_root_id === "string" && item.thread_root_id ? `; thread ${item.thread_root_id}` : "";
+    lines.push(`[Earlier channel message from ${sender.slice(0, 512)}${thread}]: ${item.text.slice(0, 4096)}`);
+  }
+  return lines.length ? `
+
+${lines.join("\n")}` : "";
 };
 var contentLength = (response) => {
   const value = response.headers.get("content-length");
@@ -288,7 +342,7 @@ async function materializeAttachments(msg, bridge) {
     }
     const kind = attachmentKind(a.kind);
     const mime = attachmentMime(a.mime);
-    if (!(a.downloaded && a.url)) {
+    if (typeof a.url !== "string" || !a.url.startsWith("/media/")) {
       notes.push(`
 [attachment ${kind} (${mime}) could not be downloaded]`);
       continue;
@@ -323,6 +377,158 @@ async function materializeAttachments(msg, bridge) {
 var cleanupAttachments = async ({ tempDir }) => {
   if (!tempDir) return;
   await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => void 0);
+};
+var MIME_BY_EXTENSION = {
+  ".avif": "image/avif",
+  ".bmp": "image/bmp",
+  ".csv": "text/csv",
+  ".doc": "application/msword",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".gif": "image/gif",
+  ".heic": "image/heic",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
+  ".json": "application/json",
+  ".md": "text/markdown",
+  ".odp": "application/vnd.oasis.opendocument.presentation",
+  ".ods": "application/vnd.oasis.opendocument.spreadsheet",
+  ".odt": "application/vnd.oasis.opendocument.text",
+  ".pdf": "application/pdf",
+  ".png": "image/png",
+  ".ppt": "application/vnd.ms-powerpoint",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".rtf": "application/rtf",
+  ".text": "text/plain",
+  ".tif": "image/tiff",
+  ".tiff": "image/tiff",
+  ".txt": "text/plain",
+  ".webp": "image/webp",
+  ".xls": "application/vnd.ms-excel",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".xml": "application/xml"
+};
+var mimeForOutboundMedia = (payload, sourcePath) => {
+  for (const candidate of [payload.mediaMimeType, payload.mimeType, payload.contentType, payload.mediaType]) {
+    const mime = validMime(candidate);
+    if (mime != null) return mime;
+  }
+  return MIME_BY_EXTENSION[path.extname(sourcePath).toLowerCase()] ?? "application/octet-stream";
+};
+var mediaReferences = (payload) => {
+  const listed = Array.isArray(payload.mediaUrls) && payload.mediaUrls.length > 0 ? payload.mediaUrls : Array.isArray(payload.mediaPaths) && payload.mediaPaths.length > 0 ? payload.mediaPaths : null;
+  if (listed != null) {
+    if (listed.some((value) => typeof value !== "string" || !value.trim())) {
+      throw new Error("polkadot reply contains an invalid mediaUrls entry");
+    }
+    if (listed.length > MAX_OUTBOUND_MEDIA_PER_REPLY) {
+      throw new Error(`polkadot reply exceeds ${MAX_OUTBOUND_MEDIA_PER_REPLY} outbound attachments`);
+    }
+    return listed.map((value) => value.trim());
+  }
+  if (typeof payload.mediaUrl === "string" && payload.mediaUrl.trim()) return [payload.mediaUrl.trim()];
+  if (typeof payload.mediaPath === "string" && payload.mediaPath.trim()) return [payload.mediaPath.trim()];
+  return [];
+};
+var localMediaPath = (reference) => {
+  if (reference.startsWith("file:")) {
+    try {
+      const url = new URL(reference);
+      if (url.protocol !== "file:") throw new Error("not a file URL");
+      return fileURLToPath(url);
+    } catch {
+      throw new Error("polkadot outbound media file URL is invalid");
+    }
+  }
+  if (!path.isAbsolute(reference)) {
+    throw new Error("polkadot outbound media must be an absolute local path or file URL");
+  }
+  return reference;
+};
+var vaultFileName = (sourcePath) => {
+  const raw = path.basename(sourcePath).normalize("NFC");
+  const safe = raw.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[._-]+|[._-]+$/g, "").slice(0, 160);
+  return safe || "attachment.bin";
+};
+var prepareOutboundMedia = async (payload, maxBytes) => {
+  const sources = mediaReferences(payload);
+  return Promise.all(sources.map(async (reference) => {
+    const sourcePath = localMediaPath(reference);
+    const stat = await fsp.lstat(sourcePath);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new Error("polkadot outbound media must be a regular local file");
+    }
+    if (stat.size > maxBytes) {
+      throw new Error(`polkadot outbound media exceeds the ${maxBytes}-byte account limit`);
+    }
+    return {
+      sourcePath,
+      // A random opaque filename avoids collisions and never exposes the host
+      // path through the bridge or the T3ams attachment metadata.
+      vaultPath: `openclaw/${randomUUID()}-${vaultFileName(sourcePath)}`,
+      mime: mimeForOutboundMedia(payload, sourcePath)
+    };
+  }));
+};
+var readPreparedMedia = async (media, maxBytes) => {
+  const initial = await fsp.lstat(media.sourcePath);
+  if (!initial.isFile() || initial.isSymbolicLink() || initial.size > maxBytes) {
+    throw new Error("polkadot outbound media changed before it could be uploaded");
+  }
+  const handle = await fsp.open(media.sourcePath, "r");
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.size !== initial.size || opened.dev !== initial.dev || opened.ino !== initial.ino) {
+      throw new Error("polkadot outbound media changed before it could be uploaded");
+    }
+    const bytes = Buffer.allocUnsafe(opened.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+      if (bytesRead <= 0) throw new Error("polkadot outbound media ended before it could be uploaded");
+      offset += bytesRead;
+    }
+    const finalStat = await handle.stat();
+    if (finalStat.size !== opened.size || finalStat.dev !== opened.dev || finalStat.ino !== opened.ino) {
+      throw new Error("polkadot outbound media changed while it was being uploaded");
+    }
+    return bytes;
+  } finally {
+    await handle.close();
+  }
+};
+var deliverOutboundReply = async ({
+  bridge,
+  account,
+  chatId,
+  replyTo,
+  threadRootId,
+  payload
+}) => {
+  const text = String(payload.text ?? "").trim();
+  const media = await prepareOutboundMedia(payload, account.outboundFileMaxBytes);
+  if (media.length === 0) {
+    if (!text) return false;
+    const result = await bridge.send(chatId, text, { replyTo, threadRootId });
+    if (!result.success) throw new Error(`polkadot /send failed: ${result.error ?? "unknown"}`);
+    return true;
+  }
+  for (const [index, item] of media.entries()) {
+    const bytes = await readPreparedMedia(item, account.outboundFileMaxBytes);
+    let uploaded = false;
+    try {
+      await bridge.putFile(chatId, item.vaultPath, bytes, item.mime);
+      uploaded = true;
+      const result = await bridge.send(chatId, index === 0 ? text : "", {
+        filePath: item.vaultPath,
+        ...index === 0 ? { replyTo } : {},
+        threadRootId
+      });
+      if (!result.success) throw new Error(`polkadot file /send failed: ${result.error ?? "unknown"}`);
+    } finally {
+      if (uploaded) await bridge.removeFile(chatId, item.vaultPath).catch(() => void 0);
+    }
+  }
+  return true;
 };
 async function startPolkadotGatewayAccount(ctx) {
   const account = resolvePolkadotAccount({ cfg: ctx.cfg, accountId: ctx.account?.accountId });
@@ -447,7 +653,7 @@ async function dispatchInbound(ctx, channelRuntime, account, bridge, msg, signal
           id: msg.message_id || randomUUID(),
           timestamp: Date.now(),
           rawText: msg.text,
-          textForAgent: msg.text + materialized.notes,
+          textForAgent: msg.text + channelContextNotes(msg.channel_context) + materialized.notes,
           textForCommands: msg.text,
           raw: msg
         }),
@@ -485,14 +691,15 @@ async function dispatchInbound(ctx, channelRuntime, account, bridge, msg, signal
             delivery: {
               deliver: async (payload) => {
                 if (signal.aborted) throw new Error("polkadot dispatcher stopped");
-                const text = String(payload?.text ?? "").trim();
-                if (!text) return { visibleReplySent: false };
-                const result = await bridge.send(chatId, text, {
+                const visibleReplySent = await deliverOutboundReply({
+                  bridge,
+                  account,
+                  chatId,
                   replyTo: msg.message_id,
-                  threadRootId
+                  threadRootId,
+                  payload: payload ?? {}
                 });
-                if (!result.success) throw new Error(`polkadot /send failed: ${result.error ?? "unknown"}`);
-                return { visibleReplySent: true };
+                return { visibleReplySent };
               },
               onError: (error) => ctx.log?.warn?.(`polkadot deliver failed: ${String(error)}`)
             },

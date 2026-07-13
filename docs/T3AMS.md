@@ -13,9 +13,12 @@ unless they were created with `--transport t3ams`.
   `pca create`; wait for `pca info <bot>` to show that registration is complete.
   The username is how people find and invite the bot in T3ams.
 - A funded account with the Statement Store publishing allowance required by
-  the target network. This is distinct from the optional HOP/file-delivery
-  allowance: `pca storage <bot> status` concerns saved-file delivery, not basic
-  T3ams text messaging.
+  the target network. Text, a live-reply placeholder or edit, typing, and a
+  reaction are all published operations, so size that allowance and the
+  submission queue for the bot's expected turn rate. This is distinct from
+  Bulletin media/storage capacity: do not assume `pca storage <bot> status`
+  (the default transport's saved-file delivery allowance) provisions a T3ams
+  Bulletin endpoint.
 - Node.js 22+, a selected brain (or `--brain echo` for a transport check), and
   the local T3ams BCTS SDK package described below.
 
@@ -80,7 +83,10 @@ configuration. Use `--t3ams-display-name <name>` to set the name shown in
 T3ams (otherwise the registered username is used). The usual `BOT_ENDPOINT`,
 `BOT_STATE_DIR`, `BOT_BRAIN`, model policy, and bridge settings still apply.
 Keep the state directory: it contains T3ams peer/workspace/key state, the
-durable inbound/bridge journal, and the AI brain's conversation state.
+durable inbound/bridge journal, attachment capability material while it is
+being processed, and the AI brain's conversation state. The transport creates
+and enforces it as mode `0700`; keep it on a private encrypted volume, do not
+mount it into the agent workspace, and treat backups as secrets.
 
 ### Obtain and rotate a private signing-key pin
 
@@ -151,14 +157,93 @@ been sized for the resulting replay traffic.
 
 ## Current scope
 
-- Text DMs and text channel messages are supported.
+- Text DMs, channel messages, and authenticated rich-text attachment references
+  are supported.
 - Thread-root context is retained; replies to a threaded prompt are sent in the
   same thread.
 - Every DM and every workspace channel has its own AI session identity; threads
   in one channel share that channel's session.
-- Attachments, reactions, edits, calls, typing indicators, and other non-text
-  T3ams events are not brain inputs in this first version.
+- Channel turns remain mention-gated. If `BOT_T3AMS_CHANNEL_CONTEXT=1`, a
+  bounded, memory-only snapshot of recent authenticated unmentioned **text**
+  can accompany a later explicit mention in that same channel or thread; it
+  never independently triggers a brain.
+- A channel shares one direct-brain session. By default, only a workspace owner
+  or admin can use its session-changing `/reset`, `/model`, `/reasoning`, and
+  `/project` commands; ordinary mentioned prompts and `/stop` remain available
+  to channel members. Configure the threshold with
+  `BOT_T3AMS_CHANNEL_CONTROL_ROLE`.
+- Slow direct-brain turns use a live message: a thinking placeholder appears
+  after `BOT_THINKING_AFTER_MS`, progress can edit that message in place, and
+  the first final chunk replaces it. Long replies continue in additional
+  messages.
+- A bridge harness can use `POST /send` with `edit_of`, `POST /react`, and
+  `POST /typing`; `GET /health` advertises those live capabilities. See
+  [HARNESSES.md](HARNESSES.md#t3ams-transport-fields) for the exact contract.
+- Incoming reactions, typing, calls, and other non-message events are not
+  agent prompts. They remain outside the direct-brain input contract.
 
 The bot only processes messages it can decrypt and authenticate through the
 standard T3ams membership/key flows. It does not bypass private-channel
 encryption or workspace membership controls.
+
+## Live replies and bridge operations
+
+A direct brain starts a best-effort typing signal as soon as it begins a turn.
+If the turn is still running after `BOT_THINKING_AFTER_MS`, the bot publishes
+`BOT_THINKING_TEXT` and keeps that one message current. The live-edit cadence,
+heartbeat, progress frames, final wait, and timeout are controlled by the
+`BOT_LIVE_*` settings in [CONFIGURATION.md](CONFIGURATION.md#replies--live-replies).
+Set `BOT_LIVE_PROGRESS=0` when only a thinking bubble and final answer are
+desired. Each update remains an on-chain T3ams operation, so very short edit
+intervals raise Statement Store allowance and queue pressure rather than making
+the response free.
+
+For a framework-driven bot, the bridge begins the same typing/placeholder flow
+when it leases an inbound turn. Its first ordinary `POST /send` finalizes that
+placeholder. A framework may stream `edit_of` updates as frequently as it
+wants; bot-core coalesces them to the safe live-edit cadence and flushes the
+latest update when the matching lease is acknowledged. `edit_of` is restricted
+to a message issued by the current bot process, and it cannot be combined with
+`reply_to`. Preserve an inbound `thread_root_id` on sends to keep a group reply
+in the same T3ams thread.
+
+## Attachments, Bulletin media, and files
+
+T3ams rich text carries an encrypted Bulletin/HOP capability as a BCTS
+attachment reference. It is not a normal network URL. The reference's claim
+ticket is a secret: the transport accepts only the `hop:` form, validates the
+authenticated id, content hash, MIME type, size, filename, and image dimensions,
+and never exposes the raw reference or ticket through bridge payloads or logs.
+Rejecting arbitrary `http:`, `https:`, `file:`, or `data:` values prevents a
+message from turning into an SSRF or local-file fetch request.
+
+The default inbound policy permits at most four attachments, each no larger
+than 25 MiB. It admits common image and document MIME types (including PDF,
+plain/structured text, Office documents, and `application/octet-stream` for
+clients that cannot identify a document precisely); operators should narrow the
+allowlist for public bots. Invalid attachment metadata does not make the
+message trusted: a valid text body can still be delivered with a safe attachment
+warning, while an attachment-only invalid message is represented only as an
+unavailable-file notice—never as fetched bytes.
+
+Only a configured, trusted T3ams Bulletin endpoint may retrieve the encrypted
+bytes. Until retrieval is configured, direct brains receive attachment metadata
+and an explicit unavailable-file note rather than a path or a fetchable ticket.
+When retrieval succeeds, a direct brain receives a staged private copy for its
+turn, not the media-cache path itself. `/file put <path>` can retain one such
+attachment in the conversation vault, and `/file get <path>` publishes a new
+encrypted attachment back into that same DM or channel.
+
+Bridge harnesses receive an opaque `media_id` and authenticated `/media` URL
+for a valid attachment only when Bulletin retrieval is enabled; the original
+attachment id is metadata, not a fetch credential. The opaque id is bounded and
+expires, while `GET/PUT/DELETE /files/<chat_id>[/<path>]` stays scoped to that
+one conversation. A bridge `POST /send` may deliver a vault `file_path` with a
+caption or reply target, but never as an edit. See
+[HARNESSES.md](HARNESSES.md#t3ams-transport-fields) for that API contract.
+
+Keep the media cache and any durable file vault below the private state volume,
+with disk quotas and retention limits sized for the 25 MiB per-attachment cap.
+The generic Polkadot-app HOP settings are not automatically a T3ams Bulletin
+configuration; use the transport-specific settings described in
+[CONFIGURATION.md](CONFIGURATION.md#t3ams-attachments-media-and-file-vault).

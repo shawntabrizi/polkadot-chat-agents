@@ -187,3 +187,58 @@ test("operators can require rich-text mention metadata instead of matching sourc
   assert.equal(normalizeT3amsInbound(event, bot, { allowTextMentions: false }).accepted, false);
   assert.equal(normalizeT3amsInbound({ ...event, mentions: [{ xid: bot.xid }] }, bot, { allowTextMentions: false }).accepted, true);
 });
+
+test("a bounded channel-context snapshot survives the private journal and reaches a bridge without attachment capabilities", () => {
+  const ws = "a1".repeat(32);
+  const channel = "b2".repeat(32);
+  const sender = "c3".repeat(32);
+  const priorSender = "d4".repeat(32);
+  const messageId = "e5".repeat(32);
+  const priorId = "f6".repeat(32);
+  const routed = normalizeT3amsInbound({
+    conversationType: "channel",
+    workspaceId: ws,
+    channelId: channel,
+    senderXid: sender,
+    senderName: "Alice",
+    messageId,
+    text: "@Atlas summarize this thread",
+    channelContext: [{
+      messageId: priorId,
+      senderXid: priorSender,
+      senderName: "Bob",
+      text: "Earlier authenticated note",
+      threadRootId: null,
+      // Attempted capability-shaped fields must not survive the context codec.
+      claimTicketHex: "never-routed",
+    }],
+  }, bot);
+  assert.equal(routed.accepted, true);
+  assert.deepEqual(routed.message.channelContext, [{
+    messageId: priorId,
+    senderXid: priorSender,
+    senderName: "Bob",
+    text: "Earlier authenticated note",
+    threadRootId: null,
+  }]);
+  const bridge = toT3amsBridgeInbound(routed);
+  assert.deepEqual(bridge.channel_context, [{
+    message_id: priorId,
+    sender_xid: priorSender,
+    sender_name: "Bob",
+    text: "Earlier authenticated note",
+  }]);
+  const restored = restoreT3amsIngressRoute(routed);
+  assert.deepEqual(restored?.message.channelContext, routed.message.channelContext);
+
+  const invalid = normalizeT3amsInbound({
+    conversationType: "channel",
+    workspaceId: ws,
+    channelId: channel,
+    senderXid: sender,
+    messageId,
+    text: "@Atlas bad context",
+    channelContext: [{ messageId: "not-an-xid", senderXid: priorSender, text: "nope" }],
+  }, bot);
+  assert.deepEqual(invalid, { accepted: false, reason: "invalid-channel-context" });
+});

@@ -173,6 +173,16 @@ export const createLiveReplies = ({
       if (lane.finalized) lane.finalized = false; // harness may keep editing a finalized live message
       update(lane, text);
     },
+
+    // A bridge delivery is acknowledged only after its framework completed a
+    // streamed turn. Promote the latest throttled frame to the terminal edit
+    // at that point so no coalesced progress timer can overwrite the final
+    // answer after the worker has ACKed its lease.
+    async finalizeExisting(peerHex, messageId, text) {
+      let lane = lanes.get(messageId);
+      if (!lane) { lane = makeLane(peerHex, messageId, "assumed"); lane.ackResolvers = []; }
+      return finalize(lane, text);
+    },
   };
 };
 

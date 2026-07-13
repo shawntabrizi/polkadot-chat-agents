@@ -1,13 +1,15 @@
 // Thin HTTP client for the bot-core bridge (the Polkadot transport daemon).
 // Contract: authenticated GET /health, leased GET /inbound?wait=<secs>,
-// POST /inbound/ack, POST /send {chat_id,text,reply_to?,thread_root_id?}, and
-// GET /media/:id (downloaded attachments).
+// POST /inbound/ack, POST /send {chat_id,text?,file_path?,reply_to?,thread_root_id?},
+// GET/PUT/DELETE /files/:chat/:path (peer-scoped artifact vault), and GET
+// /media/:id (authenticated attachment retrieval, cached or on-demand).
 
-// Attachment metadata as bot-core exposes it: bytes are already downloaded on
-// the bot-core side and served at `url` (relative to the bridge base URL).
+// Attachment metadata as bot-core exposes it. `url` is an authenticated,
+// opaque bridge capability; it may download into bot-core's private cache on
+// first use. `downloaded` is only an advisory cache-status bit.
 export type InboundAttachment = {
   id: string;
-  kind: "image" | "video" | "general";
+  kind: "image" | "document" | "video" | "general";
   mime: string;
   size: number;
   width?: number;
@@ -44,9 +46,30 @@ export type InboundMsg = {
   channel_id?: string;
   edit_of?: string;
   attachments?: InboundAttachment[];
+  channel_context?: Array<{
+    message_id: string;
+    sender_xid: string;
+    sender_name?: string;
+    text: string;
+    thread_root_id?: string;
+  }>;
 };
 export type SendResult = { success: boolean; message_id?: string; error?: string };
-export type SendOptions = { replyTo?: string; threadRootId?: string | null };
+export type SendOptions = {
+  replyTo?: string;
+  threadRootId?: string | null;
+  // A vault-relative path previously written with putFile for this exact chat.
+  // The bridge never accepts a host filesystem path in /send.
+  filePath?: string;
+};
+
+export type PutFileResult = {
+  success: boolean;
+  path?: string;
+  mime?: string;
+  size?: number;
+  error?: string;
+};
 
 export type BridgeClient = ReturnType<typeof createBridge>;
 
@@ -72,6 +95,13 @@ export function createBridge(baseUrl: string, token: string) {
   const base = baseUrl.replace(/\/+$/, "");
   if (!token?.trim()) throw new Error("polkadot bridge token is required");
   const headers = { authorization: `Bearer ${token}` };
+  const fileUrl = (chatId: string, filePath: string): string => {
+    if (!chatId) throw new Error("cannot access a file vault with an empty chat id");
+    if (!filePath) throw new Error("cannot access an empty file path");
+    // Encode the whole vault-relative path so a slash remains part of the
+    // bridge's path argument rather than being mistaken for an HTTP segment.
+    return `${base}/files/${encodeURIComponent(chatId)}/${encodeURIComponent(filePath)}`;
+  };
   return {
     health: async (): Promise<{ ok?: boolean; account?: string; identifierKey?: string; username?: string }> => {
       const response = await fetch(`${base}/health`, { headers });
@@ -115,6 +145,7 @@ export function createBridge(baseUrl: string, token: string) {
       const body = {
         chat_id: chatId,
         text,
+        ...(typeof options.filePath === "string" ? { file_path: options.filePath } : {}),
         ...(typeof options.replyTo === "string" ? { reply_to: options.replyTo } : {}),
         ...(typeof options.threadRootId === "string" ? { thread_root_id: options.threadRootId } : {}),
       };
@@ -126,6 +157,34 @@ export function createBridge(baseUrl: string, token: string) {
       const data = await responseJson<SendResult>(res);
       if (!res.ok || data.success !== true) return { success: false, error: data.error ?? `HTTP ${res.status}` };
       return data;
+    },
+
+    // Store raw bytes under the bridge's conversation-scoped artifact vault.
+    // This is deliberately separate from /send so a harness can never hand
+    // bot-core a path from the OpenClaw host filesystem.
+    putFile: async (
+      chatId: string,
+      filePath: string,
+      bytes: Uint8Array,
+      mime = "application/octet-stream",
+      { overwrite = false }: { overwrite?: boolean } = {},
+    ): Promise<PutFileResult> => {
+      const url = `${fileUrl(chatId, filePath)}${overwrite ? "?overwrite=1" : ""}`;
+      const res = await fetch(url, {
+        method: "PUT",
+        headers: { ...headers, "content-type": mime },
+        body: bytes,
+      });
+      const data = await responseJson<PutFileResult>(res);
+      if (!res.ok || data.success !== true) {
+        throw new Error(`file upload failed: ${String(data.error ?? `HTTP ${res.status}`)}`);
+      }
+      return data;
+    },
+
+    removeFile: async (chatId: string, filePath: string): Promise<void> => {
+      const res = await fetch(fileUrl(chatId, filePath), { method: "DELETE", headers });
+      await requireSuccess(res, "file removal");
     },
 
     react: async (chatId: string, messageId: string, emoji: string, remove = false): Promise<void> => {

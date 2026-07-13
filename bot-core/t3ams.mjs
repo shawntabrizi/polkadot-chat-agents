@@ -11,11 +11,17 @@ import { createStateStore } from "./lib/session-store.mjs";
 import { createAgentRuntime } from "./lib/agent-runtime.mjs";
 import { resolveModelPolicy } from "./lib/commands.mjs";
 import { splitMessageText } from "./lib/chunk.mjs";
+import { createLiveReplies, createProgressTracker } from "./lib/live-reply.mjs";
 import { createWorkspaces } from "./lib/workspaces.mjs";
 import { createKeyedDispatcher } from "./lib/keyed-dispatcher.mjs";
+import { createFileStore } from "./lib/file-store.mjs";
+import { createFileCommandHandler } from "./lib/file-commands.mjs";
 import { RUNNERS, resolveEngine } from "./lib/runners.mjs";
 import { deriveT3amsIdentity } from "./lib/t3ams-identity.mjs";
 import { createT3amsProtocol, hexToBytes, bareHex } from "./lib/t3ams-protocol.mjs";
+import { createT3amsMedia } from "./lib/t3ams-media.mjs";
+import { DEFAULT_T3AMS_ATTACHMENT_MIME_TYPES } from "./lib/t3ams-attachments.mjs";
+import { createT3amsChannelContext } from "./lib/t3ams-channel-context.mjs";
 import {
   MAX_T3AMS_TEXT_BYTES,
   normalizeT3amsInbound,
@@ -32,6 +38,7 @@ import { getWsProvider, WsEvent } from "polkadot-api/ws";
 const env = process.env;
 const enc = new TextEncoder();
 const DEFAULT_ENDPOINT = "wss://paseo-people-next-system-rpc.polkadot.io";
+const DEFAULT_BULLETIN_ENDPOINT = "wss://paseo-bulletin-next-rpc.polkadot.io";
 const endpoint = (env.BOT_ENDPOINT ?? DEFAULT_ENDPOINT).trim();
 const seedHex = (env.BOT_SEED_HEX ?? env.FAUCET_CHAT_SERVICE_SECRET ?? "").trim();
 const transportName = (env.BOT_TRANSPORT ?? "").trim().toLowerCase();
@@ -103,6 +110,61 @@ if (!new Set(["echo", "claude", "codex", "opencode", "bridge", "hermes"]).has(br
   console.error("BOT_BRAIN must be echo, claude, codex, opencode, bridge, or hermes");
   process.exit(2);
 }
+// A slow turn should visibly make progress in the T3ams client. The native
+// protocol supports durable edits, so a single placeholder becomes thinking,
+// tool activity, then the final answer (rather than accumulating bubbles).
+const thinkingText = env.BOT_THINKING_TEXT ?? "🤔 One moment — thinking…";
+const thinkingAfterMs = numberEnv("BOT_THINKING_AFTER_MS", 5_000, { min: 0, max: 86_400_000 });
+const liveMinEditMs = numberEnv("BOT_LIVE_EDIT_MIN_MS", 3_000, { min: 100, max: 86_400_000 });
+const liveMaxEditMs = numberEnv("BOT_LIVE_EDIT_MAX_MS", 15_000, { min: liveMinEditMs, max: 86_400_000 });
+const liveHeartbeatMs = numberEnv("BOT_LIVE_HEARTBEAT_MS", 15_000, { min: 100, max: 86_400_000 });
+const liveFinalAckWaitMs = numberEnv("BOT_LIVE_FINAL_ACK_WAIT_MS", 10_000, { min: 100, max: 86_400_000 });
+const liveProgress = env.BOT_LIVE_PROGRESS !== "0";
+const liveTtlMs = numberEnv("BOT_LIVE_TTL_MS", 600_000, { min: 1000, max: 7 * 86_400_000 });
+const liveTimeoutText = env.BOT_LIVE_TIMEOUT_TEXT
+  ?? "⚠️ I lost track of this one — something went wrong on my end. Please send it again.";
+const replyChunkBytes = numberEnv("BOT_REPLY_CHUNK_BYTES", 4_000, { min: 128, max: MAX_T3AMS_TEXT_BYTES });
+
+// T3ams puts a small encrypted HOP capability inside each BCTS attachment
+// reference.  Keep the accepted surface explicit: bot-core treats the bytes
+// as inert files and never executes them, while an operator may narrow the
+// MIME list for a public deployment.  These caps are shared by protocol
+// decoding, the private media cache, and outbound file delivery.
+const attachmentMaxBytes = numberEnv("BOT_T3AMS_ATTACHMENT_MAX_BYTES", 25 * 1024 * 1024, { min: 1, max: 25 * 1024 * 1024 });
+const attachmentMaxCount = numberEnv("BOT_T3AMS_ATTACHMENT_MAX_COUNT", 4, { min: 0, max: 4 });
+const attachmentMimeRaw = env.BOT_T3AMS_ATTACHMENT_MIME_TYPES;
+const attachmentMimeTypes = attachmentMimeRaw == null || attachmentMimeRaw.trim() === ""
+  ? [...DEFAULT_T3AMS_ATTACHMENT_MIME_TYPES]
+  : attachmentMimeRaw.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean);
+const attachmentMimePattern = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/;
+if (attachmentMimeTypes.length === 0 || attachmentMimeTypes.some((mime) => !attachmentMimePattern.test(mime))) {
+  console.error("BOT_T3AMS_ATTACHMENT_MIME_TYPES must be a comma-separated list of MIME types");
+  process.exit(2);
+}
+const attachmentOptions = {
+  maxBytes: attachmentMaxBytes,
+  maxCount: attachmentMaxCount,
+  allowedMimeTypes: [...new Set(attachmentMimeTypes)],
+};
+// Explicit empty value turns retrieval/upload off, which is useful for an
+// operator who wants metadata-only bot behavior.  Otherwise use the exact
+// Bulletin network configured by the current T3ams SPA.
+const bulletinRpc = env.BOT_T3AMS_BULLETIN_RPC == null
+  ? DEFAULT_BULLETIN_ENDPOINT
+  : env.BOT_T3AMS_BULLETIN_RPC.trim();
+const t3amsHopAllowInsecure = env.BOT_T3AMS_HOP_ALLOW_INSECURE === "1"; // test-only ws:// mock support
+const t3amsHopTimeoutMs = numberEnv("BOT_T3AMS_HOP_TIMEOUT_MS", 120_000, { min: 1000, max: 86_400_000 });
+const t3amsHopRpcFrameMaxBytes = numberEnv("BOT_T3AMS_HOP_RPC_FRAME_MAX_BYTES", 4_500_000, { min: 1024, max: 32 * 1024 * 1024 });
+const t3amsMediaTtlHours = numberEnv("BOT_T3AMS_MEDIA_TTL_HOURS", 48, { min: 1, max: 24 * 365 });
+const t3amsMediaMaxTotalMb = numberEnv("BOT_T3AMS_MEDIA_MAX_TOTAL_MB", 512, { min: 1, max: 32 * 1024 });
+const t3amsMediaConcurrentDownloads = numberEnv("BOT_T3AMS_MEDIA_MAX_CONCURRENT_DOWNLOADS", 2, { min: 1, max: 64 });
+const t3amsMediaReserve = (bytes) => Math.max(1, bytes * 2 + 4 * 1024 * 1024);
+const t3amsMediaMaxInflightBytes = numberEnv(
+  "BOT_T3AMS_MEDIA_MAX_INFLIGHT_BYTES",
+  Math.max(t3amsMediaReserve(attachmentMaxBytes), 64 * 1024 * 1024),
+  { min: t3amsMediaReserve(attachmentMaxBytes), max: 4 * 1024 * 1024 * 1024 },
+);
+const t3amsMediaDownloadQueueCap = numberEnv("BOT_T3AMS_MEDIA_DOWNLOAD_QUEUE_CAP", 100, { min: 1, max: 10_000 });
 
 const allowedAccountIds = String(env.BOT_ALLOWED_PEERS ?? "")
   .split(",")
@@ -421,9 +483,218 @@ const dispatcher = createKeyedDispatcher({
 // per such ID, so this short-lived map safely preserves the exact incoming
 // thread root for commands, errors, and a model's eventual answer.
 const activeReplyThreads = new Map();
-const sendAgentReply = (chatId, text) => protocol.sendText(chatId, text, {
-  threadRootId: activeReplyThreads.get(chatId) ?? null,
+// Bridge workers do not execute inside the direct-runtime dispatcher, so hold
+// their trigger's thread root until the worker ACKs its lease. Per-chat bridge
+// leasing below guarantees that this never races two active turns.
+const bridgeReplyThreads = new Map();
+const replyThreadFor = (chatId) => activeReplyThreads.has(chatId)
+  ? activeReplyThreads.get(chatId)
+  : bridgeReplyThreads.get(chatId) ?? null;
+// The bridge may only request an edit of a message this process issued. The
+// client independently enforces author matching, but this local guard avoids
+// signing pointless or surprising operations for arbitrary message IDs.
+const botIssuedMessages = new Map(); // chatId -> Set<messageId>
+const noteBotIssuedMessage = (chatId, messageId) => {
+  const id = bareHex(messageId);
+  if (!/^[0-9a-f]{64}$/.test(id)) return false;
+  const ids = botIssuedMessages.get(chatId) ?? new Set();
+  ids.delete(id);
+  ids.add(id);
+  while (ids.size > 256) ids.delete(ids.values().next().value);
+  botIssuedMessages.delete(chatId);
+  botIssuedMessages.set(chatId, ids);
+  while (botIssuedMessages.size > knownChatCap) botIssuedMessages.delete(botIssuedMessages.keys().next().value);
+  return true;
+};
+const isBotIssuedMessage = (chatId, messageId) => botIssuedMessages.get(chatId)?.has(bareHex(messageId)) === true;
+
+// ---------- attachments and durable files ----------
+// File-store namespaces must be 32-byte hex, while T3ams conversation IDs
+// include a type and (for channels) two identities.  A domain-separated hash
+// keeps the vault opaque and prevents a DM/channel collision.
+const fileNamespaceForChat = (chatId) => {
+  if (!isT3amsConversationKey(chatId)) throw new Error("invalid T3ams file namespace");
+  return createHash("sha256").update("pca:t3ams-file-v1\0").update(chatId).digest("hex");
+};
+const fetchT3amsAttachments = async (attachments) => {
+  if (!Array.isArray(attachments) || attachments.length === 0) return [];
+  // Never mutate an ingress entry's durable route with an ephemeral cache
+  // path.  A restart can safely re-fetch from the encrypted capability.
+  const prepared = attachments.map((attachment) => ({ ...attachment }));
+  return t3amsMedia.fetchAttachments(prepared);
+};
+const sendT3amsAttachment = async (chatId, {
+  filePath,
+  mime,
+  size,
+  text = null,
+  filename = null,
+  threadRootId = undefined,
+} = {}) => {
+  if (!t3amsMedia.enabled) {
+    throw new Error("T3ams file delivery is disabled; configure BOT_T3AMS_BULLETIN_RPC and a funded Bulletin allowance");
+  }
+  // A bridge vault can preserve a more specific MIME than T3ams has elected
+  // to admit inbound. It is still safe to send the opaque bytes as the
+  // standards-defined generic type, rather than making saved arbitrary files
+  // impossible to retrieve through the chat.
+  const requestedMime = typeof mime === "string" ? mime.trim().toLowerCase() : "";
+  const outgoingMime = attachmentOptions.allowedMimeTypes.includes(requestedMime)
+    ? requestedMime
+    : attachmentOptions.allowedMimeTypes.includes("application/octet-stream")
+      ? "application/octet-stream"
+      : null;
+  if (outgoingMime == null) {
+    throw new Error("file MIME is outside this bot's T3ams attachment policy");
+  }
+  const uploaded = await t3amsMedia.upload({ filePath, mime: outgoingMime, size, filename });
+  const body = typeof text === "string" ? text : uploaded.attachment.filename;
+  const root = threadRootId === undefined ? replyThreadFor(chatId) : threadRootId;
+  const sent = await protocol.sendRichText(chatId, body, {
+    ...(root == null ? {} : { threadRootId: root }),
+    attachments: [uploaded.ref],
+  });
+  noteBotIssuedMessage(chatId, sent.messageId);
+  log("T3AMS_SENT_FILE", { chatId, mime: uploaded.attachment.mime, bytes: uploaded.attachment.size });
+  return { ...sent, attachment: uploaded.attachment };
+};
+const fileCommandChats = new Map();
+// The durable file store is configured only after the authenticated protocol
+// is restored below. Defer this binding so module initialization never reads
+// `fileStore` while it is still in its temporal-dead-zone.
+let fileCommandHandler = null;
+const handleT3amsFileCommand = async (chatId, message) => {
+  if (fileCommandHandler == null) throw new Error("T3ams file commands are not initialized");
+  const namespace = fileNamespaceForChat(chatId);
+  fileCommandChats.set(namespace, chatId);
+  try {
+    // A mentioned channel invocation carries a trimmed commandText, whereas
+    // its raw text remains useful to a model. The vault command is transport
+    // owned, so it must consume the explicit slash form.
+    return await fileCommandHandler(namespace, {
+      ...message,
+      text: typeof message.commandText === "string" ? message.commandText : message.text,
+    });
+  } finally {
+    fileCommandChats.delete(namespace);
+  }
+};
+
+// ---------- live replies and typing ----------
+// T3ams ops are independently retained and the SPA buffers an edit which
+// arrives before its original message. Unlike the legacy session slot, an
+// explicit peer ACK is not required before we may edit the placeholder.
+const liveReplies = createLiveReplies({
+  send: async ({ peerHex: chatId, text, editOf }) => {
+    if (editOf != null) {
+      const edited = await protocol.editText(chatId, editOf, text);
+      return { messageId: edited.messageId, delivered: true };
+    }
+    const sent = await protocol.sendText(chatId, text, { threadRootId: replyThreadFor(chatId) });
+    noteBotIssuedMessage(chatId, sent.messageId);
+    return { messageId: sent.messageId, delivered: true };
+  },
+  awaitAck: async () => true,
+  minIntervalMs: liveMinEditMs,
+  maxIntervalMs: liveMaxEditMs,
+  finalAckWaitMs: liveFinalAckWaitMs,
+  log,
 });
+const thinkingTimers = new Map(); // chatId -> timeout
+const livePlaceholders = new Map(); // chatId -> Promise<{handle, tracker, timer, ttl} | null>
+// A framework can stream `edit_of` frames without labeling the final frame.
+// Per-chat bridge leasing lets its eventual ACK safely promote this latest
+// value into a terminal edit.
+const bridgePendingEdits = new Map(); // chatId -> { messageId, text }
+const disarmThinking = (chatId) => {
+  const timer = thinkingTimers.get(chatId);
+  if (timer != null) clearTimeout(timer);
+  thinkingTimers.delete(chatId);
+};
+const takeLivePlaceholder = async (chatId) => {
+  const pending = livePlaceholders.get(chatId);
+  if (pending == null) return null;
+  livePlaceholders.delete(chatId);
+  const placeholder = await pending.catch(() => null);
+  if (placeholder != null) {
+    clearInterval(placeholder.timer);
+    clearTimeout(placeholder.ttl);
+  }
+  return placeholder;
+};
+const peekLivePlaceholder = (chatId) => livePlaceholders.get(chatId) ?? null;
+const bestEffortTyping = (chatId) => {
+  void protocol.sendTyping(chatId).catch((error) => {
+    log("T3AMS_TYPING_FAILED", { chatId, error: String(error?.message ?? error) });
+  });
+};
+const armThinking = (chatId) => {
+  if (!thinkingText || thinkingAfterMs <= 0 || thinkingTimers.has(chatId)) return;
+  const timer = setTimeout(() => {
+    thinkingTimers.delete(chatId);
+    if (livePlaceholders.has(chatId)) return;
+    livePlaceholders.set(chatId, (async () => {
+      const handle = await liveReplies.begin(chatId, thinkingText);
+      const tracker = createProgressTracker({ label: "working" });
+      const heartbeat = setInterval(() => {
+        bestEffortTyping(chatId);
+        if (!handle.finalized) handle.update(tracker.render());
+      }, liveHeartbeatMs);
+      heartbeat.unref?.();
+      const ttl = setTimeout(async () => {
+        const placeholder = await takeLivePlaceholder(chatId);
+        if (placeholder == null) return;
+        log("T3AMS_LIVE_TTL_EXPIRED", { chatId, messageId: placeholder.handle.messageId });
+        placeholder.handle.finalize(liveTimeoutText).catch((error) => {
+          log("T3AMS_LIVE_FINALIZE_FAILED", { chatId, error: String(error?.message ?? error) });
+        });
+      }, liveTtlMs);
+      ttl.unref?.();
+      bestEffortTyping(chatId);
+      log("T3AMS_LIVE_PLACEHOLDER", { chatId, messageId: handle.messageId });
+      return { handle, tracker, timer: heartbeat, ttl };
+    })().catch((error) => {
+      log("T3AMS_THINKING_FAILED", { chatId, error: String(error?.message ?? error) });
+      return null;
+    }));
+  }, thinkingAfterMs);
+  timer.unref?.();
+  thinkingTimers.set(chatId, timer);
+};
+const sendAgentReply = async (chatId, text) => {
+  disarmThinking(chatId);
+  const sent = await protocol.sendText(chatId, text, { threadRootId: replyThreadFor(chatId) });
+  noteBotIssuedMessage(chatId, sent.messageId);
+  return sent;
+};
+const deliverAgentReply = async (chatId, text) => {
+  disarmThinking(chatId);
+  const parts = splitMessageText(text, replyChunkBytes);
+  if (parts.length > 1) log("T3AMS_REPLY_CHUNKED", { chatId, parts: parts.length, chars: text.length });
+  const placeholder = await takeLivePlaceholder(chatId);
+  let deliveredFirst = false;
+  if (placeholder != null) {
+    // Finalization is intentionally not best-effort: a final-answer delivery
+    // failure is surfaced to the durable ingress journal for retry. Progress
+    // edits and typing above remain non-fatal.
+    await placeholder.handle.finalize(parts[0]);
+    deliveredFirst = true;
+  }
+  for (const part of deliveredFirst ? parts.slice(1) : parts) await sendAgentReply(chatId, part);
+};
+const beginTurnProgress = (chatId) => {
+  bestEffortTyping(chatId);
+  armThinking(chatId);
+  if (!liveProgress) return null;
+  return (title) => {
+    const pending = peekLivePlaceholder(chatId);
+    pending?.then((placeholder) => {
+      if (placeholder == null || placeholder.handle.finalized) return;
+      placeholder.tracker.add(title);
+      placeholder.handle.update(placeholder.tracker.render());
+    }).catch(() => {});
+  };
+};
 
 const inboundRetryTimers = new Map();
 const inboundRetryAttempts = new Map();
@@ -524,13 +795,47 @@ const routeOneInbound = async (event, { historyOnly = false } = {}) => {
     text: event.text,
     threadRootId: event.threadRootId,
     mentions: event.mentions,
+    attachments: event.attachments,
+    attachmentError: event.attachmentError,
   }, { xid: selfXidHex, aliases: [username, displayName] });
   if (!routed.accepted || historyOnly) {
+    // Unmentioned group traffic remains passive. If the operator enabled the
+    // bounded local context buffer, retain only ordinary text from the live
+    // primary statement (never carrier priors or attachment capabilities).
+    if (!historyOnly && routed.reason === "unmentioned-channel-message"
+        && event.conversation?.kind === "channel"
+        && (!Array.isArray(event.attachments) || event.attachments.length === 0)
+        && typeof event.text === "string" && event.text.trim() !== "") {
+      const stored = channelContext.append(event.chatId, {
+        messageId: event.messageId,
+        senderXid: event.senderXid,
+        senderName: event.senderName,
+        text: event.text,
+        threadRootId: event.threadRootId,
+      });
+      if (stored.accepted) log("T3AMS_CHANNEL_CONTEXT_APPENDED", { chatId: event.chatId, messageId: event.messageId });
+    }
     await commitHistoryOnly(event);
     if (!historyOnly) {
       log("T3AMS_INBOUND_IGNORED", { reason: routed.reason, chatId: event.chatId });
     }
     return;
+  }
+  if (routed.message.conversationType === "channel") {
+    const snapshot = channelContext.snapshot(routed.conversationKey, {
+      threadRootId: routed.message.threadRootId,
+    });
+    if (snapshot.length > 0) routed.message.channelContext = snapshot;
+  }
+  // `/stop` must reach the direct runtime before this message waits behind a
+  // same-chat model turn. Its own durable ingress entry later sends the user a
+  // normal confirmation, preserving at-least-once acknowledgement semantics.
+  const commandInput = typeof routed.message.commandText === "string"
+    ? routed.message.commandText
+    : routed.message.text;
+  if (agentRuntime != null && /^\/stop\s*$/i.test(commandInput)) {
+    const stopped = agentRuntime.stop(routed.conversationKey);
+    log("T3AMS_STOP_REQUESTED", { chatId: routed.conversationKey, stopped });
   }
   const admission = await admitIngress(event, routed);
   if (!admission.admitted) {
@@ -716,10 +1021,113 @@ protocol = createT3amsProtocol({
   publicPeerAdmissionLimit: publicPeerAdmissions,
   publicWorkspaceAdmissionLimit: publicWorkspaceAdmissions,
   acceptWorkspaceInvite: () => autoAcceptWorkspaces,
+  attachmentOptions,
   onStateChange: () => persist(),
   onTopologyChange: syncTopology,
   log,
 });
+let t3amsMedia;
+try {
+  t3amsMedia = createT3amsMedia({
+    bcts,
+    bulletinUrl: bulletinRpc,
+    uploadSigner: wallet,
+    dir: path.join(stateDir, "media"),
+    attachmentOptions,
+    ttlHours: t3amsMediaTtlHours,
+    maxTotalMb: t3amsMediaMaxTotalMb,
+    maxConcurrentDownloads: t3amsMediaConcurrentDownloads,
+    maxInflightBytes: t3amsMediaMaxInflightBytes,
+    downloadQueueCap: t3amsMediaDownloadQueueCap,
+    timeoutMs: t3amsHopTimeoutMs,
+    rpcFrameMaxBytes: t3amsHopRpcFrameMaxBytes,
+    allowInsecure: t3amsHopAllowInsecure,
+    log,
+  });
+  t3amsMedia.sweep();
+} catch (error) {
+  console.error(`T3ams media configuration is invalid: ${String(error?.message ?? error)}`);
+  process.exit(2);
+}
+const mediaSweepTimer = setInterval(() => t3amsMedia.sweep(), 3_600_000);
+mediaSweepTimer.unref?.();
+// Durable files are deliberately distinct from the evictable media cache.
+// They are scoped to a T3ams conversation, allowing a group to intentionally
+// share a vault while preventing any cross-DM/channel lookup.
+const fileMaxBytes = numberEnv("BOT_FILE_MAX_BYTES", attachmentMaxBytes, { min: 1, max: attachmentMaxBytes });
+const fileMaxTotalMb = numberEnv(
+  "BOT_FILE_MAX_TOTAL_MB",
+  1024,
+  { min: Math.ceil(fileMaxBytes / (1024 * 1024)), max: 32 * 1024 },
+);
+const fileMaxEntries = numberEnv("BOT_FILE_MAX_ENTRIES", 2000, { min: 1, max: 100_000 });
+const fileMaxPeerMb = numberEnv(
+  "BOT_FILE_MAX_PEER_MB",
+  Math.max(Math.ceil(fileMaxBytes / (1024 * 1024)), Math.min(256, fileMaxTotalMb)),
+  { min: Math.ceil(fileMaxBytes / (1024 * 1024)), max: fileMaxTotalMb },
+);
+const fileMaxPeerEntries = numberEnv("BOT_FILE_MAX_PEER_ENTRIES", Math.min(500, fileMaxEntries), { min: 1, max: fileMaxEntries });
+const fileStore = createFileStore({
+  dir: path.join(stateDir, "files"),
+  maxFileBytes: fileMaxBytes,
+  maxTotalMb: fileMaxTotalMb,
+  maxEntries: fileMaxEntries,
+  maxPeerMb: fileMaxPeerMb,
+  maxPeerEntries: fileMaxPeerEntries,
+  log,
+});
+fileCommandHandler = createFileCommandHandler({
+  fileStore,
+  sendAttachment: async (namespace, payload) => {
+    const chatId = fileCommandChats.get(namespace);
+    if (chatId == null) throw new Error("file command lost its T3ams conversation scope");
+    return sendT3amsAttachment(chatId, payload);
+  },
+  log,
+});
+const bridgeFileMaxBytes = numberEnv("BOT_BRIDGE_FILE_MAX_BYTES", fileMaxBytes, { min: 1, max: fileMaxBytes });
+const bridgeMediaRefCap = numberEnv(
+  "BOT_T3AMS_BRIDGE_MEDIA_REF_CAP",
+  Math.max(256, Math.min(100_000, ingressCap * Math.max(1, attachmentMaxCount))),
+  { min: 16, max: 100_000 },
+);
+const bridgeMediaRefTtlMs = numberEnv("BOT_T3AMS_BRIDGE_MEDIA_REF_TTL_MS", 60 * 60_000, { min: 60_000, max: 24 * 3_600_000 });
+const channelContextSetting = (env.BOT_T3AMS_CHANNEL_CONTEXT ?? "0").trim();
+if (!new Set(["0", "1"]).has(channelContextSetting)) {
+  console.error("BOT_T3AMS_CHANNEL_CONTEXT must be 0 or 1");
+  process.exit(2);
+}
+// Passive group context is intentionally opt-in and memory-only.  Unmentioned
+// channel traffic is never sent to a brain; it only becomes a small immutable
+// snapshot when someone explicitly invokes the bot in that same channel.
+const channelContext = createT3amsChannelContext({
+  enabled: channelContextSetting === "1",
+  ttlMs: numberEnv("BOT_T3AMS_CHANNEL_CONTEXT_TTL_MS", 30 * 60_000, { min: 0, max: 24 * 3_600_000 }),
+  maxChats: numberEnv("BOT_T3AMS_CHANNEL_CONTEXT_MAX_CHATS", 128, { min: 1, max: 10_000 }),
+  maxRecordsPerChat: numberEnv("BOT_T3AMS_CHANNEL_CONTEXT_MAX_RECORDS", 16, { min: 1, max: 256 }),
+  maxBytesPerChat: numberEnv("BOT_T3AMS_CHANNEL_CONTEXT_MAX_BYTES", 8 * 1024, { min: 256, max: 256 * 1024 }),
+  maxRecordBytes: numberEnv("BOT_T3AMS_CHANNEL_CONTEXT_MAX_RECORD_BYTES", 2 * 1024, { min: 128, max: 64 * 1024 }),
+  maxRecordsPerSender: numberEnv("BOT_T3AMS_CHANNEL_CONTEXT_MAX_RECORDS_PER_SENDER", 4, { min: 1, max: 64 }),
+  maxBytesPerSender: numberEnv("BOT_T3AMS_CHANNEL_CONTEXT_MAX_BYTES_PER_SENDER", 2 * 1024, { min: 128, max: 128 * 1024 }),
+  maxTotalBytes: numberEnv("BOT_T3AMS_CHANNEL_CONTEXT_MAX_TOTAL_BYTES", 256 * 1024, { min: 1024, max: 16 * 1024 * 1024 }),
+  isValidChat: isT3amsConversationKey,
+});
+// A channel has one shared native model session. Let ordinary members invoke
+// the bot, but do not let one member silently reset or reconfigure everyone
+// else's session. `/stop` remains available to the group as a liveness lever.
+const channelControlRole = (env.BOT_T3AMS_CHANNEL_CONTROL_ROLE ?? "admin").trim().toLowerCase();
+if (!new Set(["all", "mod", "admin"]).has(channelControlRole)) {
+  console.error("BOT_T3AMS_CHANNEL_CONTROL_ROLE must be all, mod, or admin");
+  process.exit(2);
+}
+const stateChangingChannelCommand = (text) => /^\/(?:reset|model|reasoning|project)(?:\s|$)/i.test(text ?? "");
+const canControlChannel = (message) => {
+  if (message?.conversationType !== "channel" || channelControlRole === "all") return true;
+  const role = protocol.workspaceRole(message.workspaceId, message.senderXid);
+  return channelControlRole === "mod"
+    ? role === "owner" || role === "admin" || role === "mod"
+    : role === "owner" || role === "admin";
+};
 for (const entry of ingress) {
   if (!protocol.restoreInboundConversation(entry.routed)) {
     log("T3AMS_INGRESS_RESTORE_SKIPPED", { id: entry.id });
@@ -794,10 +1202,25 @@ const renderT3amsForBrain = (message) => {
     ? `channel ${message.workspaceId}/${message.channelId}`
     : "direct message";
   const thread = message.threadRootId ? `; thread ${message.threadRootId}` : "";
+  const attachmentNotes = (message.attachments ?? []).map((attachment) => {
+    const noun = attachment.kind === "image" ? "photo" : "document";
+    const size = attachment.size >= 1024 * 1024
+      ? `${(attachment.size / (1024 * 1024)).toFixed(1)} MB`
+      : `${Math.max(1, Math.round(attachment.size / 1024))} KB`;
+    return attachment.downloaded && attachment.path
+      ? `[User attached a ${noun} saved at ${attachment.path} (${attachment.mime}, ${size})]`
+      : `[User attached a ${noun} (${attachment.filename}; ${attachment.mime}, ${size}) — file bytes are unavailable: ${attachment.error ?? "download is not configured"}]`;
+  });
+  if (message.attachmentError) attachmentNotes.push(`[Attachment warning: ${message.attachmentError}]`);
+  const contextNotes = (message.channelContext ?? []).map((record) => {
+    const name = record.senderName || record.senderXid || "channel member";
+    const thread = record.threadRootId ? `; thread ${record.threadRootId}` : "";
+    return `[Earlier channel message from ${name}${thread}]: ${record.text}`;
+  });
   // Channel sessions intentionally share memory. Include the authenticated
   // sender/scope so a direct brain can distinguish participants without
   // changing the transport-neutral message API.
-  return `[T3ams ${scope}; sender ${sender}${thread}]\n${message.text}`;
+  return [`[T3ams ${scope}; sender ${sender}${thread}]`, ...contextNotes, message.text, ...attachmentNotes].filter(Boolean).join("\n");
 };
 if (engine != null) {
   fs.mkdirSync(aiWorkspace, { recursive: true, mode: 0o700 });
@@ -835,12 +1258,8 @@ if (engine != null) {
     renderMessage: renderT3amsForBrain,
     chat: {
       sendText: sendAgentReply,
-      deliver: async (chatId, text) => {
-        for (const part of splitMessageText(text, numberEnv("BOT_REPLY_CHUNK_BYTES", 4000, { min: 128, max: MAX_T3AMS_TEXT_BYTES }))) {
-          await sendAgentReply(chatId, part);
-        }
-      },
-      beginTurn: () => null,
+      deliver: deliverAgentReply,
+      beginTurn: beginTurnProgress,
     },
     throwOnReplyFailure: true,
     username,
@@ -972,23 +1391,46 @@ const executeIngressTurn = async (entry) => {
     text: routed.message.text,
     ...(typeof routed.message.commandText === "string" ? { commandText: routed.message.commandText } : {}),
     messageId: routed.message.messageId,
-    kind: "text",
+    kind: routed.message.kind,
     threadRootId: routed.message.threadRootId,
     conversationType: routed.message.conversationType,
     workspaceId: routed.message.workspaceId,
     channelId: routed.message.channelId,
     senderXid: routed.message.senderXid,
     senderName: routed.message.senderName,
+    ...(Array.isArray(routed.message.attachments) ? { attachments: routed.message.attachments } : {}),
+    ...(typeof routed.message.attachmentError === "string" ? { attachmentError: routed.message.attachmentError } : {}),
+    ...(Array.isArray(routed.message.channelContext) ? { channelContext: routed.message.channelContext } : {}),
   };
-  if (brain === "echo") {
-    await protocol.sendText(routed.conversationKey, `Echo: ${message.text}`, { threadRootId: routed.replyTarget.threadRootId });
-    return;
-  }
-  if (agentRuntime == null) throw new Error("no direct T3ams agent runtime is configured");
   const hadPrevious = activeReplyThreads.has(routed.conversationKey);
   const previous = activeReplyThreads.get(routed.conversationKey);
   activeReplyThreads.set(routed.conversationKey, routed.replyTarget.threadRootId);
   try {
+    if (Array.isArray(message.attachments) && message.attachments.length > 0) {
+      message.attachments = await fetchT3amsAttachments(message.attachments);
+    }
+    const fileResult = await handleT3amsFileCommand(routed.conversationKey, message);
+    if (fileResult?.handled) {
+      if (fileResult.reply) await sendAgentReply(routed.conversationKey, fileResult.reply);
+      return;
+    }
+    if (brain === "echo") {
+      await sendAgentReply(routed.conversationKey, `Echo: ${message.text}`);
+      return;
+    }
+    if (agentRuntime == null) throw new Error("no direct T3ams agent runtime is configured");
+    const commandInput = typeof message.commandText === "string" ? message.commandText : message.text;
+    if (/^\/stop\s*$/i.test(commandInput)) {
+      // The cancellation request was issued immediately when the authenticated
+      // event arrived; this ordered, durable turn is just its confirmation.
+      await sendAgentReply(routed.conversationKey, "⏹️ Stopped any active work for this chat.");
+      return;
+    }
+    if (stateChangingChannelCommand(commandInput) && !canControlChannel(message)) {
+      const label = channelControlRole === "mod" ? "a workspace moderator" : "a workspace owner or admin";
+      await sendAgentReply(routed.conversationKey, `Only ${label} can change this channel bot's shared session settings.`);
+      return;
+    }
     const handled = await agentRuntime.handleMessage(routed.conversationKey, message);
     if (handled !== true) throw new Error("agent turn was interrupted before completion");
   } finally {
@@ -1049,12 +1491,20 @@ const leaseBridgeIngress = async (limit) => mutateIngress(async () => {
   if (!ingressDurable) return [];
   const current = Date.now();
   const leased = [];
+  // One framework turn per native chat at a time. Besides preserving ordered
+  // model semantics, this prevents two workers from competing for one live
+  // placeholder/thread-root map in a busy group channel.
+  const occupiedChats = new Set(ingress
+    .filter((entry) => entry.kind === "bridge" && Number(entry.leaseUntil) > current)
+    .map((entry) => entry.routed.conversationKey));
   for (const entry of ingress) {
     if (leased.length >= limit) break;
     if (entry.kind !== "bridge" || Number(entry.leaseUntil) > current) continue;
+    if (occupiedChats.has(entry.routed.conversationKey)) continue;
     entry.leaseId = randomUUID();
     entry.leaseUntil = current + leaseMs;
     leased.push(entry);
+    occupiedChats.add(entry.routed.conversationKey);
   }
   if (leased.length === 0) return [];
   const saved = await persistCritical();
@@ -1069,8 +1519,14 @@ const leaseBridgeIngress = async (limit) => mutateIngress(async () => {
     return [];
   }
   ingressDurable = true;
+  for (const entry of leased) {
+    const chatId = entry.routed.conversationKey;
+    bridgeReplyThreads.set(chatId, entry.routed.replyTarget.threadRootId ?? null);
+    bestEffortTyping(chatId);
+    armThinking(chatId);
+  }
   return leased.map((entry) => ({
-    ...toT3amsBridgeInbound(entry.routed),
+    ...bridgeInboundWithMedia(entry.routed),
     delivery_id: entry.id,
     lease_id: entry.leaseId,
     lease_until: entry.leaseUntil,
@@ -1093,6 +1549,16 @@ const updateBridgeLeases = async (claims, acknowledge) => mutateIngress(async ()
   const saved = await persistCritical();
   if (saved) {
     for (const entry of acknowledged) protocol.unpinConversation(entry.routed.conversationKey);
+    for (const entry of acknowledged) {
+      const chatId = entry.routed.conversationKey;
+      const stillLeased = ingress.some((candidate) => candidate.kind === "bridge"
+        && candidate.routed.conversationKey === chatId
+        && Number(candidate.leaseUntil) > Date.now());
+      if (!stillLeased) {
+        bridgeReplyThreads.delete(chatId);
+        disarmThinking(chatId);
+      }
+    }
     knownChats.trim();
     ingressDurable = true;
     pumpIngress();
@@ -1104,6 +1570,121 @@ const updateBridgeLeases = async (claims, acknowledge) => mutateIngress(async ()
   scheduleIngressDurabilityRetry();
   return { changed: 0, durable: false };
 });
+const finalizeBridgeEdits = async (claims) => {
+  const chats = new Set();
+  for (const claim of claims) {
+    if (claim == null || typeof claim.delivery_id !== "string" || typeof claim.lease_id !== "string") continue;
+    const entry = ingress.find((candidate) => candidate.kind === "bridge"
+      && candidate.id === claim.delivery_id
+      && candidate.leaseId === claim.lease_id);
+    if (entry != null) chats.add(entry.routed.conversationKey);
+  }
+  for (const chatId of chats) {
+    const edit = bridgePendingEdits.get(chatId);
+    if (edit == null) continue;
+    const placeholder = await takeLivePlaceholder(chatId);
+    if (placeholder != null && bareHex(placeholder.handle.messageId) !== bareHex(edit.messageId)) {
+      // The framework chose to stream an earlier bot message rather than the
+      // current placeholder. Retire the placeholder so it never dangles.
+      await placeholder.handle.finalize("✓");
+    }
+    await liveReplies.finalizeExisting(chatId, edit.messageId, edit.text);
+    bridgePendingEdits.delete(chatId);
+  }
+};
+// A bridge must never receive the encrypted HOP ticket. Give each capability
+// a process-local opaque media ID instead; the ID binds every authenticated
+// reference field, so a hostile reuse of a HOP metadata ID cannot poison a
+// cached or later bridge download.
+const bridgeMediaRefs = new Map(); // opaque media ID -> { attachment, expiresAt }
+const bridgeMediaIdFor = (attachment) => createHash("sha256")
+  .update("pca:t3ams-bridge-media-v1\0")
+  .update(attachment.hopId)
+  .update("\0")
+  .update(attachment.claimTicketHex)
+  .update("\0")
+  .update(attachment.contentHashHex)
+  .update("\0")
+  .update(String(attachment.size))
+  .digest("hex");
+const pruneBridgeMediaRefs = () => {
+  const current = Date.now();
+  for (const [id, entry] of bridgeMediaRefs) {
+    if (entry.expiresAt <= current) bridgeMediaRefs.delete(id);
+  }
+  while (bridgeMediaRefs.size > bridgeMediaRefCap) bridgeMediaRefs.delete(bridgeMediaRefs.keys().next().value);
+};
+const registerBridgeMediaRef = (attachment) => {
+  pruneBridgeMediaRefs();
+  const id = bridgeMediaIdFor(attachment);
+  bridgeMediaRefs.delete(id);
+  bridgeMediaRefs.set(id, { attachment: { ...attachment }, expiresAt: Date.now() + bridgeMediaRefTtlMs });
+  pruneBridgeMediaRefs();
+  return id;
+};
+const bridgeMediaRef = (id) => {
+  if (!/^[0-9a-f]{64}$/i.test(String(id ?? ""))) return null;
+  pruneBridgeMediaRefs();
+  const entry = bridgeMediaRefs.get(String(id).toLowerCase());
+  if (entry == null) return null;
+  // LRU-like renewal helps a bridge fetch a few files from one long-running
+  // leased turn without making media capabilities permanent.
+  bridgeMediaRefs.delete(String(id).toLowerCase());
+  entry.expiresAt = Date.now() + bridgeMediaRefTtlMs;
+  bridgeMediaRefs.set(String(id).toLowerCase(), entry);
+  return { ...entry.attachment };
+};
+const bridgeInboundWithMedia = (routed) => {
+  const inbound = toT3amsBridgeInbound(routed);
+  const source = routed?.message?.attachments ?? [];
+  if (!inbound?.attachments?.length) return inbound;
+  inbound.attachments = inbound.attachments.map((attachment, index) => {
+    const raw = source[index];
+    if (raw == null || !t3amsMedia.enabled) return { ...attachment, downloaded: false };
+    const mediaId = registerBridgeMediaRef(raw);
+    const cached = t3amsMedia.findCached(raw) != null;
+    return {
+      ...attachment,
+      media_id: mediaId,
+      downloaded: cached,
+      url: `/media/${mediaId}`,
+    };
+  });
+  // Start the same bounded/single-flight download that GET /media will use.
+  // This does not block the lease or change its durable attachment metadata.
+  if (t3amsMedia.enabled) {
+    void fetchT3amsAttachments(source).catch((error) => {
+      log("T3AMS_BRIDGE_MEDIA_PREWARM_FAILED", { error: String(error?.message ?? error) });
+    });
+  }
+  return inbound;
+};
+const bridgeFileRoute = (pathname) => {
+  if (!pathname.startsWith("/files/")) return null;
+  const tail = pathname.slice("/files/".length);
+  const separator = tail.indexOf("/");
+  const encodedChat = separator < 0 ? tail : tail.slice(0, separator);
+  const encodedPath = separator < 0 ? null : tail.slice(separator + 1);
+  if (!encodedChat) return { invalid: true };
+  try {
+    const chatId = decodeURIComponent(encodedChat);
+    if (!isT3amsConversationKey(chatId)) return { invalid: true };
+    return {
+      chatId,
+      namespace: fileNamespaceForChat(chatId),
+      filePath: encodedPath == null ? null : decodeURIComponent(encodedPath),
+    };
+  } catch {
+    return { invalid: true };
+  }
+};
+const fileBridgeStatus = (error) => {
+  const code = error?.code;
+  return code === "FILE_STORE_EXISTS" ? 409
+    : code === "FILE_STORE_FILE_TOO_LARGE" ? 413
+      : code === "FILE_STORE_FULL" || code === "FILE_STORE_ENTRY_LIMIT" || code === "FILE_STORE_PEER_FULL" || code === "FILE_STORE_PEER_ENTRY_LIMIT" ? 507
+        : 400;
+};
 const readBody = (request, max = 1_000_000) => new Promise((resolve, reject) => {
   let size = 0; const chunks = [];
   request.on("data", (chunk) => { size += chunk.length; if (size > max) { reject(new Error("request body too large")); request.destroy(); } else chunks.push(chunk); });
@@ -1121,7 +1702,81 @@ const bridge = http.createServer(async (request, response) => {
     if (!authorized(request)) return json(response, 401, { success: false, error: "unauthorized" });
     const url = new URL(request.url ?? "/", "http://localhost");
     if (request.method === "GET" && url.pathname === "/health") {
-      return json(response, 200, { ok: isChainConnected(), transport: "t3ams", account: material.accountIdHex, identifierKey: null, xid: selfXidHex, username, subscriptions: subscriptions.size, bridge: { queued: bridgeQueued() } });
+      return json(response, 200, {
+        ok: isChainConnected(), transport: "t3ams", account: material.accountIdHex, identifierKey: null,
+        xid: selfXidHex, username, subscriptions: subscriptions.size,
+        bridge: { queued: bridgeQueued() },
+        media: {
+          enabled: t3amsMedia.enabled,
+          cached: t3amsMedia.stats(),
+          bulletin: t3amsMedia.enabled ? new URL(t3amsMedia.bulletinUrl).hostname : null,
+          allowance: "operator-provisioned",
+        },
+        files: { ...fileStore.stats(), maxBridgeUploadBytes: bridgeFileMaxBytes },
+        channel_context: channelContext.stats(),
+        live: { supportsEdit: true, supportsTyping: true, supportsReaction: true, minEditMs: liveMinEditMs, placeholderAfterMs: thinkingAfterMs },
+      });
+    }
+    if (request.method === "GET" && url.pathname.startsWith("/media/")) {
+      const attachment = bridgeMediaRef(url.pathname.slice("/media/".length));
+      if (attachment == null) return json(response, 404, { success: false, error: "not found" });
+      if (!t3amsMedia.enabled) return json(response, 503, { success: false, error: "T3ams media retrieval is disabled" });
+      let filePath = t3amsMedia.findCached(attachment);
+      try {
+        if (filePath == null) filePath = await t3amsMedia.download(attachment);
+        const stat = fs.lstatSync(filePath);
+        if (!stat.isFile() || stat.size !== attachment.size) throw new Error("cached attachment is invalid");
+        response.writeHead(200, {
+          "content-type": attachment.mime,
+          "content-length": stat.size,
+          "cache-control": "private, max-age=300",
+        });
+        fs.createReadStream(filePath).pipe(response);
+        return;
+      } catch (error) {
+        log("T3AMS_BRIDGE_MEDIA_FAILED", { id: attachment.id.slice(0, 16), error: String(error?.message ?? error) });
+        return json(response, 502, { success: false, error: "attachment download failed" });
+      }
+    }
+    const fileRoute = bridgeFileRoute(url.pathname);
+    if (fileRoute != null) {
+      if (fileRoute.invalid) return json(response, 400, { success: false, error: "invalid file route" });
+      try {
+        if (request.method === "GET" && fileRoute.filePath == null) {
+          const prefix = url.searchParams.get("prefix") ?? "";
+          const files = fileStore.list(fileRoute.namespace, prefix).map(({ peer, ...file }) => file);
+          return json(response, 200, { success: true, files });
+        }
+        if (request.method === "GET") {
+          if (!fileRoute.filePath) return json(response, 400, { success: false, error: "file path required" });
+          const file = fileStore.get(fileRoute.namespace, fileRoute.filePath);
+          if (file == null) return json(response, 404, { success: false, error: "not found" });
+          response.writeHead(200, { "content-type": file.mime, "content-length": file.size, "cache-control": "private, no-store" });
+          fs.createReadStream(file.filePath).pipe(response);
+          return;
+        }
+        if (request.method === "PUT") {
+          if (!fileRoute.filePath) return json(response, 400, { success: false, error: "file path required" });
+          const rawMime = Array.isArray(request.headers["content-type"])
+            ? request.headers["content-type"][0]
+            : request.headers["content-type"];
+          const mime = String(rawMime ?? "application/octet-stream").split(";", 1)[0].trim();
+          const bytes = await readBody(request, bridgeFileMaxBytes);
+          const saved = fileStore.putBytes(fileRoute.namespace, fileRoute.filePath, bytes, {
+            mime,
+            overwrite: url.searchParams.get("overwrite") === "1",
+          });
+          return json(response, 201, { success: true, path: saved.path, mime: saved.mime, size: saved.size });
+        }
+        if (request.method === "DELETE") {
+          if (!fileRoute.filePath) return json(response, 400, { success: false, error: "file path required" });
+          if (!fileStore.remove(fileRoute.namespace, fileRoute.filePath)) return json(response, 404, { success: false, error: "not found" });
+          return json(response, 200, { success: true });
+        }
+        return json(response, 405, { success: false, error: "method not allowed" });
+      } catch (error) {
+        return json(response, fileBridgeStatus(error), { success: false, error: String(error?.message ?? error).slice(0, 300) });
+      }
     }
     if (request.method === "GET" && url.pathname === "/inbound") {
       const limit = Math.min(32, Math.max(1, Number(url.searchParams.get("limit") ?? 1) || 1));
@@ -1150,6 +1805,12 @@ const bridge = http.createServer(async (request, response) => {
           : body.delivery_id || body.lease_id
             ? [body]
             : [];
+      if (url.pathname.endsWith("/ack")) {
+        // A streaming framework's ACK means its turn has completed. Flush the
+        // latest coalesced edit before removing the durable lease, otherwise
+        // a throttled progress timer could be the visible terminal state.
+        await finalizeBridgeEdits(claims);
+      }
       const result = await updateBridgeLeases(claims, url.pathname.endsWith("/ack"));
       if (!result.durable) return json(response, 503, { success: false, error: "state persistence pending; retry the claim" });
       return json(response, 200, { success: true, [url.pathname.endsWith("/ack") ? "acknowledged" : "renewed"]: result.changed });
@@ -1158,22 +1819,117 @@ const bridge = http.createServer(async (request, response) => {
       const body = JSON.parse((await readBody(request)).toString("utf8") || "{}");
       const chatId = typeof body.chat_id === "string" ? body.chat_id : "";
       const text = typeof body.text === "string" ? body.text : "";
-      if (!chatId || !text) return json(response, 400, { success: false, error: "chat_id and text are required" });
+      const hasText = text.length > 0;
+      const filePath = body.file_path == null ? null : body.file_path;
+      if (!chatId || (!hasText && filePath == null)) return json(response, 400, { success: false, error: "chat_id and text or file_path are required" });
+      if (!isT3amsConversationKey(chatId)) return json(response, 400, { success: false, error: "invalid chat_id" });
       if (Buffer.byteLength(text, "utf8") > MAX_T3AMS_TEXT_BYTES) return json(response, 413, { success: false, error: "text too large" });
-      if (body.edit_of != null || body.file_path != null) return json(response, 400, { success: false, error: "T3ams v1 supports text replies only" });
+      if (filePath != null && (typeof filePath !== "string" || !filePath)) {
+        return json(response, 400, { success: false, error: "file_path must be a saved file path" });
+      }
       if (body.thread_root_id != null && typeof body.thread_root_id !== "string") {
         return json(response, 400, { success: false, error: "thread_root_id must be a string" });
+      }
+      const editOf = body.edit_of == null ? null : bareHex(body.edit_of);
+      if (editOf != null && !/^[0-9a-f]{64}$/.test(editOf)) {
+        return json(response, 400, { success: false, error: "edit_of must be a 32-byte hexadecimal message ID" });
       }
       const replyTo = typeof body.reply_to === "string"
         ? body.reply_to
         : typeof body.reply_to_message_id === "string"
           ? body.reply_to_message_id
           : null;
+      if (replyTo != null && editOf != null) return json(response, 400, { success: false, error: "reply_to and edit_of are mutually exclusive" });
+      const replyToId = replyTo == null ? null : bareHex(replyTo);
+      if (replyToId != null && !/^[0-9a-f]{64}$/.test(replyToId)) {
+        return json(response, 400, { success: false, error: "reply_to must be a 32-byte hexadecimal message ID" });
+      }
+      if (editOf != null) {
+        if (!hasText || filePath != null) return json(response, 400, { success: false, error: "edits require text and cannot include a file" });
+        if (!isBotIssuedMessage(chatId, editOf)) {
+          return json(response, 409, { success: false, error: "edit_of must name a message issued by this bot process" });
+        }
+        disarmThinking(chatId);
+        bridgePendingEdits.set(chatId, { messageId: editOf, text });
+        liveReplies.throttledEdit(chatId, editOf, text);
+        return json(response, 200, { success: true, message_id: editOf, coalesced: true });
+      }
       const root = body.thread_root_id == null
-        ? protocol.replyThreadFor(chatId, replyTo)
+        ? protocol.replyThreadFor(chatId, replyToId)
         : bareHex(body.thread_root_id);
-      const sent = await protocol.sendText(chatId, text, { threadRootId: root });
-      return json(response, 200, { success: true, message_id: sent.messageId });
+      if (root != null && !/^[0-9a-f]{64}$/.test(root)) return json(response, 400, { success: false, error: "thread_root_id must be a 32-byte hexadecimal message ID" });
+      disarmThinking(chatId);
+      bridgePendingEdits.delete(chatId);
+      if (filePath != null) {
+        let file;
+        try { file = fileStore.get(fileNamespaceForChat(chatId), filePath); }
+        catch (error) { return json(response, fileBridgeStatus(error), { success: false, error: String(error?.message ?? error).slice(0, 300) }); }
+        if (file == null) return json(response, 404, { success: false, error: "file not found" });
+        const placeholder = await takeLivePlaceholder(chatId);
+        if (placeholder != null) {
+          // Attachments cannot be added by an edit, so keep the live message
+          // as a clear delivery status while the actual rich-file message is
+          // submitted below. `reply_to` must not turn it into an unexplained
+          // checkmark bubble.
+          await placeholder.handle.finalize("📎 Sending file…");
+        }
+        try {
+          const sent = await sendT3amsAttachment(chatId, {
+            filePath: file.filePath,
+            mime: file.mime,
+            size: file.size,
+            text: hasText ? text : file.path,
+            threadRootId: root,
+          });
+          return json(response, 200, { success: true, message_id: sent.messageId, attachment: {
+            id: sent.attachment.id,
+            mime: sent.attachment.mime,
+            size: sent.attachment.size,
+            filename: sent.attachment.filename,
+          } });
+        } catch (error) {
+          log("T3AMS_BRIDGE_FILE_SEND_FAILED", { chatId, path: file.path, error: String(error?.message ?? error) });
+          return json(response, 502, { success: false, error: "file delivery failed" });
+        }
+      }
+      const parts = splitMessageText(text, replyChunkBytes);
+      if (parts.length > 1) log("T3AMS_REPLY_CHUNKED", { chatId, parts: parts.length, chars: text.length });
+      let firstId = null;
+      const placeholder = await takeLivePlaceholder(chatId);
+      if (placeholder != null) {
+        // A bridge lease records the triggering thread before the harness
+        // begins work, so the placeholder is already in the correct T3ams
+        // reply/thread. `reply_to` is normally supplied by both shipped
+        // adapters and must not force a redundant \"✓\" plus a second bubble.
+        firstId = (await placeholder.handle.finalize(parts[0])).messageId;
+        noteBotIssuedMessage(chatId, firstId);
+      }
+      for (const [index, part] of parts.entries()) {
+        if (index === 0 && firstId != null) continue;
+        const sent = await protocol.sendText(chatId, part, { threadRootId: root });
+        noteBotIssuedMessage(chatId, sent.messageId);
+        if (index === 0) firstId = sent.messageId;
+      }
+      return json(response, 200, { success: true, message_id: firstId, ...(parts.length > 1 ? { parts: parts.length } : {}) });
+    }
+    if (request.method === "POST" && url.pathname === "/react") {
+      const body = JSON.parse((await readBody(request)).toString("utf8") || "{}");
+      const chatId = typeof body.chat_id === "string" ? body.chat_id : "";
+      const messageId = typeof body.message_id === "string" ? body.message_id : "";
+      const emoji = typeof body.emoji === "string" ? body.emoji : "";
+      if (!isT3amsConversationKey(chatId) || !messageId || !emoji) {
+        return json(response, 400, { success: false, error: "chat_id, message_id and emoji are required" });
+      }
+      await protocol.sendReaction(chatId, messageId, emoji, { removed: body.remove === true });
+      return json(response, 200, { success: true });
+    }
+    if (request.method === "POST" && url.pathname === "/typing") {
+      const body = JSON.parse((await readBody(request)).toString("utf8") || "{}");
+      const chatId = typeof body.chat_id === "string" ? body.chat_id : "";
+      if (!isT3amsConversationKey(chatId)) return json(response, 400, { success: false, error: "invalid chat_id" });
+      try { await protocol.sendTyping(chatId); }
+      catch (error) { log("T3AMS_BRIDGE_TYPING_FAILED", { chatId, error: String(error?.message ?? error) }); }
+      return json(response, 200, { success: true });
     }
     return json(response, 404, { success: false, error: "not found" });
   } catch (error) {
@@ -1330,6 +2086,7 @@ const shutdown = async (code = 0) => {
   if (ingressPumpTimer != null) clearTimeout(ingressPumpTimer);
   if (ingressReplayTimer != null) clearTimeout(ingressReplayTimer);
   clearInterval(subscriptionRefreshTimer);
+  clearInterval(mediaSweepTimer);
   for (const timer of inboundRetryTimers.values()) clearTimeout(timer);
   clearInterval(presenceTimer);
   wakeBridge();

@@ -1,8 +1,10 @@
 # Configuration reference
 
-Every bot is configured entirely through environment variables read by
-`bot-core/index.mjs`. `pca create/run/deploy` generate the common ones for you;
-this document is the full reference, plus annotated `bot.env` examples.
+Every bot is configured entirely through environment variables read by its
+transport entry point: `bot-core/index.mjs` for `polkadot-app` or
+`bot-core/t3ams.mjs` for `t3ams`. `pca create/run/deploy` generate the common
+ones for you; this document is the full reference, plus annotated `bot.env`
+examples.
 
 - **Local runs** (`pca run`): the CLI builds the environment from the bot's
   `~/.pca/bots/<name>/config.json` + `secret.json` and passes it to the process.
@@ -15,8 +17,8 @@ commit or log it. The agent CLI a direct-engine bot spawns is deliberately
 *not* given this file (see [DESIGN.md](DESIGN.md) security model): its child
 environment is a scrubbed allowlist with the seed and all secrets removed.
 
-The authoritative, always-current list lives in the header comment at the top
-of `bot-core/index.mjs`. This doc mirrors it; if they disagree, the code wins.
+The authoritative, always-current lists live in the runtime source. This doc
+mirrors them; if it and the code disagree, the code wins.
 
 ---
 
@@ -210,6 +212,13 @@ variables `pca deploy` writes into `bot.env` automatically.
 | `BOT_MAX_OWED_REPLIES` | 2000 | Cap on the crash-durable owed-reply backlog. |
 | `BOT_MAX_OWED_BYTES` | 16 MB | Byte cap on that backlog. |
 
+For `BOT_TRANSPORT=t3ams`, `BOT_STATE_DIR` is also the private root for
+`t3ams-state.json`, the encrypted-media cache, and the durable file vault.
+The T3ams runner creates it with mode `0700`; do not share it with the agent
+workspace or a host user, and encrypt or otherwise protect backups. A retained
+T3ams ingress record can contain an attachment's Bulletin claim capability, so
+the directory is sensitive even if no model session has been created.
+
 ### HTTP bridge (authenticated control surface)
 
 | Variable | Default | Purpose |
@@ -272,7 +281,14 @@ variables `pca deploy` writes into `bot.env` automatically.
 | `BOT_LIVE_TIMEOUT_TEXT` | auto | That timeout note's text. |
 | `BOT_OUTBOUND_ACK_GRACE_MS` | 60000 | How long an un-ACKed statement holds the channel slot before a queued one takes over. |
 
-### Attachments (HOP)
+T3ams uses the same thinking, edit cadence, progress, final-wait, timeout, and
+chunk settings. Its protocol can safely apply an edit without the default
+transport's peer-ACK gate, so `BOT_LIVE_ACK_TIMEOUT_MS` is not read by the
+T3ams runner. Remember that every placeholder, live edit, typing signal, and
+reaction is a publish operation: set `BOT_LIVE_EDIT_MIN_MS` conservatively for
+the available Statement Store allowance and submit queue.
+
+### Attachments (Polkadot-app HOP transport)
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -288,7 +304,7 @@ variables `pca deploy` writes into `bot.env` automatically.
 | `BOT_HOP_UPLOAD_NODE` | `""` | Operator-pinned HOP endpoint for outbound files. It must satisfy `BOT_HOP_ALLOWED_NODES` in production and needs an active Bulletin storage allowance. |
 | `BOT_HOP_UPLOAD_TIMEOUT_MS` | 120000 | Whole-upload deadline. |
 
-### Durable files
+### Durable files (Polkadot-app HOP transport)
 
 `/file put <path>` saves exactly one same-message attachment in the sender's
 private vault. `/file ls`, `/file info`, `/file rm`, and `/file get` use that
@@ -366,6 +382,86 @@ is an operational fallback for the fixed testnet profile, not a normal onboardin
 step. After using it, check `status` and run `recover` if a local guard remains.
 `pca` deliberately excludes public bots and arbitrary `wss://` endpoints: a
 public sender must not be able to spend a finite upload allowance by default.
+
+### T3ams attachments, media, and file vault
+
+`BOT_TRANSPORT=t3ams` has a separate encrypted Bulletin/HOP data path. Its
+settings deliberately do **not** inherit `BOT_HOP_ALLOWED_NODES`,
+`BOT_MEDIA_*`, or `BOT_HOP_UPLOAD_NODE` from the default Polkadot-app
+transport. The T3ams parser accepts only an encrypted `hop:` BCTS reference;
+the claim ticket is never returned in a bridge item or logged.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BOT_T3AMS_ATTACHMENT_MAX_BYTES` | 25 MiB | Per-attachment maximum. It may be narrowed but not raised above 25 MiB. |
+| `BOT_T3AMS_ATTACHMENT_MAX_COUNT` | 4 | Maximum rich-text attachments per T3ams message (0–4). |
+| `BOT_T3AMS_ATTACHMENT_MIME_TYPES` | built-in image/document list | Comma-separated allowlist. The default includes common image formats, PDF, text/structured text, Office documents, and `application/octet-stream`; narrow it for public bots. |
+| `BOT_T3AMS_BULLETIN_RPC` | `wss://paseo-bulletin-next-rpc.polkadot.io` | Trusted T3ams Bulletin RPC endpoint for encrypted downloads and uploads. Set it to an explicit empty value to run metadata-only: retrieval and file delivery are disabled. |
+| `BOT_T3AMS_HOP_ALLOW_INSECURE` | `0` | `1` permits insecure `ws://` only for a local test mock. Production uses a validated TLS endpoint. |
+| `BOT_T3AMS_HOP_TIMEOUT_MS` | 120000 | Whole encrypted download/upload deadline. |
+| `BOT_T3AMS_HOP_RPC_FRAME_MAX_BYTES` | 4.5 MB | Largest accepted Bulletin/HOP RPC frame. |
+| `BOT_T3AMS_MEDIA_TTL_HOURS` | 48 | TTL for the evictable downloaded-media cache below `BOT_STATE_DIR/media`. |
+| `BOT_T3AMS_MEDIA_MAX_TOTAL_MB` | 512 | Total media-cache capacity. |
+| `BOT_T3AMS_MEDIA_MAX_CONCURRENT_DOWNLOADS` | 2 | Concurrent encrypted attachment downloads. |
+| `BOT_T3AMS_MEDIA_MAX_INFLIGHT_BYTES` | max(64 MiB, `2 × attachment cap + 4 MiB`) | Reservation for active download/decrypt work. It cannot be set below the value required for one allowed attachment. |
+| `BOT_T3AMS_MEDIA_DOWNLOAD_QUEUE_CAP` | 100 | Queued attachment-download limit. |
+| `BOT_T3AMS_BRIDGE_MEDIA_REF_CAP` | max(256, min(100000, `BOT_INBOUND_CAP × attachment count`)) | Bounded process-local opaque media references that bridge deliveries may fetch. |
+| `BOT_T3AMS_BRIDGE_MEDIA_REF_TTL_MS` | 3600000 | Lifetime of an opaque bridge-media reference; fetching it renews its short-lived TTL. |
+| `BOT_BRIDGE_FILE_MAX_BYTES` | `BOT_FILE_MAX_BYTES` | Largest raw `PUT /files` bridge upload; it cannot exceed the T3ams durable-file cap. |
+
+T3ams uses the shared `BOT_FILE_MAX_BYTES`, `BOT_FILE_MAX_TOTAL_MB`,
+`BOT_FILE_MAX_ENTRIES`, `BOT_FILE_MAX_PEER_MB`, and
+`BOT_FILE_MAX_PEER_ENTRIES` settings for a conversation-scoped durable vault
+under `BOT_STATE_DIR/files`. For this transport, `BOT_FILE_MAX_BYTES` defaults
+to `BOT_T3AMS_ATTACHMENT_MAX_BYTES` and cannot exceed it. A DM and a channel
+are different vault namespaces; a group channel intentionally shares one vault
+among its members. `/file put` requires exactly one successfully downloaded
+attachment, and `/file get` uploads the saved regular file as a new encrypted
+T3ams attachment. The bridge can access the same private namespace with its
+authenticated `/files` routes and can send only a vault `file_path`, never an
+arbitrary host path.
+
+Keep Bulletin capacity separate from the Statement Store allowance that funds
+text and live operations. Before enabling `/file get` or bridge `file_path`,
+ensure the bot account has the required T3ams Bulletin upload allowance and
+monitor it independently; `pca storage <bot>` and its named Paseo faucet flow
+document the default Polkadot-app transport, not a T3ams Bulletin preflight.
+The bridge token authorizes access to cached media and every file in every
+conversation vault, so do not publish the bridge port or inject that token into
+an untrusted agent process.
+
+### T3ams group-channel context (optional)
+
+T3ams remains mention-gated by default: unmentioned channel traffic is never
+sent to a brain. Set `BOT_T3AMS_CHANNEL_CONTEXT=1` only when a later explicit
+mention should receive a small, in-memory snapshot of recent authenticated
+channel context. It is not persisted, does not change membership/private-key
+checks, and its caps should stay small on a public bot.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BOT_T3AMS_CHANNEL_CONTEXT` | `0` | `1` enables passive, memory-only context collection for channel chats. |
+| `BOT_T3AMS_CHANNEL_CONTEXT_TTL_MS` | 1800000 | Retention time; `0` expires records immediately. |
+| `BOT_T3AMS_CHANNEL_CONTEXT_MAX_CHATS` | 128 | Channel conversations retained in memory. |
+| `BOT_T3AMS_CHANNEL_CONTEXT_MAX_RECORDS` | 16 | Records per channel. |
+| `BOT_T3AMS_CHANNEL_CONTEXT_MAX_BYTES` | 8192 | Text budget per channel. |
+| `BOT_T3AMS_CHANNEL_CONTEXT_MAX_RECORD_BYTES` | 2048 | Maximum one retained message. |
+| `BOT_T3AMS_CHANNEL_CONTEXT_MAX_RECORDS_PER_SENDER` | 4 | Fairness cap per sender in one channel. |
+| `BOT_T3AMS_CHANNEL_CONTEXT_MAX_BYTES_PER_SENDER` | 2048 | Per-sender text budget in one channel. |
+| `BOT_T3AMS_CHANNEL_CONTEXT_MAX_TOTAL_BYTES` | 262144 | Process-wide memory budget for passive context. |
+
+### T3ams shared-channel direct-brain controls
+
+A channel uses one shared direct-brain session. Normal mentioned prompts remain
+available to channel members, but the session-changing direct commands
+`/reset`, `/model`, `/reasoning`, and `/project` are role-gated from the
+authenticated T3ams workspace state. This setting does not apply to DMs or a
+bridge framework's own commands. `/stop` remains available to any channel
+member so a stuck shared turn always has a group-visible cancellation lever.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BOT_T3AMS_CHANNEL_CONTROL_ROLE` | `admin` | Minimum role for shared-session commands: `admin` permits owners/admins; `mod` also permits moderators; `all` permits any member whose message reaches the bot. |
 
 ### Ingress (poll / subscribe)
 

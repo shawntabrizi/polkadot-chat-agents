@@ -215,6 +215,19 @@ test("throttledEdit coalesces harness-driven edits of a delivered message", asyn
   assert.equal(h.sent[1].text, "v3");
 });
 
+test("finalizeExisting flushes the bridge's final edit and cancels queued progress", async () => {
+  const h = makeHarness({ minIntervalMs: 1000 });
+  h.live.throttledEdit("peer", "TARGET-1", "progress");
+  await h.clock.advance(0);
+  h.live.throttledEdit("peer", "TARGET-1", "late progress");
+  const result = await h.live.finalizeExisting("peer", "TARGET-1", "final answer");
+  assert.deepEqual(result, { messageId: "TARGET-1", edited: true });
+  assert.equal(h.sent.at(-1).editOf, "TARGET-1");
+  assert.equal(h.sent.at(-1).text, "final answer");
+  await h.clock.advance(10_000);
+  assert.equal(h.sent.at(-1).text, "final answer", "the queued progress frame must not overwrite the terminal edit");
+});
+
 test("progress tracker renders elapsed, steps and a rolling action window", () => {
   let t = 0;
   const tracker = createProgressTracker({ label: "working", maxActions: 2, now: () => t });

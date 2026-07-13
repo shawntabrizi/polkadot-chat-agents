@@ -7,6 +7,7 @@
 // existing direct-engine and HTTP-bridge runtimes stay transport-agnostic.
 
 import { conversationKeyFor } from "./t3ams-routing.mjs";
+import { normalizeT3amsAttachmentRefs } from "./t3ams-attachments.mjs";
 
 export const T3AMS_STATE_VERSION = 1;
 export const T3AMS_BACKFILL_CAP = 8;
@@ -576,6 +577,9 @@ export function createT3amsProtocol({
   publicWorkspaceAdmissionLimit = 4,
   publicAdmissionWindowMs = 60 * 60 * 1000,
   acceptWorkspaceInvite = () => true,
+  // The parser is deliberately strict about HOP-only attachment metadata.
+  // Operators may narrow the MIME/size policy without changing the protocol.
+  attachmentOptions = {},
   onStateChange = () => {},
   onTopologyChange = () => {},
   log = () => {},
@@ -638,6 +642,10 @@ export function createT3amsProtocol({
   const conversations = new Map();
   const pinnedConversations = new Map();
   const replyTargets = new Map();
+  // Typing is deliberately ephemeral. Keep only a bounded local cadence map;
+  // the SPA clears a true indicator by TTL, so there is no durable state or
+  // false indicator to publish when a turn ends.
+  const lastTypingAt = new Map();
   // Decoding a carrier happens before the runtime has durably admitted its
   // message to the local ingress journal. Keep a short-lived claim separate
   // from `state.seen`: otherwise a full bridge/dispatcher queue could mark a
@@ -646,6 +654,32 @@ export function createT3amsProtocol({
   const workspaceJoinInFlight = new Set();
   const persist = () => onStateChange(jsonClone(state));
   const submitStatement = async (statement) => submit(statement);
+  // All outbound paths share the serialized submitter owned by the transport.
+  // Keep its transient failure classification in one place so live edits,
+  // typing, and final replies behave consistently under allowance pressure.
+  const submitOutboundStatement = async (statement) => {
+    try {
+      await submitStatement(statement);
+    } catch (error) {
+      if (error?.code === "T3AMS_SUBMIT_QUEUE_FULL") {
+        // The in-process queue drains on its own. Callers that need a durable
+        // result (a final reply) can retry rather than silently lose it.
+        const retryable = new Error("T3ams statement submit queue is full");
+        retryable.code = "T3AMS_SUBMIT_QUEUE_FULL";
+        retryable.cause = error;
+        throw retryable;
+      }
+      if (error?.statementSubmitReason === "noAllowance" || String(error?.message ?? error).includes("noAllowance")) {
+        // Allowance can be restored by an operator without restarting the
+        // bot, so this is retryable rather than a terminal route failure.
+        const retryable = new Error("T3ams statement allowance is exhausted");
+        retryable.code = "T3AMS_NO_ALLOWANCE";
+        retryable.cause = error;
+        throw retryable;
+      }
+      throw error;
+    }
+  };
   const publicAdmission = (kind) => {
     if (!publicTofuEnrollment) return true;
     const field = kind === "peer" ? "publicPeers" : "publicWorkspaces";
@@ -906,6 +940,23 @@ export function createT3amsProtocol({
     return true;
   };
 
+  // Attachment references are encrypted with the message, but their HOP
+  // ticket is capability material once decrypted. Parse them only after the
+  // message's signature and route checks have succeeded, and never log the
+  // raw reference/ticket. An invalid attachment does not erase a valid text
+  // message; it becomes a visible unavailable-file note downstream.
+  const decodeAttachments = (expression) => {
+    const attachmentsEnvelope = bcts.extractParameter(expression, "attachments");
+    if (attachmentsEnvelope == null) return { attachments: [], attachmentError: null };
+    try {
+      const raw = bcts.parseAttachmentsEnvelope(attachmentsEnvelope);
+      return { attachments: normalizeT3amsAttachmentRefs(raw, attachmentOptions), attachmentError: null };
+    } catch (error) {
+      log("T3AMS_ATTACHMENT_REJECTED", { code: String(error?.code ?? "invalid").slice(0, 80) });
+      return { attachments: [], attachmentError: "One or more attached files could not be safely read." };
+    }
+  };
+
   // Decode priors from the encrypted blobs themselves. The carrier headers are
   // intentionally plaintext and are useful only for UI placeholders; they
   // never decide what reaches a bot brain.
@@ -951,6 +1002,7 @@ export function createT3amsProtocol({
         const root = extractBytes(bcts, expression, "threadRootId");
         const threadRootId = root == null ? null : bareHex(bcts.formatXID(root));
         if (threadRootId != null && !validXidHex(threadRootId)) return null;
+        const { attachments, attachmentError } = decodeAttachments(expression);
         touchPeer(peerHex);
         return {
           conversation,
@@ -962,6 +1014,8 @@ export function createT3amsProtocol({
           senderName: typeof peer.displayName === "string" ? peer.displayName : "",
           threadRootId,
           mentions: [],
+          attachments,
+          ...(attachmentError == null ? {} : { attachmentError }),
           wireBlobHex: bytesToHex(blob),
         };
       } catch {
@@ -1023,6 +1077,7 @@ export function createT3amsProtocol({
         const mentions = mentionsEnvelope == null
           ? []
           : bcts.parseMentionsEnvelope(mentionsEnvelope).map((xid) => bareHex(bcts.formatXID(xid)));
+        const { attachments, attachmentError } = decodeAttachments(expression);
         touchWorkspace(wsId);
         return {
           conversation,
@@ -1034,6 +1089,8 @@ export function createT3amsProtocol({
           senderName,
           threadRootId,
           mentions,
+          attachments,
+          ...(attachmentError == null ? {} : { attachmentError }),
           wireBlobHex: bytesToHex(blob),
         };
       } catch {
@@ -1444,10 +1501,191 @@ export function createT3amsProtocol({
     await submitStatement({ channel, topics: bcts.createWorkspaceDiscoveryTopics(wsId), data: bcts.envelopeToBytes(sealed) });
   };
 
-  const sendText = async (chatId, text, options = {}) => {
+  const requireConversation = (chatId) => {
     const conversation = conversations.get(chatId);
     if (conversation == null) throw terminalDeliveryError("T3AMS_UNKNOWN_CONVERSATION", "unknown T3ams conversation");
-    if (typeof text !== "string" || text.trim() === "") throw terminalDeliveryError("T3AMS_INVALID_TEXT", "text is required");
+    return conversation;
+  };
+
+  const requireTargetMessageId = (messageId) => {
+    const normalized = bareHex(messageId);
+    if (!validXidHex(normalized)) {
+      throw terminalDeliveryError("T3AMS_INVALID_MESSAGE_ID", "messageId must be a 32-byte hexadecimal message ID");
+    }
+    return normalized;
+  };
+
+  const requireOperationText = (text) => {
+    if (typeof text !== "string" || text.trim() === "") {
+      throw terminalDeliveryError("T3AMS_INVALID_TEXT", "text is required");
+    }
+    return text;
+  };
+
+  const requireRichContent = (text, attachments) => {
+    if (typeof text !== "string") {
+      throw terminalDeliveryError("T3AMS_INVALID_TEXT", "text must be a string");
+    }
+    const refs = attachments == null ? [] : attachments;
+    try {
+      normalizeT3amsAttachmentRefs(refs, attachmentOptions);
+    } catch (error) {
+      throw terminalDeliveryError("T3AMS_INVALID_ATTACHMENT", "attachment metadata is invalid", error);
+    }
+    if (text.trim() === "" && refs.length === 0) {
+      throw terminalDeliveryError("T3AMS_INVALID_TEXT", "text or an attachment is required");
+    }
+    return refs;
+  };
+
+  const requireEmoji = (emoji) => {
+    const normalized = typeof emoji === "string" ? emoji.trim() : "";
+    // Reactions are UI affordances, not an arbitrary hidden data channel.
+    // Keep a generous Unicode allowance but reject controls and huge payloads.
+    if (!normalized || Array.from(normalized).length > 32 || /[\u0000-\u001f\u007f]/.test(normalized)) {
+      throw terminalDeliveryError("T3AMS_INVALID_REACTION", "emoji must be a short printable reaction");
+    }
+    return normalized;
+  };
+
+  const workspaceOperationRoute = (conversation, operation) => {
+    const workspace = stateWorkspace(state, conversation.wsId);
+    const channelEntry = stateChannel(workspace, conversation.channelIdHex);
+    if (workspace == null || channelEntry == null || !isWorkspaceMember(workspace, selfXidHex)) {
+      throw terminalDeliveryError("T3AMS_CHANNEL_UNAVAILABLE", "bot is not an active member of this workspace channel");
+    }
+    if (channelEntry.archived === true || channelEntry.deleted === true) {
+      throw terminalDeliveryError("T3AMS_CHANNEL_UNAVAILABLE", "workspace channel is archived or deleted");
+    }
+    if (!canPostWorkspaceChannel(workspace, channelEntry, selfXidHex)) {
+      throw terminalDeliveryError("T3AMS_CHANNEL_FORBIDDEN", `bot is not permitted to ${operation} in this workspace channel`);
+    }
+    const channelId = hexToBytes(channelEntry.idHex);
+    const key = channelEntry.isPrivate
+      ? stateKey(state, conversation.wsId, channelEntry.idHex)?.current?.keyHex
+      : bcts.deriveWorkspaceKey(conversation.wsId);
+    if (key == null) {
+      throw terminalDeliveryError("T3AMS_CHANNEL_KEY_MISSING", "no private-channel key has been granted to this bot");
+    }
+    return {
+      channelEntry,
+      channelId,
+      key: typeof key === "string" ? hexToBytes(key) : key,
+      topics: channelEntry.isPrivate
+        ? bcts.createPrivateChannelTopics(channelId, identity.xid, "message", true)
+        : bcts.createPublicChannelTopics(channelId, identity.xid, true),
+    };
+  };
+
+  const submitDmOperation = async (conversation, expression, channel) => {
+    const peer = hexToBytes(conversation.peerXidHex);
+    const operationChannel = channel(peer);
+    const { envelope } = bcts.createGSTPRequest(expression(peer));
+    const signed = bcts.signGSTPRequest(envelope, identity.signingPrivateKey);
+    const sealed = bcts.encryptDMEnvelope(signed, identity.xid, peer);
+    await submitOutboundStatement({
+      channel: operationChannel,
+      topics: bcts.createDMTopics(operationChannel, identity.xid, true),
+      data: bcts.envelopeToBytes(sealed),
+    });
+  };
+
+  const submitWorkspaceOperation = async (conversation, expression, channelFor, operation) => {
+    const route = workspaceOperationRoute(conversation, operation);
+    const { envelope } = bcts.createGSTPRequest(expression(route.channelId));
+    const signed = bcts.signGSTPRequest(envelope, identity.signingPrivateKey);
+    const sealed = bcts.encryptWorkspaceChannelEnvelope(signed, route.key);
+    await submitOutboundStatement({
+      channel: channelFor(route.channelEntry, route.channelId),
+      topics: route.topics,
+      data: bcts.envelopeToBytes(sealed),
+    });
+  };
+
+  const editText = async (chatId, messageId, text) => {
+    const conversation = requireConversation(chatId);
+    const target = requireTargetMessageId(messageId);
+    const replacement = requireOperationText(text);
+    const editedAt = now();
+    if (conversation.kind === "dm") {
+      await submitDmOperation(
+        conversation,
+        (peer) => bcts.editMessageExpression(hexToBytes(target), replacement, editedAt, peer),
+        (peer) => bcts.derivePersonalDMOpsChannel(identity.xid, peer),
+      );
+    } else {
+      await submitWorkspaceOperation(
+        conversation,
+        () => bcts.channelEditMessageExpression(hexToBytes(target), replacement, identity.xid, editedAt),
+        (channelEntry, channelId) => channelEntry.isPrivate
+          ? bcts.derivePrivateChannelOpsChannel(channelId)
+          : bcts.derivePublicChannelOpsChannel(channelId),
+        "edit messages",
+      );
+    }
+    log("T3AMS_EDITED_TEXT", { chatId, target });
+    return { messageId: target, edited: true };
+  };
+
+  const sendReaction = async (chatId, messageId, emoji, { removed = false } = {}) => {
+    const conversation = requireConversation(chatId);
+    const target = requireTargetMessageId(messageId);
+    const reaction = requireEmoji(emoji);
+    const reactedAt = now();
+    if (conversation.kind === "dm") {
+      await submitDmOperation(
+        conversation,
+        (peer) => (removed ? bcts.removeReactionExpression : bcts.addReactionExpression)(hexToBytes(target), reaction, reactedAt, peer),
+        (peer) => bcts.derivePersonalDMOpsChannel(identity.xid, peer),
+      );
+    } else {
+      await submitWorkspaceOperation(
+        conversation,
+        () => (removed ? bcts.channelRemoveReactionExpression : bcts.channelAddReactionExpression)(
+          hexToBytes(target), reaction, identity.xid, reactedAt,
+        ),
+        (channelEntry, channelId) => channelEntry.isPrivate
+          ? bcts.derivePrivateChannelOpsChannel(channelId)
+          : bcts.derivePublicChannelOpsChannel(channelId),
+        "react to messages",
+      );
+    }
+    log("T3AMS_SENT_REACTION", { chatId, target, removed });
+    return { messageId: target, removed };
+  };
+
+  const sendTyping = async (chatId, { force = false, minIntervalMs = 4_000 } = {}) => {
+    const conversation = requireConversation(chatId);
+    const interval = boundedInteger(minIntervalMs, 4_000, { min: 250, max: 60_000 });
+    const current = now();
+    const previous = lastTypingAt.get(chatId) ?? 0;
+    if (!force && current - previous < interval) return { sent: false, throttled: true };
+    if (conversation.kind === "dm") {
+      await submitDmOperation(
+        conversation,
+        (peer) => bcts.typingIndicatorExpression(bcts.derivePersonalDMChannel(identity.xid, peer), true, current, peer),
+        (peer) => bcts.derivePersonalDMTypingChannel(identity.xid, peer),
+      );
+    } else {
+      await submitWorkspaceOperation(
+        conversation,
+        () => bcts.channelTypingExpression(identity.xid, current),
+        (channelEntry, channelId) => channelEntry.isPrivate
+          ? bcts.derivePrivateChannelTypingChannel(channelId)
+          : bcts.derivePublicChannelTypingChannel(channelId),
+        "show typing",
+      );
+    }
+    lastTypingAt.delete(chatId);
+    lastTypingAt.set(chatId, current);
+    while (lastTypingAt.size > conversationLimit) lastTypingAt.delete(lastTypingAt.keys().next().value);
+    log("T3AMS_SENT_TYPING", { chatId });
+    return { sent: true, throttled: false };
+  };
+
+  const sendRichText = async (chatId, text, options = {}) => {
+    const conversation = requireConversation(chatId);
+    const attachments = requireRichContent(text, options.attachments);
     const rootId = Object.hasOwn(options, "threadRootId")
       ? options.threadRootId
       : conversation.threadRootId ?? null;
@@ -1467,6 +1705,7 @@ export function createT3amsProtocol({
         to: peer,
         body: text,
         ...(rootId != null ? { threadRootId: hexToBytes(rootId) } : {}),
+        ...(attachments.length > 0 ? { attachments } : {}),
       });
       const sent = bcts.createEncryptedDMMessage(message, identity, peer);
       blob = bcts.envelopeToBytes(sent.envelope);
@@ -1498,6 +1737,7 @@ export function createT3amsProtocol({
         text,
         sentAt,
         rootId == null ? undefined : hexToBytes(rootId),
+        attachments.length > 0 ? attachments : undefined,
       );
       const { envelope } = bcts.createGSTPRequest(expression);
       const signed = bcts.signGSTPRequest(envelope, identity.signingPrivateKey);
@@ -1516,34 +1756,13 @@ export function createT3amsProtocol({
       };
       messageId = bareHex(bcts.formatXID(bcts.extractParameter(expression, "id").extractBytes()));
     }
-    try {
-      await submitStatement(statement);
-    } catch (error) {
-      if (error?.code === "T3AMS_SUBMIT_QUEUE_FULL") {
-        // The in-process submit queue drains on its own. Preserve the durable
-        // ingress item so the transport retries rather than permanently
-        // dropping a user's prompt during a short burst.
-        const retryable = new Error("T3ams statement submit queue is full");
-        retryable.code = "T3AMS_SUBMIT_QUEUE_FULL";
-        retryable.cause = error;
-        throw retryable;
-      }
-      if (error?.statementSubmitReason === "noAllowance" || String(error?.message ?? error).includes("noAllowance")) {
-        // Allowance can be restored by an operator without restarting the
-        // bot, so this is a delivery retry rather than a terminal route
-        // failure. The durable journal applies bounded backoff.
-        const retryable = new Error("T3ams statement allowance is exhausted");
-        retryable.code = "T3AMS_NO_ALLOWANCE";
-        retryable.cause = error;
-        throw retryable;
-      }
-      throw error;
-    }
+    await submitOutboundStatement(statement);
     appendBackfill(state, chatId, { id: messageId, senderXid: selfXidHex, timestamp: messageTimestamp, blob: bytesToHex(blob) });
     persist();
-    log("T3AMS_SENT_TEXT", { chatId, chars: text.length });
+    log("T3AMS_SENT_TEXT", { chatId, chars: text.length, ...(attachments.length > 0 ? { attachments: attachments.length } : {}) });
     return { messageId };
   };
+  const sendText = (chatId, text, options = {}) => sendRichText(chatId, text, options);
 
   return {
     selfXidHex,
@@ -1564,6 +1783,7 @@ export function createT3amsProtocol({
     },
     channels: (wsId) => (safeChannelEntries(stateWorkspace(state, wsId)?.channels ?? [], { max: channelLimit }) ?? []).slice(0, channelLimit),
     isWorkspaceMember: (wsId) => isWorkspaceMember(stateWorkspace(state, wsId), selfXidHex),
+    workspaceRole: (wsId, xidHex) => workspaceRoleFor(stateWorkspace(state, wsId), xidHex),
     canReadChannel: (wsId, channelIdHex) => {
       const workspace = stateWorkspace(state, wsId);
       return canReadWorkspaceChannel(workspace, stateChannel(workspace, channelIdHex), selfXidHex);
@@ -1586,6 +1806,10 @@ export function createT3amsProtocol({
     releaseInbound,
     publishMemberAnnounce,
     sendText,
+    sendRichText,
+    editText,
+    sendReaction,
+    sendTyping,
     conversation: (chatId) => conversations.get(chatId) ?? null,
     replyThreadFor: (chatId, messageId) => {
       const key = replyTargetKey(chatId, messageId);

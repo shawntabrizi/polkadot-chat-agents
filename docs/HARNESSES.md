@@ -29,14 +29,14 @@ A framework plugin needs this small authenticated API:
 | Route | Purpose |
 |---|---|
 | `GET /health` | returns `{ ok, account, identifierKey, username }` |
-| `GET /inbound?wait=<secs>&limit=<n>` | long-poll; returns at most the requested bounded batch of leased `[{ delivery_id, lease_id, lease_ms, chat_id, text, message_id }, ...]`, or an empty array on timeout. `chat_id` is the peer's account-id hex. `text` is always non-empty (a placeholder like `[photo, image/jpeg, 245 KB]` is synthesized for caption-less attachments). Items may carry `kind` (`richText`/`reply`/`edited`), `reply_to`, `edit_of`, and `attachments: [{ id, kind, mime, size, width?, height?, duration?, downloaded, url?, error? }]`. Add `&events=1` to also receive non-message signals (`kind`: `reaction`, `coinageSend`, `leftChat`, `contactAdded`) — opt-in, so a harness that ignores them never chat-replies to a reaction. |
+| `GET /inbound?wait=<secs>&limit=<n>` | long-poll; returns at most the requested bounded batch of leased `[{ delivery_id, lease_id, lease_ms, chat_id, text, message_id }, ...]`, or an empty array on timeout. `chat_id` is transport-specific (a peer account-id hex for the default transport; T3ams is described below). `text` is always non-empty (a placeholder like `[photo, image/jpeg, 245 KB]` is synthesized for caption-less attachments). Items may carry `kind` (`richText`/`reply`/`edited`), `reply_to`, `edit_of`, and `attachments: [{ id, kind, mime, size, width?, height?, duration?, media_id?, downloaded, url?, error? }]`. Add `&events=1` to also receive non-message signals (`kind`: `reaction`, `coinageSend`, `leftChat`, `contactAdded`) — opt-in, so a harness that ignores them never chat-replies to a reaction. |
 | `POST /inbound/ack { delivery_id, lease_id }` | permanently acknowledges a leased inbound row after the framework has successfully handed it to its own runtime. Accepts `deliveries: [{ delivery_id, lease_id }, ...]` for a batch. Unacknowledged rows are retried after their lease expires; a stale claim acknowledges zero rows. |
 | `POST /inbound/renew { delivery_id, lease_id }` | extends an active lease for a long-running turn. Renew before `lease_ms` elapses, then ACK only the current lease. |
-| `GET /media/<id>` | bytes of a downloaded attachment (`id`/`url` from the inbound item), served with its content type |
+| `GET /media/<id>` | bytes of a downloaded attachment (`url` from the inbound item), served with its content type; T3ams uses its opaque `media_id` rather than the attachment metadata id. |
 | `GET /files/<chat_id>`; `GET/PUT/DELETE /files/<chat_id>/<path>` | list, read, write raw bytes, or remove a durable file in that peer's vault. `PUT` uses the request content type and obeys the bot's per-file, per-peer, and global caps. |
-| `POST /send { chat_id, text?, file_path?, reply_to?, edit_of? }` | publishes a reply to that peer; returns `{ success, message_id }`. `message_id` is the outgoing message's id — hold on to it to edit that message later. `reply_to: <message_id>` renders as a quote of that peer message in the app; `edit_of: <message_id>` rewrites a message the bot sent earlier (the app updates the bubble in place). The two are mutually exclusive. `file_path` names a file already saved in that exact peer's vault; it cannot be combined with a reply or edit and is delivered only when the bot has an operator-pinned HOP endpoint and provisioned Bulletin allowance. **Live replies:** when a turn runs long, bot-core posts a "thinking…" placeholder; the first plain send for that peer is auto-upgraded into the placeholder's final edit (the returned `message_id` is the placeholder's), so the user sees one evolving bubble instead of thinking + answer. `edit_of` sends are throttled and coalesced server-side (latest-wins) to a statement-store-safe cadence — a harness may stream edits as fast as it likes. `GET /health` advertises this under `live: { supportsEdit, minEditMs, placeholderAfterMs }`. |
+| `POST /send { chat_id, text?, file_path?, reply_to?, edit_of? }` | publishes a reply to that peer; returns `{ success, message_id }`. `message_id` is the outgoing message's id — hold on to it to edit that message later. `reply_to: <message_id>` renders as a quote of that peer message in the app; `edit_of: <message_id>` rewrites a message the bot sent earlier (the app updates the bubble in place). The two are mutually exclusive. `file_path` names a file already saved in that exact peer's vault; delivery requires the transport's configured HOP/Bulletin upload path. The default Polkadot-app transport does not combine a file with a reply or edit; T3ams permits a caption and reply target but never an edit (details below). **Live replies:** when a turn runs long, bot-core posts a "thinking…" placeholder; the first plain send for that peer is auto-upgraded into the placeholder's final edit (the returned `message_id` is the placeholder's), so the user sees one evolving bubble instead of thinking + answer. `edit_of` sends are throttled and coalesced server-side (latest-wins) to a statement-store-safe cadence — a harness may stream edits as fast as it likes. `GET /health` advertises this under `live: { supportsEdit, minEditMs, placeholderAfterMs }`. |
 | `POST /react { chat_id, message_id, emoji, remove? }` | reacts to a peer message with an emoji (shown as a chip under the bubble in the app); `remove: true` retracts a previous reaction. Returns `{ success }`. |
-| `POST /typing { chat_id }` | best-effort, currently a no-op |
+| `POST /typing { chat_id }` | best-effort transport signal; T3ams publishes it, while transports without a typing operation may no-op. |
 
 An adapter is a loop: poll a bounded `/inbound` batch, renew each active lease
 while its agent turn runs, ACK only after that handoff succeeds, then use
@@ -57,11 +57,46 @@ deliveries use `chat_id` values beginning with `t3ams:` and add
 `conversation_type`, `sender_xid`, `sender_name`, and, for workspace traffic,
 `workspace_id` and `channel_id`. A threaded input also carries
 `thread_root_id`. Preserve that value on `POST /send` so the reply stays in the
-same T3ams thread (or send `reply_to` with the inbound `message_id`). T3ams v1
-does not implement bridge file delivery, edits, reactions, or typing; adapters
-should send plain text only. The included OpenClaw and Hermes adapters forward
-the thread root and rely on bot-core's authenticated T3ams peer/workspace policy
-(including private account-to-device key pins) as the authorization gate.
+same T3ams thread (or send `reply_to` with the inbound `message_id`).
+
+T3ams supports live bridge operations. `POST /send` accepts plain text,
+`thread_root_id`, `reply_to`/`reply_to_message_id`, or `edit_of`; a reply and
+edit are mutually exclusive. An edit must name a message issued by the current
+bot process, and bot-core coalesces rapid edit frames to the advertised live
+cadence. `POST /react` publishes or removes an emoji reaction, and
+`POST /typing` publishes a best-effort typing signal. `GET /health` includes
+`live: { supportsEdit, supportsTyping, supportsReaction, minEditMs,
+placeholderAfterMs }`. A leased T3ams turn can acquire a thinking placeholder;
+the first ordinary send finalizes it, while the lease ACK flushes a coalesced
+streaming edit.
+
+T3ams rich-text inbound rows may include `attachments` with only safe metadata
+(`id`, `kind`, `mime`, `size`, `filename`, and optional dimensions), plus an
+`attachment_error` when a reference could not be accepted. They intentionally
+never include a Bulletin claim ticket or raw `hop:` reference. When T3ams
+Bulletin retrieval is enabled, an attachment also gets an opaque `media_id`,
+`url: /media/<media_id>`, and a best-effort `downloaded` flag. Fetch that URL,
+not the attachment's metadata `id`: the opaque id is process-local, bounded,
+and expires according to `BOT_T3AMS_BRIDGE_MEDIA_REF_TTL_MS`. It is the only
+bridge handle that can retrieve attachment bytes.
+
+`GET /media/<media_id>` downloads from the configured Bulletin endpoint into
+the private cache when needed and streams the authenticated bytes. The bridge
+also supports `GET/PUT/DELETE /files/<url-encoded-chat_id>[/<path>]`; every
+T3ams DM or channel gets a separate opaque vault namespace. `POST /send` with
+that chat's `file_path` uploads it as an encrypted BCTS attachment; it may have
+a text caption and `reply_to`, but cannot use `edit_of`. A disabled Bulletin
+endpoint or missing upload allowance makes byte retrieval/delivery fail rather
+than leaking a capability or falling back to an arbitrary URL.
+
+When optional channel context is enabled, a T3ams channel delivery can also
+include `channel_context`, a bounded snapshot of earlier authenticated
+unmentioned text in the same channel/thread. It is context, not independent
+work: do not issue replies for its rows. Treat the bridge token as authority to
+send, edit, react, type, read media, and access every vault; keep it inside the
+private harness network.
+See [T3AMS.md](T3AMS.md#attachments-bulletin-media-and-files) for the
+transport-specific media and file-vault configuration.
 
 ## Hermes
 
