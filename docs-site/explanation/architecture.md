@@ -9,6 +9,10 @@ prev:
 This is the operator view of the system: where messages travel, what needs to
 remain private, and which boundary protects a deployed agent.
 
+The default Polkadot-app transport and T3ams share these security boundaries.
+For T3ams-specific BCTS/Bulletin media, native typing, reactions, edits, and
+conversation-scoped files, see [Run a bot in T3ams](/guide/t3ams).
+
 ## The path a message takes
 
 ```text
@@ -46,14 +50,17 @@ limits. See [Private & public bots](/guide/access) for the recommended profiles.
 
 ## Files and attachments
 
-An attachment arrives as an encrypted reference. The bot downloads it only from
-trusted HOP nodes, then stages it for the current turn. A normal attachment is
-temporary; `/file put` is the explicit action that saves it in that chat's
-durable vault. `/file get` returns only a file from that same vault.
+On the default Polkadot-app transport, an attachment arrives as an encrypted
+reference. The bot downloads it only from trusted HOP nodes, then stages it for
+the current turn. A normal attachment is temporary; `/file put` is the explicit
+action that saves it in that chat's durable vault. `/file get` returns only a
+file from that same vault.
 
-The named private Paseo profile can provision the testnet allowance used for
-returning saved files. Public deployments and production allocation require
-deliberate operator choices. See [Files & storage](/guide/files).
+The named private Paseo profile can provision the default transport's testnet
+allowance used for returning saved files. T3ams uses encrypted Bulletin media
+and a separate operator-provisioned upload allowance. Public deployments and
+production allocation require deliberate operator choices. See
+[Files & storage](/guide/files).
 
 ## Framework integrations
 

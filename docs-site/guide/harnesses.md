@@ -36,16 +36,16 @@ A framework plugin needs this small authenticated API:
 
 | Route | Purpose |
 |---|---|
-| `GET /health` | returns `{ ok, account, identifierKey, username }` |
-| `GET /inbound?wait=<secs>&limit=<n>` | long-poll; returns at most the requested bounded batch of leased `[{ delivery_id, lease_id, lease_ms, chat_id, text, message_id }, ...]`, or an empty array on timeout. `chat_id` is the peer's account-id hex. `text` is always non-empty (a placeholder like `[photo, image/jpeg, 245 KB]` is synthesized for caption-less attachments). Items may carry `kind` (`richText`/`reply`/`edited`), `reply_to`, `edit_of`, and `attachments: [{ id, kind, mime, size, width?, height?, duration?, downloaded, url?, error? }]`. Add `&events=1` to also receive non-message signals (`kind`: `reaction`, `coinageSend`, `leftChat`, `contactAdded`) — opt-in, so a harness that ignores them never chat-replies to a reaction. |
+| `GET /health` | returns `{ ok, transport, account, identifierKey, username, … }`, including live/media/file capability flags. |
+| `GET /inbound?wait=<secs>&limit=<n>` | long-poll; returns at most the requested bounded batch of leased `[{ delivery_id, lease_id, lease_ms, chat_id, text, message_id }, ...]`, or an empty array on timeout. `chat_id` is transport-specific. `text` is always non-empty (a safe placeholder is synthesized for a caption-less attachment). Items may carry `kind` (`richText`/`reply`/`edited`), `reply_to`, `edit_of`, and safe attachment metadata. Add `&events=1` to also receive non-message signals — opt-in, so a harness that ignores them never chat-replies to a reaction. |
 | `POST /inbound/ack { delivery_id, lease_id }` | permanently acknowledges a leased inbound row after the framework has successfully handed it to its own runtime. Accepts `deliveries: [{ delivery_id, lease_id }, ...]` for a batch. Unacknowledged rows are retried after their lease expires; a stale claim acknowledges zero rows. |
 | `POST /inbound/renew { delivery_id, lease_id }` | extends an active lease for a long-running turn. Renew before `lease_ms` elapses, then ACK only the current lease. |
-| `GET /media/<id>` | bytes of a downloaded attachment (`id`/`url` from the inbound item), served with its content type |
+| `GET /media/<id>` | authenticated attachment bytes (`url` from the inbound item), served with its content type. A T3ams URL can materialize validated encrypted media on demand. |
 | `GET /files/<chat_id>` / `GET /files/<chat_id>/<path>` | list a peer's durable vault (optional `?prefix=`), or stream one saved file. |
 | `PUT /files/<chat_id>/<path>` / `DELETE /files/<chat_id>/<path>` | save raw bytes in that peer's vault (use `?overwrite=1` to replace), or remove one file. |
-| `POST /send { chat_id, text?, file_path?, reply_to?, edit_of? }` | publishes a reply or a saved file to that peer; returns `{ success, message_id }`. `file_path` must identify a file already in that same peer's vault and cannot be combined with a reply or edit. `message_id` is the outgoing message's id — hold on to it to edit that message later. `reply_to: <message_id>` renders as a quote of that peer message in the app; `edit_of: <message_id>` rewrites a message the bot sent earlier (the app updates the bubble in place). The two are mutually exclusive. **Live replies:** when a turn runs long, bot-core posts a "thinking…" placeholder; the first plain send for that peer is auto-upgraded into the placeholder's final edit (the returned `message_id` is the placeholder's), so the user sees one evolving bubble instead of thinking + answer. `edit_of` sends are throttled and coalesced server-side (latest-wins) to a statement-store-safe cadence — a harness may stream edits as fast as it likes. `GET /health` advertises this under `live: { supportsEdit, minEditMs, placeholderAfterMs }`. |
-| `POST /react { chat_id, message_id, emoji, remove? }` | reacts to a peer message with an emoji (shown as a chip under the bubble in the app); `remove: true` retracts a previous reaction. Returns `{ success }`. |
-| `POST /typing { chat_id }` | best-effort, currently a no-op |
+| `POST /send { chat_id, text?, file_path?, reply_to?, edit_of? }` | publishes a reply, file, or edit; returns `{ success, message_id }`. `file_path` must identify a file already in that same chat's vault. `reply_to` and `edit_of` are mutually exclusive. A T3ams file may include a caption and reply target, but never `edit_of`. **Live replies:** when a turn runs long, bot-core posts a thinking placeholder; the first plain send resolves it into the final answer. `edit_of` frames are throttled and coalesced server-side, so a harness may stream freely. `GET /health` advertises the actual `live` capability. |
+| `POST /react { chat_id, message_id, emoji, remove? }` | reacts to a peer message with an emoji; `remove: true` retracts a prior reaction. T3ams publishes the native operation. |
+| `POST /typing { chat_id }` | best-effort typing signal. T3ams publishes it natively; transports without that operation can no-op. |
 
 An adapter is a loop: poll a bounded `/inbound` batch, renew each active lease
 while its agent turn runs, ACK only after that handoff succeeds, then use
@@ -54,24 +54,39 @@ it at the bridge with `POLKADOT_BRIDGE_URL` and `POLKADOT_BRIDGE_TOKEN`.
 bot-core enforces the allowlist before a message reaches the bridge, so unlisted
 senders never reach the agent or spend model quota.
 
-### T3ams transport fields
-
-`BOT_TRANSPORT=t3ams` keeps the same leased-array bridge API. Its text
-deliveries use `chat_id` values beginning with `t3ams:` and add
-`conversation_type`, `sender_xid`, `sender_name`, and, for workspace traffic,
-`workspace_id` and `channel_id`. A threaded input also carries
-`thread_root_id`. Preserve that value on `POST /send` so the reply stays in the
-same T3ams thread (or send `reply_to` with the inbound `message_id`). T3ams v1
-does not implement bridge file delivery, edits, reactions, or typing; adapters
-should send plain text only. The included OpenClaw and Hermes adapters forward
-the thread root and rely on bot-core's authenticated T3ams peer/workspace policy
-(including private account-to-device key pins) as the authorization gate.
-
 To return a framework-generated artifact, store it with
 `PUT /files/<chat_id>/<path>` and then call `POST /send` with that `file_path`.
 The bridge never accepts an arbitrary host path for delivery. `GET /health`
-reports the derived file-delivery allowance account and whether upload is
-configured.
+reports the relevant delivery status: the default transport's derived allowance
+account or T3ams's trusted Bulletin endpoint and operator-provisioned media
+status.
+
+### T3ams bridge behavior
+
+With `--transport t3ams`, the same poll loop drives DMs and workspace channels.
+T3ams chat IDs begin with `t3ams:` and inbound rows include the conversation
+type, sender XID/name, channel/workspace IDs where applicable, and
+`thread_root_id` for a threaded message. Send that thread root back with the
+reply when the framework should stay in the same thread.
+
+T3ams rows can include `attachments` with safe metadata (`mime`, `size`,
+filename, optional dimensions, or `duration_ms`) and an opaque
+`/media/<media_id>` URL. The original encrypted Bulletin reference is
+deliberately absent. Fetch the bridge URL when the agent needs bytes;
+`downloaded` only says whether it is already cached, not whether the URL is
+usable. The framework can read or write only the same conversation's vault
+through `/files`, then return an artifact as an encrypted T3ams attachment with
+`file_path`.
+
+Slow T3ams turns use the same thinking placeholder pattern as direct brains.
+The bridge performs real typing, reaction, and edit operations, including
+coalesced edit streaming. Read `GET /health.live` rather than hard-coding
+support. An optional `channel_context` field is bounded earlier authenticated
+channel text supplied only with an explicit mention; it is background context,
+not an inbound message to answer independently. See the
+[Bridge HTTP API](/reference/bridge#t3ams-rich-chat) and
+[T3ams files](/guide/files#t3ams-photos-media-and-documents) for the
+transport-specific limits and allowance requirements.
 
 ## Bundled framework deployments
 

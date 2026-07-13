@@ -35,11 +35,15 @@ whoever messages it, at whatever rate they message it. Treat `--public` as
 "I am funding this for the world."
 :::
 
-Public bots receive attachment references, but only download and process their
-bytes after you configure `BOT_HOP_ALLOWED_NODES` with trusted HOP hosts. Their
-automatic Paseo file-delivery allowance is intentionally disabled. Keep outbound
-file delivery off unless you deliberately fund it and have set tight storage,
-queue, and model limits. The [public deployment profile](/reference/configuration#public-bot-deliberately-bounded)
+For the default Polkadot-app transport, public bots receive attachment
+references but only download and process their bytes after you configure
+`BOT_HOP_ALLOWED_NODES` with trusted HOP hosts. Its automatic Paseo
+file-delivery allowance is intentionally disabled. For T3ams, use a trusted
+`BOT_T3AMS_BULLETIN_RPC`, narrow `BOT_T3AMS_ATTACHMENT_MIME_TYPES`, and bound
+the count, size, cache, and vault; T3ams has no automatic Bulletin upload grant.
+Keep outbound file delivery off unless you deliberately fund it and have set
+tight storage, queue, and model limits. The
+[public deployment profile](/reference/configuration#public-bot-deliberately-bounded)
 has a conservative starting point.
 
 ## What changes between the two
@@ -84,10 +88,13 @@ workspace or container and their engine-specific controls for those engines.
 
 ## Attachments are hostile input
 
-Files arrive from the peer, so their source node is chosen by the sender. The
-transport treats attachment fetches defensively (size caps, integrity checks,
-scheme restrictions). For production, pin the nodes you trust with
-`BOT_HOP_ALLOWED_NODES` — see [Configuration](/reference/configuration#attachments-hop).
+Files arrive from the peer and are hostile input. The transport treats fetches
+defensively with size caps, integrity checks, and strict reference handling. On
+the default transport, pin the trusted HOP hosts with `BOT_HOP_ALLOWED_NODES`.
+On T3ams, attachments are encrypted `hop:` capabilities rather than peer-chosen
+web URLs; use the trusted `BOT_T3AMS_BULLETIN_RPC`, narrow the MIME policy when
+appropriate, and keep the private media cache/vault bounded. See
+[T3ams media configuration](/reference/configuration#t3ams-media-and-file-vault).
 
 ## The knobs
 
@@ -99,3 +106,5 @@ The decisions on this page map to these settings, all detailed in
 - `BOT_BRIDGE_TOKEN` — bridge authentication.
 - `BOT_AI_SKIP_PERMISSIONS` — full tool autonomy; Claude can also use
   `BOT_AI_ALLOWED_TOOLS` when it is disabled.
+- `BOT_T3AMS_ATTACHMENT_MIME_TYPES` / `BOT_T3AMS_ATTACHMENT_MAX_*` — T3ams
+  attachment admission policy and media bounds.
