@@ -5,15 +5,18 @@ on:
     branches: [master]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   bot-core:
     runs-on: ubuntu-latest
     defaults:
       run: { working-directory: bot-core }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: npm, cache-dependency-path: bot-core/package-lock.json }
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: { node-version: 22.22.0, cache: npm, cache-dependency-path: bot-core/package-lock.json }
       - name: Install (runs papi generate from committed metadata)
         run: npm ci
       - name: Descriptors resolve
@@ -22,11 +25,14 @@ jobs:
         run: for f in index.mjs cli.mjs test-client.mjs test-client-device.mjs lib/*.mjs; do node --check "$f"; done
       - name: Unit tests
         run: npm test
+      - name: Production dependency audit
+        run: npm audit --omit=dev --audit-level=high
       - name: CLI smoke (create a bot offline)
         run: |
           node cli.mjs
           PCA_BOTS_DIR="$RUNNER_TEMP/bots" node cli.mjs create cismoke --brain echo --no-register
           test -f "$RUNNER_TEMP/bots/cismoke/config.json"
+          node -e 'const c=require(process.env.RUNNER_TEMP + "/bots/cismoke/config.json"); if (typeof c.bridgeToken !== "string" || c.bridgeToken.length < 32) process.exit(1)'
       - name: Vendored wasm proof helper works and is deterministic
         run: |
           node --input-type=module -e '
@@ -49,22 +55,26 @@ jobs:
     defaults:
       run: { working-directory: openclaw-plugin/polkadot }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 22 }
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: { node-version: 22.22.0, cache: npm, cache-dependency-path: openclaw-plugin/polkadot/package-lock.json }
       - name: Build bundle
-        run: npm install --no-audit --no-fund && npm run build
+        run: npm ci --no-audit --no-fund && npm run build
       - name: Committed dist is current
         run: git diff --exit-code dist/
 
   bandersnatch-cli:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with: { targets: wasm32-wasip1 }
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with: { toolchain: stable, targets: wasm32-wasip1 }
+      - uses: taiki-e/install-action@50414676f9f5d50a65992c6dd2ed02641263226c # v2.82.10
+        with: { tool: cargo-audit@0.22.1 }
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
         with: { workspaces: tools/bandersnatch-cli }
+      - name: Audit locked Rust dependencies
+        run: cargo audit --file tools/bandersnatch-cli/Cargo.lock
       - name: Build identity tool (native + the shipped wasm target)
         run: |
           cargo build --manifest-path tools/bandersnatch-cli/Cargo.toml
