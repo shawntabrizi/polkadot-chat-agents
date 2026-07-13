@@ -15,7 +15,10 @@ npm install -g polkadot-chat-agents
 ```
 
 Install and sign in to the AI-agent CLI you want the bot to use before creating
-it. For a no-model transport check, use `--brain echo` instead.
+it: [Claude Code](https://code.claude.com/docs/en/setup),
+[Codex CLI](https://developers.openai.com/codex/cli/), or
+[OpenCode](https://opencode.ai/docs/). For a no-model transport check, use
+`--brain echo` instead.
 
 If you are working from a source checkout, run `npm install` at the repository
 root and use `npm run pca -- <command> ...` in place of `pca <command> ...`.
@@ -23,7 +26,7 @@ root and use `npm run pca -- <command> ...` in place of `pca <command> ...`.
 ## Create and run
 
 ```bash
-pca create mycoolbot --brain claude --owner yourname.42
+pca create mycoolbot --brain claude --owner <your-app-username-or-SS58-address>
 pca run mycoolbot --greet
 ```
 
