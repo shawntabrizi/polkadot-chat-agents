@@ -3,7 +3,7 @@
 A bot's **brain** is what produces its replies. Pick it with `--brain` at
 `create`, or change it later.
 
-Direct engines run a headless coding-agent CLI as an autonomous agent —
+Direct engines run a headless AI-agent CLI as an autonomous agent —
 verbatim prompts, native session memory (`--resume`), and real tools
 (bash / read / edit / write) in a container that is their sandbox.
 
@@ -41,8 +41,3 @@ quota:
 
 `/reasoning <level>` dials thinking depth per conversation on engines that
 support it (claude, codex). `BOT_AI_REASONING` sets the default.
-
-## Next
-
-- [In-chat commands](/guide/commands)
-- [Projects & worktrees](/guide/projects)

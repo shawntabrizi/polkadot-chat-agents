@@ -1,3 +1,9 @@
+---
+prev:
+  text: "How it works"
+  link: "/explanation/how-it-works"
+---
+
 # Architecture
 
 How the framework works and why it is shaped this way. For setup instructions see

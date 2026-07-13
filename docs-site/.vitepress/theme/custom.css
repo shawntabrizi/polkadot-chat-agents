@@ -52,8 +52,20 @@
 }
 .vp-doc a:hover { color: var(--fg-link-hover); }
 
-/* Hero headline in DM Serif Display — the ONE place the display face is used. */
-.VPHero .name,
+/* Product name as a quiet eyebrow (Inter), above the value prop — keeps the
+   heading mass down so the hero isn't five lines of display serif. */
+.VPHero .name {
+  font-family: var(--font-sans);
+  font-weight: 500;
+  font-size: 0.95rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-secondary);
+  display: block;
+  margin-bottom: 0.75rem;
+  -webkit-text-fill-color: currentColor; /* override VitePress's clip fill */
+}
+/* The value prop is the ONE place the DM Serif display face is used. */
 .VPHero .text {
   font-family: var(--font-serif);
   font-weight: 400;

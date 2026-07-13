@@ -3,54 +3,51 @@ layout: home
 
 hero:
   name: "Polkadot Chat Agents"
-  text: "AI coding agents, in your chat."
+  text: "Your agents. Encrypted and uncensorable."
   tagline: >
-    Run Claude Code, Codex, or OpenCode as a bot you message from the Polkadot
-    app. No chat server, no public IP — end-to-end encrypted over the Statement
-    Store. A bot is just a process with an outbound connection.
-  image:
-    light: /logo-symbol-dark.svg
-    dark: /logo-symbol-light.svg
-    alt: Polkadot
+    Run your own AI agents and talk to them from your phone — end-to-end
+    encrypted, with no central server to seize and no account to ban. They go
+    where you go, and answer only to you.
   actions:
     - theme: brand
       text: Get started
       link: /guide/introduction
     - theme: alt
-      text: Configuration
-      link: /reference/configuration
+      text: How it works
+      link: /explanation/how-it-works
     - theme: alt
       text: GitHub
       link: https://github.com/shawntabrizi/polkadot-chat-agents
 
 features:
-  - title: No chat server
+  - title: Private by default
     details: >
-      Messages travel over the Polkadot Statement Store, a decentralized
-      store-and-forward layer. Conversations are end-to-end encrypted. The bot
-      needs no inbound ports, no webhook, and no hosting platform.
-  - title: Real coding agents
+      Only you — or the people you allow — can reach your agents. Every message
+      is end-to-end encrypted, so no one in the middle can read what you send or
+      what comes back.
+  - title: Nothing to shut down
     details: >
-      Direct engines run a headless agent CLI — verbatim prompts, native session
-      resume, and real tools (bash, read, edit, write) inside a container that is
-      their sandbox. Claude Code, Codex, and OpenCode are built in.
-  - title: Projects & git worktrees
+      There is no central chat server and no company account behind your bot.
+      Nothing to seize, deplatform, or ban. Conversations live only on a
+      decentralized network and on your own devices.
+  - title: Reachable from anywhere
     details: >
-      Point a conversation at a repo with /project, or /project name@branch for
-      an isolated worktree. Per-peer, so different people can work in different
-      repositories with the same bot.
-  - title: Bring your own framework
+      Message your agents from your phone, wherever you are. Ask a question,
+      lock your screen, and come back to the answer — the conversation waits for
+      you.
+  - title: Real work, not just chat
     details: >
-      Prefer memory, tools, and a persona? Bridge mode hands each message to an
-      agent framework over a small authenticated HTTP API. Hermes and OpenClaw
-      integrations are included.
-  - title: Built to survive restarts
+      These are real agents with real tools. Give one a task and it acts — reads
+      and edits files, runs commands, works across your projects — instead of
+      only talking about it.
+  - title: Your AI, your keys
     details: >
-      Sessions, the dedup set, and a crash-durable owed-reply journal persist to
-      disk and rebuild on startup. A message is acknowledged only once it is
-      safely recorded.
-  - title: Runs anywhere Node runs
+      Bring the AI you already use — Claude, Codex, OpenCode, and more. Each bot
+      holds its own keys and runs in its own sandbox; your secrets stay with it
+      and never reach the agent or the network.
+  - title: Yours to run
     details: >
-      Install with npm, create and register an identity, and deploy to any
-      Docker + SSH box with one command. Laptop or a small VPS — your choice.
+      Free and open source. Stand one up on a laptop in minutes, or deploy it to
+      a small server so it answers around the clock. No platform, no gatekeeper,
+      no subscription to us.
 ---

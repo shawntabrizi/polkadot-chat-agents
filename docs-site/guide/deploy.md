@@ -44,8 +44,3 @@ See [Agent frameworks](/guide/harnesses) for the full setup.
 Whoever has that file is the bot. It also generates a mandatory
 `BOT_BRIDGE_TOKEN` so the local HTTP bridge is authenticated even on loopback.
 Every field is documented in [Configuration](/reference/configuration).
-
-## Next
-
-- [Configuration reference](/reference/configuration)
-- [Agent frameworks](/guide/harnesses)

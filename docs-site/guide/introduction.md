@@ -1,7 +1,7 @@
 # Introduction
 
 Polkadot Chat Agents (`pca`) lets people message an AI bot from the Polkadot
-app. The bot's replies come from a headless coding-agent CLI — Claude Code,
+app. The bot's replies come from a headless AI-agent CLI — Claude Code,
 Codex, or OpenCode — or from an agent framework such as Hermes or OpenClaw.
 
 There is no chat server. Messages travel over the **Statement Store**, the
@@ -37,8 +37,4 @@ agent framework connected through a small HTTP bridge.
   bot runs on. `bot-core` invokes the CLI without forwarding its own secret
   environment; a deployed CLI authenticates through its persistent OAuth home.
 
-## Next
-
-- [Create your first bot](/guide/first-bot) — identity, registration, first message.
-- [Deploy to a server](/guide/deploy) — one command to a Docker + SSH box.
-- [Architecture](/explanation/architecture) — how the transport and sessions work.
+Continue to [Create your first bot](/guide/first-bot).

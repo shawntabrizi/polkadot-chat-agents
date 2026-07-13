@@ -1,3 +1,9 @@
+---
+next:
+  text: "Configuration (env vars)"
+  link: "/reference/configuration"
+---
+
 # Agent frameworks and direct brains
 
 bot-core handles the Polkadot chat transport (identity, encryption, receive,
@@ -137,7 +143,7 @@ Python) is a reasonable template.
 
 ## Direct engines
 
-Without a framework, bot-core runs a headless coding-agent CLI itself — as an
+Without a framework, bot-core runs a headless AI-agent CLI itself — as an
 autonomous agent, not a chat wrapper: the user's message is passed verbatim (no
 injected persona), conversation continuity is the CLI's own native session
 (`--resume`), and tools are on. Each engine is a small config in

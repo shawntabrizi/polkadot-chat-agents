@@ -5,7 +5,7 @@ import { defineConfig } from "vitepress";
 export default defineConfig({
   title: "Polkadot Chat Agents",
   description:
-    "Run AI coding agents as chat bots in the Polkadot app — over the Statement Store, end-to-end encrypted, no chat server.",
+    "Run AI agents as chat bots in the Polkadot app — over the Statement Store, end-to-end encrypted, no chat server.",
   lang: "en-US",
   cleanUrls: true,
   lastUpdated: true,
@@ -45,6 +45,7 @@ export default defineConfig({
             { text: "Introduction", link: "/guide/introduction" },
             { text: "Create your first bot", link: "/guide/first-bot" },
             { text: "Deploy to a server", link: "/guide/deploy" },
+            { text: "Private & public bots", link: "/guide/access" },
           ],
         },
         {
@@ -71,6 +72,7 @@ export default defineConfig({
         {
           text: "Explanation",
           items: [
+            { text: "How it works", link: "/explanation/how-it-works" },
             { text: "Architecture", link: "/explanation/architecture" },
             { text: "Live replies", link: "/explanation/live-replies" },
             { text: "Roadmap", link: "/explanation/roadmap" },

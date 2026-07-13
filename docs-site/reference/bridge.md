@@ -1,3 +1,9 @@
+---
+next:
+  text: "How it works"
+  link: "/explanation/how-it-works"
+---
+
 # Bridge HTTP API
 
 In bridge mode, `bot-core` handles the transport (polling, decoding, ACKs,

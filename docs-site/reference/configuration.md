@@ -1,3 +1,9 @@
+---
+prev:
+  text: "Agent frameworks"
+  link: "/guide/harnesses"
+---
+
 # Configuration reference
 
 Every bot is configured entirely through environment variables read by
