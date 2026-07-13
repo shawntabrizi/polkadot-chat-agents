@@ -72,20 +72,28 @@ typing speed instead of protocol-etiquette speed.
 
 **Status: not planned.**
 
-## 3. Sending files *from* a bot (Runtime + Spec) — receive works, send doesn't
+## 3. Sending files from a bot (Runtime + Spec) — transport works; production provisioning is missing
 
-**Today.** Bots receive attachments fine (HOP claim/ack, ticket-derived
-keys — this part of the spec is solid and was pleasant to implement). But a
-bot cannot *send* a file: `hop_submit` requires a wallet-signed sender proof
-plus a **bulletin-chain allowance**, and there is no documented path for a
-lite person (which is what a registered bot is) to obtain that allowance. So
-"generate a patch file / a chart / a photo and send it back" — a core agent
-capability — is impossible today.
+**Today.** Bot-core now sends files: it performs HOP `hop_submit`, encrypts
+chunks under a fresh ticket, signs with the app-compatible
+`//allowance//bulletin//chat` account, and embeds the reference in rich text.
+For an eligible private bot on the named Paseo testnet profile, local `pca`
+configures matching HOP endpoints and invokes the public testnet faucet for
+that derived account automatically. It preflights capacity and expiry, and
+keeps ambiguous submissions locally guarded rather than duplicating a finite
+testnet allocation. The remaining production operator gap is storage
+provisioning. The deployed bot seed can derive and use the signer, but cannot
+create a production allowance by itself: the People-chain
+`Resources.claim_long_term_storage` call carries a current
+`AsResources(ClaimLongTermStorage)` Bandersnatch person proof derived from the
+original mnemonic, not from the deployable mini-secret.
 
-**Ask (Runtime).** Define and document the upload-allowance path for lite
-persons / bot accounts, or an explicit delegation mechanism (a person grants
-their bot upload quota, mirroring `set_statement_store_account` for
-statements).
+**Ask (Runtime).** Publish the supported bot/operator flow: a read-only
+Bulletin allowance query, then an explicit local, mnemonic-held claim flow (or,
+preferably, an owner-to-bot storage delegation mechanism). It should describe
+expiry, renewal, status, HOP endpoint selection, and what capacity each claim
+actually grants. Bots must not need person-proof material on a VPS just to send
+a file.
 
 **Related, planned — but neither covers this.** RFC-0001 (spec PR #3:
 versioned pool blobs, inline small files, `bitswap_v1_get` fallback after
@@ -94,9 +102,8 @@ side; both assume the sender can already upload. **Endorsed; please land
 them.** But note the dependency this creates: RFC-0002 (message compaction)
 overflows a sender's message backlog to a HOP upload — so once it lands,
 upload allowance stops being a "file feature" and becomes a prerequisite for
-*basic messaging under backlog*. A lite-person bot with no allowance path
-can't compact, which means it can't reliably message an offline peer either.
-The allowance gap should be solved before or with RFC-0002, not after.
+*basic messaging under backlog*. The operator allocation/delegation path should
+be solved before or with RFC-0002, not after.
 
 ## 4. Push notifications for bot replies (Runtime + Spec)
 

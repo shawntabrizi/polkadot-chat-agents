@@ -58,14 +58,20 @@ takopi has these; we have equivalents, often better-suited to our transport:
 
 ### MEDIUM
 
-3. **`/file`-style workspace I/O.**
-   - *In:* ✅ DONE — downloaded attachments are staged in a private per-turn
-     directory before the engine runs and removed after the turn, so the agent
-     acts on a file inside its own workspace (falls back to the media-store
-     path on copy failure).
-   - *Out (blocked):* pulling a file/artifact from the workspace back to chat
-     needs outbound HOP upload, which is the existing backlog item (see
-     docs/DESIGN.md "sending files"). Gated on that.
+3. **✅ DONE — durable `/file` storage and return.**
+   - *In:* downloaded attachments are staged in a private per-turn directory
+     before the engine runs and removed after the turn, so the agent acts on a
+     file inside its workspace (falls back to the media-store path on copy
+     failure).
+   - *Saved:* `/file put <path>` stores one attachment in a durable,
+     peer-scoped vault; `/file ls`, `/file info`, and `/file rm` manage it.
+   - *Out:* `/file get <path>` returns a saved file through encrypted HOP
+     upload. Bridge frameworks can put generated artifacts in the same vault
+     and return them through `file_path`, never by naming an arbitrary host
+     path. The named private Paseo profile configures HOP and provisions its
+     testnet allowance locally.
+   - *Still open:* production storage allowance provisioning remains an
+     explicit local operator flow; it cannot safely run from the deployed bot.
 
 4. **✅ DONE — Per-run reasoning/effort control (`/reasoning`).** Engine table
    maps levels to flags — claude `--effort low|medium|high|xhigh|max`, codex
@@ -100,6 +106,7 @@ takopi has these; we have equivalents, often better-suited to our transport:
 
 1. ~~Long-answer chunking~~ ✅ done (as outbound lanes + chunking).
 2. ~~Multi-project workspaces + worktrees~~ ✅ done.
-3. ~~Attachment → workspace~~ ✅ done (inbound staging; outbound still gated on HOP upload).
+3. ~~Attachment → workspace and durable file delivery~~ ✅ done; production
+   allowance provisioning remains an operator flow.
 4. ~~`/reasoning` per-run effort~~ ✅ done (claude + codex; opencode has no such flag).
 5. ~~Usage surfacing~~ ✅ done (BOT_AI_USAGE log + /usage; claude + codex).
