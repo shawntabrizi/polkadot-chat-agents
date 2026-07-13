@@ -297,7 +297,7 @@ variables `pca deploy` writes into `bot.env` automatically.
 | `BOT_THINKING_TEXT` | "🤔 One moment — thinking…" | Placeholder text; empty disables it. |
 | `BOT_THINKING_AFTER_MS` | 5000 | Post the placeholder if no reply within this delay. |
 | `BOT_LIVE_EDIT_MIN_MS` / `BOT_LIVE_EDIT_MAX_MS` | 3000 / 15000 | Live-edit throttle (escalating). |
-| `BOT_LIVE_HEARTBEAT_MS` | 15000 | Elapsed-clock frame cadence. |
+| `BOT_LIVE_HEARTBEAT_MS` | 5000 | Typing refresh and elapsed-clock frame cadence; stays below the T3ams client's 6-second typing expiry. |
 | `BOT_LIVE_ACK_TIMEOUT_MS` | 60000 | Give up gating edits on the peer's ACK after this. |
 | `BOT_LIVE_FINAL_ACK_WAIT_MS` | 10000 | Wait for the placeholder ACK before finalizing. |
 | `BOT_LIVE_PROGRESS` | `1` | `0` = placeholder and final only (no per-tool progress frames). |
@@ -435,6 +435,79 @@ private and exposes only an opaque bridge media handle.
 | `BOT_T3AMS_BRIDGE_MEDIA_REF_CAP` | bounded from inbound capacity | Maximum process-local opaque media handles exposed to the bridge. |
 | `BOT_T3AMS_BRIDGE_MEDIA_REF_TTL_MS` | 3600000 | Lifetime of an opaque bridge media handle; fetching it renews its short TTL. |
 | `BOT_BRIDGE_FILE_MAX_BYTES` | `BOT_FILE_MAX_BYTES` | Maximum raw `PUT /files` bridge upload. For T3ams it cannot exceed the durable-file and attachment caps. |
+
+### Optional isolated photo and document analysis
+
+Attachment retrieval and attachment understanding are deliberately separate.
+Without this feature, a hardened public direct bot receives metadata only: its
+Claude process has no filesystem tools and must not claim it read a staged
+photo or document. That remains the safe default for a bot with an OAuth home.
+
+`pca deploy <bot> --media-analyzer` is available for a T3ams direct engine. It
+adds a separate API-only `media-analyzer` container. The transport passes it
+only bounded, HOP-verified bytes and receives a bounded summary, which is
+marked as **untrusted attachment-derived data** in the brain prompt. The worker
+does not mount the bot seed, `/state`, `/workspace`, OAuth home, bridge token,
+or a host port; it is the only container with the provider API key.
+
+Enabling analysis sends supported attachment bytes and the accompanying user
+request to the configured Anthropic API. Do not turn it on for content that
+must stay entirely on the VPS. Supported semantic inputs are JPEG/PNG/GIF/WebP
+images, PDFs, UTF-8 plain text/Markdown/CSV/TSV/XML/RTF/JSON/NDJSON, and common
+Office XML files (`.docx`, `.xlsx`, `.pptx`). Office files go through a bounded
+ZIP/XML text projection, never a shell or desktop converter. Audio/video,
+legacy Office binaries, archives, and arbitrary binary files still transfer as
+normal downloadable T3ams attachments but remain metadata-only to the brain.
+Plain-text and Office projections are capped at 256 KiB before the provider
+call even when the encrypted attachment itself is within the larger file limit.
+Images above 40 megapixels, encrypted PDFs, and PDFs with more than 50 visible
+page markers are metadata-only too.
+
+| Transport variable | Default | Purpose |
+|---|---|---|
+| `BOT_T3AMS_MEDIA_ANALYZER_URL` | unset | Exact worker endpoint, normally `http://media-analyzer:8798/v1/analyze`. Set together with the token; both empty disables analysis. |
+| `BOT_T3AMS_MEDIA_ANALYZER_TOKEN` | unset | 32+ character worker capability. `pca deploy --media-analyzer` generates it and writes it to `bot.env`; never pass it to an agent. |
+| `BOT_T3AMS_MEDIA_ANALYZER_HTTP_HOSTS` | `media-analyzer` | Comma-separated hosts permitted for an `http:` worker URL. Use HTTPS for a non-internal endpoint. |
+| `BOT_T3AMS_MEDIA_ANALYZER_MAX_FILES` | 4 | Maximum semantic-analysis files per message (1–8). |
+| `BOT_T3AMS_MEDIA_ANALYZER_MAX_FILE_BYTES` | 7 MiB | Per-file semantic-analysis cap (up to 12 MiB). Larger attachments remain downloadable but are not copied to the worker. |
+| `BOT_T3AMS_MEDIA_ANALYZER_MAX_TOTAL_BYTES` | 12 MiB | Cumulative semantic-analysis cap (at least the per-file cap; up to 16 MiB). |
+| `BOT_T3AMS_MEDIA_ANALYZER_TIMEOUT_MS` | 90000 | Worker wait (1 s–10 min). Failure falls back to metadata-only rather than failing the chat turn. |
+| `BOT_T3AMS_MEDIA_ANALYZER_MAX_PROMPT_BYTES` | 12288 | User request bytes copied to the worker. |
+| `BOT_T3AMS_MEDIA_ANALYZER_MAX_SUMMARY_BYTES` | 6144 | Maximum worker summary bytes copied to the brain. |
+| `BOT_T3AMS_MEDIA_ANALYZER_MAX_CONCURRENT` | 1 | Maximum in-flight provider analyses before the direct-agent queue (1–8). |
+| `BOT_T3AMS_MEDIA_ANALYZER_MAX_QUEUED` | 20 | Bounded waiting analyses (0–1000); a full queue falls back to metadata-only. |
+| `BOT_T3AMS_MEDIA_ANALYZER_SENDER_CAP` | 4 | Durable analyses available to one authenticated sender in its refill window. |
+| `BOT_T3AMS_MEDIA_ANALYZER_SENDER_WINDOW_MS` | 3600000 | Sender-token refill window (1 s–31 days). |
+| `BOT_T3AMS_MEDIA_ANALYZER_GLOBAL_CAP` | 30 | Durable analyses available to the bot in its refill window. |
+| `BOT_T3AMS_MEDIA_ANALYZER_GLOBAL_WINDOW_MS` | 3600000 | Global-token refill window (1 s–31 days). |
+| `BOT_T3AMS_MEDIA_ANALYZER_SENDER_BUCKET_CAP` | 1000 | Maximum remembered sender buckets; least-recent/stale buckets are evicted. |
+
+Before a supported attachment leaves the transport, the bot durably records a
+rate reservation and a `submitted` marker. `/stop`, edits, and deletes abort
+the worker request. If a process dies after submission but before the result is
+saved, a recovery attempt stays metadata-only rather than uploading that
+attachment a second time.
+
+`deploy` creates a separate `media-token.env` with the worker capability. It
+never creates, reads, prints, uploads, or overwrites the VPS's `media.env`.
+Before the first deployment, create that mode-`0600` file in the remote bot
+directory with the provider key and an API model name:
+
+```sh
+# On the VPS, make the remote bot directory private, then use an editor or
+# secret manager to create its media.env. Keep the provider key out of CI.
+install -d -m 700 <remote bot directory>
+# <remote bot directory>/media.env — pca never reads it
+ANTHROPIC_API_KEY=...
+MEDIA_ANALYZER_MODEL=<an available Anthropic API model>
+chmod 600 <remote bot directory>/media.env
+```
+
+The worker accepts matching `MEDIA_ANALYZER_MAX_*` limits plus
+`MEDIA_ANALYZER_MAX_TOKENS` and `MEDIA_ANALYZER_TIMEOUT_MS`; keep them no larger
+than the transport limits. Its container needs outbound HTTPS for the provider.
+Use a host firewall or egress proxy if that must be narrowed to a specific
+provider endpoint.
 
 The same `BOT_FILE_MAX_BYTES`, `BOT_FILE_MAX_TOTAL_MB`, `BOT_FILE_MAX_ENTRIES`,
 `BOT_FILE_MAX_PEER_MB`, and `BOT_FILE_MAX_PEER_ENTRIES` settings bound the

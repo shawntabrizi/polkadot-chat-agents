@@ -20,6 +20,8 @@ import { RUNNERS, resolveEngine } from "./lib/runners.mjs";
 import { deriveT3amsIdentity } from "./lib/t3ams-identity.mjs";
 import { createT3amsProtocol, hexToBytes, bareHex } from "./lib/t3ams-protocol.mjs";
 import { createT3amsMedia } from "./lib/t3ams-media.mjs";
+import { createT3amsMediaAnalyzer, mediaAnalyzerKind, renderUntrustedAttachmentAnalysis } from "./lib/t3ams-media-analyzer.mjs";
+import { createT3amsMediaAnalysisBudget } from "./lib/t3ams-media-budget.mjs";
 import {
   DEFAULT_T3AMS_ATTACHMENT_MIME_TYPES,
   isT3amsAttachmentMimeAllowed,
@@ -157,7 +159,10 @@ const thinkingText = env.BOT_THINKING_TEXT ?? "🤔 One moment — thinking…";
 const thinkingAfterMs = numberEnv("BOT_THINKING_AFTER_MS", 5_000, { min: 0, max: 86_400_000 });
 const liveMinEditMs = numberEnv("BOT_LIVE_EDIT_MIN_MS", 3_000, { min: 100, max: 86_400_000 });
 const liveMaxEditMs = numberEnv("BOT_LIVE_EDIT_MAX_MS", 15_000, { min: liveMinEditMs, max: 86_400_000 });
-const liveHeartbeatMs = numberEnv("BOT_LIVE_HEARTBEAT_MS", 15_000, { min: 100, max: 86_400_000 });
+// The SPA expires a typing indicator after six seconds. Refresh a little
+// sooner (the protocol itself rate-limits to four seconds) so a slow turn
+// never flickers between "typing" and silence.
+const liveHeartbeatMs = numberEnv("BOT_LIVE_HEARTBEAT_MS", 5_000, { min: 100, max: 86_400_000 });
 const liveFinalAckWaitMs = numberEnv("BOT_LIVE_FINAL_ACK_WAIT_MS", 10_000, { min: 100, max: 86_400_000 });
 const liveProgress = env.BOT_LIVE_PROGRESS !== "0";
 const liveTtlMs = numberEnv("BOT_LIVE_TTL_MS", 600_000, { min: 1000, max: 7 * 86_400_000 });
@@ -168,6 +173,31 @@ const configuredReplyChunkBytes = numberEnv("BOT_REPLY_CHUNK_BYTES", 4_000, { mi
 // setting to that same effective value so a valid 128–255 configuration never
 // stages chunks that its own durable validator later rejects.
 const replyChunkBytes = Math.max(256, configuredReplyChunkBytes);
+// Live drafts are transient edits, not the durable final reply. Keep them
+// deliberately smaller than one normal reply chunk so a long stream cannot
+// make an edit invalid or cause unbounded presentation memory.
+const liveDraftMaxBytes = numberEnv(
+  "BOT_LIVE_DRAFT_MAX_BYTES",
+  Math.min(8 * 1024, Math.max(256, replyChunkBytes - 128)),
+  { min: 256, max: Math.max(256, MAX_T3AMS_TEXT_BYTES - 128) },
+);
+const truncateUtf8 = (value, maxBytes) => {
+  const text = String(value ?? "");
+  if (Buffer.byteLength(text) <= maxBytes) return text;
+  const suffix = "…";
+  const limit = Math.max(0, maxBytes - Buffer.byteLength(suffix));
+  let used = 0;
+  let out = "";
+  // `for…of` yields full Unicode code points, so a truncation cannot split a
+  // surrogate pair or UTF-8 sequence inside an editable rich-text frame.
+  for (const char of text) {
+    const bytes = Buffer.byteLength(char);
+    if (used + bytes > limit) break;
+    out += char;
+    used += bytes;
+  }
+  return `${out}${suffix}`;
+};
 // Keep the durable final-turn journal bounded by the same response cap the
 // runner enforces. A small allowance covers the persisted one-time help hint.
 const aiMaxOutputBytes = numberEnv("BOT_AI_MAX_OUTPUT_BYTES", 1_000_000, { min: 1024, max: 64 * 1024 * 1024 });
@@ -260,6 +290,30 @@ const t3amsMediaMaxInflightBytes = numberEnv(
   { min: t3amsMediaReserve(attachmentMaxBytes), max: 4 * 1024 * 1024 * 1024 },
 );
 const t3amsMediaDownloadQueueCap = numberEnv("BOT_T3AMS_MEDIA_DOWNLOAD_QUEUE_CAP", 100, { min: 1, max: 10_000 });
+// Semantic attachment understanding is deliberately opt-in. The regular bot
+// process only receives a worker URL/token; an isolated companion container
+// owns the provider key and never mounts transport state or the Claude OAuth
+// home. Leaving both variables empty retains metadata-only attachment behavior.
+const t3amsMediaAnalyzerUrl = (env.BOT_T3AMS_MEDIA_ANALYZER_URL ?? "").trim();
+const t3amsMediaAnalyzerToken = (env.BOT_T3AMS_MEDIA_ANALYZER_TOKEN ?? "").trim();
+const t3amsMediaAnalyzerHttpHosts = (env.BOT_T3AMS_MEDIA_ANALYZER_HTTP_HOSTS ?? "media-analyzer")
+  .split(",").map((value) => value.trim()).filter(Boolean);
+const t3amsMediaAnalyzerMaxFiles = numberEnv("BOT_T3AMS_MEDIA_ANALYZER_MAX_FILES", 4, { min: 1, max: 8 });
+const t3amsMediaAnalyzerMaxFileBytes = numberEnv("BOT_T3AMS_MEDIA_ANALYZER_MAX_FILE_BYTES", 7 * 1024 * 1024, { min: 1, max: 12 * 1024 * 1024 });
+const t3amsMediaAnalyzerMaxTotalBytes = numberEnv("BOT_T3AMS_MEDIA_ANALYZER_MAX_TOTAL_BYTES", 12 * 1024 * 1024, { min: 1, max: 16 * 1024 * 1024 });
+const t3amsMediaAnalyzerTimeoutMs = numberEnv("BOT_T3AMS_MEDIA_ANALYZER_TIMEOUT_MS", 90_000, { min: 1_000, max: 10 * 60_000 });
+const t3amsMediaAnalyzerMaxPromptBytes = numberEnv("BOT_T3AMS_MEDIA_ANALYZER_MAX_PROMPT_BYTES", 12 * 1024, { min: 256, max: 64 * 1024 });
+const t3amsMediaAnalyzerMaxSummaryBytes = numberEnv("BOT_T3AMS_MEDIA_ANALYZER_MAX_SUMMARY_BYTES", 6 * 1024, { min: 256, max: 16 * 1024 });
+const t3amsMediaAnalyzerMaxConcurrent = numberEnv("BOT_T3AMS_MEDIA_ANALYZER_MAX_CONCURRENT", 1, { min: 1, max: 8 });
+const t3amsMediaAnalyzerMaxQueued = numberEnv("BOT_T3AMS_MEDIA_ANALYZER_MAX_QUEUED", 20, { min: 0, max: 1_000 });
+// External analysis is billable work. Keep a durable sender/global budget in
+// addition to the in-process queue so a public sender cannot sustain provider
+// calls by spacing uploads over time or forcing process restarts.
+const t3amsMediaAnalyzerSenderCapacity = numberEnv("BOT_T3AMS_MEDIA_ANALYZER_SENDER_CAP", 4, { min: 1, max: 10_000 });
+const t3amsMediaAnalyzerSenderWindowMs = numberEnv("BOT_T3AMS_MEDIA_ANALYZER_SENDER_WINDOW_MS", 60 * 60_000, { min: 1_000, max: 31 * 24 * 60 * 60_000 });
+const t3amsMediaAnalyzerGlobalCapacity = numberEnv("BOT_T3AMS_MEDIA_ANALYZER_GLOBAL_CAP", 30, { min: 1, max: 100_000 });
+const t3amsMediaAnalyzerGlobalWindowMs = numberEnv("BOT_T3AMS_MEDIA_ANALYZER_GLOBAL_WINDOW_MS", 60 * 60_000, { min: 1_000, max: 31 * 24 * 60 * 60_000 });
+const t3amsMediaAnalyzerSenderBucketCap = numberEnv("BOT_T3AMS_MEDIA_ANALYZER_SENDER_BUCKET_CAP", 1_000, { min: 1, max: 100_000 });
 
 const allowedAccountIds = String(env.BOT_ALLOWED_PEERS ?? "")
   .split(",")
@@ -376,6 +430,14 @@ const knownChats = createT3amsKnownChats({
   cap: knownChatCap,
   isProtected: (chatId) => ingress.some((entry) => entry.routed.conversationKey === chatId),
   isValid: isT3amsConversationKey,
+});
+const mediaAnalysisBudget = createT3amsMediaAnalysisBudget({
+  senderCapacity: t3amsMediaAnalyzerSenderCapacity,
+  senderWindowMs: t3amsMediaAnalyzerSenderWindowMs,
+  globalCapacity: t3amsMediaAnalyzerGlobalCapacity,
+  globalWindowMs: t3amsMediaAnalyzerGlobalWindowMs,
+  senderCap: t3amsMediaAnalyzerSenderBucketCap,
+  initial: restored?.mediaAnalysisBudget ?? null,
 });
 const deadLetters = [];
 // A deleted queued turn is removed before its next model dispatch. If the
@@ -534,6 +596,41 @@ const wakeBridge = () => {
     resolve();
   }
 };
+// `submitted` is the durable at-most-once boundary. It is written before the
+// worker receives any attachment bytes. If this process dies before a result
+// can be saved, a retry deliberately falls back to attachment metadata rather
+// than sending the same private file to the external provider a second time.
+const MEDIA_ANALYSIS_STATES = new Set(["complete", "unavailable", "budget", "submitted"]);
+const MEDIA_ANALYSIS_RESULT_STATES = new Set(["analyzed", "unsupported", "unavailable"]);
+// Persist just the bounded model-facing projection, never a local cache path,
+// HOP capability, raw bytes, provider request id, or worker error. A durable
+// completion is reused; a durable `submitted` boundary is intentionally
+// metadata-only after a crash, preserving at-most-once external processing.
+const compactMediaAnalysis = (raw, state = "complete") => {
+  const normalizedState = MEDIA_ANALYSIS_STATES.has(state) ? state : "unavailable";
+  const results = [];
+  const seen = new Set();
+  for (const item of Array.isArray(raw?.results) ? raw.results : []) {
+    if (!Number.isSafeInteger(item?.index) || item.index < 0 || item.index >= attachmentMaxCount || seen.has(item.index)
+        || !MEDIA_ANALYSIS_RESULT_STATES.has(item.status)) continue;
+    if (item.status === "analyzed") {
+      const summary = truncateUtf8(String(item.summary ?? "").replace(/\u0000/g, "").trim(), t3amsMediaAnalyzerMaxSummaryBytes);
+      if (!summary) continue;
+      results.push({ index: item.index, status: "analyzed", summary });
+    } else {
+      results.push({ index: item.index, status: item.status });
+    }
+    seen.add(item.index);
+  }
+  return { v: 1, state: normalizedState, results: results.sort((left, right) => left.index - right.index) };
+};
+const restoreMediaAnalysis = (raw) => {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw) || raw.v !== 1 || !MEDIA_ANALYSIS_STATES.has(raw.state)
+      || !Array.isArray(raw.results) || raw.results.length > attachmentMaxCount) return null;
+  const normalized = compactMediaAnalysis(raw, raw.state);
+  if (normalized.results.length !== raw.results.length) return null;
+  return normalized;
+};
 const restoredIngressIds = new Set();
 for (const raw of Array.isArray(restored?.ingress) ? restored.ingress.slice(-ingressCap) : []) {
   const routed = restoreT3amsIngressRoute(raw?.routed);
@@ -549,6 +646,9 @@ for (const raw of Array.isArray(restored?.ingress) ? restored.ingress.slice(-ing
   const restoredReplyOutbox = kind === "turn"
     ? restoreAgentReplyOutbox(raw.agentReplyOutbox, revision)
     : { outbox: null, invalid: false };
+  const restoredMediaAnalysis = kind === "turn" && raw.mediaAnalysisRevision === revision
+    ? restoreMediaAnalysis(raw.mediaAnalysis)
+    : null;
   restoredIngressIds.add(id);
   ingress.push({
     id,
@@ -563,6 +663,8 @@ for (const raw of Array.isArray(restored?.ingress) ? restored.ingress.slice(-ing
     artifactOutboxInvalid: restoredOutbox.invalid,
     replyOutbox: restoredReplyOutbox.outbox,
     replyOutboxInvalid: restoredReplyOutbox.invalid,
+    mediaAnalysis: restoredMediaAnalysis,
+    mediaAnalysisRevision: restoredMediaAnalysis == null ? null : revision,
     // A process restart intentionally releases all harness leases. The next
     // adapter poll receives the durable delivery again rather than losing it.
     leaseId: null,
@@ -587,6 +689,7 @@ const stateSnapshot = () => ({
   messageLifecycle: messageLifecycle?.snapshot?.() ?? restored?.messageLifecycle ?? null,
   agent: agentRuntime?.snapshotAgent?.() ?? restored?.agent ?? null,
   agentIntroduced: agentRuntime?.introducedList?.() ?? restored?.agentIntroduced ?? [],
+  mediaAnalysisBudget: mediaAnalysisBudget.snapshot(),
   // A threaded turn has its own native session key but still belongs to one
   // valid delivery conversation. Persist the base chat separately so restore
   // can retain normal conversation validation and known-chat bounds.
@@ -609,6 +712,9 @@ const stateSnapshot = () => ({
     revision: entry.revision ?? 0,
     ...(entry.artifactOutbox == null ? {} : { agentArtifactOutbox: snapshotAgentArtifactOutbox(entry.artifactOutbox) }),
     ...(entry.replyOutbox == null ? {} : { agentReplyOutbox: entry.replyOutbox }),
+    ...(entry.mediaAnalysis == null || entry.mediaAnalysisRevision !== entry.revision
+      ? {}
+      : { mediaAnalysisRevision: entry.revision, mediaAnalysis: entry.mediaAnalysis }),
     leaseId: entry.leaseId ?? null,
     leaseUntil: entry.leaseUntil ?? 0,
   })),
@@ -660,6 +766,40 @@ const scheduleIngressDurabilityRetry = () => {
   }, 1000);
   ingressDurabilityRetryTimer.unref?.();
 };
+// Atomically reserve a public-analysis token and write the at-most-once
+// `submitted` boundary before any attachment bytes leave the transport. If
+// persistence itself fails, roll the in-memory token bucket back too: a
+// durability outage must pause work, not silently burn a sender's allowance.
+const beginMediaAnalysisForIngress = async (entryId, revision, senderXid) => mutateIngress(async () => {
+  const current = ingress.find((candidate) => candidate.id === entryId);
+  if (current == null || (Number.isSafeInteger(current.revision) ? current.revision : 0) !== revision) {
+    return { status: "superseded", allowed: false, durable: true };
+  }
+  const budgetBefore = mediaAnalysisBudget.snapshot();
+  const priorAnalysis = current.mediaAnalysis;
+  const priorAnalysisRevision = current.mediaAnalysisRevision;
+  const reservation = mediaAnalysisBudget.reserve(senderXid);
+  current.mediaAnalysis = compactMediaAnalysis(null, reservation.allowed ? "submitted" : "budget");
+  current.mediaAnalysisRevision = revision;
+  const saved = await persistCritical();
+  if (!saved) {
+    mediaAnalysisBudget.restore(budgetBefore);
+    current.mediaAnalysis = priorAnalysis;
+    current.mediaAnalysisRevision = priorAnalysisRevision;
+    // `persistCritical()` may already have staged its failed snapshot. Replace
+    // it with the rolled-back state before the normal retry timer flushes it.
+    persist();
+    ingressDurable = false;
+    scheduleIngressDurabilityRetry();
+    return { status: "persistence", allowed: false, durable: false, reason: "persistence", retryAfterMs: 0 };
+  }
+  ingressDurable = true;
+  return {
+    status: reservation.allowed ? "started" : "budget",
+    ...reservation,
+    durable: true,
+  };
+});
 
 const subscriptions = new Map();
 const subscriptionRetryTimers = new Map();
@@ -1592,7 +1732,22 @@ const beginTurnProgress = (chatId) => {
   const tracker = progressTrackerFor(chatId);
   armThinking(chatId);
   if (!liveProgress) return null;
-  return (title) => tracker.add(title);
+  const onAction = (title) => tracker.add(title);
+  // Claude's stream-json deltas contain user-visible final prose, not hidden
+  // chain-of-thought. Render that prose into the same ACK-gated editable
+  // placeholder, while retaining a bounded prefix until the terminal answer
+  // atomically replaces it. This gives T3ams a real streaming answer without
+  // leaking reasoning or making an interrupted draft durable.
+  let draft = "";
+  let draftTruncated = false;
+  onAction.onPartial = (delta) => {
+    if (draftTruncated || typeof delta !== "string" || !delta) return;
+    const next = `${draft}${delta}`;
+    draftTruncated = Buffer.byteLength(next) > liveDraftMaxBytes;
+    draft = truncateUtf8(next, liveDraftMaxBytes);
+    tracker.setLiveText(`✍️ Writing a reply…\n${draft}`);
+  };
+  return onAction;
 };
 
 const inboundRetryTimers = new Map();
@@ -1759,8 +1914,21 @@ const routeOneInbound = async (event, { historyOnly = false } = {}) => {
     : routed.message.text;
   if (agentRuntime != null && /^\/stop\s*$/i.test(commandInput)) {
     const sessionKey = agentSessionKeyForT3ams(routed.conversationKey, routed.message.threadRootId);
-    const stopped = agentRuntime.stop(routed.conversationKey, sessionKey ?? routed.conversationKey);
-    log("T3AMS_STOP_REQUESTED", { chatId: routed.conversationKey, stopped });
+    const effectiveSessionKey = sessionKey ?? routed.conversationKey;
+    // Abort the live process/HTTP work synchronously. The following durable
+    // journal mutation may need disk I/O, and must not delay a user's stop.
+    const mediaStopped = abortMediaAnalysesForSession(routed.conversationKey, effectiveSessionKey, "stopped by user");
+    const ingressStopped = abortIngressTurnsForSession(routed.conversationKey, effectiveSessionKey, "stopped by user");
+    const stopped = agentRuntime.stop(routed.conversationKey, effectiveSessionKey);
+    const cancelled = await cancelUnfinishedIngressForSession(routed.conversationKey, effectiveSessionKey, "stopped by user");
+    log("T3AMS_STOP_REQUESTED", {
+      chatId: routed.conversationKey,
+      stopped,
+      mediaStopped,
+      ingressStopped,
+      cancelled: cancelled.cancelled,
+      durable: cancelled.durable,
+    });
   }
   const admission = await admitIngress(event, routed);
   if (!admission.admitted) {
@@ -1825,6 +1993,7 @@ const reconcileQueuedIngressOperation = async (operation, lifecycle) => mutateIn
   // (and potentially using private tools) behind an otherwise fenced reply.
   const stoppedSessionKeys = new Set();
   const noteStoppedTurn = (entry) => {
+    abortMediaAnalysis(entry.id, lifecycle.deleted ? "message deleted" : "message updated");
     if (!runningIngress.has(entry.id)) return;
     stopped = true;
     if (entry.kind !== "turn") return;
@@ -1833,6 +2002,10 @@ const reconcileQueuedIngressOperation = async (operation, lifecycle) => mutateIn
       entry.routed.message?.threadRootId,
     ) ?? entry.routed.conversationKey;
     stoppedSessionKeys.add(sessionKey);
+    // Kill an already-started CLI process before waiting for the journal write
+    // below. The outer reconciliation call repeats this harmlessly after a
+    // successful persistence boundary for compatibility with older embeds.
+    agentRuntime?.stop(entry.routed.conversationKey, sessionKey);
   };
   const removed = [];
   const invalidatedOutboxes = [];
@@ -1858,6 +2031,10 @@ const reconcileQueuedIngressOperation = async (operation, lifecycle) => mutateIn
       continue;
     }
     entry.routed = rerouted;
+    // The analysis is derived from the prior prompt/attachments. A new
+    // revision must never reuse it, and the active request is aborted below.
+    entry.mediaAnalysis = null;
+    entry.mediaAnalysisRevision = null;
     if (entry.artifactOutbox != null || entry.artifactOutboxInvalid || entry.replyOutbox != null || entry.replyOutboxInvalid) {
       entry.artifactOutbox = null;
       entry.artifactOutboxInvalid = false;
@@ -2224,6 +2401,35 @@ try {
 }
 const mediaSweepTimer = setInterval(() => t3amsMedia.sweep(), 3_600_000);
 mediaSweepTimer.unref?.();
+let t3amsMediaAnalyzer;
+try {
+  t3amsMediaAnalyzer = createT3amsMediaAnalyzer({
+    endpoint: t3amsMediaAnalyzerUrl,
+    token: t3amsMediaAnalyzerToken,
+    allowedHttpHosts: t3amsMediaAnalyzerHttpHosts,
+    maxFiles: t3amsMediaAnalyzerMaxFiles,
+    maxFileBytes: t3amsMediaAnalyzerMaxFileBytes,
+    maxTotalBytes: t3amsMediaAnalyzerMaxTotalBytes,
+    timeoutMs: t3amsMediaAnalyzerTimeoutMs,
+    maxPromptBytes: t3amsMediaAnalyzerMaxPromptBytes,
+    maxSummaryBytes: t3amsMediaAnalyzerMaxSummaryBytes,
+    maxConcurrent: t3amsMediaAnalyzerMaxConcurrent,
+    maxQueued: t3amsMediaAnalyzerMaxQueued,
+    log,
+  });
+} catch (error) {
+  console.error(`T3ams media analyzer configuration is invalid: ${String(error?.message ?? error)}`);
+  process.exit(2);
+}
+if (t3amsMediaAnalyzer.enabled) {
+  log("T3AMS_MEDIA_ANALYZER_ENABLED", {
+    maxFiles: t3amsMediaAnalyzer.limits.maxFiles,
+    maxFileBytes: t3amsMediaAnalyzer.limits.maxFileBytes,
+    maxTotalBytes: t3amsMediaAnalyzer.limits.maxTotalBytes,
+    maxConcurrent: t3amsMediaAnalyzer.limits.maxConcurrent,
+    maxQueued: t3amsMediaAnalyzer.limits.maxQueued,
+  });
+}
 // Durable files are deliberately distinct from the evictable media cache.
 // They are scoped to a T3ams conversation, allowing a group to intentionally
 // share a vault while preventing any cross-DM/channel lookup.
@@ -2436,7 +2642,10 @@ const renderT3amsForBrain = (message) => {
     || customCmd
     || aiSkipPermissions
     || aiAllowedTools.some((tool) => /^(?:read|bash)(?:\(|$)/i.test(tool));
-  const attachmentNotes = (message.attachments ?? []).map((attachment) => {
+  const analyzedAttachments = new Map((message.mediaAnalysis?.results ?? [])
+    .filter((result) => result?.status === "analyzed" && Number.isSafeInteger(result.index) && typeof result.summary === "string" && result.summary)
+    .map((result) => [result.index, result]));
+  const attachmentNotes = (message.attachments ?? []).map((attachment, index) => {
     const noun = attachment.kind === "image"
       ? "photo"
       : attachment.kind === "video"
@@ -2452,6 +2661,18 @@ const renderT3amsForBrain = (message) => {
     // not preserve the sender-visible filename. Keep that validated filename
     // beside the usable path: it is often the only clue for an otherwise
     // opaque document (for example, an unknown browser File.type).
+    const analysis = analyzedAttachments.get(index);
+    if (analysis != null) {
+      // The worker's output is a bounded visual/text summary, not a trusted
+      // instruction. Delimit it separately from the user prompt so even a
+      // tool-capable private engine does not mistake document text for a task.
+      return renderUntrustedAttachmentAnalysis({
+        index,
+        filename: attachment.filename,
+        mime: attachment.mime,
+        summary: analysis.summary,
+      });
+    }
     return attachment.downloaded && attachment.path && claudeCanInspectStagedFiles
       ? `[User attached a ${noun} saved at ${attachment.path} (${attachment.filename}; ${attachment.mime}, ${size}${duration})]`
       : attachment.downloaded && attachment.path
@@ -2556,6 +2777,103 @@ if (engine != null) {
 // The entry stays durable until the turn completes, yielding at-least-once
 // processing after a crash rather than a prompt silently disappearing.
 const runningIngress = new Set();
+// One controller spans every pre-agent phase of a direct turn. The worker
+// request is only one cancellation point: /stop or an authenticated
+// edit/delete must also fence the tiny gap between a completed media request
+// and a later CLI dispatch.
+const activeIngressTurns = new Map(); // ingress id -> { controller, chatId, sessionKey }
+const abortIngressTurn = (entryId, reason = "ingress turn cancelled") => {
+  const active = activeIngressTurns.get(entryId);
+  if (active == null) return false;
+  if (!active.controller.signal.aborted) active.controller.abort(new Error(reason));
+  return true;
+};
+const ingressSessionKey = (entry) => agentSessionKeyForT3ams(
+  entry?.routed?.conversationKey,
+  entry?.routed?.message?.threadRootId,
+) ?? entry?.routed?.conversationKey;
+const abortIngressTurnsForSession = (chatId, sessionKey, reason = "ingress turn cancelled") => {
+  let count = 0;
+  for (const [entryId, active] of activeIngressTurns) {
+    if (active.chatId !== chatId || active.sessionKey !== sessionKey) continue;
+    if (abortIngressTurn(entryId, reason)) count += 1;
+  }
+  return count;
+};
+// Sidecar analysis is outside agent-runtime's child-process queue, so retain
+// an explicit cancellation handle for /stop and authenticated edit/delete
+// reconciliation. It is memory-only because a process exit ends the HTTP
+// request; the durable ingress revision/cache handles the restart boundary.
+const activeMediaAnalyses = new Map(); // ingress id -> { controller, chatId, sessionKey }
+const abortMediaAnalysis = (entryId, reason = "media analysis cancelled") => {
+  const active = activeMediaAnalyses.get(entryId);
+  if (active != null) activeMediaAnalyses.delete(entryId);
+  // The media controller is intentionally the same full-turn controller, so
+  // this also prevents the old prompt reaching the brain after the HTTP call
+  // has resolved but before the next revision check.
+  const stopped = abortIngressTurn(entryId, reason);
+  if (active != null && !active.controller.signal.aborted) active.controller.abort(new Error(reason));
+  return active != null || stopped;
+};
+const abortMediaAnalysesForSession = (chatId, sessionKey, reason = "media analysis cancelled") => {
+  let count = 0;
+  for (const [entryId, active] of activeMediaAnalyses) {
+    if (active.chatId !== chatId || active.sessionKey !== sessionKey) continue;
+    if (abortMediaAnalysis(entryId, reason)) count += 1;
+  }
+  return count;
+};
+// /stop is intercepted ahead of the per-chat queue. Make that cancellation
+// durable too: merely killing an in-memory HTTP request leaves the old journal
+// row eligible to run again as soon as its worker slot is released. Completed
+// reply outboxes are deliberately retained; their model work is already done
+// and this command should not erase an answer that is only awaiting delivery.
+const cancelUnfinishedIngressForSession = async (chatId, sessionKey, reason = "stopped by user") => mutateIngress(async () => {
+  const removed = [];
+  for (let index = ingress.length - 1; index >= 0; index -= 1) {
+    const entry = ingress[index];
+    if (entry?.kind !== "turn" || entry.routed?.conversationKey !== chatId
+        || ingressSessionKey(entry) !== sessionKey || Number(entry.completedAt) > 0 || entry.replyOutbox != null) continue;
+    abortMediaAnalysis(entry.id, reason);
+    abortIngressTurn(entry.id, reason);
+    removed.push(entry);
+    ingress.splice(index, 1);
+  }
+  if (removed.length === 0) return { cancelled: 0, durable: true };
+  const saved = await persistCritical();
+  if (saved) {
+    for (const entry of removed) {
+      protocol.unpinConversation(entry.routed.conversationKey);
+      removeAgentArtifactOutbox(entry.id);
+    }
+    knownChats.trim();
+    ingressDurable = true;
+    return { cancelled: removed.length, durable: true };
+  }
+  // Match edit/delete reconciliation: keep the in-memory removal so the
+  // stopped prompt cannot execute in this process, and let the durable retry
+  // commit it when storage recovers. A crash before then is the unavoidable
+  // at-least-once boundary, but never a reason to keep working right now.
+  deferredIngressUnpins.push(...removed.map((entry) => entry.routed.conversationKey));
+  deferredAgentArtifactOutboxCleanup.push(...removed.map((entry) => entry.id));
+  ingressDurable = false;
+  scheduleIngressDurabilityRetry();
+  return { cancelled: removed.length, durable: false };
+});
+const persistMediaAnalysisForIngress = async (entryId, revision, analysis) => mutateIngress(async () => {
+  const current = ingress.find((candidate) => candidate.id === entryId);
+  if (current == null || ingressRevision(current) !== revision) return "superseded";
+  current.mediaAnalysis = analysis;
+  current.mediaAnalysisRevision = revision;
+  const saved = await persistCritical();
+  if (!saved) {
+    ingressDurable = false;
+    scheduleIngressDurabilityRetry();
+    return false;
+  }
+  ingressDurable = true;
+  return true;
+});
 const ingressRevision = (entry) => Number.isSafeInteger(entry?.revision) && entry.revision >= 0 ? entry.revision : 0;
 const ingressEntryCurrent = (id, revision) => ingress.some((candidate) => candidate.id === id && ingressRevision(candidate) === revision);
 const completeIngressTurn = async (entry, expectedRevision) => mutateIngress(async () => {
@@ -2686,10 +3004,26 @@ const executeIngressTurn = async (entry, expectedRevision) => {
     ...(typeof routed.message.attachmentError === "string" ? { attachmentError: routed.message.attachmentError } : {}),
     ...(Array.isArray(routed.message.channelContext) ? { channelContext: routed.message.channelContext } : {}),
   };
+  const turnController = new AbortController();
+  activeIngressTurns.set(entry.id, {
+    controller: turnController,
+    chatId: routed.conversationKey,
+    sessionKey: message.sessionKey,
+  });
+  const turnCurrent = () => !turnController.signal.aborted && ingressEntryCurrent(entry.id, expectedRevision);
   const hadPrevious = activeReplyThreads.has(routed.conversationKey);
   const previous = activeReplyThreads.get(routed.conversationKey);
   activeReplyThreads.set(routed.conversationKey, routed.replyTarget.threadRootId);
   try {
+    const commandInput = typeof message.commandText === "string" ? message.commandText : message.text;
+    if (agentRuntime != null && /^\/stop\s*$/i.test(commandInput)) {
+      // The cancellation was durably applied as soon as this authenticated
+      // inbound command arrived. Do not download its attachments or wait for
+      // a sidecar queue merely to deliver the ordered confirmation.
+      if (!turnCurrent()) return null;
+      await sendAgentReply(routed.conversationKey, "⏹️ Stopped any active work for this conversation.");
+      return turnCurrent() ? expectedRevision : null;
+    }
     // A complete persisted handoff means the model already ran. Drain the
     // exact files/text/chunks only; this is the key recovery boundary that
     // prevents a failed final delivery from rerunning tools or Claude.
@@ -2705,48 +3039,108 @@ const executeIngressTurn = async (entry, expectedRevision) => {
         if (priorArtifactContext == null) activeAgentArtifactDeliveries.delete(routed.conversationKey);
         else activeAgentArtifactDeliveries.set(routed.conversationKey, priorArtifactContext);
       }
-      return ingressEntryCurrent(entry.id, expectedRevision) ? expectedRevision : null;
+      return turnCurrent() ? expectedRevision : null;
     }
+    let attachmentProgress = null;
     if (Array.isArray(message.attachments) && message.attachments.length > 0) {
       // Attachment retrieval precedes the agent process. Start the same live
       // turn before it begins so a photo/PDF never looks ignored while its
       // encrypted bytes are claimed and verified; later CLI tool actions join
       // this one deferred tracker rather than replacing its history.
-      const onAttachmentProgress = agentRuntime == null
+      attachmentProgress = agentRuntime == null
         ? null
         : beginTurnProgress(routed.conversationKey);
       message.attachments = await fetchT3amsAttachments(message.attachments, {
-        onProgress: onAttachmentProgress,
+        onProgress: attachmentProgress,
       });
     }
-    if (!ingressEntryCurrent(entry.id, expectedRevision)) return null;
+    if (!turnCurrent()) return null;
     const fileResult = await handleT3amsFileCommand(routed.conversationKey, message);
     if (fileResult?.handled) {
-      if (!ingressEntryCurrent(entry.id, expectedRevision)) return null;
+      if (!turnCurrent()) return null;
       if (fileResult.reply) await sendAgentReply(routed.conversationKey, fileResult.reply);
       return expectedRevision;
     }
     if (brain === "echo") {
-      if (!ingressEntryCurrent(entry.id, expectedRevision)) return null;
+      if (!turnCurrent()) return null;
       await sendAgentReply(routed.conversationKey, `Echo: ${message.text}`);
       return expectedRevision;
     }
     if (agentRuntime == null) throw new Error("no direct T3ams agent runtime is configured");
-    const commandInput = typeof message.commandText === "string" ? message.commandText : message.text;
-    if (/^\/stop\s*$/i.test(commandInput)) {
-      // The cancellation request was issued immediately when the authenticated
-      // event arrived; this ordered, durable turn is just its confirmation.
-      if (!ingressEntryCurrent(entry.id, expectedRevision)) return null;
-      await sendAgentReply(routed.conversationKey, "⏹️ Stopped any active work for this conversation.");
-      return expectedRevision;
-    }
     if (stateChangingChannelCommand(commandInput) && !canControlChannel(message)) {
       const label = channelControlRole === "mod" ? "a workspace moderator" : "a workspace owner or admin";
-      if (!ingressEntryCurrent(entry.id, expectedRevision)) return null;
+      if (!turnCurrent()) return null;
       await sendAgentReply(routed.conversationKey, `Only ${label} can change this channel bot's session settings.`);
       return expectedRevision;
     }
-    if (!ingressEntryCurrent(entry.id, expectedRevision)) return null;
+    const cachedMediaAnalysis = entry.mediaAnalysisRevision === expectedRevision
+      ? restoreMediaAnalysis(entry.mediaAnalysis)
+      : null;
+    if (cachedMediaAnalysis != null) {
+      // A complete result is reused after retry/restart. A recovered
+      // `submitted` marker intentionally remains metadata-only: the prior
+      // process may have reached the external provider just before it died.
+      message.mediaAnalysis = cachedMediaAnalysis;
+    } else if (t3amsMediaAnalyzer.enabled && Array.isArray(message.attachments)
+        // Agent-runtime resolves command-shaped text locally (including
+        // unknown slash commands), so do not spend an external-analysis token
+        // on an attachment that cannot reach the model in the first place.
+        && !/^\/[a-z][a-z0-9_-]*(?:\s+\S+)?\s*$/i.test(commandInput)) {
+      const hasAnalyzableAttachment = message.attachments.some((attachment) => {
+        if (!attachment?.downloaded || typeof attachment.path !== "string") return false;
+        const size = Number(attachment.size);
+        if (!Number.isSafeInteger(size) || size < 0 || size > t3amsMediaAnalyzer.limits.maxFileBytes) return false;
+        try { return mediaAnalyzerKind(attachment.mime) != null; }
+        catch { return false; }
+      });
+      if (hasAnalyzableAttachment) {
+        // Run only after native file commands and session-control commands
+        // have short-circuited. Reserve one durable global+sender token before
+        // making an external request. `begin…` writes either a durable budget
+        // result or the at-most-once `submitted` state first.
+        const reservation = await beginMediaAnalysisForIngress(entry.id, expectedRevision, message.senderXid);
+        if (!turnCurrent() || reservation.status === "superseded") return null;
+        if (!reservation.durable) throw new Error("media analysis budget could not be persisted");
+        if (!reservation.allowed) {
+          log("T3AMS_MEDIA_ANALYZER_BUDGET", { reason: reservation.reason, retryAfterMs: reservation.retryAfterMs });
+          message.mediaAnalysis = restoreMediaAnalysis(entry.mediaAnalysis) ?? compactMediaAnalysis(null, "budget");
+        } else {
+          const analysisProgress = attachmentProgress ?? beginTurnProgress(routed.conversationKey);
+          activeMediaAnalyses.set(entry.id, {
+            controller: turnController,
+            chatId: routed.conversationKey,
+            sessionKey: message.sessionKey,
+          });
+          let analysis;
+          try {
+            const result = await t3amsMediaAnalyzer.analyze({
+              attachments: message.attachments,
+              prompt: message.text,
+              onProgress: analysisProgress,
+              // Stable only within this ingress revision. It is useful for
+              // sidecar correlation without persisting a provider request id
+              // or relying on a provider-specific idempotency contract.
+              requestId: `${entry.id}-${expectedRevision.toString(16)}`,
+              signal: turnController.signal,
+            });
+            analysis = compactMediaAnalysis(result, "complete");
+          } catch (error) {
+            if (!turnCurrent()) return null;
+            log("T3AMS_MEDIA_ANALYZER_FAILED", { error: String(error?.message ?? error).slice(0, 180) });
+            analysis = compactMediaAnalysis(null, "unavailable");
+          } finally {
+            const active = activeMediaAnalyses.get(entry.id);
+            if (active?.controller === turnController) activeMediaAnalyses.delete(entry.id);
+          }
+          if (!turnCurrent()) return null;
+          const persisted = await persistMediaAnalysisForIngress(entry.id, expectedRevision, analysis);
+          if (persisted === "superseded" || !turnCurrent()) return null;
+          if (persisted !== true) throw new Error("media analysis result could not be persisted");
+          message.mediaAnalysis = analysis;
+        }
+      }
+    }
+    if (!turnCurrent()) return null;
     const priorArtifactContext = activeAgentArtifactDeliveries.get(routed.conversationKey);
     activeAgentArtifactDeliveries.set(routed.conversationKey, { id: entry.id, revision: expectedRevision });
     let handled;
@@ -2756,10 +3150,12 @@ const executeIngressTurn = async (entry, expectedRevision) => {
       if (priorArtifactContext == null) activeAgentArtifactDeliveries.delete(routed.conversationKey);
       else activeAgentArtifactDeliveries.set(routed.conversationKey, priorArtifactContext);
     }
-    if (!ingressEntryCurrent(entry.id, expectedRevision)) return null;
+    if (!turnCurrent()) return null;
     if (handled !== true) throw new Error("agent turn was interrupted before completion");
     return expectedRevision;
   } finally {
+    const activeTurn = activeIngressTurns.get(entry.id);
+    if (activeTurn?.controller === turnController) activeIngressTurns.delete(entry.id);
     if (hadPrevious) activeReplyThreads.set(routed.conversationKey, previous);
     else activeReplyThreads.delete(routed.conversationKey);
   }

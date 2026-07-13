@@ -309,3 +309,18 @@ test("deferred progress retains pre-placeholder actions and flushes them after a
   tracker.add("must not render");
   assert.equal(updates.length, 2);
 });
+
+test("deferred progress can safely replace activity with a transient live draft", () => {
+  const updates = [];
+  const tracker = createDeferredProgressTracker({ label: "working" });
+  tracker.setLiveText("✍️ Writing a reply…\nFirst draft before the placeholder");
+  const handle = { finalized: false, update: (text) => updates.push(text) };
+  tracker.attach(handle);
+  assert.equal(updates.at(-1), "✍️ Writing a reply…\nFirst draft before the placeholder");
+  tracker.add("downloading photo.jpg");
+  tracker.setLiveText("✍️ Writing a reply…\nThis is the visible draft");
+  assert.equal(updates.at(-1), "✍️ Writing a reply…\nThis is the visible draft");
+  assert.equal(tracker.render(), "✍️ Writing a reply…\nThis is the visible draft");
+  tracker.setLiveText("");
+  assert.match(updates.at(-1), /downloading photo\.jpg/);
+});

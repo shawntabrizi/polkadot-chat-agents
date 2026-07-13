@@ -581,12 +581,14 @@ export const createAgentRuntime = ({
     return jobs.length;
   };
 
-  // Run one agent turn. Streams the engine's JSONL: tool actions feed live-
-  // reply progress frames, the session id is captured for --resume, the
-  // answer is accumulated. No wall-clock limit — an idle-silence backstop
-  // kills a wedged process (and unblocks the peer queue). Returns { answer },
-  // { stopped: true } (user /stop), or null on failure.
-  const runEngine = (peerHex, userText, onAction = null, cwd = workspace, job = null, outputDir = null, sessionKey = peerHex) => new Promise((resolve) => {
+// Run one agent turn. Streams the engine's JSONL: tool actions feed live-
+// reply progress frames and (when supported by the CLI) final-text deltas
+// feed a live draft. The session id is captured for --resume and only full
+// terminal text is accumulated as the durable answer. No wall-clock limit —
+// an idle-silence backstop kills a wedged process (and unblocks the peer
+// queue). Returns { answer }, { stopped: true } (user /stop), or null on
+// failure.
+  const runEngine = (peerHex, userText, onAction = null, onPartial = null, cwd = workspace, job = null, outputDir = null, sessionKey = peerHex) => new Promise((resolve) => {
     const k = norm(sessionKey);
     if (job?.cancelled) { resolve({ stopped: true }); return; }
     let child;
@@ -643,6 +645,11 @@ export const createAgentRuntime = ({
         if (ev.kind === "started") {
           if (ev.sessionId && !gotSession) { gotSession = true; peerResume.set(k, ev.sessionId); trimMap(peerResume, peerCap); persist(); }
         } else if (ev.kind === "action") onAction?.(ev.title);
+        // Partial text is deliberately presentation-only. The complete
+        // assistant/result frames still own `answer`, which prevents stream
+        // retries or a CLI's repeated transcript frame from duplicating the
+        // final reply.
+        else if (ev.kind === "partial") onPartial?.(ev.text);
         else if (ev.kind === "text") answer += ev.text;
         else if (ev.kind === "result") { resultText = ev.text || null; if (ev.usage) usage = ev.usage; }
         else if (ev.kind === "error") errored = ev.message;
@@ -800,7 +807,13 @@ export const createAgentRuntime = ({
         await sendReply("sendText", peerHex, `⚠️ I couldn't open ${proj ? `${proj.alias}${proj.branch ? `@${proj.branch}` : ""}` : "the workspace"}: ${String(e?.message ?? e)}. /project default switches back to the shared workspace.`);
         return true;
       }
-      const onAction = chat.beginTurn(peerHex); // arms the "thinking" placeholder
+      const turnProgress = chat.beginTurn(peerHex); // arms the "thinking" placeholder
+      // Preserve the historical function-shaped beginTurn API while allowing
+      // transports to hang a second, presentation-only partial-text callback
+      // from that same turn. A non-function object form is also accepted for
+      // custom transports.
+      const onAction = typeof turnProgress === "function" ? turnProgress : turnProgress?.onAction;
+      const onPartial = typeof turnProgress === "function" ? turnProgress.onPartial : turnProgress?.onPartial;
       let artifactHandoff = null;
       try {
         const result = await queueEngineTurn(peerHex, async (job) => {
@@ -816,7 +829,7 @@ export const createAgentRuntime = ({
             // `outputDir` is transport-owned capability context, so surface it
             // to a renderer only for the turn in which it actually exists.
             const promptMessage = outputDir == null ? msg : { ...msg, outputDir };
-            const engineResult = await runEngine(peerHex, renderMessage(promptMessage), onAction, turnCwd, job, outputDir, k);
+            const engineResult = await runEngine(peerHex, renderMessage(promptMessage), onAction, onPartial, turnCwd, job, outputDir, k);
             if (engineResult && !engineResult.stopped && outputDir) {
               // The callback must never receive a path still writable by the
               // agent. Snapshot it now, while the root transport controls the

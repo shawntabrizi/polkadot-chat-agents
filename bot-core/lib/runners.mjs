@@ -40,7 +40,12 @@ const claude = {
   command: "claude",
   effortLevels: ["low", "medium", "high", "xhigh", "max"],
   buildArgs({ prompt, model, resume, allowedTools, skipPermissions, safeMode = false, effort }) {
-    const args = ["-p", "--output-format", "stream-json", "--verbose"];
+    // Claude emits final-answer deltas as `stream_event` frames only when
+    // this flag is present. They are intentionally kept separate from the
+    // terminal assistant message below: transports can safely live-render
+    // user-visible prose without treating it as model reasoning or doubling
+    // the durable final answer.
+    const args = ["-p", "--output-format", "stream-json", "--include-partial-messages", "--verbose"];
     if (resume) args.push("--resume", resume);
     if (model) args.push("--model", model);
     if (effort) args.push("--effort", effort);
@@ -73,6 +78,12 @@ const claude = {
         else if (block?.type === "text" && block.text) out.push({ kind: "text", text: block.text });
       }
       return out;
+    }
+    if (obj?.type === "stream_event" && obj.event?.type === "content_block_delta") {
+      const delta = obj.event.delta;
+      if (delta?.type === "text_delta" && typeof delta.text === "string" && delta.text) {
+        return [{ kind: "partial", text: delta.text }];
+      }
     }
     if (obj?.type === "result") {
       if (obj.is_error) return [{ kind: "error", message: String(obj.result ?? obj.subtype ?? "claude error") }];

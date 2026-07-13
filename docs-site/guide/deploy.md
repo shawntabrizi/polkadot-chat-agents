@@ -52,6 +52,36 @@ restarts and redeploys; keep a tool-enabled deployment private and allowlisted.
 `echo` also deploys as a single container, but it does not spawn an AI CLI and
 needs no provider login.
 
+## Photo and document understanding for T3ams
+
+A public no-tools Claude bot can safely receive encrypted photos and files, but
+it cannot inspect a staged file itself: its OAuth home is intentionally kept
+out of reach of model tools. For a T3ams direct bot, use the explicit
+`--media-analyzer` deployment option to add a separate API-only worker:
+
+```bash
+# First create the private remote directory and edit its media.env directly on
+# the VPS. Do not put this provider key in your local shell history or CI logs.
+install -d -m 700 /root/pca-bots/<bot>
+# In your editor or secret-manager workflow, create /root/pca-bots/<bot>/media.env:
+ANTHROPIC_API_KEY=...
+MEDIA_ANALYZER_MODEL=<an available Anthropic API model>
+chmod 600 /root/pca-bots/<bot>/media.env
+
+# Then deploy; the API key is never passed to bot.env, Claude, or your local pca command.
+pca deploy mycoolbot --host root@your-server --media-analyzer
+```
+
+The generated worker has no published port and does not mount `/state`, the
+agent workspace, the Claude OAuth home, or the bot's bridge token. It receives
+only verified, bounded attachment bytes, then returns a small untrusted
+summary for the brain. It supports common images, PDFs, text documents, and
+`.docx`/`.xlsx`/`.pptx`; other file types continue to be delivered/downloadable
+but are not semantically inspected. The worker sends supported files to the
+Anthropic API, so do not enable it for material that must remain entirely on
+your server. See [Configuration](/reference/configuration#optional-isolated-photo-and-document-analysis)
+for limits, cancellation, at-most-once recovery behavior, and egress guidance.
+
 ## Bridge bots
 
 Bridge bots deploy together with their agent framework as a **two-container

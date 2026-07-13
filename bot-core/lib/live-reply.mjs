@@ -264,9 +264,14 @@ export const createDeferredProgressTracker = (options = {}) => {
   const tracker = createProgressTracker(options);
   let handle = null;
   let disposed = false;
+  // A transport can replace the compact activity card with a user-visible
+  // draft of the final answer. The draft belongs to the display layer only:
+  // callers retain the terminal answer independently, so an interrupted
+  // stream never promotes a partial response into a durable final message.
+  let liveText = null;
   const flush = () => {
     if (disposed || handle == null || handle.finalized) return;
-    handle.update(tracker.render());
+    handle.update(liveText ?? tracker.render());
   };
   return {
     add(title) {
@@ -274,12 +279,21 @@ export const createDeferredProgressTracker = (options = {}) => {
       tracker.add(title);
       flush();
     },
+    setLiveText(text) {
+      if (disposed) return;
+      const next = typeof text === "string" && text.trim() ? text : null;
+      if (next === liveText) return;
+      liveText = next;
+      flush();
+    },
     attach(nextHandle) {
       if (disposed || nextHandle == null) return;
       handle = nextHandle;
       // Do not replace a fresh "thinking…" bubble with a redundant working
-      // frame unless there is real pre-placeholder work to report.
-      if (tracker.step > 0) flush();
+      // frame unless there is real pre-placeholder work or user-visible final
+      // prose to report. A no-tools Claude turn can start streaming text
+      // before it emits any tool/action event.
+      if (tracker.step > 0 || liveText != null) flush();
     },
     detach() { handle = null; },
     dispose() {
@@ -287,6 +301,6 @@ export const createDeferredProgressTracker = (options = {}) => {
       handle = null;
     },
     get step() { return tracker.step; },
-    render: () => tracker.render(),
+    render: () => liveText ?? tracker.render(),
   };
 };

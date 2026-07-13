@@ -40,6 +40,7 @@ test("claude buildArgs: explicit no-tools default, allowlist, and bypass", () =>
   const none = RUNNERS.claude.buildArgs({ prompt: "hi" });
   assert.ok(none.includes("--permission-mode") && none[none.indexOf("--permission-mode") + 1] === "dontAsk");
   assert.ok(none.includes("--tools") && none[none.indexOf("--tools") + 1] === "");
+  assert.ok(none.includes("--include-partial-messages"), "Claude live drafts require stream deltas");
   assert.ok(!none.includes("--allowedTools"));
 
   const fresh = RUNNERS.claude.buildArgs({ prompt: "hi", allowedTools: ["Bash", "Read", "Edit", "Write"] });
@@ -93,6 +94,18 @@ test("claude parseEvent: falls back to accumulated text when result.result is em
     { type: "result", is_error: false },
   ]);
   assert.equal(out.answer, "partial answer");
+});
+
+test("claude parseEvent: stream deltas are presentation-only partial text", () => {
+  const [event] = RUNNERS.claude.parseEvent({
+    type: "stream_event",
+    event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "draft" } },
+  });
+  assert.deepEqual(event, { kind: "partial", text: "draft" });
+  assert.deepEqual(RUNNERS.claude.parseEvent({
+    type: "stream_event",
+    event: { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "hidden" } },
+  }), []);
 });
 
 // ---- codex -----------------------------------------------------------------

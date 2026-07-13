@@ -307,6 +307,32 @@ test("direct deployment defaults to no tools and makes private tool access expli
     result = runCli(botsDir, ["deploy", "publiccodex", "--host", "root@example.test", "--dry-run"]);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /Public direct deployment currently supports only Claude/);
+
+    writeBot(botsDir, "publicmedia", {
+      name: "publicmedia",
+      endpoint: "ws://127.0.0.1:9944",
+      brain: "claude",
+      transport: "t3ams",
+      allow: [],
+      bridgePort: 8799,
+      bridgeToken: "a-long-enough-bridge-token-for-tests",
+    });
+    result = runCli(botsDir, ["deploy", "publicmedia", "--host", "root@example.test", "--media-analyzer", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^BOT_T3AMS_MEDIA_ANALYZER_URL=http:\/\/media-analyzer:8798\/v1\/analyze$/m);
+    assert.match(result.stdout, /^BOT_T3AMS_MEDIA_ANALYZER_TOKEN=<hidden>$/m);
+    assert.match(result.stdout, /media-analyzer:\n[\s\S]*cap_drop:\n      - ALL/);
+    assert.match(result.stdout, /depends_on:\n      media-analyzer:\n        condition: service_healthy/);
+    assert.match(result.stdout, /env_file:\n      - \.\/media\.env\n      - \.\/media-token\.env/);
+    assert.doesNotMatch(result.stdout, /ANTHROPIC_API_KEY=/);
+    const publicMedia = readBot(botsDir, "publicmedia");
+    assert.equal(typeof publicMedia.mediaAnalyzerToken, "string");
+    assert.ok(publicMedia.mediaAnalyzerToken.length >= 32);
+    assert.notEqual(publicMedia.mediaAnalyzerToken, publicMedia.bridgeToken);
+
+    result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--media-analyzer", "--dry-run"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /requires a T3ams direct-engine deployment/);
   } finally {
     fs.rmSync(botsDir, { recursive: true, force: true });
   }

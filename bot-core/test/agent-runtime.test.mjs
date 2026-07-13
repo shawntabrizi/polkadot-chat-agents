@@ -17,6 +17,7 @@ const makeRuntime = ({ script, workspaces = null, workspace, ...runtimeOptions }
   const ws = workspace ?? fs.mkdtempSync(path.join(os.tmpdir(), "pca-agent-"));
   const sent = [];      // chat.sendText (commands, errors)
   const delivered = []; // chat.deliver (answers)
+  const partials = [];  // presentation-only streamed final-text deltas
   const events = [];
   let persists = 0;
   const runtime = createAgentRuntime({
@@ -31,14 +32,18 @@ const makeRuntime = ({ script, workspaces = null, workspace, ...runtimeOptions }
     chat: {
       sendText: async (p, t) => { sent.push(t); },
       deliver: async (p, t) => { delivered.push(t); },
-      beginTurn: () => null,
+      beginTurn: () => {
+        const onAction = () => {};
+        onAction.onPartial = (text) => partials.push(text);
+        return onAction;
+      },
     },
     username: "unit.00",
     log: (event, extra) => events.push({ event, ...extra }),
     persist: () => { persists += 1; },
     ...runtimeOptions,
   });
-  return { runtime, sent, delivered, events, workspace: ws, persists: () => persists };
+  return { runtime, sent, delivered, partials, events, workspace: ws, persists: () => persists };
 };
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -64,6 +69,20 @@ test("a plain message runs a turn and delivers the answer with the one-time tip"
   // Second turn: no tip repeat.
   await h.runtime.handleMessage("PEER", { text: "again", messageId: "M2", kind: "text" });
   assert.equal(h.delivered[1], "the answer");
+});
+
+test("final-text stream deltas reach the transport without changing the durable answer", async () => {
+  const h = makeRuntime({
+    script: `printf '%s\\n' \
+      '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"draft "}}}' \
+      '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"answer"}}}' \
+      '{"type":"assistant","message":{"content":[{"type":"text","text":"the final answer"}]}}' \
+      '{"type":"result","is_error":false,"result":"the final answer"}'`,
+  });
+  await h.runtime.handleMessage("peer", { text: "hi", messageId: "M1", kind: "text" });
+  assert.deepEqual(h.partials, ["draft ", "answer"]);
+  assert.match(h.delivered[0], /^the final answer/);
+  assert.doesNotMatch(h.delivered[0], /draft answer/);
 });
 
 test("a durable transport can opt into reply-delivery failures propagating to its ingress journal", async () => {

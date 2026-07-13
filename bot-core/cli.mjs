@@ -129,7 +129,7 @@ const fail = (s) => { console.error(`${c("✗", "31")} ${s}`); process.exit(1); 
 
 // Flags that are always boolean — they must never consume the following token,
 // or `pca create --public mybot` would swallow the bot name into --public.
-const BOOLEAN_FLAGS = new Set(["public", "dry-run", "no-register", "follow", "greet", "yes", "help", "version", "safe-tools", "full-autonomy", "t3ams-auto-accept-workspaces", "t3ams-no-auto-accept-workspaces"]);
+const BOOLEAN_FLAGS = new Set(["public", "dry-run", "no-register", "follow", "greet", "yes", "help", "version", "safe-tools", "full-autonomy", "media-analyzer", "t3ams-auto-accept-workspaces", "t3ams-no-auto-accept-workspaces"]);
 const SHORT_FLAGS = { "-f": "follow", "-h": "help", "-V": "version" };
 function parseFlags(argv) {
   const flags = {};
@@ -243,6 +243,17 @@ function ensureBridgeToken(name, cfg) {
   cfg.bridgeToken = newBridgeToken();
   saveConfig(name, cfg);
   return cfg.bridgeToken;
+}
+
+// The media worker gets a distinct capability, rather than reusing the bridge
+// token. That makes its narrow attachment-analysis boundary independently
+// revocable and keeps a leaked bridge credential from becoming an API caller.
+function ensureMediaAnalyzerToken(name, cfg) {
+  const token = typeof cfg.mediaAnalyzerToken === "string" ? cfg.mediaAnalyzerToken.trim() : "";
+  if (token.length >= 32 && token !== cfg.bridgeToken) return token;
+  cfg.mediaAnalyzerToken = newBridgeToken();
+  saveConfig(name, cfg);
+  return cfg.mediaAnalyzerToken;
 }
 
 function bridgePortFor(cfg) {
@@ -1272,18 +1283,22 @@ const DEPLOY_ENGINES = {
 const KEY_FLAGS = { ANTHROPIC_API_KEY: "anthropic-key", OPENAI_API_KEY: "openai-key", OPENROUTER_API_KEY: "openrouter-key", GEMINI_API_KEY: "gemini-key", GROQ_API_KEY: "groq-key" };
 
 async function cmdDeploy(name, flags) {
-  if (!name) fail("Usage: pca deploy <name> --host <ssh-target> [--harness openclaw|hermes] [--model <m>] [--safe-tools|--allowed-tools <list>|--full-autonomy] [--dry-run]");
+  if (!name) fail("Usage: pca deploy <name> --host <ssh-target> [--harness openclaw|hermes] [--model <m>] [--safe-tools|--allowed-tools <list>|--full-autonomy] [--media-analyzer] [--dry-run]");
   const host = flags.host ? sshTarget(flags.host) : null;
   if (!host) fail(`--host <ssh-target> is required, e.g.  pca deploy ${name} --host root@1.2.3.4`);
   const cfg = readConfig(name);
   if (!fs.existsSync(secretPath(name))) fail(`No secret found for "${name}".`);
   const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
   const transport = configuredTransport(cfg);
+  const mediaAnalyzerEnabled = flags["media-analyzer"] === true;
   const suppliedKeyFlag = Object.values(KEY_FLAGS).find((key) => flags[key] != null);
   if (suppliedKeyFlag) {
     fail(`--${suppliedKeyFlag} is no longer accepted: API keys are not injected into autonomous agents. Authenticate the selected CLI or framework through its own persistent credential store instead.`);
   }
   if (cfg.brain === "hermes" || cfg.brain === "bridge") {
+    if (mediaAnalyzerEnabled) {
+      fail("--media-analyzer requires a T3ams direct-engine deployment (claude, codex, or opencode); bridge bots own their attachment runtime.");
+    }
     const harness = flags.harness ? String(flags.harness).toLowerCase() : null;
     if (harness !== "openclaw" && harness !== "hermes") {
       fail(`"${name}" is a bridge-mode bot — pick which agent framework drives it:\n  pca deploy ${name} --host ${host} --harness openclaw   (fully headless if the server has Claude creds)\n  pca deploy ${name} --host ${host} --harness hermes     (one interactive codex login after deploy)`);
@@ -1292,6 +1307,9 @@ async function cmdDeploy(name, flags) {
   }
   const spec = DEPLOY_ENGINES[cfg.brain];
   if (!spec) fail(`deploy supports echo/claude/codex/opencode and --harness openclaw|hermes for bridge bots.\nFor "${cfg.brain}", set it up manually — see docs/HARNESSES.md.`);
+  if (mediaAnalyzerEnabled && (transport !== "t3ams" || !spec.pkg)) {
+    fail("--media-analyzer requires a T3ams direct-engine deployment (claude, codex, or opencode); it has no effect for echo or bridge bots.");
+  }
   if (!fs.existsSync(path.join(HERE, "node_modules")) || !fs.existsSync(path.join(HERE, ".papi"))) {
     fail(`bot-core dependencies missing. Run:  (cd ${HERE} && npm ci)  then retry.`);
   }
@@ -1327,6 +1345,7 @@ async function cmdDeploy(name, flags) {
 
   // Generate env + compose + Dockerfile locally, then (unless dry-run) ship & launch.
   const bridgeToken = ensureBridgeToken(name, cfg);
+  const mediaAnalyzerToken = mediaAnalyzerEnabled ? ensureMediaAnalyzerToken(name, cfg) : null;
   const bridgePort = bridgePortFor(cfg);
   const entrypoint = entrypointForTransport(transport);
   const transportEnv = t3amsEnvironment(cfg, transport);
@@ -1343,6 +1362,13 @@ async function cmdDeploy(name, flags) {
     envLine("BOT_BRIDGE_PORT", bridgePort),
     envLine("BOT_BRIDGE_TOKEN", bridgeToken),
   ];
+  if (mediaAnalyzerEnabled) {
+    envLines.push(
+      envLine("BOT_T3AMS_MEDIA_ANALYZER_URL", "http://media-analyzer:8798/v1/analyze"),
+      envLine("BOT_T3AMS_MEDIA_ANALYZER_TOKEN", mediaAnalyzerToken),
+      envLine("BOT_T3AMS_MEDIA_ANALYZER_HTTP_HOSTS", "media-analyzer"),
+    );
+  }
   for (const [key, value] of Object.entries(fileDeliveryEnvironment(cfg))) {
     envLines.push(envLine(key, value));
   }
@@ -1368,21 +1394,34 @@ async function cmdDeploy(name, flags) {
   const dockerfile = spec.pkg
     ? `FROM ${NODE_IMAGE}\nRUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates ripgrep && rm -rf /var/lib/apt/lists/*\nRUN npm install --global --no-audit --no-fund ${spec.pkg} && npm cache clean --force\nRUN mkdir -p /home/node /workspace /state && chown -R 1000:1000 /home/node /workspace && chmod 700 /home/node /workspace /state\nENV HOME=/home/node\nWORKDIR /app\nCMD ["node", "${entrypoint}"]\n`
     : null;
+  const mediaDependsOn = mediaAnalyzerEnabled
+    ? "    depends_on:\n      media-analyzer:\n        condition: service_healthy\n"
+    : "";
   const engineService = spec.pkg
-    ? `  bot:\n    build: ./image\n    user: "0:0"\n    init: true\n    read_only: true\n    pids_limit: 256\n    mem_limit: 2g\n    cpus: "2.0"\n    security_opt:\n      - no-new-privileges:true\n    tmpfs:\n      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n      - ./workspace:/workspace\n      - ./home:/home/node\n    command: ["node", "${entrypoint}"]\n`
-    : `  bot:\n    image: ${NODE_IMAGE}\n    user: "1000:1000"\n    init: true\n    read_only: true\n    pids_limit: 128\n    mem_limit: 512m\n    cpus: "1.0"\n    security_opt:\n      - no-new-privileges:true\n    tmpfs:\n      - /tmp:rw,noexec,nosuid,nodev,size=128m,mode=1777\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n    command: ["node", "${entrypoint}"]\n`;
-  const compose = `services:\n${engineService}`;
+    ? `  bot:\n    build: ./image\n    user: "0:0"\n    init: true\n    read_only: true\n    pids_limit: 256\n    mem_limit: 2g\n    cpus: "2.0"\n    security_opt:\n      - no-new-privileges:true\n    tmpfs:\n      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777\n    container_name: ${cn}\n    restart: unless-stopped\n${mediaDependsOn}${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n      - ./workspace:/workspace\n      - ./home:/home/node\n    command: ["node", "${entrypoint}"]\n`
+    : `  bot:\n    image: ${NODE_IMAGE}\n    user: "1000:1000"\n    init: true\n    read_only: true\n    pids_limit: 128\n    mem_limit: 512m\n    cpus: "1.0"\n    security_opt:\n      - no-new-privileges:true\n    tmpfs:\n      - /tmp:rw,noexec,nosuid,nodev,size=128m,mode=1777\n    container_name: ${cn}\n    restart: unless-stopped\n${mediaDependsOn}${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n    command: ["node", "${entrypoint}"]\n`;
+  const mediaContainer = mediaAnalyzerEnabled ? containerName(`${cn}-media`) : null;
+  // This service has no bot state, workspace, OAuth home, host port, or Docker
+  // socket. Its `media.env` is intentionally provisioned by the operator on
+  // the VPS and never read or overwritten by pca deploy.
+  const mediaService = mediaAnalyzerEnabled
+    ? `  media-analyzer:\n    image: ${NODE_IMAGE}\n    user: "1000:1000"\n    init: true\n    read_only: true\n    pids_limit: 64\n    mem_limit: 512m\n    cpus: "1.0"\n    cap_drop:\n      - ALL\n    security_opt:\n      - no-new-privileges:true\n    tmpfs:\n      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777\n    container_name: ${mediaContainer}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./media.env\n      - ./media-token.env\n    volumes:\n      - ./app:/app:ro\n    healthcheck:\n      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8798/healthz').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]\n      interval: 30s\n      timeout: 5s\n      retries: 3\n      start_period: 10s\n    command: ["node", "media-analyzer.mjs"]\n`
+    : "";
+  const compose = `services:\n${engineService}${mediaService}`;
 
   if (flags["dry-run"] === true) {
     console.log(`\n--- ${base}/docker-compose.yml ---\n${compose}`);
     if (dockerfile) console.log(`--- ${base}/image/Dockerfile ---\n${dockerfile}`);
     console.log(`--- ${base}/bot.env (secrets hidden) ---\n${redactEnv(envLines.join("\n"))}`);
+    if (mediaAnalyzerEnabled) {
+      console.log(`--- ${base}/media-token.env (secrets hidden) ---\n${redactEnv(envLine("MEDIA_ANALYZER_TOKEN", mediaAnalyzerToken))}`);
+      note("Before a real deploy, create a mode-0600 media.env on the VPS with ANTHROPIC_API_KEY and MEDIA_ANALYZER_MODEL. pca never reads or overwrites that file.");
+    }
     note(`\nDry run — nothing deployed.`);
     return;
   }
 
   requireT3amsSdkForDeploy(transport);
-  await provisionTestnetFileAllowance(name, cfg);
 
   step(`Checking ${host}…`);
   const pf = runLocal("ssh", [...sshOpts, host, "docker version --format '{{.Server.Version}}' && docker compose version --short"], { capture: true });
@@ -1392,6 +1431,23 @@ async function cmdDeploy(name, flags) {
   // The transport owns /state and runs as root. Only the spawned agent gets
   // the node-owned workspace and OAuth home; it cannot read the signing seed.
   const remoteBase = shellQuote(base);
+  if (mediaAnalyzerEnabled) {
+    // Create the parent before credential preflight. The credentials themselves
+    // remain operator-provisioned on the VPS and are never read by this CLI.
+    const mediaBase = runLocal("ssh", [...sshOpts, host, `mkdir -p ${remoteBase} && chmod 700 ${remoteBase}`], { capture: true });
+    if (mediaBase.status !== 0) {
+      fail(`Could not securely prepare ${base} on ${host} for --media-analyzer.`);
+    }
+    // Do not inspect the credentials file: its API key must never transit the
+    // local CLI or stdout. We only prove the operator provisioned a regular,
+    // nonempty file before generating a compose service that depends on it.
+    const mediaEnv = runLocal("ssh", [...sshOpts, host,
+      `test -f ${remoteBase}/media.env && test ! -L ${remoteBase}/media.env && test -s ${remoteBase}/media.env && test "$(stat -c %a ${remoteBase}/media.env)" = 600`], { capture: true });
+    if (mediaEnv.status !== 0) {
+      fail(`--media-analyzer requires a regular, nonempty mode-0600 ${base}/media.env on ${host}. Create it there with ANTHROPIC_API_KEY and MEDIA_ANALYZER_MODEL; pca never reads or overwrites this file.`);
+    }
+  }
+  await provisionTestnetFileAllowance(name, cfg);
   const prepareVolumes = spec.pkg
     ? `mkdir -p ${remoteBase}/app ${remoteBase}/state ${remoteBase}/workspace ${remoteBase}/home ${remoteBase}/image && chown -R root:root ${remoteBase}/state && chmod 700 ${remoteBase}/state && chown -R 1000:1000 ${remoteBase}/workspace ${remoteBase}/home && chmod 700 ${remoteBase}/workspace ${remoteBase}/home`
     : `mkdir -p ${remoteBase}/app ${remoteBase}/state ${remoteBase}/image && chown -R 1000:1000 ${remoteBase}/state && chmod 700 ${remoteBase}/state`;
@@ -1406,17 +1462,26 @@ async function cmdDeploy(name, flags) {
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pca-deploy-"));
   fs.writeFileSync(path.join(tmp, "bot.env"), `${envLines.join("\n")}\n`, { mode: 0o600 });
+  if (mediaAnalyzerEnabled) {
+    fs.writeFileSync(path.join(tmp, "media-token.env"), `${envLine("MEDIA_ANALYZER_TOKEN", mediaAnalyzerToken)}\n`, { mode: 0o600 });
+  }
   fs.writeFileSync(path.join(tmp, "docker-compose.yml"), compose);
   if (dockerfile) fs.writeFileSync(path.join(tmp, "Dockerfile"), dockerfile);
   const scpFiles = [path.join(tmp, "bot.env"), path.join(tmp, "docker-compose.yml")];
+  if (mediaAnalyzerEnabled) scpFiles.push(path.join(tmp, "media-token.env"));
   const cp = runLocal("scp", [...sshOpts, ...scpFiles, `${host}:${base}/`]);
   const dockerCp = dockerfile
     ? runLocal("scp", [...sshOpts, path.join(tmp, "Dockerfile"), `${host}:${base}/image/`])
     : null;
   fs.rmSync(tmp, { recursive: true, force: true });
   if (cp.status !== 0 || dockerCp?.status !== 0) fail("Copying config (scp) failed.");
-  // scp applies the remote umask, so restore 0600 on the env (it holds the seed).
-  runLocal("ssh", [...sshOpts, host, `chmod 600 ${base}/bot.env`]);
+  // scp applies the remote umask, so fail closed unless every generated secret
+  // is mode 0600 before Compose is allowed to start a container with it.
+  const remoteSecretFiles = [`${remoteBase}/bot.env`];
+  if (mediaAnalyzerEnabled) remoteSecretFiles.push(`${remoteBase}/media-token.env`);
+  const secureSecrets = runLocal("ssh", [...sshOpts, host,
+    `chmod 600 ${remoteSecretFiles.join(" ")} && ${remoteSecretFiles.map((file) => `test "$(stat -c %a ${file})" = 600`).join(" && ")}`], { capture: true });
+  if (secureSecrets.status !== 0) fail("Could not secure generated deployment secret files.");
 
   if (dockerfile) {
     step("Building the agent image (first run pulls the CLI — a few minutes)…");
@@ -1447,7 +1512,18 @@ async function cmdDeploy(name, flags) {
     }
     console.log();
     note(`Logs:  ssh ${host} 'docker logs -f ${cn}'`);
-    note(`Stop:  ssh ${host} 'docker rm -f ${cn}'`);
+    if (mediaAnalyzerEnabled) {
+      const mediaWait = runLocal("ssh", [...sshOpts, host,
+        `for i in $(seq 1 20); do status="$(docker inspect --format '{{.State.Health.Status}}' ${mediaContainer} 2>/dev/null || true)"; [ "$status" = healthy ] && break; sleep 1; done; docker inspect --format 'MEDIA_ANALYZER_HEALTH={{.State.Health.Status}}' ${mediaContainer} 2>&1; docker logs --tail 10 ${mediaContainer} 2>&1`], { capture: true });
+      if (/MEDIA_ANALYZER_HEALTH=healthy/.test(mediaWait.stdout || "")) {
+        ok(`Attachment analysis worker is live (container ${mediaContainer}).`);
+        note(`Worker logs: ssh ${host} 'docker logs -f ${mediaContainer}'`);
+      } else {
+        warn("Bot is live, but the attachment analysis worker did not report ready. Check its logs; normal chat replies remain available.");
+        console.log((mediaWait.stdout || "").split("\n").slice(-10).join("\n"));
+      }
+    }
+    note(`Stop:  pca stop ${name}`);
     if (spec.pkg) {
       const login = cfg.brain === "opencode" ? "opencode auth login" : `${cfg.brain} login`;
       note(`Model login (once): ssh ${host} 'docker exec -it --user 1000:1000 ${cn} ${login}'`);
@@ -1790,14 +1866,16 @@ create flags:
 model controls:  show current policy  ·  set <model> pins the default model  ·  allow <a,b>
   restricts chat-side switching  ·  lock disables it  ·  open permits it only for allowlisted bots
 
-deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --model <m>  ·  --safe-tools | --allowed-tools <list> | --full-autonomy  ·  --dry-run
+deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --model <m>  ·  --safe-tools | --allowed-tools <list> | --full-autonomy  ·  --media-analyzer  ·  --dry-run
   Needs Docker on the server + SSH access. Direct engines (echo/claude/codex/opencode)
   deploy with root-only transport state and a non-root agent CLI, with a persistent
   /workspace the agent works in; bridge bots deploy a two-container stack. Direct
   agents start with no tools. For a private bot, --safe-tools opts into the
   Bash/Read/Edit/Write allowlist, --allowed-tools selects a narrower list, and
   --full-autonomy is the explicit unrestricted override. Public direct bots stay
-  no-tools until their tools and OAuth credentials are isolated. The deploy output
+  no-tools until their tools and OAuth credentials are isolated. For a T3ams
+  direct bot, --media-analyzer adds an isolated API-only photo/document worker;
+  provision its remote media.env with a provider API key and model first. The deploy output
   gives the one-time OAuth login command for direct engines; logs/status/stop reuse
   the saved host (override with --host).
 
@@ -1815,7 +1893,7 @@ const COMMAND_FLAGS = {
   create: ["brain", "transport", "owner", "allow", "t3ams-peer-key", "t3ams-display-name", "t3ams-auto-accept-workspaces", "t3ams-no-auto-accept-workspaces", "public", "network", "endpoint", "backend", "username", "digits", "model", "port", "wait", "no-register"],
   register: ["username", "digits", "wait"],
   run: ["model", "greet"],
-  deploy: ["host", "harness", "anthropic-key", "openai-key", "openrouter-key", "gemini-key", "groq-key", "safe-tools", "allowed-tools", "full-autonomy", "model", "dry-run", "remote-dir", "greet"],
+  deploy: ["host", "harness", "anthropic-key", "openai-key", "openrouter-key", "gemini-key", "groq-key", "safe-tools", "allowed-tools", "full-autonomy", "media-analyzer", "model", "dry-run", "remote-dir", "greet"],
   logs: ["host", "follow", "tail"],
   status: ["host"],
   stop: ["host"],
