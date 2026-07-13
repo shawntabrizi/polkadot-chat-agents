@@ -45,6 +45,19 @@ async function withPeopleApi(endpoint, fn) {
 // the working directory. Override with PCA_BOTS_DIR.
 const BOTS_DIR = process.env.PCA_BOTS_DIR ?? path.join(os.homedir(), ".pca", "bots");
 const DEFAULT_ENDPOINT = "wss://paseo-people-next-system-rpc.polkadot.io";
+// Keep testnet attachment delivery deliberate and named. An arbitrary People
+// endpoint tells us nothing about the matching Bulletin/HOP network, so only a
+// known profile receives automatic HOP configuration.
+const PASEO_TESTNET_FILE_DELIVERY = Object.freeze({
+  profile: "paseo-next-v2",
+  bulletinNetwork: "Bulletin Paseo Next v2",
+  consoleUrl: "https://paritytech.github.io/polkadot-bulletin-chain/authorizations?tab=faucet",
+  uploadNode: "wss://paseo-hop-next-0.polkadot.io",
+  allowedNodes: Object.freeze([
+    "paseo-hop-next-0.polkadot.io",
+    "paseo-hop-next-1.polkadot.io",
+  ]),
+});
 // Immutable multi-architecture manifests prevent a later deploy from silently
 // receiving a republished mutable image.
 const NODE_IMAGE = "node:22.22.0-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94";
@@ -229,6 +242,53 @@ function configuredModelPolicy(cfg) {
 
 const isPublicBot = (cfg) => !Array.isArray(cfg.allow) || cfg.allow.length === 0;
 
+function configuredFileDelivery(cfg) {
+  if (cfg.fileDelivery == null) return null;
+  if (typeof cfg.fileDelivery !== "object" || Array.isArray(cfg.fileDelivery)
+      || cfg.fileDelivery.profile !== PASEO_TESTNET_FILE_DELIVERY.profile
+      || cfg.networkProfile !== "paseo") {
+    fail(`Invalid fileDelivery configuration for "${cfg.name ?? "this bot"}".`);
+  }
+  if (isPublicBot(cfg)) {
+    fail(`"${cfg.name ?? "This bot"}" is public, so testnet file delivery is disabled to protect its finite storage allowance.`);
+  }
+  return PASEO_TESTNET_FILE_DELIVERY;
+}
+
+function fileDeliveryEnvironment(cfg) {
+  const profile = configuredFileDelivery(cfg);
+  if (!profile) return {};
+  return {
+    BOT_HOP_UPLOAD_NODE: profile.uploadNode,
+    BOT_HOP_ALLOWED_NODES: profile.allowedNodes.join(","),
+  };
+}
+
+function seedFromHex(seedHex) {
+  const hex = String(seedHex ?? "").trim().replace(/^0x/i, "");
+  if (!/^[0-9a-f]{64}$/i.test(hex)) throw new Error("bot seed must be exactly 32 bytes of hex");
+  return new Uint8Array(Buffer.from(hex, "hex"));
+}
+
+function fileAllowanceAccount(seed) {
+  const pair = deriveSr25519PairFromSeed(seed, "//allowance//bulletin//chat");
+  return { hex: bytesToHex(pair.publicKey), address: ss58Address(pair.publicKey, 42) };
+}
+
+function printTestnetFileAllowanceGuide(cfg, seed) {
+  const profile = configuredFileDelivery(cfg);
+  if (!profile) return;
+  const account = fileAllowanceAccount(seed);
+  console.log("Testnet file delivery (optional):");
+  note(`${profile.bulletinNetwork} is configured for this private bot. Before /file get can send a file, authorize this derived account:`);
+  console.log(`  ${c(account.address, "36")}`);
+  note(`account id: ${account.hex}`);
+  note(`1. Open ${profile.consoleUrl}`);
+  note(`2. Select ${profile.bulletinNetwork}, then Faucet > Authorize Account.`);
+  note("3. Paste the address above, choose a small test quota, and wait for confirmation.");
+  note("Do not enter the bot mnemonic or VPS seed. Production uses a separate operator provisioning flow.");
+}
+
 function modelPolicyEnvironment(cfg) {
   const policy = configuredModelPolicy(cfg);
   if (policy.open) {
@@ -333,7 +393,8 @@ async function cmdCreate(name, flags) {
   const brain = String(flags.brain ?? "echo").toLowerCase();
   if (!BRAINS.includes(brain)) fail(`--brain must be one of: ${BRAINS.join(", ")}`);
   warnMissingBrainCli(brain);
-  const endpoint = flags.network == null || flags.network === "paseo" ? DEFAULT_ENDPOINT : String(flags.endpoint ?? flags.network);
+  const networkProfile = flags.network == null || flags.network === "paseo" ? "paseo" : null;
+  const endpoint = networkProfile === "paseo" ? DEFAULT_ENDPOINT : String(flags.endpoint ?? flags.network);
   const backendUrl = flags.backend ? String(flags.backend) : DEFAULT_BACKENDS.paseo;
   const allowInputs = [
     ...String(flags.allow ?? "").split(",").map((s) => s.trim()).filter(Boolean),
@@ -384,6 +445,10 @@ async function cmdCreate(name, flags) {
   fs.writeFileSync(secretPath(name), `${JSON.stringify({ mnemonic, seedHex: bytesToHex(seed) }, null, 2)}\n`, { mode: 0o600 });
   const config = {
     name, endpoint, backendUrl, brain, allow, allowLabels,
+    ...(networkProfile ? { networkProfile } : {}),
+    // Testnet uploads can spend a finite Bulletin allowance. Configure the
+    // known HOP profile only for an allowlisted bot, never a public one.
+    ...(networkProfile === "paseo" && allow.length > 0 ? { fileDelivery: { profile: PASEO_TESTNET_FILE_DELIVERY.profile } } : {}),
     ...(flags.model != null ? { model: flagValue(flags.model, "model") } : {}), // pin per-brain model
     bridgePort: portFlag(flags.port ?? 8799),
     bridgeToken: newBridgeToken(),
@@ -420,6 +485,12 @@ async function cmdCreate(name, flags) {
   if (config.username) note(`or search: ${config.username}`);
   console.log();
   note(`Start it:  pca run ${name}`);
+  if (config.fileDelivery) {
+    console.log();
+    printTestnetFileAllowanceGuide(config, seed);
+  } else if (networkProfile === "paseo" && allow.length === 0) {
+    note("Testnet outbound file delivery is disabled for this public bot to protect a finite storage allowance.");
+  }
 }
 
 // Register a bot on the network and wait for confirmation. Idempotent and
@@ -670,6 +741,18 @@ async function cmdInfo(name) {
   const allowShown = (cfg.allow ?? []).map((hex) => cfg.allowLabels?.[hex] ?? shortAllowEntry(hex));
   console.log(`  access:   ${allowShown.length ? `only ${allowShown.join(", ")} can message it` : c("open to anyone", "33")}`);
   console.log(`  status:   ${status}`);
+  const delivery = configuredFileDelivery(cfg);
+  if (delivery) {
+    try {
+      const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
+      const allowance = fileAllowanceAccount(seedFromHex(secret.seedHex));
+      console.log(`  files:    ${delivery.bulletinNetwork} HOP delivery enabled`);
+      console.log(`  allowance: ${allowance.address}`);
+      note(`Authorize that exact derived account at ${delivery.consoleUrl}`);
+    } catch (error) {
+      warn(`Testnet file delivery is configured, but its allowance account could not be derived: ${String(error?.message ?? error)}`);
+    }
+  }
   if (cfg.deploy?.host) console.log(`  deployed: ${cfg.deploy.host} (container ${cfg.deploy.container}) — pca status ${name}`);
   console.log();
   console.log(`  Message this bot in the Polkadot app:`);
@@ -703,6 +786,12 @@ function cmdRun(name, flags = {}) {
     BOT_STATE_DIR: botDir(name),   // persist sessions so a restart keeps open threads
     BOT_AI_WORKSPACE: workspace,
   };
+  // A local operator may deliberately override a test HOP endpoint in their
+  // shell. Deploys always use the persisted profile, but don't erase that
+  // local test override here.
+  for (const [key, value] of Object.entries(fileDeliveryEnvironment(cfg))) {
+    if (!env[key]) env[key] = value;
+  }
   // Model: --model overrides the one saved by create (both land in BOT_AI_MODEL,
   // which each direct brain passes to its CLI's own model flag).
   const model = flags.model != null ? flagValue(flags.model, "model") : cfg.model;
@@ -788,6 +877,9 @@ async function cmdDeploy(name, flags) {
     envLine("BOT_BRIDGE_PORT", bridgePort),
     envLine("BOT_BRIDGE_TOKEN", bridgeToken),
   ];
+  for (const [key, value] of Object.entries(fileDeliveryEnvironment(cfg))) {
+    envLines.push(envLine(key, value));
+  }
   const deployModel = flags.model != null ? flagValue(flags.model, "model") : cfg.model;
   if (deployModel) envLines.push(envLine("BOT_AI_MODEL", deployModel));
   if (DIRECT_BRAIN_CLIS.has(cfg.brain)) {
@@ -924,6 +1016,7 @@ async function deployHarnessStack(name, cfg, secret, flags, host, harness) {
     envLine("BOT_STATE_DIR", "/state"),
     envLine("BOT_BRIDGE_PORT", bridgePort), // keep in sync with bridgeUrl/status
     envLine("BOT_BRIDGE_TOKEN", bridgeToken),
+    ...Object.entries(fileDeliveryEnvironment(cfg)).map(([key, value]) => envLine(key, value)),
     // The harness container reaches the bridge over the compose network, so the
     // bridge must bind beyond loopback here (no ports are published to the host).
     `BOT_BRIDGE_HOST=0.0.0.0`,
@@ -1185,7 +1278,7 @@ create flags:
   --greet          (run/deploy) the bot opens the chat with its owner on first start — proof of life
   --no-register    create the identity locally without registering (finish later with pca register)
   --wait <secs>    how long to wait for on-chain confirmation (default 180)
-  --network <ep>   target network: paseo (default) or a full wss:// endpoint
+  --network <ep>   target People network: paseo (default) or a full wss:// endpoint. Private Paseo bots get the named testnet file-delivery profile.
 
 model controls:  show current policy  ·  set <model> pins the default model  ·  allow <a,b>
   restricts chat-side switching  ·  lock disables it  ·  open permits it only for allowlisted bots

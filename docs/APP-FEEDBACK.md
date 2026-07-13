@@ -77,9 +77,12 @@ typing speed instead of protocol-etiquette speed.
 **Today.** Bot-core now sends files: it performs HOP `hop_submit`, encrypts
 chunks under a fresh ticket, signs with the app-compatible
 `//allowance//bulletin//chat` account, and embeds the reference in rich text.
-The remaining operator gap is storage provisioning. The deployed bot seed can
-derive and use that signer, but cannot create an allowance by itself: the
-People-chain `Resources.claim_long_term_storage` call carries a current
+For a private bot on the named Paseo testnet profile, `pca` now prints that
+derived account and configures the matching HOP endpoints; the Bulletin Console
+Faucet can authorize that account for an integration test. The remaining
+production operator gap is storage provisioning. The deployed bot seed can
+derive and use the signer, but cannot create a production allowance by itself:
+the People-chain `Resources.claim_long_term_storage` call carries a current
 `AsResources(ClaimLongTermStorage)` Bandersnatch person proof derived from the
 original mnemonic, not from the deployable mini-secret.
 

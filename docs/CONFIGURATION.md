@@ -313,6 +313,27 @@ off the VPS. `/health` reports the exact allowance account and whether a HOP
 upload node is configured; a future local-only `pca storage status` should query
 the Bulletin authorization before an operator enables delivery.
 
+### Paseo testnet file delivery
+
+For a private bot created with the named `--network paseo` profile (the default),
+`pca create` persists a matching HOP profile and prints the derived
+allowance account. `pca run` and `pca deploy` emit these settings automatically:
+
+```sh
+BOT_HOP_UPLOAD_NODE=wss://paseo-hop-next-0.polkadot.io
+BOT_HOP_ALLOWED_NODES=paseo-hop-next-0.polkadot.io,paseo-hop-next-1.polkadot.io
+```
+
+Before the bot can send a file, open the [Bulletin Console Faucet](https://paritytech.github.io/polkadot-bulletin-chain/authorizations?tab=faucet), select **Bulletin Paseo Next v2**, then choose **Faucet > Authorize Account**. Paste the SS58 allowance address that `pca create` or `pca info <bot>` displays, choose a small test quota, wait for finalization, and verify the authorization is attached to that exact address. It is not the bot's main chat wallet address.
+
+This uses the testnet Console's account-authorization Faucet. Never enter the
+bot mnemonic or its VPS seed in the Console, and do not treat this as a
+production allocation path. The Faucet's availability and quota are testnet
+operator policy, so handle a rejected request as an operational issue rather
+than assuming an allowance exists. `pca` does not automatically apply this
+profile to public bots or arbitrary `wss://` endpoints: a public sender must
+not be able to spend a finite upload allowance by default.
+
 ### Ingress (poll / subscribe)
 
 | Variable | Default | Purpose |

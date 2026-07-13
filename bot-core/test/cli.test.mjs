@@ -84,3 +84,57 @@ test("pca model persists a safe policy and serializes it for direct deploys", ()
     fs.rmSync(botsDir, { recursive: true, force: true });
   }
 });
+
+test("Paseo private-bot onboarding configures a testnet file-delivery profile", () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
+  try {
+    let result = runCli(botsDir, ["create", "filebot", "--brain", "echo", "--owner", `0x${ACCOUNT}`, "--no-register"]);
+    assert.equal(result.status, 0, result.stderr);
+    const privateBot = readBot(botsDir, "filebot");
+    const privateSecret = JSON.parse(fs.readFileSync(path.join(botsDir, "filebot", "secret.json"), "utf8"));
+    assert.equal(privateBot.networkProfile, "paseo");
+    assert.deepEqual(privateBot.fileDelivery, { profile: "paseo-next-v2" });
+    assert.match(result.stdout, /Testnet file delivery \(optional\):/);
+    assert.match(result.stdout, /Bulletin Paseo Next v2/);
+    assert.match(result.stdout, /Faucet > Authorize Account/);
+    assert.match(result.stdout, /account id: 0x[0-9a-f]{64}/i);
+    assert.ok(!result.stdout.includes(privateSecret.seedHex));
+    assert.ok(!result.stdout.includes(privateSecret.mnemonic));
+
+    result = runCli(botsDir, ["info", "filebot"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /HOP delivery enabled/);
+    assert.match(result.stdout, /allowance: 5/);
+
+    result = runCli(botsDir, ["deploy", "filebot", "--host", "root@example.test", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^BOT_HOP_UPLOAD_NODE=wss:\/\/paseo-hop-next-0\.polkadot\.io$/m);
+    assert.match(result.stdout, /^BOT_HOP_ALLOWED_NODES=paseo-hop-next-0\.polkadot\.io,paseo-hop-next-1\.polkadot\.io$/m);
+
+    result = runCli(botsDir, ["create", "publicbot", "--brain", "echo", "--public", "--no-register"]);
+    assert.equal(result.status, 0, result.stderr);
+    const publicBot = readBot(botsDir, "publicbot");
+    assert.equal(publicBot.networkProfile, "paseo");
+    assert.equal("fileDelivery" in publicBot, false);
+    assert.match(result.stdout, /outbound file delivery is disabled for this public bot/i);
+
+    result = runCli(botsDir, ["deploy", "publicbot", "--host", "root@example.test", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, /BOT_HOP_UPLOAD_NODE=/);
+    assert.doesNotMatch(result.stdout, /BOT_HOP_ALLOWED_NODES=/);
+
+    result = runCli(botsDir, ["create", "openbot", "--brain", "echo", "--no-register"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal("fileDelivery" in readBot(botsDir, "openbot"), false);
+    assert.match(result.stdout, /outbound file delivery is disabled for this public bot/i);
+
+    result = runCli(botsDir, ["create", "custombot", "--brain", "echo", "--owner", `0x${ACCOUNT}`, "--network", "wss://people.example.test", "--no-register"]);
+    assert.equal(result.status, 0, result.stderr);
+    const customBot = readBot(botsDir, "custombot");
+    assert.equal("networkProfile" in customBot, false);
+    assert.equal("fileDelivery" in customBot, false);
+    assert.doesNotMatch(result.stdout, /Testnet file delivery/);
+  } finally {
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
+});

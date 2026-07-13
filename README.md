@@ -50,6 +50,12 @@ link, or search for the username in the Polkadot app, and send a message.
 Registration is usually confirmed within a few minutes; `pca info
 mycoolbot` re-checks.
 
+A private bot created for the default Paseo testnet also prints its derived
+Bulletin file-delivery account and the test Faucet handoff. Authorize that
+account, not the bot's chat wallet, before using `/file get`; `pca info
+mycoolbot` prints it again later. Public bots deliberately do not receive this
+finite-allowance profile.
+
 The number suffix is a network-assigned discriminator, since base names are not
 unique. Pass `--digits NN` to request a specific one; if it is taken, `create`
 says so before registering anything.
