@@ -50,11 +50,18 @@ link, or search for the username in the Polkadot app, and send a message.
 Registration is usually confirmed within a few minutes; `pca info
 mycoolbot` re-checks.
 
-A private bot created for the default Paseo testnet also prints its derived
-Bulletin file-delivery account and the test Faucet handoff. Authorize that
-account, not the bot's chat wallet, before using `/file get`; `pca info
-mycoolbot` prints it again later. Public bots deliberately do not receive this
-finite-allowance profile.
+A private bot created for the default Paseo testnet gets a derived Bulletin
+file-delivery account. The local `pca` CLI automatically provisions its fixed
+testnet allowance during normal onboarding, including refreshing an allowance
+that is close to expiry. Use `pca storage mycoolbot status` for a read-only
+check, and run `pca storage mycoolbot grant` only when capacity actually needs
+provisioning. An interrupted, uncertain, or unverified faucet submission remains
+guarded locally: check `status`, then use `pca storage mycoolbot recover` rather
+than retrying a grant. It authorizes that derived account, not the bot's chat
+wallet.
+Public bots deliberately do not receive this finite-allowance profile. This
+convenience is Paseo-testnet-only; production allocation remains an operator
+authorization flow.
 
 The number suffix is a network-assigned discriminator, since base names are not
 unique. Pass `--digits NN` to request a specific one; if it is taken, `create`
@@ -125,8 +132,9 @@ you send are downloaded into a private per-turn workspace directory and removed
 after the turn, so "here's the spec, implement it" works with a photo or
 document attached. Caption one attachment `/file put <path>` to retain it in a
 private per-chat vault; `/file ls`, `/file info`, `/file rm`, and `/file get`
-manage it. File return needs an operator-pinned HOP node and its separately
-provisioned Bulletin allowance.
+manage it. File return needs an operator-pinned HOP node and an active Bulletin
+allowance. The named private Paseo profile provisions its testnet allowance
+locally; other networks need separate operator provisioning.
 
 **Projects.** `pca project <bot> add <alias> <path>` registers a directory the
 agent can work in (repeat for more). In chat, `/project <alias>` points your

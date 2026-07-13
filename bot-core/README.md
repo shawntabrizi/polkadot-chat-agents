@@ -33,6 +33,11 @@ Highlights:
   git worktree) points the agent at that repo.
 - Long answers arrive as several ordered messages (split at paragraph and
   code-fence boundaries), never as one failed oversized send.
+- Private Paseo bots automatically receive their testnet file allowance from
+  local `pca`, including an expiry refresh when needed; use
+  `pca storage <bot> status` to inspect it, `grant` only when capacity is
+  needed, and `recover` after an interrupted or uncertain faucet submission.
+  Production storage remains a separate operator authorization flow.
 - Conversations survive restarts; state lives in `~/.pca/bots/<name>/`.
 
 Full documentation, architecture notes, and the framework plugins live in the

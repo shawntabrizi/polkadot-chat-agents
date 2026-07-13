@@ -144,13 +144,19 @@ fresh claim ticket, encrypts the chunks and metadata with AES-GCM, signs every
 submission from `//allowance//bulletin//chat`, and wraps the resulting reference
 in an encrypted rich-text message. The upload endpoint is operator-pinned with
 `BOT_HOP_UPLOAD_NODE`; peer-supplied HOP endpoints are never used for uploads.
-That signer needs a Bulletin storage allowance. A deployed `BOT_SEED_HEX` can
-derive and use the signer, but it cannot safely create an allowance: the
-People-chain claim requires the original mnemonic-derived Bandersnatch person
-proof plus the live `AsResources(ClaimLongTermStorage)` extension. Keep that
-proof material off the VPS. A read-only future `pca storage status` should query
-the Bulletin authorization; allocation belongs in a confirmed local operator
-flow, not a chat command or the transport daemon.
+That signer needs a Bulletin storage allowance. The fixed private Paseo testnet
+profile is the narrow exception: local `pca` can call the public `//Eve` test
+faucet for its derived account. `pca storage <bot> status|grant|recover` keeps
+that testnet action local: it preflights capacity and expiry, refreshes a
+near-expiry authorization before a top-up, and leaves a persistent local guard
+after an interrupted or ambiguous faucet submit. Recovery always reads the
+chain before permitting another grant. This is not a transport-daemon action
+and does not solve production provisioning. A deployed `BOT_SEED_HEX` can
+derive and use the signer, but it cannot safely create a production allowance:
+the People-chain claim requires the original mnemonic-derived Bandersnatch
+person proof plus the live `AsResources(ClaimLongTermStorage)` extension. Keep
+that proof material off the VPS; production allocation belongs in a confirmed
+local operator flow, not a chat command or the transport daemon.
 
 ## Identity: being messageable requires personhood
 

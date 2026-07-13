@@ -63,11 +63,32 @@ tool: the bug is almost certainly in device-session polling or ACKs.
 
 ## Paseo testnet outbound file delivery
 
-Create an allowlisted bot on the named Paseo profile, then follow the
-testnet-only allowance handoff printed by `pca create` (or rerun it with
-`pca info <name>`). In the [Bulletin Console Faucet](https://paritytech.github.io/polkadot-bulletin-chain/authorizations?tab=faucet), select **Bulletin Paseo Next v2**, open **Faucet > Authorize Account**, and paste the displayed derived allowance account. Do not authorize the bot's main chat address and do not enter the bot mnemonic or VPS seed. After the authorization finalizes, send a small attachment with the caption `/file put check.txt`, then send `/file get check.txt`. The app should receive the returned attachment and the bot log should contain `BOT_FILE_DELIVERED`.
+Create an allowlisted bot on the named Paseo profile. Normal local onboarding
+provisions its derived testnet allowance automatically, including an expiry
+refresh when needed. Confirm it with:
 
-This validates a real HOP upload. The test Faucet and its quota are not a
+```bash
+pca storage <name> status
+```
+
+If it is missing, expired, or low, grant it locally with
+`pca storage <name> grant`. This is a fixed Paseo-testnet faucet transaction;
+it targets the derived allowance account, not the bot's main chat address. Run
+it from the machine that has `~/.pca/bots/<name>/secret.json`: `pca` derives the
+target locally and never sends that seed or mnemonic to the faucet.
+
+Do not retry an interrupted or uncertain grant. Wait for finalization, run
+`pca storage <name> status`, then run `pca storage <name> recover`. A sufficient
+on-chain allowance clears the persistent local guard without another faucet
+transaction. If it remains insufficient, use `recover --yes` only after
+verifying that the old transaction cannot finalize; it clears the guard only,
+so run `grant` separately if still needed.
+
+Then send a small attachment with the caption `/file put check.txt`, followed by
+`/file get check.txt`. The app should receive the returned attachment and the
+bot log should contain `BOT_FILE_DELIVERED`.
+
+This validates a real HOP upload. The test faucet and its quota are not a
 production provisioning path; production allocation remains an explicit local
 operator flow.
 

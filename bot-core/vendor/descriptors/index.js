@@ -14,16 +14,28 @@ const toBinary = (base64) => {
   return bytes;
 };
 
-const descriptorValues = import('./descriptors-BDyXfai6.js').then((module) => module["PaseoPeopleNext"]);
-const metadataTypes = import('./metadataTypes-CCylAJ0h.js').then(
+const descriptorValues$1 = import('./descriptors-CCYquBSv.js').then((module) => module["PaseoPeopleNext"]);
+const metadataTypes$1 = import('./metadataTypes-BuljkfVT.js').then(
+  (module) => toBinary("default" in module ? module.default : module)
+);
+const asset$1 = {};
+const extensions$1 = {};
+const getMetadata$2 = () => import('./paseoPeopleNext_metadata-DfetSzwV.js').then(
+  (module) => toBinary("default" in module ? module.default : module)
+);
+const genesis$1 = "0xc5af1826b31493f08b7e2a823842f98575b806a784126f28da9608c68665afa5";
+const _allDescriptors$1 = { descriptors: descriptorValues$1, metadataTypes: metadataTypes$1, asset: asset$1, extensions: extensions$1, getMetadata: getMetadata$2, genesis: genesis$1 };
+
+const descriptorValues = import('./descriptors-CCYquBSv.js').then((module) => module["BulletinPaseoNextV2"]);
+const metadataTypes = import('./metadataTypes-BuljkfVT.js').then(
   (module) => toBinary("default" in module ? module.default : module)
 );
 const asset = {};
 const extensions = {};
-const getMetadata$1 = () => import('./paseoPeopleNext_metadata-DfetSzwV.js').then(
+const getMetadata$1 = () => import('./bulletinPaseoNextV2_metadata-BaLIpmxp.js').then(
   (module) => toBinary("default" in module ? module.default : module)
 );
-const genesis = "0xc5af1826b31493f08b7e2a823842f98575b806a784126f28da9608c68665afa5";
+const genesis = "0x8cfe6717dc4becfda2e13c488a1e2061ff2dfee96e7d031157f72d36716c0a22";
 const _allDescriptors = { descriptors: descriptorValues, metadataTypes, asset, extensions, getMetadata: getMetadata$1, genesis };
 
 const DigestItem = _Enum;
@@ -75,8 +87,12 @@ const XcmV4AssetAssetFilter = _Enum;
 const XcmV4AssetWildAsset = _Enum;
 const TransactionValidityUnknownTransaction = _Enum;
 const TransactionValidityTransactionSource = _Enum;
+const XcmVersionedAsset = _Enum;
 
-const metadatas = { ["0x097791dfb5f5285085f7c54145dad4e9c0c270020fc1a7335c224354436b0c01"]: _allDescriptors };
+const metadatas = {
+  ["0x097791dfb5f5285085f7c54145dad4e9c0c270020fc1a7335c224354436b0c01"]: _allDescriptors$1,
+  ["0x4fe167698d8a654b0d832ffa2b22471689331b278d93e1802b4f3d469b807d5a"]: _allDescriptors
+};
 const getMetadata = async (codeHash) => {
   try {
     return await metadatas[codeHash].getMetadata();
@@ -85,4 +101,4 @@ const getMetadata = async (codeHash) => {
   return null;
 };
 
-export { ArithmeticError, BalanceStatus, BalancesAdjustmentDirection, BalancesTypesReasons, DigestItem, DispatchClass, IdentityData, MultiAddress, Phase, TokenError, TransactionPaymentEvent, TransactionPaymentReleases, TransactionValidityTransactionSource, TransactionValidityUnknownTransaction, TransactionalError, UpgradeGoAhead, UpgradeRestriction, XcmPalletVersionMigrationStage, XcmV2JunctionBodyPart, XcmV2MultiassetWildFungibility, XcmV2OriginKind, XcmV3Instruction, XcmV3Junction, XcmV3JunctionBodyId, XcmV3JunctionNetworkId, XcmV3Junctions, XcmV3MaybeErrorCode, XcmV3MultiassetAssetId, XcmV3MultiassetAssetInstance, XcmV3MultiassetFungibility, XcmV3MultiassetMultiAssetFilter, XcmV3MultiassetWildMultiAsset, XcmV3Response, XcmV3TraitsError, XcmV3WeightLimit, XcmV4AssetAssetFilter, XcmV4AssetWildAsset, XcmV4Instruction, XcmV4Response, XcmV5AssetFilter, XcmV5Instruction, XcmV5Junction, XcmV5Junctions, XcmV5NetworkId, XcmV5WildAsset, XcmVersionedAssetId, XcmVersionedAssets, XcmVersionedLocation, XcmVersionedXcm, getMetadata, _allDescriptors as paseoPeopleNext };
+export { ArithmeticError, BalanceStatus, BalancesAdjustmentDirection, BalancesTypesReasons, DigestItem, DispatchClass, IdentityData, MultiAddress, Phase, TokenError, TransactionPaymentEvent, TransactionPaymentReleases, TransactionValidityTransactionSource, TransactionValidityUnknownTransaction, TransactionalError, UpgradeGoAhead, UpgradeRestriction, XcmPalletVersionMigrationStage, XcmV2JunctionBodyPart, XcmV2MultiassetWildFungibility, XcmV2OriginKind, XcmV3Instruction, XcmV3Junction, XcmV3JunctionBodyId, XcmV3JunctionNetworkId, XcmV3Junctions, XcmV3MaybeErrorCode, XcmV3MultiassetAssetId, XcmV3MultiassetAssetInstance, XcmV3MultiassetFungibility, XcmV3MultiassetMultiAssetFilter, XcmV3MultiassetWildMultiAsset, XcmV3Response, XcmV3TraitsError, XcmV3WeightLimit, XcmV4AssetAssetFilter, XcmV4AssetWildAsset, XcmV4Instruction, XcmV4Response, XcmV5AssetFilter, XcmV5Instruction, XcmV5Junction, XcmV5Junctions, XcmV5NetworkId, XcmV5WildAsset, XcmVersionedAsset, XcmVersionedAssetId, XcmVersionedAssets, XcmVersionedLocation, XcmVersionedXcm, _allDescriptors as bulletinPaseoNextV2, getMetadata, _allDescriptors$1 as paseoPeopleNext };

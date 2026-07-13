@@ -112,7 +112,7 @@ BOT_FILE_MAX_ENTRIES=4000
 BOT_FILE_MAX_PEER_ENTRIES=2000
 
 # Required for production attachment download. File delivery additionally needs
-# a provisioned Bulletin allowance for the derived account shown by /health.
+# an active Bulletin allowance for the derived account shown by /health.
 BOT_HOP_ALLOWED_NODES=hop.example.org
 BOT_HOP_UPLOAD_NODE=wss://hop.example.org
 ```
@@ -155,8 +155,8 @@ BOT_MEDIA_MAX_TOTAL_MB=128
 BOT_MEDIA_MAX_CONCURRENT_DOWNLOADS=1
 BOT_MEDIA_DOWNLOAD_QUEUE_CAP=20
 
-# Keep outbound HOP file delivery disabled until its finite allowance has an
-# operator-defined spend policy. Inbound /file put remains quota-bounded.
+# Keep outbound HOP file delivery disabled. The automatic Paseo testnet grant
+# intentionally excludes public bots; inbound /file put remains quota-bounded.
 # BOT_HOP_UPLOAD_NODE=
 ```
 
@@ -285,7 +285,7 @@ variables `pca deploy` writes into `bot.env` automatically.
 | `BOT_HOP_TIMEOUT_MS` | 120000 | Per-download deadline. |
 | `BOT_HOP_RPC_FRAME_MAX_BYTES` | 4.5 MB | Max HOP RPC frame. |
 | `BOT_HOP_ALLOW_INSECURE` | `0` | Tests only: permit `ws://` and IP-literal hosts. |
-| `BOT_HOP_UPLOAD_NODE` | `""` | Operator-pinned HOP endpoint for outbound files. It must satisfy `BOT_HOP_ALLOWED_NODES` in production and needs a separately provisioned Bulletin storage allowance. |
+| `BOT_HOP_UPLOAD_NODE` | `""` | Operator-pinned HOP endpoint for outbound files. It must satisfy `BOT_HOP_ALLOWED_NODES` in production and needs an active Bulletin storage allowance. |
 | `BOT_HOP_UPLOAD_TIMEOUT_MS` | 120000 | Whole-upload deadline. |
 
 ### Durable files
@@ -305,34 +305,67 @@ same peer namespace. The authenticated bridge can manage the same vault with
 | `BOT_FILE_MAX_PEER_ENTRIES` | min(500, global cap) | Entry cap for one chat peer. |
 
 Outbound `/file get` and bridge `file_path` delivery use HOP `hop_submit` with
-the derived `//allowance//bulletin//chat` signer. The deployed `BOT_SEED_HEX`
-can derive and use that account, but cannot safely mint its allowance: the
-People-chain claim requires the original mnemonic-derived Bandersnatch person
-proof and a live `AsResources` transaction extension. Keep that proof material
-off the VPS. `/health` reports the exact allowance account and whether a HOP
-upload node is configured; a future local-only `pca storage status` should query
-the Bulletin authorization before an operator enables delivery.
+the derived `//allowance//bulletin//chat` signer. For production, the deployed
+`BOT_SEED_HEX` can derive and use that account but cannot safely mint its
+allowance: the People-chain claim requires the original mnemonic-derived
+Bandersnatch person proof and a live `AsResources` transaction extension. Keep
+that proof material off the VPS. `/health` reports the exact allowance account
+and whether a HOP upload node is configured. `pca storage <bot> status` queries
+the named Paseo testnet authorization. Normal private Paseo onboarding handles
+that testnet allocation automatically; run `pca storage <bot> grant` only after
+status says capacity is missing, expired, or low. If a prior faucet submission
+was interrupted or uncertain, use `pca storage <bot> recover` after checking
+status instead of retrying a grant. These are testnet-only local CLI commands,
+not production provisioning commands.
 
 ### Paseo testnet file delivery
 
 For a private bot created with the named `--network paseo` profile (the default),
-`pca create` persists a matching HOP profile and prints the derived
-allowance account. `pca run` and `pca deploy` emit these settings automatically:
+`pca create` persists a matching HOP profile and shows the derived allowance
+account. `pca run` and `pca deploy` emit these settings automatically:
 
 ```sh
 BOT_HOP_UPLOAD_NODE=wss://paseo-hop-next-0.polkadot.io
 BOT_HOP_ALLOWED_NODES=paseo-hop-next-0.polkadot.io,paseo-hop-next-1.polkadot.io
 ```
 
-Before the bot can send a file, open the [Bulletin Console Faucet](https://paritytech.github.io/polkadot-bulletin-chain/authorizations?tab=faucet), select **Bulletin Paseo Next v2**, then choose **Faucet > Authorize Account**. Paste the SS58 allowance address that `pca create` or `pca info <bot>` displays, choose a small test quota, wait for finalization, and verify the authorization is attached to that exact address. It is not the bot's main chat wallet address.
+On a successful normal `pca create`, `pca register`, or non-dry-run `pca deploy`,
+the local CLI asks the fixed public **Bulletin Paseo Next v2** testnet faucet to
+provision that derived account. It preflights expiry and remaining capacity: a
+sufficient authorization is left alone, an active authorization approaching
+expiry is refreshed, and missing or low capacity receives a bounded test
+allocation. Check it with `pca storage <bot> status`. `pca storage <bot> grant`
+runs the same preflight when manual provisioning is actually needed. The derived
+SS58 account shown by `pca info <bot>` is the target, not the bot's main chat
+wallet.
 
-This uses the testnet Console's account-authorization Faucet. Never enter the
-bot mnemonic or its VPS seed in the Console, and do not treat this as a
-production allocation path. The Faucet's availability and quota are testnet
-operator policy, so handle a rejected request as an operational issue rather
-than assuming an allowance exists. `pca` does not automatically apply this
-profile to public bots or arbitrary `wss://` endpoints: a public sender must
-not be able to spend a finite upload allowance by default.
+This command is a local CLI action, not a bot-runtime action. It uses the
+testnet's public faucet signer only for the fixed Paseo profile; it does not
+send the bot mnemonic or a production person proof to the faucet. The faucet's
+availability and quota remain testnet operator policy. No Console visit is
+needed for the normal flow.
+
+Each automatic or manual faucet attempt creates a local marker keyed to the
+derived allowance account immediately before a transaction is submitted. A
+confirmed result with a verified follow-up status removes it. A timeout,
+transport failure, interrupted CLI, or failed follow-up status query leaves the
+marker in place permanently, blocking another grant so an allocation with an
+unknown effective state cannot consume a second finite allowance. Resolve that
+state with the following sequence:
+
+1. Wait for any pending transaction to finalize, then run `pca storage <bot> status`.
+2. Run `pca storage <bot> recover`. When the on-chain allowance is sufficient,
+   this read-first command clears the local guard without sending a transaction.
+3. If the allowance is still insufficient, do not grant again until the prior
+   transaction is known not to finalize. `pca storage <bot> recover --yes`
+   clears only the local guard; it does not contact the faucet. Run `grant`
+   separately, and only if the status still requires it.
+
+The [Bulletin Console Faucet](https://paritytech.github.io/polkadot-bulletin-chain/authorizations?tab=faucet)
+is an operational fallback for the fixed testnet profile, not a normal onboarding
+step. After using it, check `status` and run `recover` if a local guard remains.
+`pca` deliberately excludes public bots and arbitrary `wss://` endpoints: a
+public sender must not be able to spend a finite upload allowance by default.
 
 ### Ingress (poll / subscribe)
 

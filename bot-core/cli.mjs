@@ -14,7 +14,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -29,6 +29,12 @@ import { paseoPeopleNext } from "./lib/descriptors.mjs";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
 import { deriveP256PrivateKey, p256PublicKeyFromPrivateKey } from "./vendor/app-chat-codec.mjs";
 import { registerIdentity, waitForAttestation, withTimeout, DEFAULT_BACKENDS } from "./lib/register.mjs";
+import {
+  PaseoAllowanceFinalizationUnknownError,
+  ensurePaseoFileAllowance,
+  getPaseoFileAllowanceStatus,
+  hasSufficientPaseoFileAllowance,
+} from "./lib/testnet-file-allowance.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // Proofs run via the vendored wasm build by default (no Rust toolchain needed);
@@ -144,6 +150,10 @@ const BOT_NAME_RE = /^[a-z][a-z0-9-]{1,30}(?:\.\d{2})?$/;
 const botDir = (name) => path.join(BOTS_DIR, name);
 const configPath = (name) => path.join(botDir(name), "config.json");
 const secretPath = (name) => path.join(botDir(name), "secret.json");
+const allowanceProvisioningLockPath = (address) => path.join(
+  BOTS_DIR,
+  `.paseo-file-allowance-${createHash("sha256").update(address).digest("hex")}.lock`,
+);
 const saveConfig = (name, cfg) => {
   fs.writeFileSync(configPath(name), `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 });
   fs.chmodSync(configPath(name), 0o600);
@@ -155,6 +165,71 @@ const readConfig = (name) => {
   return JSON.parse(fs.readFileSync(configPath(name), "utf8"));
 };
 const listBots = () => (fs.existsSync(BOTS_DIR) ? fs.readdirSync(BOTS_DIR).filter((n) => fs.existsSync(configPath(n))) : []);
+
+function allowanceProvisioningPendingError(name) {
+  const error = new Error(`A prior Paseo file allowance submission for "${name}" is unresolved. Check status and explicitly recover it before another grant.`);
+  error.code = "PASEO_FILE_ALLOWANCE_PROVISIONING_PENDING";
+  return error;
+}
+
+function readAllowanceProvisioningLock(address) {
+  try {
+    return JSON.parse(fs.readFileSync(allowanceProvisioningLockPath(address), "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    // A malformed local marker is fail-closed. It can only be cleared through
+    // the explicit recovery command after the operator checks on-chain state.
+    return { state: "unresolved" };
+  }
+}
+
+function clearAllowanceProvisioningLock(address) {
+  try { fs.unlinkSync(allowanceProvisioningLockPath(address)); }
+  catch (error) { if (error?.code !== "ENOENT") throw error; }
+}
+
+// Coordinate separate local `pca` processes by the allowance account, not the
+// bot name. The marker is deliberately never time-expired: it changes to
+// unresolved immediately before signAndSubmit, so clearing it requires an
+// explicit, read-only recovery after an ambiguous result or interrupted CLI.
+function acquireAllowanceProvisioningLock(name, address) {
+  const lockPath = allowanceProvisioningLockPath(address);
+  const token = randomBytes(18).toString("hex");
+  try {
+    fs.writeFileSync(lockPath, `${JSON.stringify({
+      token,
+      state: "checking",
+      address,
+      pid: process.pid,
+      createdAt: new Date().toISOString(),
+    })}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+  } catch (error) {
+    if (error?.code === "EEXIST") throw allowanceProvisioningPendingError(name);
+    throw error;
+  }
+  return {
+    markUnresolved: (operation) => {
+      const existing = readAllowanceProvisioningLock(address);
+      if (existing?.token !== token) {
+        throw new Error("Paseo allowance provisioning marker changed before submission");
+      }
+      fs.writeFileSync(lockPath, `${JSON.stringify({
+        ...existing,
+        state: "unresolved",
+        operation,
+        submissionStartedAt: new Date().toISOString(),
+      })}\n`, { encoding: "utf8", mode: 0o600 });
+    },
+    release: () => {
+      const existing = readAllowanceProvisioningLock(address);
+      if (existing?.token === token) clearAllowanceProvisioningLock(address);
+    },
+  };
+}
 
 const newBridgeToken = () => randomBytes(32).toString("base64url");
 function ensureBridgeToken(name, cfg) {
@@ -275,18 +350,161 @@ function fileAllowanceAccount(seed) {
   return { hex: bytesToHex(pair.publicKey), address: ss58Address(pair.publicKey, 42) };
 }
 
-function printTestnetFileAllowanceGuide(cfg, seed) {
+function fileAllowanceAccountForBot(name) {
+  if (!fs.existsSync(secretPath(name))) fail(`No secret found for "${name}".`);
+  const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
+  return fileAllowanceAccount(seedFromHex(secret.seedHex));
+}
+
+function formatAllowanceBytes(value) {
+  if (typeof value !== "bigint") return "quota unavailable";
+  const mib = 1024n * 1024n;
+  if (value >= mib) {
+    const whole = value / mib;
+    const tenths = (value % mib) * 10n / mib;
+    return `${whole}.${tenths} MiB`;
+  }
+  if (value >= 1024n) return `${value / 1024n} KiB`;
+  return `${value} B`;
+}
+
+function fileAllowanceStatusText(status) {
+  if (status?.action === "finalization-unknown") {
+    return "faucet finalization is unknown; check status and recover before another grant";
+  }
+  if (status?.action === "provisioning-pending") {
+    return "a prior local allowance submission needs recovery before another grant";
+  }
+  if (status?.statusVerified === false) {
+    return "faucet transaction finalized; storage status verification is pending";
+  }
+  if (!status.present) return "not authorized";
+  if (!status.active) {
+    return status.expiresAt == null ? "authorization status is incomplete" : `expired at block ${status.expiresAt}`;
+  }
+  const expiry = status.expiresAt == null ? "active"
+    : `active through block ${status.expiresAt}${status.remainingBlocks == null ? "" : ` (${status.remainingBlocks} blocks remaining)`}`;
+  if (status.remainingTransactions == null || status.remainingBytes == null) return expiry;
+  return `${expiry}; ${status.remainingTransactions} transactions and ${formatAllowanceBytes(status.remainingBytes)} remain`;
+}
+
+function printFileAllowanceStatus(account, status) {
+  console.log(`  allowance: ${account.address}`);
+  console.log(`  storage:   ${fileAllowanceStatusText(status)}`);
+}
+
+async function provisionTestnetFileAllowance(name, cfg, { optional = true, account = null } = {}) {
+  const profile = configuredFileDelivery(cfg);
+  if (!profile) return null;
+  const allowance = account ?? fileAllowanceAccountForBot(name);
+  let provisioningLock = null;
+  let retainLock = false;
+  try {
+    provisioningLock = acquireAllowanceProvisioningLock(name, allowance.address);
+    step(`Provisioning ${profile.bulletinNetwork} file allowance…`);
+    const result = await ensurePaseoFileAllowance({
+      address: allowance.address,
+      onSubmissionStarting: provisioningLock.markUnresolved,
+    });
+    if (result.statusVerified === false) {
+      retainLock = true;
+      ok("Paseo testnet file allowance transaction finalized.");
+    } else if (!hasSufficientPaseoFileAllowance(result)) {
+      warn("The Paseo faucet transaction finalized, but the resulting allowance is still too low or too close to expiry.");
+    } else if (result.action === "already-authorized") {
+      ok("Paseo testnet file allowance is already ready.");
+    } else if (result.action === "refreshed") {
+      ok("Paseo testnet file allowance expiry was refreshed.");
+    } else {
+      ok("Paseo testnet file allowance is ready.");
+    }
+    note(fileAllowanceStatusText(result));
+    if (result.statusVerified === false) {
+      warn("The faucet transaction finalized, but its follow-up status query could not be completed. Check it with pca storage " + name + " status.");
+      note(`After verifying the result, clear the local guard:  pca storage ${name} recover`);
+      if (!optional) process.exitCode = 1;
+    }
+    return { ...result, account: allowance };
+  } catch (error) {
+    const message = String(error?.message ?? error);
+    if (error instanceof PaseoAllowanceFinalizationUnknownError) {
+      // The marker was written before signAndSubmit. Keep it until an operator
+      // checks current state and explicitly recovers the local guard.
+      try { provisioningLock?.markUnresolved("unknown"); } catch { /* marker is already retained */ }
+      retainLock = true;
+      warn("The public Paseo faucet may have accepted this allowance grant. Do not retry it yet.");
+      note(`Wait for finalization, then check:  pca storage ${name} status`);
+      note(`After verifying the result, clear the local guard:  pca storage ${name} recover`);
+      if (!optional) process.exitCode = 1;
+      return {
+        action: "finalization-unknown",
+        present: null,
+        active: null,
+        expiresAt: null,
+        currentBlock: null,
+        remainingBlocks: null,
+        remainingTransactions: null,
+        remainingBytes: null,
+        statusVerified: false,
+        account: allowance,
+        error: message,
+      };
+    }
+    if (error?.code === "PASEO_FILE_ALLOWANCE_PROVISIONING_PENDING") {
+      warn(message);
+      note(`Check the current state:  pca storage ${name} status`);
+      note(`After verifying it, recover the local guard:  pca storage ${name} recover`);
+      if (!optional) process.exitCode = 1;
+      return {
+        action: "provisioning-pending",
+        present: null,
+        active: null,
+        expiresAt: null,
+        currentBlock: null,
+        remainingBlocks: null,
+        remainingTransactions: null,
+        remainingBytes: null,
+        account: allowance,
+        error: message,
+      };
+    }
+    if (!optional) throw new Error(`Paseo testnet file allowance could not be provisioned: ${message}`);
+    warn(`Couldn't provision the Paseo testnet file allowance: ${message}`);
+    note(`Check it locally:  pca storage ${name} status`);
+    note(`Grant it only if needed:  pca storage ${name} grant`);
+    note(`If the public testnet faucet is unavailable, use ${profile.consoleUrl}.`);
+    return { action: "unavailable", account: allowance, error: message };
+  } finally {
+    if (provisioningLock && !retainLock) provisioningLock.release();
+  }
+}
+
+function printTestnetFileAllowanceGuide(cfg, seed, provisioned = null) {
   const profile = configuredFileDelivery(cfg);
   if (!profile) return;
   const account = fileAllowanceAccount(seed);
-  console.log("Testnet file delivery (optional):");
-  note(`${profile.bulletinNetwork} is configured for this private bot. Before /file get can send a file, authorize this derived account:`);
+  console.log("Testnet file delivery:");
+  note(`${profile.bulletinNetwork} is configured for this private bot.`);
   console.log(`  ${c(account.address, "36")}`);
   note(`account id: ${account.hex}`);
-  note(`1. Open ${profile.consoleUrl}`);
-  note(`2. Select ${profile.bulletinNetwork}, then Faucet > Authorize Account.`);
-  note("3. Paste the address above, choose a small test quota, and wait for confirmation.");
-  note("Do not enter the bot mnemonic or VPS seed. Production uses a separate operator provisioning flow.");
+  if (provisioned?.action === "finalization-unknown") {
+    note(`The faucet submission is awaiting confirmation. Check it:  pca storage ${cfg.name} status`);
+    note(`Then clear the local guard before another grant:  pca storage ${cfg.name} recover`);
+  } else if (provisioned?.action === "provisioning-pending") {
+    note(`A previous local submission needs recovery. Check it:  pca storage ${cfg.name} status`);
+    note(`Then clear the local guard:  pca storage ${cfg.name} recover`);
+  } else if (provisioned?.statusVerified === false) {
+    note(`The faucet transaction needs a verified status check:  pca storage ${cfg.name} status`);
+    note(`Then clear the local guard before another grant:  pca storage ${cfg.name} recover`);
+  } else if (["authorized", "refreshed", "refreshed-and-authorized"].includes(provisioned?.action)) {
+    note("The local PCA CLI provisioned this derived account through the public Paseo testnet faucet.");
+  } else if (provisioned?.action === "already-authorized") {
+    note("This derived account already has usable Paseo testnet storage allowance.");
+  } else {
+    note(`Check it:  pca storage ${cfg.name} status`);
+    note(`Grant it only if needed:  pca storage ${cfg.name} grant`);
+  }
+  note("Only this derived account is authorized. This is a local CLI action, not a bot-runtime action; production uses a separate operator flow.");
 }
 
 function modelPolicyEnvironment(cfg) {
@@ -477,6 +695,13 @@ async function cmdCreate(name, flags) {
     return;
   }
 
+  // This testnet-only grant is deliberately performed by the local CLI, not
+  // by the deployed bot. A temporary faucet outage must not strand a newly
+  // registered chat identity, so the helper leaves an explicit retry command.
+  const provisionedAllowance = config.fileDelivery && register
+    ? await provisionTestnetFileAllowance(name, config, { account: fileAllowanceAccount(seed) })
+    : null;
+
   console.log();
   console.log(allow.length ? `Locked to ${allow.length} allowlisted address${allow.length > 1 ? "es" : ""} — only they can message it.`
                    : "Open — anyone can message it.");
@@ -487,7 +712,7 @@ async function cmdCreate(name, flags) {
   note(`Start it:  pca run ${name}`);
   if (config.fileDelivery) {
     console.log();
-    printTestnetFileAllowanceGuide(config, seed);
+    printTestnetFileAllowanceGuide(config, seed, provisionedAllowance);
   } else if (networkProfile === "paseo" && allow.length === 0) {
     note("Testnet outbound file delivery is disabled for this public bot to protect a finite storage allowance.");
   }
@@ -539,13 +764,18 @@ async function runRegistration(name, config, { mnemonic, wantUsername, digits, w
 async function cmdRegister(name, flags) {
   if (!name) fail("Usage: pca register <botname>");
   const cfg = readConfig(name);
-  if (cfg.registered) { ok(`"${name}" is already registered as ${cfg.username}.`); return; }
+  if (cfg.registered) {
+    ok(`"${name}" is already registered as ${cfg.username}.`);
+    await provisionTestnetFileAllowance(name, cfg);
+    return;
+  }
   if (!fs.existsSync(secretPath(name))) fail(`No secret found for "${name}".`);
   const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
   const wantUsername = String(flags.username ?? cfg.username ?? name);
   const wantDigits = flags.digits ? String(flags.digits) : (/\.(\d{2})$/.exec(wantUsername)?.[1] ?? null);
   const reg = await runRegistration(name, cfg, { mnemonic: secret.mnemonic, wantUsername, digits: wantDigits, wait: flags.wait });
   if (reg === "failed") process.exitCode = 1;
+  else await provisionTestnetFileAllowance(name, cfg);
 }
 
 function cmdDelete(name, flags) {
@@ -748,7 +978,7 @@ async function cmdInfo(name) {
       const allowance = fileAllowanceAccount(seedFromHex(secret.seedHex));
       console.log(`  files:    ${delivery.bulletinNetwork} HOP delivery enabled`);
       console.log(`  allowance: ${allowance.address}`);
-      note(`Authorize that exact derived account at ${delivery.consoleUrl}`);
+      note(`Check it: pca storage ${name} status; grant only when needed: pca storage ${name} grant`);
     } catch (error) {
       warn(`Testnet file delivery is configured, but its allowance account could not be derived: ${String(error?.message ?? error)}`);
     }
@@ -757,6 +987,70 @@ async function cmdInfo(name) {
   console.log();
   console.log(`  Message this bot in the Polkadot app:`);
   printReachLine(cfg.account, cfg.username);
+}
+
+function storageCommandUsage(name = "<botname>") {
+  return `Usage: pca storage ${name} [status | grant | recover] [--yes]`;
+}
+
+// The storage command is intentionally a local operator command. Bot-core's
+// runtime never imports its fixed Paseo faucet helper.
+async function cmdStorage(positional, flags = {}) {
+  const [name, rawAction = "status", ...extra] = positional;
+  if (!name) fail(storageCommandUsage());
+  if (extra.length) fail(storageCommandUsage(name));
+  const cfg = readConfig(name);
+  if (!configuredFileDelivery(cfg)) {
+    fail(`"${name}" has no managed private Paseo testnet file-delivery profile. Automatic allowance provisioning is unavailable.`);
+  }
+  const account = fileAllowanceAccountForBot(name);
+  const action = String(rawAction).toLowerCase();
+  if (action === "status") {
+    step(`Checking ${PASEO_TESTNET_FILE_DELIVERY.bulletinNetwork} file allowance…`);
+    const status = await getPaseoFileAllowanceStatus({ address: account.address });
+    printFileAllowanceStatus(account, status);
+    const recoveryPending = readAllowanceProvisioningLock(account.address) != null;
+    if (recoveryPending) {
+      warn("A previous local faucet submission remains guarded until it is explicitly recovered.");
+      note(`After verifying this status:  pca storage ${name} recover`);
+    }
+    if (!hasSufficientPaseoFileAllowance(status)) {
+      note(recoveryPending
+        ? `Grant or top it up only after recovery, if needed:  pca storage ${name} grant`
+        : `Grant or top it up locally:  pca storage ${name} grant`);
+    }
+    return;
+  }
+  if (action === "grant") {
+    const result = await provisionTestnetFileAllowance(name, cfg, { optional: false, account });
+    printFileAllowanceStatus(account, result);
+    return;
+  }
+  if (action === "recover") {
+    step(`Checking ${PASEO_TESTNET_FILE_DELIVERY.bulletinNetwork} file allowance before recovery…`);
+    const status = await getPaseoFileAllowanceStatus({ address: account.address });
+    printFileAllowanceStatus(account, status);
+    if (!readAllowanceProvisioningLock(account.address)) {
+      note("No unresolved local faucet submission is recorded.");
+      return;
+    }
+    if (hasSufficientPaseoFileAllowance(status)) {
+      clearAllowanceProvisioningLock(account.address);
+      ok("Verified allowance is sufficient; cleared the local recovery guard.");
+      return;
+    }
+    if (flags.yes !== true) {
+      warn("The allowance is still not sufficient, so the original faucet submission cannot be resolved automatically.");
+      note(`After verifying that no old transaction will finalize, clear the guard:  pca storage ${name} recover --yes`);
+      process.exitCode = 1;
+      return;
+    }
+    clearAllowanceProvisioningLock(account.address);
+    warn("Cleared the local recovery guard without submitting a faucet transaction.");
+    note(`After verifying the prior transaction is no longer pending, grant only if needed:  pca storage ${name} grant`);
+    return;
+  }
+  fail(storageCommandUsage(name));
 }
 
 function cmdRun(name, flags = {}) {
@@ -843,6 +1137,7 @@ async function cmdDeploy(name, flags) {
     if (harness !== "openclaw" && harness !== "hermes") {
       fail(`"${name}" is a bridge-mode bot — pick which agent framework drives it:\n  pca deploy ${name} --host ${host} --harness openclaw   (fully headless if the server has Claude creds)\n  pca deploy ${name} --host ${host} --harness hermes     (one interactive codex login after deploy)`);
     }
+    if (flags["dry-run"] !== true) await provisionTestnetFileAllowance(name, cfg);
     return deployHarnessStack(name, cfg, secret, flags, host, harness);
   }
   const spec = DEPLOY_ENGINES[cfg.brain];
@@ -850,6 +1145,7 @@ async function cmdDeploy(name, flags) {
   if (!fs.existsSync(path.join(HERE, "node_modules")) || !fs.existsSync(path.join(HERE, ".papi"))) {
     fail(`bot-core dependencies missing. Run:  (cd ${HERE} && npm ci)  then retry.`);
   }
+  if (flags["dry-run"] !== true) await provisionTestnetFileAllowance(name, cfg);
   if (spec.pkg && Object.keys(KEY_FLAGS).some((key) => process.env[key])) {
     warn("Provider API keys from this shell are intentionally not copied into the container. Use the deployed CLI's OAuth login instead.");
   }
@@ -1265,6 +1561,7 @@ function usage() {
   pca project <name> [add <alias> <path> | rm <alias>]   projects a direct-engine bot can work in
                                        (in chat: /project <alias>[@branch] — branches get isolated git worktrees)
   pca model <name> [show|set|allow|lock|open]            inspect or set a direct bot's model policy
+  pca storage <name> [status|grant|recover]  check, provision, or recover the private Paseo testnet file allowance
   pca info <name>                      show address + how to message it
 
 create flags:
@@ -1278,7 +1575,7 @@ create flags:
   --greet          (run/deploy) the bot opens the chat with its owner on first start — proof of life
   --no-register    create the identity locally without registering (finish later with pca register)
   --wait <secs>    how long to wait for on-chain confirmation (default 180)
-  --network <ep>   target People network: paseo (default) or a full wss:// endpoint. Private Paseo bots get the named testnet file-delivery profile.
+  --network <ep>   target People network: paseo (default) or a full wss:// endpoint. Private Paseo bots get the named testnet file-delivery profile and local automatic allowance provisioning.
 
 model controls:  show current policy  ·  set <model> pins the default model  ·  allow <a,b>
   restricts chat-side switching  ·  lock disables it  ·  open permits it only for allowlisted bots
@@ -1310,7 +1607,7 @@ const COMMAND_FLAGS = {
   status: ["host"],
   stop: ["host"],
   delete: ["yes"],
-  list: [], info: [], help: [], project: [], model: [],
+  list: [], info: [], help: [], project: [], model: [], storage: ["yes"],
 };
 
 const { flags, positional } = parseFlags(process.argv.slice(2));
@@ -1343,6 +1640,7 @@ try {
     case "list": cmdList(); break;
     case "project": cmdProject(positional.slice(1)); break;
     case "model": cmdModel(positional.slice(1)); break;
+    case "storage": await cmdStorage(positional.slice(1), flags); break;
     case "info": await cmdInfo(arg); break;
     case "help": usage(); break;
     default: usage(); if (command != null) process.exit(1);

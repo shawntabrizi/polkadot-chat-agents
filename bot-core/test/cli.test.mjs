@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -94,9 +95,10 @@ test("Paseo private-bot onboarding configures a testnet file-delivery profile", 
     const privateSecret = JSON.parse(fs.readFileSync(path.join(botsDir, "filebot", "secret.json"), "utf8"));
     assert.equal(privateBot.networkProfile, "paseo");
     assert.deepEqual(privateBot.fileDelivery, { profile: "paseo-next-v2" });
-    assert.match(result.stdout, /Testnet file delivery \(optional\):/);
+    assert.match(result.stdout, /Testnet file delivery:/);
     assert.match(result.stdout, /Bulletin Paseo Next v2/);
-    assert.match(result.stdout, /Faucet > Authorize Account/);
+    assert.match(result.stdout, /pca storage filebot grant/);
+    assert.doesNotMatch(result.stdout, /Faucet > Authorize Account/);
     assert.match(result.stdout, /account id: 0x[0-9a-f]{64}/i);
     assert.ok(!result.stdout.includes(privateSecret.seedHex));
     assert.ok(!result.stdout.includes(privateSecret.mnemonic));
@@ -105,6 +107,10 @@ test("Paseo private-bot onboarding configures a testnet file-delivery profile", 
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /HOP delivery enabled/);
     assert.match(result.stdout, /allowance: 5/);
+    assert.match(result.stdout, /pca storage filebot status/);
+    assert.match(result.stdout, /pca storage filebot grant/);
+    const allowanceAddress = /allowance:\s+(\S+)/.exec(result.stdout)?.[1];
+    assert.ok(allowanceAddress, "pca info prints the derived allowance address");
 
     result = runCli(botsDir, ["deploy", "filebot", "--host", "root@example.test", "--dry-run"]);
     assert.equal(result.status, 0, result.stderr);
@@ -122,6 +128,22 @@ test("Paseo private-bot onboarding configures a testnet file-delivery profile", 
     assert.equal(result.status, 0, result.stderr);
     assert.doesNotMatch(result.stdout, /BOT_HOP_UPLOAD_NODE=/);
     assert.doesNotMatch(result.stdout, /BOT_HOP_ALLOWED_NODES=/);
+
+    result = runCli(botsDir, ["storage", "publicbot"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /no managed private Paseo testnet file-delivery profile/);
+
+    const allowanceLock = path.join(
+      botsDir,
+      `.paseo-file-allowance-${createHash("sha256").update(allowanceAddress).digest("hex")}.lock`,
+    );
+    fs.writeFileSync(allowanceLock, `${JSON.stringify({ state: "unresolved" })}\n`);
+    result = runCli(botsDir, ["storage", "filebot", "grant"]);
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stdout, /prior Paseo file allowance submission/);
+    assert.match(result.stdout, /pca storage filebot status/);
+    assert.match(result.stdout, /pca storage filebot recover/);
+    fs.rmSync(allowanceLock);
 
     result = runCli(botsDir, ["create", "openbot", "--brain", "echo", "--no-register"]);
     assert.equal(result.status, 0, result.stderr);

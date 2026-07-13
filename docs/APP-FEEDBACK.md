@@ -72,17 +72,19 @@ typing speed instead of protocol-etiquette speed.
 
 **Status: not planned.**
 
-## 3. Sending files from a bot (Runtime + Spec) — transport works, provisioning is missing
+## 3. Sending files from a bot (Runtime + Spec) — transport works; production provisioning is missing
 
 **Today.** Bot-core now sends files: it performs HOP `hop_submit`, encrypts
 chunks under a fresh ticket, signs with the app-compatible
 `//allowance//bulletin//chat` account, and embeds the reference in rich text.
-For a private bot on the named Paseo testnet profile, `pca` now prints that
-derived account and configures the matching HOP endpoints; the Bulletin Console
-Faucet can authorize that account for an integration test. The remaining
-production operator gap is storage provisioning. The deployed bot seed can
-derive and use the signer, but cannot create a production allowance by itself:
-the People-chain `Resources.claim_long_term_storage` call carries a current
+For an eligible private bot on the named Paseo testnet profile, local `pca`
+configures matching HOP endpoints and invokes the public testnet faucet for
+that derived account automatically. It preflights capacity and expiry, and
+keeps ambiguous submissions locally guarded rather than duplicating a finite
+testnet allocation. The remaining production operator gap is storage
+provisioning. The deployed bot seed can derive and use the signer, but cannot
+create a production allowance by itself: the People-chain
+`Resources.claim_long_term_storage` call carries a current
 `AsResources(ClaimLongTermStorage)` Bandersnatch person proof derived from the
 original mnemonic, not from the deployable mini-secret.
 
