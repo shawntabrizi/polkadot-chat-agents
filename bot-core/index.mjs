@@ -10,7 +10,8 @@
 //                                       (&events=1 adds reactions/coinage/leftChat)
 //   POST /inbound/renew {delivery_id, lease_id} -> extend an active lease
 //   GET  /media/<id>                 -> bytes of a downloaded attachment
-//   POST /send  {chat_id, text, reply_to?, edit_of?} -> publish a reply / quote / edit
+//   GET/PUT/DELETE /files/<chat_id>[/<path>] -> durable peer-scoped files
+//   POST /send  {chat_id, text?, file_path?, reply_to?, edit_of?} -> publish a reply / file / quote / edit
 //   POST /react {chat_id, message_id, emoji, remove?} -> emoji reaction
 //   POST /typing {chat_id}           -> no-op (best effort)
 //
@@ -31,6 +32,11 @@
 //   BOT_HOP_ALLOWED_NODES (comma-sep trusted host suffixes; required for
 //   production attachment downloads), BOT_HOP_RPC_FRAME_MAX_BYTES (4.5MB),
 //   BOT_HOP_ALLOW_INSECURE (tests only: permit ws:// and IP hosts).
+//   Durable files: BOT_FILE_MAX_BYTES (50MB), BOT_FILE_MAX_TOTAL_MB (1024),
+//   BOT_FILE_MAX_ENTRIES (2000), BOT_FILE_MAX_PEER_MB (256), and
+//   BOT_FILE_MAX_PEER_ENTRIES (500). File delivery additionally needs
+//   BOT_HOP_UPLOAD_NODE (operator-pinned HOP URL) and a provisioned Bulletin
+//   allowance for the derived //allowance//bulletin//chat account.
 //   Durable backlog: BOT_MAX_OWED_REPLIES (2000), BOT_MAX_OWED_BYTES (16MB).
 //   Replies: BOT_REPLY_CHUNK_BYTES (4000) — long answers are split into parts
 //   of at most this many UTF-8 bytes (paragraph/code-fence aware).
@@ -66,8 +72,10 @@ import { resolveModelPolicy } from "./lib/commands.mjs";
 import { splitMessageText } from "./lib/chunk.mjs";
 import { createOutboundLanes } from "./lib/outbound-lanes.mjs";
 import { createWorkspaces } from "./lib/workspaces.mjs";
-import { downloadP2PFile } from "./lib/hop-client.mjs";
+import { downloadP2PFile, uploadP2PFile, validateHopUrl } from "./lib/hop-client.mjs";
 import { createMediaStore } from "./lib/media-store.mjs";
+import { createFileStore } from "./lib/file-store.mjs";
+import { createFileCommandHandler } from "./lib/file-commands.mjs";
 import { createLiveReplies, createProgressTracker } from "./lib/live-reply.mjs";
 import { RUNNERS, resolveEngine, ENGINES } from "./lib/runners.mjs";
 import { createKeyedDispatcher } from "./lib/keyed-dispatcher.mjs";
@@ -90,6 +98,7 @@ import {
   decodeSessionStatementPayload,
   encodeNativeChatRequestV2,
   encodeOpaqueTextMessage,
+  encodeOpaqueRichTextMessage,
   encodeOpaqueReactionMessage,
   encodeOpaqueReplyMessage,
   encodeOpaqueEditedMessage,
@@ -320,6 +329,48 @@ const mediaStore = createMediaStore({
 mediaStore.sweep();
 setInterval(() => mediaStore.sweep(), 3_600_000).unref();
 
+// Saved files are a separate explicit capability from the evictable media
+// cache. They are peer-scoped and never carry an inbound claim ticket.
+const fileMaxBytes = numberEnv("BOT_FILE_MAX_BYTES", 50 * 1024 * 1024, { min: 1, max: 512 * 1024 * 1024 });
+const fileMaxTotalMb = numberEnv(
+  "BOT_FILE_MAX_TOTAL_MB",
+  1024,
+  { min: Math.ceil(fileMaxBytes / (1024 * 1024)), max: 32 * 1024 },
+);
+const fileMaxEntries = numberEnv("BOT_FILE_MAX_ENTRIES", 2000, { min: 1, max: 100_000 });
+const fileMaxPeerMb = numberEnv(
+  "BOT_FILE_MAX_PEER_MB",
+  Math.max(Math.ceil(fileMaxBytes / (1024 * 1024)), Math.min(256, fileMaxTotalMb)),
+  { min: Math.ceil(fileMaxBytes / (1024 * 1024)), max: fileMaxTotalMb },
+);
+const fileMaxPeerEntries = numberEnv(
+  "BOT_FILE_MAX_PEER_ENTRIES",
+  Math.min(500, fileMaxEntries),
+  { min: 1, max: fileMaxEntries },
+);
+const fileStore = createFileStore({
+  dir: path.join(env.BOT_STATE_DIR, "files"),
+  maxFileBytes: fileMaxBytes,
+  maxTotalMb: fileMaxTotalMb,
+  maxEntries: fileMaxEntries,
+  maxPeerMb: fileMaxPeerMb,
+  maxPeerEntries: fileMaxPeerEntries,
+  log,
+});
+const hopUploadNode = (env.BOT_HOP_UPLOAD_NODE ?? "").trim();
+const hopUploadTimeoutMs = numberEnv("BOT_HOP_UPLOAD_TIMEOUT_MS", 120_000, { min: 1000, max: 86_400_000 });
+if (hopUploadNode) {
+  try {
+    validateHopUrl(hopUploadNode, {
+      allowInsecure: hopAllowInsecure,
+      allowedNodes: hopAllowedNodes.length ? hopAllowedNodes : null,
+    });
+  } catch (error) {
+    console.error(`BOT_HOP_UPLOAD_NODE is invalid: ${String(error?.message ?? error)}`);
+    process.exit(2);
+  }
+}
+
 const humanSize = (bytes) =>
   bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 const attachmentNoun = (a) => (a.fileKind === "image" ? "photo" : a.fileKind === "video" ? "video" : "file");
@@ -461,11 +512,20 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 const seed = hexToBytes(seedHex);
 const wallet = deriveSr25519PairFromSeed(seed, "//wallet");
 const chatPair = deriveSr25519PairFromSeed(seed, "//wallet//chat");
+const hopUploadPair = deriveSr25519PairFromSeed(seed, "//allowance//bulletin//chat");
 const p256PrivateKey = deriveP256PrivateKey(chatPair);
 const identifierKey = p256PublicKeyFromPrivateKey(p256PrivateKey);
 const accountId = wallet.publicKey;
 const accountIdHex = norm(bytesToHex(accountId));
+const hopUploadAccountIdHex = norm(bytesToHex(hopUploadPair.publicKey));
 const username = env.FAUCET_CHAT_SERVICE_USERNAME ?? env.BOT_USERNAME ?? "";
+if (hopUploadNode) {
+  log("BOT_HOP_UPLOAD_CONFIGURED", {
+    account: `0x${hopUploadAccountIdHex}`,
+    host: new URL(hopUploadNode).hostname,
+    maxBytes: fileMaxBytes,
+  });
+}
 
 // ---------- chain clients ----------
 // Keep handles on BOTH providers so /health can read real socket state: the
@@ -831,6 +891,48 @@ const sendMessage = async (peerHex, opts) => {
 };
 const sendText = (peerHex, text) => sendMessage(peerHex, { text });
 
+// HOP accepts the dedicated Bulletin allowance signer, not the bot's chat
+// wallet. The uploaded ticket is only embedded into the encrypted RichText
+// envelope; it is never logged or written to the durable vault.
+const sendAttachment = async (peerHex, { filePath, mime, size, text = null }) => {
+  const k = norm(peerHex);
+  if (sessions.get(k) == null) throw new Error("no active session for peer");
+  if (!hopUploadNode) {
+    throw new Error("file delivery is not configured; the operator must set BOT_HOP_UPLOAD_NODE and provision the bot's Bulletin allowance");
+  }
+  const stat = fs.lstatSync(filePath);
+  if (!stat.isFile() || stat.size !== size) throw new Error("saved file changed before delivery");
+  const uploaded = await uploadP2PFile({
+    filePath,
+    wssUrl: hopUploadNode,
+    sender: hopUploadPair,
+    maxBytes: fileMaxBytes,
+    deadlineMs: hopUploadTimeoutMs,
+    maxRpcFrameBytes: hopRpcFrameMaxBytes,
+    allowInsecure: hopAllowInsecure,
+    allowedNodes: hopAllowedNodes.length ? hopAllowedNodes : null,
+    log,
+  });
+  const messageId = makeAppUuid();
+  const opaque = encodeOpaqueRichTextMessage({
+    messageId,
+    text,
+    attachments: [{
+      identifier: uploaded.identifier,
+      claimTicket: uploaded.claimTicket,
+      wssUrl: uploaded.wssUrl,
+      mime,
+      size,
+      fileKind: "general",
+    }],
+  });
+  const { submitted, delivered } = outbound.enqueue(k, opaque, { messageId });
+  await submitted;
+  disarmThinking(peerHex);
+  log("BOT_SENT_FILE", { to: peerHex, mime, bytes: size });
+  return { messageId, delivered };
+};
+
 // ---------- live replies (one evolving message per slow turn) ----------
 const liveReplies = createLiveReplies({
   send: ({ peerHex, text, editOf, supersedes }) => submitMessage(peerHex, { text, editOf, supersedes }),
@@ -945,6 +1047,14 @@ const agentRuntime = engine ? createAgentRuntime({
   persist: () => persist(),
 }) : null;
 
+// File commands are transport commands, not model prompts. That makes the
+// same peer-scoped vault work for direct engines and bridge-backed bots.
+const handleFileCommand = createFileCommandHandler({
+  fileStore,
+  sendAttachment,
+  log,
+});
+
 // Bridge-facing attachment shape: no claimTicket (key material stays inside
 // bot-core); the harness fetches bytes via GET /media/:id.
 const publicAttachment = (a) => ({
@@ -978,6 +1088,14 @@ const renderForBrain = (msg) => {
 // msg: { text, messageId, kind, attachments?, replyTo?, editOf? }
 const handleInbound = async (peerHex, msg, owedId = null, { reservedBridge = false } = {}) => {
   await fetchAttachments(msg.attachments);
+  const fileResult = await handleFileCommand(peerHex, msg);
+  if (fileResult?.handled) {
+    if (fileResult.reply) {
+      await sendText(peerHex, fileResult.reply).catch((error) => log("BOT_FILE_REPLY_FAILED", { to: peerHex, error: String(error?.message ?? error) }));
+    }
+    if (reservedBridge) releaseBridgeReservation();
+    return;
+  }
   if (brain === "echo") {
     await sendText(peerHex, `Echo: ${synthesizeText(msg.text, msg.attachments)}`).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
     return;
@@ -1715,6 +1833,7 @@ const pollOnce = async () => {
 // ---------- HTTP bridge ----------
 const BRIDGE_BODY_MAX_BYTES = numberEnv("BOT_BRIDGE_BODY_MAX_BYTES", 1_000_000, { min: 1024, max: 8 * 1024 * 1024 });
 const BRIDGE_TEXT_MAX_BYTES = numberEnv("BOT_BRIDGE_TEXT_MAX_BYTES", 128 * 1024, { min: 1, max: 480 * 1024 });
+const BRIDGE_FILE_MAX_BYTES = numberEnv("BOT_BRIDGE_FILE_MAX_BYTES", fileMaxBytes, { min: 1, max: fileMaxBytes });
 const BRIDGE_MESSAGE_ID_MAX = 128;
 const PEER_ID_RE = /^[0-9a-f]{64}$/i;
 const bridgeAuthorized = (req) => {
@@ -1725,7 +1844,7 @@ const bridgeAuthorized = (req) => {
   const actual = Buffer.from(token);
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 };
-const readJson = (req) => new Promise((resolve, reject) => {
+const readBody = (req, maxBytes) => new Promise((resolve, reject) => {
   const chunks = [];
   let bytes = 0;
   let settled = false;
@@ -1736,7 +1855,7 @@ const readJson = (req) => new Promise((resolve, reject) => {
   };
   req.on("data", (chunk) => {
     bytes += chunk.length;
-    if (bytes > BRIDGE_BODY_MAX_BYTES) {
+    if (bytes > maxBytes) {
       finish(reject, new Error("request body too large"));
       req.destroy();
       return;
@@ -1745,12 +1864,33 @@ const readJson = (req) => new Promise((resolve, reject) => {
   });
   req.on("end", () => {
     if (settled) return;
-    try { finish(resolve, bytes ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {}); }
-    catch (e) { finish(reject, e); }
+    finish(resolve, Buffer.concat(chunks));
   });
   req.on("aborted", () => finish(reject, new Error("request aborted")));
   req.on("error", (error) => finish(reject, error));
 });
+const readJson = async (req) => {
+  const body = await readBody(req, BRIDGE_BODY_MAX_BYTES);
+  return body.length ? JSON.parse(body.toString("utf8")) : {};
+};
+const bridgeFileRoute = (pathname) => {
+  const match = /^\/files\/([0-9a-f]{64})(?:\/(.*))?$/i.exec(pathname);
+  if (!match) return null;
+  let filePath = null;
+  if (match[2] != null) {
+    try { filePath = decodeURIComponent(match[2]); }
+    catch { return { invalid: true }; }
+  }
+  return { peerHex: norm(match[1]), filePath };
+};
+const fileBridgeFailure = (json, error) => {
+  const code = error?.code;
+  const status = code === "FILE_STORE_EXISTS" ? 409
+    : code === "FILE_STORE_FILE_TOO_LARGE" ? 413
+      : code === "FILE_STORE_FULL" || code === "FILE_STORE_ENTRY_LIMIT" || code === "FILE_STORE_PEER_FULL" || code === "FILE_STORE_PEER_ENTRY_LIMIT" ? 507
+        : 400;
+  return json(status, { success: false, error: String(error?.message ?? error) });
+};
 const startBridge = () => {
   const server = http.createServer(async (req, res) => {
     let url;
@@ -1777,6 +1917,15 @@ const startBridge = () => {
           dispatch: statementDispatcher.stats(),
           agent: agentRuntime?.queueStats() ?? null,
           owed: { count: owedReplies.size, bytes: owedReplyBytes, byteCap: MAX_OWED_BYTES },
+          files: {
+            ...fileStore.stats(),
+            delivery: {
+              configured: Boolean(hopUploadNode),
+              allowanceAccount: `0x${hopUploadAccountIdHex}`,
+              allowance: "operator-provisioned",
+              ...(hopUploadNode ? { node: new URL(hopUploadNode).hostname } : {}),
+            },
+          },
           // Capability advertisement for harness adapters (OpenClaw-style
           // supportsEdit gating): edits exist and are throttled server-side.
           live: { supportsEdit: true, minEditMs: liveMinEditMs, placeholderAfterMs: thinkingText ? thinkingAfterMs : null },
@@ -1818,6 +1967,43 @@ const startBridge = () => {
         fs.createReadStream(found.path).pipe(res);
         return;
       }
+      const fileRoute = bridgeFileRoute(url.pathname);
+      if (fileRoute) {
+        if (fileRoute.invalid) return json(400, { success: false, error: "invalid file path" });
+        try {
+          if (req.method === "GET" && fileRoute.filePath == null) {
+            const prefix = url.searchParams.get("prefix") ?? "";
+            const files = fileStore.list(fileRoute.peerHex, prefix).map(({ peer, ...entry }) => entry);
+            return json(200, { success: true, files });
+          }
+          if (req.method === "GET") {
+            if (!fileRoute.filePath) return json(400, { success: false, error: "file path required" });
+            const file = fileStore.get(fileRoute.peerHex, fileRoute.filePath);
+            if (!file) return json(404, { success: false, error: "not found" });
+            res.writeHead(200, { "content-type": file.mime, "content-length": file.size });
+            fs.createReadStream(file.filePath).pipe(res);
+            return;
+          }
+          if (req.method === "PUT") {
+            if (!fileRoute.filePath) return json(400, { success: false, error: "file path required" });
+            const rawMime = Array.isArray(req.headers["content-type"]) ? req.headers["content-type"][0] : req.headers["content-type"];
+            const mime = String(rawMime ?? "application/octet-stream").split(";", 1)[0].trim();
+            const bytes = await readBody(req, BRIDGE_FILE_MAX_BYTES);
+            const saved = fileStore.putBytes(fileRoute.peerHex, fileRoute.filePath, bytes, {
+              mime,
+              overwrite: url.searchParams.get("overwrite") === "1",
+            });
+            return json(201, { success: true, path: saved.path, mime: saved.mime, size: saved.size });
+          }
+          if (req.method === "DELETE") {
+            if (!fileRoute.filePath) return json(400, { success: false, error: "file path required" });
+            if (!fileStore.remove(fileRoute.peerHex, fileRoute.filePath)) return json(404, { success: false, error: "not found" });
+            return json(200, { success: true });
+          }
+        } catch (error) {
+          return fileBridgeFailure(json, error);
+        }
+      }
       if (req.method === "POST" && url.pathname === "/inbound/ack") {
         const body = await readJson(req);
         const claims = body.deliveries
@@ -1839,13 +2025,34 @@ const startBridge = () => {
         return json(200, { success: true, renewed: result.renewed, lease_ms: BRIDGE_LEASE_MS });
       }
       if (req.method === "POST" && url.pathname === "/send") {
-        const { chat_id: chatId, text, reply_to: replyTo, edit_of: editOf } = await readJson(req);
-        if (!chatId || !text) return json(400, { success: false, error: "chat_id and text required" });
+        const { chat_id: chatId, text, file_path: filePath, reply_to: replyTo, edit_of: editOf } = await readJson(req);
+        const hasText = typeof text === "string" && text.length > 0;
+        if (!chatId || (!hasText && !filePath)) return json(400, { success: false, error: "chat_id and text or file_path required" });
         if (!PEER_ID_RE.test(String(chatId))) return json(400, { success: false, error: "invalid chat_id" });
-        if (Buffer.byteLength(String(text)) > BRIDGE_TEXT_MAX_BYTES) return json(413, { success: false, error: "text too large" });
+        if (hasText && Buffer.byteLength(text) > BRIDGE_TEXT_MAX_BYTES) return json(413, { success: false, error: "text too large" });
         if (replyTo && editOf) return json(400, { success: false, error: "reply_to and edit_of are mutually exclusive" });
         if ((replyTo && String(replyTo).length > BRIDGE_MESSAGE_ID_MAX) || (editOf && String(editOf).length > BRIDGE_MESSAGE_ID_MAX)) {
           return json(400, { success: false, error: "message id too long" });
+        }
+        if (filePath) {
+          if (typeof filePath !== "string") return json(400, { success: false, error: "file_path must be a string" });
+          if (replyTo || editOf) return json(400, { success: false, error: "file replies and edits are not supported" });
+          let file;
+          try { file = fileStore.get(chatId, filePath); }
+          catch (error) { return fileBridgeFailure(json, error); }
+          if (!file) return json(404, { success: false, error: "file not found" });
+          try {
+            const sent = await sendAttachment(chatId, {
+              filePath: file.filePath,
+              mime: file.mime,
+              size: file.size,
+              text: hasText ? text : file.path,
+            });
+            return json(200, { success: true, message_id: sent.messageId });
+          } catch (error) {
+            log("BOT_BRIDGE_FILE_SEND_FAILED", { to: chatId, path: file.path, error: String(error?.message ?? error) });
+            return json(502, { success: false, error: "file delivery failed" });
+          }
         }
         // Harness-driven edits go through the live outbox: throttled,
         // latest-wins, so a streaming harness (Hermes edits every 0.8s) can't
@@ -1857,13 +2064,13 @@ const startBridge = () => {
           const lpe = await takeLivePlaceholder(chatId);
           if (lpe) lpe.handle.finalize("✓").catch((e) => log("BOT_LIVE_FINALIZE_FAILED", { to: chatId, error: String(e?.message ?? e) }));
           disarmThinking(chatId);
-          liveReplies.throttledEdit(norm(chatId), String(editOf), String(text));
+          liveReplies.throttledEdit(norm(chatId), String(editOf), text);
           return json(200, { success: true, message_id: String(editOf), coalesced: true });
         }
         // Long harness answers are chunked like direct-engine ones; the
         // outbound lane keeps the parts ordered on the wire.
-        const parts = splitMessageText(String(text), replyChunkBytes);
-        if (parts.length > 1) log("BOT_REPLY_CHUNKED", { to: chatId, parts: parts.length, chars: String(text).length });
+        const parts = splitMessageText(text, replyChunkBytes);
+        if (parts.length > 1) log("BOT_REPLY_CHUNKED", { to: chatId, parts: parts.length, chars: text.length });
         let firstId = null;
         const lp = await takeLivePlaceholder(chatId);
         if (lp && !replyTo) {

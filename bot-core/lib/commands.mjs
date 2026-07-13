@@ -80,6 +80,7 @@ export function createCommandHandler({
           modelHelp,
           ...(effortLevels ? ["/reasoning — dial my thinking depth (/reasoning <level>, /reasoning default)"] : []),
           ...(hasProjects() ? ["/project — pick the project I work in (/project <name>[@branch], /project default)"] : []),
+          "/file — save, retrieve, list, or remove durable files",
           "/usage — tokens and cost spent on this chat since my last restart",
           "/ping — check the bot is alive",
         ].join("\n");

@@ -442,6 +442,126 @@ describe("transport e2e", { concurrency: 8 }, () => {
     }
   });
 
+  test("/file put saves a same-message attachment in the durable peer vault", async () => {
+    const node = await startMockStatementNode();
+    const hop = await startMockHopNode();
+    const stateDir = tmpState();
+    const bytes = new Uint8Array(Buffer.from("durable client attachment\n"));
+    const attachment = hop.putFile(bytes);
+    const bot = await startBot({
+      endpoint: node.url,
+      stateDir,
+      extraEnv: { BOT_SUBSCRIBE: "0", BOT_HOP_ALLOW_INSECURE: "1" },
+    });
+    try {
+      const result = await runClient(node.url, [
+        "--attach", attachSpecOf(attachment, bytes, "text/plain"),
+        "--attach-caption", "/file put incoming/spec.txt",
+        "--wait-secs", "14",
+      ], ["file vault opener"]);
+      assert.equal(result.code, 0, `client failed:\n${result.out}`);
+      assert.match(result.out, /Saved incoming\/spec\.txt/, `file command did not reply:\n${result.out}`);
+      assert.doesNotMatch(result.out, /Echo: \/file put/, "file commands must not be passed to the brain");
+
+      const saved = await bot.waitFor(
+        (event) => event.event === "BOT_FILE_SAVED" && event.path === "incoming/spec.txt",
+        { label: "BOT_FILE_SAVED" },
+      );
+      assert.equal(saved.peer, CLIENT_ACCOUNT);
+      assert.equal(saved.bytes, bytes.length);
+      const vaultPath = path.join(stateDir, "files", "peers", CLIENT_ACCOUNT, "incoming", "spec.txt");
+      assert.equal(Buffer.compare(fs.readFileSync(vaultPath), bytes), 0, "durable vault bytes differ from the attachment");
+    } finally {
+      await bot.stop();
+      await node.close();
+      await hop.close();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  test("bridge /files uploads, lists, retrieves, and sends a vault file", async () => {
+    const node = await startMockStatementNode();
+    const hop = await startMockHopNode();
+    const stateDir = tmpState();
+    const bot = await startBot({
+      endpoint: node.url,
+      stateDir,
+      extraEnv: {
+        BOT_SUBSCRIBE: "0",
+        BOT_HOP_ALLOW_INSECURE: "1",
+        BOT_HOP_UPLOAD_NODE: hop.url,
+      },
+    });
+    const base = `http://127.0.0.1:${bot.bridgePort}`;
+    const authHeaders = { authorization: `Bearer ${bot.bridgeToken}` };
+    const vaultPath = "exports/bridge-note.txt";
+    const payload = Buffer.from("bridge durable payload\n");
+    try {
+      // Establish the encrypted device session before bridge-driven file delivery.
+      const opener = await runClient(node.url, ["--wait-secs", "12"], ["bridge file opener", "bridge file warmup"]);
+      assert.equal(opener.code, 0, `client failed:\n${opener.out}`);
+
+      const putResponse = await fetch(`${base}/files/${CLIENT_ACCOUNT}/${vaultPath}`, {
+        method: "PUT",
+        headers: { ...authHeaders, "content-type": "text/plain; charset=utf-8" },
+        body: payload,
+      });
+      assert.equal(putResponse.status, 201);
+      const put = await putResponse.json();
+      assert.deepEqual(put, {
+        success: true,
+        path: vaultPath,
+        mime: "text/plain",
+        size: payload.length,
+      });
+
+      const listResponse = await fetch(`${base}/files/${CLIENT_ACCOUNT}?prefix=exports`, { headers: authHeaders });
+      assert.equal(listResponse.status, 200);
+      const listed = await listResponse.json();
+      assert.equal(listed.success, true);
+      assert.equal(listed.files.length, 1);
+      assert.equal(listed.files[0].path, vaultPath);
+      assert.equal(listed.files[0].mime, "text/plain");
+      assert.equal(listed.files[0].size, payload.length);
+      assert.equal(Object.hasOwn(listed.files[0], "peer"), false, "bridge listing must not expose a peer namespace field");
+
+      const getResponse = await fetch(`${base}/files/${CLIENT_ACCOUNT}/${vaultPath}`, { headers: authHeaders });
+      assert.equal(getResponse.status, 200);
+      assert.match(getResponse.headers.get("content-type") ?? "", /^text\/plain/);
+      const fetched = Buffer.from(await getResponse.arrayBuffer());
+      assert.equal(Buffer.compare(fetched, payload), 0, "bridge GET returned different durable-file bytes");
+
+      const sendResponse = await fetch(`${base}/send`, {
+        method: "POST",
+        headers: { ...authHeaders, "content-type": "application/json" },
+        body: JSON.stringify({
+          chat_id: CLIENT_ACCOUNT,
+          text: "Bridge file delivery",
+          file_path: vaultPath,
+        }),
+      });
+      assert.equal(sendResponse.status, 200);
+      const sent = await sendResponse.json();
+      assert.equal(sent.success, true, JSON.stringify(sent));
+      assert.match(sent.message_id, /^[0-9A-F-]{36}$/);
+      await bot.waitFor((event) => event.event === "BOT_SENT_FILE", { label: "BOT_SENT_FILE" });
+      assert.equal(hop.submissions.length, 2, "small file upload should submit one encrypted chunk and metadata");
+      const expectedSigner = `0x${bytesToHex(deriveSr25519PairFromSeed(hexToBytes(BOT_SEED), "//allowance//bulletin//chat").publicKey)}`;
+      assert.ok(hop.submissions.every((submission) => submission.signer === expectedSigner), "outbound HOP upload used the wrong signer");
+
+      // The deterministic device client sees the rich-text caption and ACKs it;
+      // its own follow-up makes the run wait long enough to observe the file.
+      const recipient = await runClient(node.url, ["--no-opener", "1", "--wait-secs", "14"], ["bridge file follow-up"]);
+      assert.equal(recipient.code, 0, `recipient failed:\n${recipient.out}`);
+      assert.match(recipient.out, /Bridge file delivery/, `outbound file caption was not delivered:\n${recipient.out}`);
+    } finally {
+      await bot.stop();
+      await node.close();
+      await hop.close();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
   test("bridge leases renew long work and reject stale acknowledgements", async () => {
     const node = await startMockStatementNode();
     const stateDir = tmpState();

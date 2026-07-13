@@ -77,6 +77,8 @@ export const createFileStore = ({
   maxFileBytes = 50 * 1024 * 1024,
   maxTotalMb = 1024,
   maxEntries = 2000,
+  maxPeerMb = Math.max(maxFileBytes / (1024 * 1024), Math.min(256, maxTotalMb)),
+  maxPeerEntries = Math.min(500, maxEntries),
   log = () => {},
 } = {}) => {
   if (typeof dir !== "string" || !dir) throw new Error("file store directory is required");
@@ -86,6 +88,13 @@ export const createFileStore = ({
     throw new Error("invalid file store total capacity");
   }
   if (!Number.isSafeInteger(maxEntries) || maxEntries < 1) throw new Error("invalid file store entry capacity");
+  const maxPeerBytes = Math.floor(Number(maxPeerMb) * 1024 * 1024);
+  if (!Number.isSafeInteger(maxPeerBytes) || maxPeerBytes < maxFileBytes || maxPeerBytes > maxTotalBytes) {
+    throw new Error("invalid file store peer capacity");
+  }
+  if (!Number.isSafeInteger(maxPeerEntries) || maxPeerEntries < 1 || maxPeerEntries > maxEntries) {
+    throw new Error("invalid file store peer entry capacity");
+  }
 
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   fs.chmodSync(dir, 0o700);
@@ -98,7 +107,37 @@ export const createFileStore = ({
   const manifestPath = path.join(dir, "manifest.json");
   const entries = new Map();
   let totalBytes = 0;
+  const peerBytes = new Map();
+  const peerEntries = new Map();
   let tempSequence = 0;
+
+  const usageFor = (peer) => ({
+    bytes: peerBytes.get(peer) ?? 0,
+    entries: peerEntries.get(peer) ?? 0,
+  });
+  const adjustUsage = (peer, bytes, entriesCount) => {
+    const current = usageFor(peer);
+    const nextBytes = current.bytes + bytes;
+    const nextEntries = current.entries + entriesCount;
+    if (nextBytes < 0 || nextEntries < 0) throw new Error("file store usage accounting underflow");
+    if (nextBytes === 0) peerBytes.delete(peer);
+    else peerBytes.set(peer, nextBytes);
+    if (nextEntries === 0) peerEntries.delete(peer);
+    else peerEntries.set(peer, nextEntries);
+  };
+  const setEntry = (key, next) => {
+    const previous = entries.get(key);
+    if (previous) {
+      entries.delete(key);
+      totalBytes -= previous.size;
+      adjustUsage(previous.peer, -previous.size, -1);
+    }
+    if (next) {
+      entries.set(key, next);
+      totalBytes += next.size;
+      adjustUsage(next.peer, next.size, 1);
+    }
+  };
 
   const loadManifest = () => {
     if (!fs.existsSync(manifestPath)) return;
@@ -122,12 +161,15 @@ export const createFileStore = ({
           throw new Error("invalid entry fields");
         }
         const key = makeEntryKey(peer, vaultPath);
-        if (entries.has(key) || totalBytes + size > maxTotalBytes) throw new Error("duplicate or oversized entry");
+        const peerUsage = usageFor(peer);
+        if (entries.has(key) || totalBytes + size > maxTotalBytes
+          || peerUsage.bytes + size > maxPeerBytes || peerUsage.entries >= maxPeerEntries) {
+          throw new Error("duplicate or oversized entry");
+        }
         const physicalPath = resolvePhysicalPath(peer, vaultPath, { createParents: false });
         const stat = assertRegularFile(physicalPath, "stored file");
         if (stat.size !== size) throw new Error("stored file size changed");
-        entries.set(key, { peer, path: vaultPath, mime, size, createdAt, updatedAt });
-        totalBytes += size;
+        setEntry(key, { peer, path: vaultPath, mime, size, createdAt, updatedAt });
       } catch (error) {
         throw new Error(`file store manifest contains an invalid entry: ${String(error?.message ?? error)}`);
       }
@@ -192,18 +234,24 @@ export const createFileStore = ({
     return filePath;
   };
 
-  const admit = (existing, size, overwrite) => {
+  const admit = (existing, peer, size, overwrite) => {
     if (existing && !overwrite) throw fileStoreError("a saved file already exists at that path", "FILE_STORE_EXISTS");
     if (size > maxFileBytes) throw fileStoreError("file exceeds BOT_FILE_MAX_BYTES", "FILE_STORE_FILE_TOO_LARGE");
     if (!existing && entries.size >= maxEntries) throw fileStoreError("file vault has reached its entry limit", "FILE_STORE_ENTRY_LIMIT");
     const available = maxTotalBytes - totalBytes + (existing?.size ?? 0);
     if (size > available) throw fileStoreError("file vault is full", "FILE_STORE_FULL");
+    const peerUsage = usageFor(peer);
+    if (!existing && peerUsage.entries >= maxPeerEntries) {
+      throw fileStoreError("file namespace has reached its entry limit", "FILE_STORE_PEER_ENTRY_LIMIT");
+    }
+    const peerAvailable = maxPeerBytes - peerUsage.bytes + (existing?.size ?? 0);
+    if (size > peerAvailable) throw fileStoreError("file namespace is full", "FILE_STORE_PEER_FULL");
   };
 
   const replace = ({ peer, vaultPath, size, mime, overwrite, writeTemporary }) => {
     const key = makeEntryKey(peer, vaultPath);
     const existing = entryFor(peer, vaultPath);
-    admit(existing, size, overwrite);
+    admit(existing, peer, size, overwrite);
     const destination = resolvePhysicalPath(peer, vaultPath, { createParents: true });
     const parent = path.dirname(destination);
     const temporary = path.join(parent, `.${path.basename(destination)}.${process.pid}.${tempSequence += 1}.tmp`);
@@ -231,14 +279,11 @@ export const createFileStore = ({
         createdAt: existing?.createdAt ?? now,
         updatedAt: now,
       };
-      entries.set(key, next);
-      totalBytes += size - (existing?.size ?? 0);
+      setEntry(key, next);
       try {
         writeManifest();
       } catch (error) {
-        entries.delete(key);
-        if (existing) entries.set(key, existing);
-        totalBytes -= size - (existing?.size ?? 0);
+        setEntry(key, existing);
         try { fs.rmSync(destination, { force: true }); } catch { /* best effort */ }
         if (movedExisting) {
           try { fs.renameSync(backup, destination); } catch { /* best effort */ }
@@ -314,13 +359,11 @@ export const createFileStore = ({
     const destination = assertEntryFile(existing);
     const backup = `${destination}.${process.pid}.${tempSequence += 1}.delete`;
     fs.renameSync(destination, backup);
-    entries.delete(key);
-    totalBytes -= existing.size;
+    setEntry(key, null);
     try {
       writeManifest();
     } catch (error) {
-      entries.set(key, existing);
-      totalBytes += existing.size;
+      setEntry(key, existing);
       try { fs.renameSync(backup, destination); } catch { /* best effort */ }
       throw error;
     }
@@ -339,6 +382,14 @@ export const createFileStore = ({
     get,
     list,
     remove,
-    stats: () => ({ entries: entries.size, bytes: totalBytes, maxEntries, maxBytes: maxTotalBytes, maxFileBytes }),
+    stats: () => ({
+      entries: entries.size,
+      bytes: totalBytes,
+      maxEntries,
+      maxBytes: maxTotalBytes,
+      maxFileBytes,
+      maxPeerEntries,
+      maxPeerBytes,
+    }),
   };
 };

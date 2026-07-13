@@ -19,7 +19,15 @@ test("stores a peer-scoped file durably with MIME metadata", () => {
   assert.equal(saved.path, "notes/plan.txt");
   assert.equal(saved.mime, "text/plain");
   assert.equal(fs.readFileSync(saved.filePath, "utf8"), "hello");
-  assert.deepEqual(store.stats(), { entries: 1, bytes: 5, maxEntries: 10, maxBytes: 2 * 1024 * 1024, maxFileBytes: 1024 * 1024 });
+  assert.deepEqual(store.stats(), {
+    entries: 1,
+    bytes: 5,
+    maxEntries: 10,
+    maxBytes: 2 * 1024 * 1024,
+    maxFileBytes: 1024 * 1024,
+    maxPeerEntries: 10,
+    maxPeerBytes: 2 * 1024 * 1024,
+  });
 
   const reopened = createFileStore({ dir: store.dir, maxFileBytes: 1024 * 1024, maxTotalMb: 2, maxEntries: 10 });
   const found = reopened.get(PEER_A, "notes/plan.txt");
@@ -47,6 +55,42 @@ test("requires an explicit overwrite and enforces durable capacity", () => {
   store.putBytes(PEER_A, "one.txt", Buffer.from("12"), { mime: "text/plain", overwrite: true });
   assert.throws(() => store.putBytes(PEER_A, "two.txt", Buffer.from("x"), { mime: "text/plain" }), /entry limit/);
   assert.throws(() => store.putBytes(PEER_A, "large.txt", Buffer.alloc(11), { mime: "text/plain" }), /MAX_BYTES/);
+});
+
+test("enforces byte and entry capacity independently for each peer", () => {
+  const store = makeStore({
+    maxFileBytes: 10,
+    maxTotalMb: 1,
+    maxEntries: 10,
+    maxPeerMb: 0.00001,
+    maxPeerEntries: 1,
+  });
+  store.putBytes(PEER_A, "one.txt", Buffer.from("123456"), { mime: "text/plain" });
+  assert.throws(
+    () => store.putBytes(PEER_A, "two.txt", Buffer.from("x"), { mime: "text/plain" }),
+    (error) => error?.code === "FILE_STORE_PEER_ENTRY_LIMIT",
+  );
+  store.putBytes(PEER_B, "one.txt", Buffer.from("123456"), { mime: "text/plain" });
+
+  const byteBounded = makeStore({
+    maxFileBytes: 10,
+    maxTotalMb: 1,
+    maxEntries: 10,
+    maxPeerMb: 0.00001,
+    maxPeerEntries: 10,
+  });
+  byteBounded.putBytes(PEER_A, "one.txt", Buffer.from("123456"), { mime: "text/plain" });
+  assert.throws(
+    () => byteBounded.putBytes(PEER_A, "two.txt", Buffer.from("12345"), { mime: "text/plain" }),
+    (error) => error?.code === "FILE_STORE_PEER_FULL",
+  );
+  byteBounded.putBytes(PEER_B, "one.txt", Buffer.from("12345"), { mime: "text/plain" });
+});
+
+test("default peer capacity always admits the configured largest file", () => {
+  const largestFile = 300 * 1024 * 1024;
+  const store = makeStore({ maxFileBytes: largestFile, maxTotalMb: 512, maxEntries: 10 });
+  assert.equal(store.stats().maxPeerBytes, largestFile);
 });
 
 test("rejects path escapes and never follows an injected namespace symlink", () => {

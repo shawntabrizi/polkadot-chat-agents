@@ -48,7 +48,7 @@ test("unknown but command-shaped input redirects to /help, never the model", () 
 test("/help lists every command", () => {
   const { handler } = make();
   const help = handler("peer", "/help");
-  for (const cmd of ["/reset", "/stop", "/model", "/ping"]) assert.ok(help.includes(cmd), `missing ${cmd}`);
+  for (const cmd of ["/reset", "/stop", "/model", "/file", "/ping"]) assert.ok(help.includes(cmd), `missing ${cmd}`);
 });
 
 test("/reset clears only that peer's session token", () => {
