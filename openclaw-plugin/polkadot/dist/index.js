@@ -20,6 +20,9 @@ function resolvePolkadotAccount({ cfg, accountId }) {
   const acct = root.accounts?.[id] ?? {};
   const bridgeUrl = acct.bridgeUrl ?? root.bridgeUrl ?? process.env.POLKADOT_BRIDGE_URL ?? "http://127.0.0.1:8799";
   const bridgeToken = String(acct.bridgeToken ?? root.bridgeToken ?? process.env.POLKADOT_BRIDGE_TOKEN ?? "").trim();
+  const bridgeProactiveToken = String(
+    acct.bridgeProactiveToken ?? root.bridgeProactiveToken ?? process.env.POLKADOT_BRIDGE_PROACTIVE_TOKEN ?? ""
+  ).trim();
   const outboundFileMaxBytes = positiveBytes(
     acct.outboundFileMaxBytes ?? root.outboundFileMaxBytes ?? process.env.POLKADOT_OUTBOUND_FILE_MAX_BYTES,
     DEFAULT_OUTBOUND_FILE_MAX_BYTES
@@ -34,6 +37,7 @@ function resolvePolkadotAccount({ cfg, accountId }) {
     configured: Boolean(bridgeUrl && bridgeToken),
     bridgeUrl,
     bridgeToken,
+    bridgeProactiveToken,
     outboundFileMaxBytes,
     dmPolicy,
     allowFrom
@@ -69,10 +73,16 @@ var requireSuccess = async (response, operation) => {
   }
   return data;
 };
-function createBridge(baseUrl, token) {
+function createBridge(baseUrl, token, proactiveToken = "") {
   const base = baseUrl.replace(/\/+$/, "");
   if (!token?.trim()) throw new Error("polkadot bridge token is required");
   const headers = { authorization: `Bearer ${token}` };
+  const proactive = proactiveToken.trim();
+  const proactiveHeaders = (requested) => {
+    if (!requested) return {};
+    if (!proactive) throw new Error("polkadot proactive bridge token is not configured");
+    return { "x-bridge-proactive-token": proactive };
+  };
   const fileUrl = (chatId, filePath) => {
     if (!chatId) throw new Error("cannot access a file vault with an empty chat id");
     if (!filePath) throw new Error("cannot access an empty file path");
@@ -119,11 +129,13 @@ function createBridge(baseUrl, token) {
         text,
         ...typeof options.filePath === "string" ? { file_path: options.filePath } : {},
         ...typeof options.replyTo === "string" ? { reply_to: options.replyTo } : {},
-        ...typeof options.threadRootId === "string" ? { thread_root_id: options.threadRootId } : {}
+        ...typeof options.threadRootId === "string" ? { thread_root_id: options.threadRootId } : {},
+        ...typeof options.deliveryId === "string" ? { delivery_id: options.deliveryId } : {},
+        ...typeof options.leaseId === "string" ? { lease_id: options.leaseId } : {}
       };
       const res = await fetch(`${base}/send`, {
         method: "POST",
-        headers: { ...headers, "content-type": "application/json" },
+        headers: { ...headers, ...proactiveHeaders(options.proactive === true), "content-type": "application/json" },
         body: JSON.stringify(body)
       });
       const data = await responseJson(res);
@@ -150,13 +162,21 @@ function createBridge(baseUrl, token) {
       const res = await fetch(fileUrl(chatId, filePath), { method: "DELETE", headers });
       await requireSuccess(res, "file removal");
     },
-    react: async (chatId, messageId, emoji, remove = false) => {
+    react: async (chatId, messageId, emoji, remove = false, options = {}) => {
       const res = await fetch(`${base}/react`, {
         method: "POST",
-        headers: { ...headers, "content-type": "application/json" },
+        headers: { ...headers, ...proactiveHeaders(options.proactive === true), "content-type": "application/json" },
         body: JSON.stringify({ chat_id: chatId, message_id: messageId, emoji, remove })
       });
       await requireSuccess(res, "reaction");
+    },
+    typing: async (chatId, options = {}) => {
+      const res = await fetch(`${base}/typing`, {
+        method: "POST",
+        headers: { ...headers, ...proactiveHeaders(options.proactive === true), "content-type": "application/json" },
+        body: JSON.stringify({ chat_id: chatId })
+      });
+      await requireSuccess(res, "typing");
     },
     fetchMedia: async (relativePath, signal) => {
       if (!relativePath.startsWith("/media/")) throw new Error("invalid bridge media path");
@@ -273,7 +293,7 @@ var extensionForMime = (mime) => {
   const suffix = mime.split("/", 2)[1]?.replace(/[^a-zA-Z0-9]/g, "").slice(0, 16);
   return suffix || "bin";
 };
-var attachmentKind = (value) => value === "image" || value === "document" || value === "video" || value === "general" ? value : "file";
+var attachmentKind = (value) => value === "image" || value === "document" || value === "video" || value === "audio" || value === "general" ? value : "file";
 var validMime = (value) => {
   const mime = String(value ?? "").trim();
   return /^[A-Za-z0-9][A-Za-z0-9.+-]{0,63}\/[A-Za-z0-9][A-Za-z0-9.+-]{0,63}$/.test(mime) ? mime.toLowerCase() : null;
@@ -502,13 +522,15 @@ var deliverOutboundReply = async ({
   chatId,
   replyTo,
   threadRootId,
+  deliveryId,
+  leaseId,
   payload
 }) => {
   const text = String(payload.text ?? "").trim();
   const media = await prepareOutboundMedia(payload, account.outboundFileMaxBytes);
   if (media.length === 0) {
     if (!text) return false;
-    const result = await bridge.send(chatId, text, { replyTo, threadRootId });
+    const result = await bridge.send(chatId, text, { replyTo, threadRootId, deliveryId, leaseId });
     if (!result.success) throw new Error(`polkadot /send failed: ${result.error ?? "unknown"}`);
     return true;
   }
@@ -521,7 +543,9 @@ var deliverOutboundReply = async ({
       const result = await bridge.send(chatId, index === 0 ? text : "", {
         filePath: item.vaultPath,
         ...index === 0 ? { replyTo } : {},
-        threadRootId
+        threadRootId,
+        deliveryId,
+        leaseId
       });
       if (!result.success) throw new Error(`polkadot file /send failed: ${result.error ?? "unknown"}`);
     } finally {
@@ -697,6 +721,8 @@ async function dispatchInbound(ctx, channelRuntime, account, bridge, msg, signal
                   chatId,
                   replyTo: msg.message_id,
                   threadRootId,
+                  deliveryId: msg.delivery_id,
+                  leaseId: msg.lease_id,
                   payload: payload ?? {}
                 });
                 return { visibleReplySent };
@@ -757,7 +783,11 @@ var polkadotPlugin = createChatChannelPlugin({
       channel: POLKADOT_CHANNEL_ID,
       sendText: async ({ cfg, to, text, accountId }) => {
         const account = resolvePolkadotAccount({ cfg, accountId });
-        const res = await createBridge(account.bridgeUrl, account.bridgeToken).send(to, text);
+        const res = await createBridge(
+          account.bridgeUrl,
+          account.bridgeToken,
+          account.bridgeProactiveToken
+        ).send(to, text, { proactive: account.bridgeProactiveToken.length > 0 });
         if (!res.success) throw new Error(`polkadot /send failed for ${to}: ${res.error ?? "unknown"}`);
         const messageId = String(res.message_id ?? Date.now());
         return {

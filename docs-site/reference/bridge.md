@@ -26,6 +26,16 @@ The token can manage every peer's saved-file vault as well as send messages.
 Treat a framework that receives it as part of the bot's trusted computing base;
 do not expose the bridge port or token to an untrusted process.
 
+T3ams bridge/Hermes mode adds a lease fence for outbound chat operations:
+normally `/send`, `/react`, and `/typing` carry the active `delivery_id` and
+`lease_id`. If an operator explicitly needs a framework-originated action with
+no inbound delivery, they may configure a distinct 32+ character
+`BOT_BRIDGE_PROACTIVE_TOKEN`. That request still needs normal bridge
+authentication and must additionally carry the raw
+`x-bridge-proactive-token` header. This optional capability is not an
+alternative bridge credential, does not authorize vault access by itself, and
+never turns a supplied stale lease into a valid one.
+
 ## Endpoints
 
 | Method & path | Purpose |
@@ -110,6 +120,17 @@ supports `GET`, `PUT`, and `DELETE` under
 `/files/<url-encoded-chat_id>[/<path>]`. `POST /send` with a file from that
 same vault uploads a fresh encrypted T3ams attachment. It may include a text
 caption, `reply_to`, and `thread_root_id`, but cannot use `edit_of`.
+
+When the T3ams bot runs `BOT_BRAIN=bridge` or `hermes`, bind every outbound
+`POST /send`, `POST /react`, and `POST /typing` to the leased inbound work by
+including its `delivery_id` and `lease_id`. An authenticated edit or delete
+revokes the old claim, preventing a stale worker from replying to the
+superseded prompt or publishing stale live activity. For the deliberate
+exception of a framework action that has no inbound delivery, configure the
+separate `BOT_BRIDGE_PROACTIVE_TOKEN` and send it in
+`x-bridge-proactive-token` alongside the normal bridge token. The header is
+accepted only for an entirely unleased `/send`, `/react`, or `/typing` request;
+a request that supplies a lease must still have an active matching lease.
 
 T3ams supports `POST /send` edits, `POST /react`, and `POST /typing` as real
 chat operations. `GET /health` advertises the exact support under

@@ -12,6 +12,9 @@ export type ResolvedPolkadotAccount = {
   configured: boolean;
   bridgeUrl: string;
   bridgeToken: string;
+  // Optional, narrower T3ams capability used only for framework-initiated
+  // outbound messages that have no leased inbound delivery to bind to.
+  bridgeProactiveToken: string;
   // Per-artifact limit before bytes are copied into the authenticated bridge
   // vault. Keep this aligned with T3ams' default attachment admission limit.
   outboundFileMaxBytes: number;
@@ -35,6 +38,12 @@ export function resolvePolkadotAccount({ cfg, accountId }: { cfg: any; accountId
   const acct = root.accounts?.[id] ?? {};
   const bridgeUrl = acct.bridgeUrl ?? root.bridgeUrl ?? process.env.POLKADOT_BRIDGE_URL ?? "http://127.0.0.1:8799";
   const bridgeToken = String(acct.bridgeToken ?? root.bridgeToken ?? process.env.POLKADOT_BRIDGE_TOKEN ?? "").trim();
+  const bridgeProactiveToken = String(
+    acct.bridgeProactiveToken
+      ?? root.bridgeProactiveToken
+      ?? process.env.POLKADOT_BRIDGE_PROACTIVE_TOKEN
+      ?? "",
+  ).trim();
   const outboundFileMaxBytes = positiveBytes(
     acct.outboundFileMaxBytes ?? root.outboundFileMaxBytes ?? process.env.POLKADOT_OUTBOUND_FILE_MAX_BYTES,
     DEFAULT_OUTBOUND_FILE_MAX_BYTES,
@@ -49,6 +58,7 @@ export function resolvePolkadotAccount({ cfg, accountId }: { cfg: any; accountId
     configured: Boolean(bridgeUrl && bridgeToken),
     bridgeUrl,
     bridgeToken,
+    bridgeProactiveToken,
     outboundFileMaxBytes,
     dmPolicy,
     allowFrom,

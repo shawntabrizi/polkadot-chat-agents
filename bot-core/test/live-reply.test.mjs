@@ -228,6 +228,26 @@ test("finalizeExisting flushes the bridge's final edit and cancels queued progre
   assert.equal(h.sent.at(-1).text, "final answer", "the queued progress frame must not overwrite the terminal edit");
 });
 
+test("cancelExisting and a guard fence discard a revoked queued bridge edit", async () => {
+  const h = makeHarness({ minIntervalMs: 1000 });
+  let active = true;
+  h.live.throttledEdit("peer", "TARGET-1", "first", { guard: () => active });
+  await h.clock.advance(0);
+  assert.equal(h.sent.length, 1);
+
+  h.live.throttledEdit("peer", "TARGET-1", "must not send", { guard: () => active });
+  active = false;
+  assert.equal(h.live.cancelExisting("peer", "TARGET-1"), true);
+  await h.clock.advance(10_000);
+  assert.deepEqual(h.sent.map((entry) => entry.text), ["first"]);
+
+  // Even if cancellation races a timer, the guard is evaluated directly
+  // before the protocol send and fences the stale frame.
+  h.live.throttledEdit("peer", "TARGET-2", "also stale", { guard: () => active });
+  await h.clock.advance(0);
+  assert.deepEqual(h.sent.map((entry) => entry.text), ["first"]);
+});
+
 test("progress tracker renders elapsed, steps and a rolling action window", () => {
   let t = 0;
   const tracker = createProgressTracker({ label: "working", maxActions: 2, now: () => t });

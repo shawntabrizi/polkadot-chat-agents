@@ -297,6 +297,70 @@ export function createT3amsChannelContext({
         : { accepted: true, record: publicRecord(retained) };
     },
 
+    // Apply an authenticated edit to a passive context row without changing
+    // its receipt ordering. The caller owns sender/authentication checks; an
+    // optional senderXid still makes accidental cross-author replacement fail
+    // closed at this small local boundary.
+    replace(chatId, messageId, { text, senderXid = null } = {}) {
+      if (enabled !== true) return { accepted: false, reason: "disabled" };
+      const normalizedChatId = normalizeChatId(chatId, isValidChat);
+      const normalizedMessageId = normalizeXid(messageId);
+      const normalizedSenderXid = senderXid == null ? null : normalizeXid(senderXid);
+      if (normalizedChatId == null || normalizedMessageId == null || (senderXid != null && normalizedSenderXid == null)) {
+        return { accepted: false, reason: "invalid-record" };
+      }
+      const current = receiptNow();
+      pruneExpired(current);
+      const chat = touch(normalizedChatId);
+      if (chat == null) return { accepted: false, reason: "missing" };
+      const index = chat.entries.findIndex((entry) => entry.messageId === normalizedMessageId);
+      if (index < 0) return { accepted: false, reason: "missing" };
+      const existing = chat.entries[index];
+      if (normalizedSenderXid != null && normalizedSenderXid !== existing.senderXid) return { accepted: false, reason: "sender-mismatch" };
+      const normalized = normalizeRecord({ ...existing, text }, existing.receivedAt);
+      if (normalized.record == null) return { accepted: false, reason: normalized.reason };
+      const replacement = {
+        ...normalized.record,
+        receivedAt: existing.receivedAt,
+        sequence: existing.sequence,
+      };
+      chat.entries[index] = replacement;
+      chat.bytes += replacement.bytes - existing.bytes;
+      totalBytes += replacement.bytes - existing.bytes;
+      trimChat(chat);
+      if (chat.entries.length === 0) chats.delete(normalizedChatId);
+      trimGlobal();
+      const retained = chats.get(normalizedChatId)?.entries.find((entry) => entry.messageId === normalizedMessageId) ?? null;
+      return retained == null
+        ? { accepted: false, reason: "capacity" }
+        : { accepted: true, record: publicRecord(retained) };
+    },
+
+    // A delete/redaction must immediately remove passive content; the caller
+    // retains any longer-lived tombstone separately so a replay cannot append
+    // it again after this in-memory context row is gone.
+    remove(chatId, messageId, { senderXid = null } = {}) {
+      if (enabled !== true) return { accepted: false, reason: "disabled" };
+      const normalizedChatId = normalizeChatId(chatId, isValidChat);
+      const normalizedMessageId = normalizeXid(messageId);
+      const normalizedSenderXid = senderXid == null ? null : normalizeXid(senderXid);
+      if (normalizedChatId == null || normalizedMessageId == null || (senderXid != null && normalizedSenderXid == null)) {
+        return { accepted: false, reason: "invalid-record" };
+      }
+      pruneExpired(receiptNow());
+      const chat = touch(normalizedChatId);
+      if (chat == null) return { accepted: false, reason: "missing" };
+      const index = chat.entries.findIndex((entry) => entry.messageId === normalizedMessageId);
+      if (index < 0) return { accepted: false, reason: "missing" };
+      if (normalizedSenderXid != null && normalizedSenderXid !== chat.entries[index].senderXid) {
+        return { accepted: false, reason: "sender-mismatch" };
+      }
+      const removed = publicRecord(chat.entries[index]);
+      removeAt(chat, index);
+      if (chat.entries.length === 0) chats.delete(normalizedChatId);
+      return { accepted: true, record: removed };
+    },
+
     snapshot(chatId, { threadRootId = null, maxRecords = null, maxBytes = null } = {}) {
       if (enabled !== true) return [];
       const normalizedChatId = normalizeChatId(chatId, isValidChat);

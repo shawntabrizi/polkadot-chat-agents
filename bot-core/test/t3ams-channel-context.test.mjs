@@ -188,3 +188,26 @@ test("per-channel byte and global LRU/byte caps stay bounded and clear is scoped
   assert.equal(lru.snapshot(three).length, 1);
   assert.equal(lru.clear(one), false);
 });
+
+test("authenticated edits replace and deletes purge a passive context row without changing order", () => {
+  const store = createT3amsChannelContext({ enabled: true });
+  const channel = chat(30);
+  const first = message(1, 1, "first");
+  const second = message(2, 2, "second");
+  store.append(channel, first);
+  store.append(channel, second);
+
+  const edited = store.replace(channel, first.messageId, { senderXid: first.senderXid, text: "first, edited" });
+  assert.equal(edited.accepted, true);
+  assert.deepEqual(store.snapshot(channel).map((record) => record.text), ["first, edited", "second"]);
+  assert.deepEqual(store.replace(channel, first.messageId, { senderXid: second.senderXid, text: "forged" }), {
+    accepted: false,
+    reason: "sender-mismatch",
+  });
+  assert.equal(store.remove(channel, first.messageId, { senderXid: first.senderXid }).accepted, true);
+  assert.deepEqual(ids(store.snapshot(channel)), [second.messageId]);
+  assert.deepEqual(store.remove(channel, second.messageId, { senderXid: first.senderXid }), {
+    accepted: false,
+    reason: "sender-mismatch",
+  });
+});

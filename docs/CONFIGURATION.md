@@ -74,6 +74,9 @@ BOT_USERNAME=hermesbot.01
 BOT_STATE_DIR=/state
 BOT_BRIDGE_PORT=8799
 BOT_BRIDGE_TOKEN=…              # the harness container presents this to drive the bot
+# T3ams only, optional: a distinct secret for framework-originated sends with
+# no leased inbound turn (for example OpenClaw attached results).
+BOT_BRIDGE_PROACTIVE_TOKEN=…
 BOT_BRIDGE_HOST=0.0.0.0         # bind beyond loopback so the harness container can reach it (no host ports published)
 ```
 
@@ -224,6 +227,7 @@ the directory is sensitive even if no model session has been created.
 | Variable | Default | Purpose |
 |---|---|---|
 | `BOT_BRIDGE_TOKEN` | — (required) | 32+ char shared secret; every request must present it (`Authorization: Bearer` or `x-bridge-token`). Process exits if unset/short. **gen** |
+| `BOT_BRIDGE_PROACTIVE_TOKEN` | unset | T3ams bridge/Hermes only: optional, distinct 32+ char outbound capability. An otherwise authenticated unleased `POST /send`, `/react`, or `/typing` must present it in `x-bridge-proactive-token`; it does not replace `BOT_BRIDGE_TOKEN`. |
 | `BOT_BRIDGE_PORT` | 8799 | Port the bridge listens on. **gen** |
 | `BOT_BRIDGE_HOST` | `127.0.0.1` | Bind address. Deploy sets `0.0.0.0` for harness stacks (compose network only). **gen for bridge** |
 | `BOT_BRIDGE_BODY_MAX_BYTES` | 1000000 | Max request body. |
@@ -394,8 +398,15 @@ the claim ticket is never returned in a bridge item or logged.
 | Variable | Default | Purpose |
 |---|---|---|
 | `BOT_T3AMS_ATTACHMENT_MAX_BYTES` | 25 MiB | Per-attachment maximum. It may be narrowed but not raised above 25 MiB. |
-| `BOT_T3AMS_ATTACHMENT_MAX_COUNT` | 4 | Maximum rich-text attachments per T3ams message (0–4). |
-| `BOT_T3AMS_ATTACHMENT_MIME_TYPES` | built-in image/document list | Comma-separated allowlist. The default includes common image formats, PDF, text/structured text, Office documents, and `application/octet-stream`; narrow it for public bots. |
+| `BOT_T3AMS_ATTACHMENT_MAX_COUNT` | 8 | Maximum rich-text attachments per T3ams message (0–16). |
+| `BOT_T3AMS_AGENT_OUTPUT_MAX_ARTIFACTS` | `BOT_T3AMS_ATTACHMENT_MAX_COUNT` | Maximum top-level regular files a direct Claude/Codex/OpenCode turn can return from its private `PCA_OUTPUT_DIR` (0–16; `0` disables generated-file delivery). |
+| `BOT_T3AMS_AGENT_OUTPUT_MAX_TOTAL_BYTES` | min(64 MiB, count × attachment cap), at least one attachment cap | Cumulative byte budget for all generated files from one direct turn (1 byte–512 MiB). |
+| `BOT_T3AMS_AGENT_OUTBOX_MAX_ENTRIES` | min(1024, max(16, `128 ×` artifact count)) | Global count cap for private generated-file snapshots waiting for upload. |
+| `BOT_T3AMS_AGENT_OUTBOX_MAX_BYTES` | max(per-turn artifact cap, min(512 MiB, `8 ×` per-turn cap)) | Global byte cap for generated-file snapshots waiting for upload (up to 4 GiB). |
+| `BOT_T3AMS_REPLY_OUTBOX_MAX_ENTRIES` | 128 | Global cap for incomplete durable direct-agent final replies. |
+| `BOT_T3AMS_REPLY_OUTBOX_MAX_BYTES` | max(one reply, min(128 MiB, `32 ×` one reply)) | Global serialized-byte cap for incomplete durable direct-agent final replies (up to 4 GiB). |
+| `BOT_T3AMS_ATTACHMENT_MAX_DURATION_MS` | 604800000 (7 days) | Maximum declared audio/video duration accepted as attachment metadata (0–31 days). |
+| `BOT_T3AMS_ATTACHMENT_MIME_TYPES` | `*/*` | Comma-separated MIME admission policy. Exact MIME types and `type/*` patterns narrow the broad default. |
 | `BOT_T3AMS_BULLETIN_RPC` | `wss://paseo-bulletin-next-rpc.polkadot.io` | Trusted T3ams Bulletin RPC endpoint for encrypted downloads and uploads. Set it to an explicit empty value to run metadata-only: retrieval and file delivery are disabled. |
 | `BOT_T3AMS_HOP_ALLOW_INSECURE` | `0` | `1` permits insecure `ws://` only for a local test mock. Production uses a validated TLS endpoint. |
 | `BOT_T3AMS_HOP_TIMEOUT_MS` | 120000 | Whole encrypted download/upload deadline. |
@@ -421,6 +432,26 @@ T3ams attachment. The bridge can access the same private namespace with its
 authenticated `/files` routes and can send only a vault `file_path`, never an
 arbitrary host path.
 
+For a direct brain, generated files are uploaded from a fresh private
+`PCA_OUTPUT_DIR` at the end of a turn. Only top-level regular files are
+considered; nested paths and symlinks are ignored and the directory is removed
+after delivery. Before the first upload or final-answer statement, bot-core
+durably records the final reply chunks and copies accepted bytes into a private
+per-turn outbox. A normal delivery retry drains that exact turn rather than
+asking the model to create a second text response, image, or document. Uploaded
+Bulletin references are also persisted before their chat statement, avoiding a
+repeat upload on a later statement retry. Generated files follow the same
+outbound MIME, per-file size, and cumulative-output policy. If Bulletin upload,
+attachments, or generic `application/octet-stream` delivery is disabled by
+configuration, direct-agent file generation is disabled rather than creating a
+stuck retry; text replies continue normally.
+
+The remote Bulletin upload and Statement Store submission APIs do not expose a
+transactional cross-service idempotency key. A process loss after a remote
+statement succeeds but before local journal progress is flushed can therefore
+produce one at-least-once duplicate on recovery; the durable turn outbox avoids
+rerunning the completed model turn in ordinary delivery-retry cases.
+
 Keep Bulletin capacity separate from the Statement Store allowance that funds
 text and live operations. Before enabling `/file get` or bridge `file_path`,
 ensure the bot account has the required T3ams Bulletin upload allowance and
@@ -429,6 +460,14 @@ document the default Polkadot-app transport, not a T3ams Bulletin preflight.
 The bridge token authorizes access to cached media and every file in every
 conversation vault, so do not publish the bridge port or inject that token into
 an untrusted agent process.
+
+In T3ams bridge/Hermes mode, regular outbound `/send`, `/react`, and `/typing`
+requests remain bound to their active inbound `delivery_id` and `lease_id`.
+`BOT_BRIDGE_PROACTIVE_TOKEN` is a separate opt-in for a framework action that
+has no inbound lease at all (such as a generic attached result). It must be a
+different random secret, is required in the `x-bridge-proactive-token` header
+in addition to normal bridge authentication, and never makes a stale supplied
+lease valid. Leave it unset unless that explicit proactive behavior is needed.
 
 ### T3ams group-channel context (optional)
 
@@ -462,6 +501,21 @@ member so a stuck shared turn always has a group-visible cancellation lever.
 | Variable | Default | Purpose |
 |---|---|---|
 | `BOT_T3AMS_CHANNEL_CONTROL_ROLE` | `admin` | Minimum role for shared-session commands: `admin` permits owners/admins; `mod` also permits moderators; `all` permits any member whose message reaches the bot. |
+
+### T3ams message-operation reconciliation
+
+T3ams retains messages separately from edit/delete operations. bot-core keeps a
+bounded, persisted lifecycle index so a valid edit/deletion can arrive before its
+message carrier, update pending channel context/work, or cancel a queued direct
+turn. Reactions and typing never become model prompts, and a deletion cannot
+retract a response already published by the bot.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BOT_T3AMS_MESSAGE_LIFECYCLE_MAX_RECORDS` | max(1024, `4 × BOT_INBOUND_CAP`) | Cap for recently seen message/edit/delete state. |
+| `BOT_T3AMS_MESSAGE_LIFECYCLE_TTL_MS` | 21600000 (6 hours) | Lifecycle retention; `0` expires state immediately. |
+| `BOT_T3AMS_MESSAGE_LIFECYCLE_MAX_BYTES` | 8 MiB | Aggregate durable lifecycle-state budget; oldest records are evicted before the journal grows beyond it. |
+| `BOT_T3AMS_SUBSCRIPTION_CAP` | 1024 | Active T3ams subscription cap; each known DM needs carrier and operation routes. |
 
 ### Ingress (poll / subscribe)
 

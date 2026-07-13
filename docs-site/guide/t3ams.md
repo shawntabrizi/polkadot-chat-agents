@@ -72,6 +72,25 @@ reactions, and `POST /typing` for a native typing signal. The authenticated
 bridge's `GET /health.live` describes the current support. See
 [Agent frameworks](/guide/harnesses#t3ams-bridge-behavior).
 
+For `BOT_BRAIN=bridge` or `hermes`, a framework also includes the leased
+`delivery_id` and `lease_id` on each outbound `POST /send`, `POST /react`, and
+`POST /typing`. Editing or deleting a prompt revokes that claim, so a stale
+worker cannot publish an answer or live activity for old text.
+
+For an explicit framework-originated action with no inbound turn (for example
+an OpenClaw attached result), configure a distinct
+`BOT_BRIDGE_PROACTIVE_TOKEN`. The request still needs ordinary bridge
+authentication and must also send that secret in `x-bridge-proactive-token`.
+It permits only an entirely unleased `/send`, `/react`, or `/typing`; it never
+turns a supplied stale lease into a valid one. Leave this capability unset when
+proactive output is not needed.
+
+Edits and deletes are authenticated on a separate retained operation route.
+bot-core reconciles them before queued work is dispatched: an edit updates the
+pending prompt/context and a deletion removes pending work or stops an active
+direct-agent turn. It cannot retract a reply already published before the bot
+received the deletion. Reactions and typing never become prompts.
+
 In a channel, normal mentioned prompts and `/stop` are available to members.
 By default, only workspace owners/admins may change a shared direct-brain
 session with `/reset`, `/model`, `/reasoning`, or `/project`; tune the threshold
@@ -93,6 +112,20 @@ brain gets a temporary staged copy for the turn. A bridge gets an opaque,
 authenticated `/media/<id>` URL that can materialize the bytes on demand.
 `BOT_T3AMS_ATTACHMENT_MAX_DURATION_MS` bounds declared duration metadata to
 seven days by default.
+
+A direct Claude, Codex, or OpenCode turn can also return a generated file. The
+bot gives that turn a private `PCA_OUTPUT_DIR`; files written directly at its
+top level are uploaded as native attachments and then removed locally. The
+limit is `BOT_T3AMS_AGENT_OUTPUT_MAX_ARTIFACTS` (the attachment-count limit by
+default); `BOT_T3AMS_AGENT_OUTPUT_MAX_TOTAL_BYTES` also caps the total batch.
+Nested files and symlinks are ignored, and the normal outbound size and MIME
+policy still applies. Before upload, accepted files are copied into a private
+durable turn outbox together with the final reply chunks, so a transient
+delivery retry reuses the same immutable answer and bytes rather than rerunning
+the agent. The independent `BOT_T3AMS_AGENT_OUTBOX_*` and
+`BOT_T3AMS_REPLY_OUTBOX_*` budgets bound retained file and reply state. If
+Bulletin upload or generic-file MIME delivery is unavailable, `PCA_OUTPUT_DIR`
+is withheld and the bot still returns text normally.
 
 Use `/file put <path>` with one successfully fetched attachment to retain it in
 that T3ams conversation's vault, and `/file get <path>` to return it as a fresh

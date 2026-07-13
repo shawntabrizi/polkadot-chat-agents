@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   DEFAULT_T3AMS_ATTACHMENT_MAX_BYTES,
   T3amsAttachmentValidationError,
+  isT3amsAttachmentMimeAllowed,
   normalizeT3amsAttachmentRef,
   normalizeT3amsAttachmentRefs,
   parseT3amsHopReference,
@@ -99,6 +100,54 @@ test("accepts a generic opaque document so clients can carry ordinary files", ()
   assert.equal(normalizeT3amsAttachmentRef(ref).kind, "document");
 });
 
+test("normalizes the T3ams composer's paired empty browser MIME as an opaque file", () => {
+  // Browser File.type is allowed to be empty for an unknown extension. The
+  // SPA preserves that value in both locations, so accept only the paired
+  // form and expose a useful conventional MIME to downstream brains.
+  const ref = {
+    id: bytes("d"),
+    hash: bytes("e"),
+    storageUrl: hopUrl({
+      v: 1,
+      id: hex("1"),
+      key: hex("2"),
+      mime: "",
+      size: 17,
+      name: "workspace.custom-format",
+    }),
+    mimeType: "",
+    fileSize: 17,
+    filename: "workspace.custom-format",
+  };
+  const normalized = normalizeT3amsAttachmentRef(ref);
+  assert.equal(normalized.kind, "document");
+  assert.equal(normalized.mime, "application/octet-stream");
+  // A raw HOP capability cannot establish that its BCTS partner also carried
+  // the browser's empty MIME, so the public parser intentionally stays strict.
+  assert.throws(
+    () => parseT3amsHopReference(ref.storageUrl),
+    validationCode("T3AMS_ATTACHMENT_MIME"),
+  );
+
+  // This is compatibility for one browser representation, not a way to make
+  // either side of the authenticated metadata optional or mismatched.
+  assert.throws(
+    () => normalizeT3amsAttachmentRef({ ...ref, mimeType: "application/octet-stream" }),
+    validationCode("T3AMS_ATTACHMENT_METADATA_MISMATCH"),
+  );
+  assert.throws(
+    () => normalizeT3amsAttachmentRef({
+      ...ref,
+      storageUrl: hopUrl({ v: 1, id: hex("1"), key: hex("2"), mime: "application/octet-stream", size: 17, name: "workspace.custom-format" }),
+    }),
+    validationCode("T3AMS_ATTACHMENT_METADATA_MISMATCH"),
+  );
+  assert.throws(
+    () => normalizeT3amsAttachmentRef(ref, { allowedMimeTypes: ["image/*"] }),
+    validationCode("T3AMS_ATTACHMENT_UNSUPPORTED_MIME"),
+  );
+});
+
 test("accepts a missing optional Hop filename when the BCTS filename is safe", () => {
   const ref = imageRef({
     storageUrl: hopUrl({ v: 1, id: hex("a"), key: hex("b"), mime: "image/png", size: 123, w: 1600, h: 900 }),
@@ -159,11 +208,28 @@ test("rejects MIME, size, filename, and dimension mismatches", () => {
   );
 });
 
-test("rejects unsupported media and oversized references by default", () => {
-  assert.throws(
-    () => normalizeT3amsAttachmentRef(imageRef({ mimeType: "application/zip", storageUrl: imageHop({ mime: "application/zip" }) })),
-    validationCode("T3AMS_ATTACHMENT_UNSUPPORTED_MIME"),
-  );
+test("accepts arbitrary valid file types by default and keeps the size cap", () => {
+  const archive = normalizeT3amsAttachmentRef(imageRef({
+    mimeType: "application/zip",
+    storageUrl: imageHop({ mime: "application/zip", name: "workspace.zip" }),
+    filename: "workspace.zip",
+  }));
+  assert.equal(archive.kind, "document");
+  const video = normalizeT3amsAttachmentRef(imageRef({
+    mimeType: "video/mp4",
+    storageUrl: imageHop({ mime: "video/mp4", name: "walkthrough.mp4" }),
+    filename: "walkthrough.mp4",
+    durationMs: 12_345,
+  }));
+  assert.equal(video.kind, "video");
+  assert.equal(video.durationMs, 12_345);
+  const audio = normalizeT3amsAttachmentRef(imageRef({
+    mimeType: "audio/ogg",
+    storageUrl: imageHop({ mime: "audio/ogg", name: "voice.ogg" }),
+    filename: "voice.ogg",
+    durationMs: 1_000,
+  }));
+  assert.equal(audio.kind, "audio");
   assert.throws(
     () => parseT3amsHopReference(imageHop({ size: DEFAULT_T3AMS_ATTACHMENT_MAX_BYTES + 1 })),
     validationCode("T3AMS_ATTACHMENT_TOO_LARGE"),
@@ -179,13 +245,11 @@ test("rejects generic BCTS attachment fields that this HOP adapter does not impl
     () => normalizeT3amsAttachmentRef(imageRef({ thumbnailUrl: "hop:elsewhere" })),
     validationCode("T3AMS_ATTACHMENT_UNSUPPORTED_FIELDS"),
   );
-  assert.throws(
-    () => normalizeT3amsAttachmentRef(imageRef({ durationMs: 1000 })),
-    validationCode("T3AMS_ATTACHMENT_UNSUPPORTED_FIELDS"),
-  );
+  assert.throws(() => normalizeT3amsAttachmentRef(imageRef({ durationMs: -1 })), validationCode("T3AMS_ATTACHMENT_DURATION"));
+  assert.throws(() => normalizeT3amsAttachmentRef(imageRef({ durationMs: 8 * 24 * 60 * 60 * 1000 })), validationCode("T3AMS_ATTACHMENT_DURATION"));
 });
 
-test("enforces a bounded attachment list and supports an explicit MIME policy extension", () => {
+test("enforces a bounded attachment list and supports exact and wildcard MIME policies", () => {
   assert.throws(
     () => normalizeT3amsAttachmentRefs([imageRef(), imageRef()], { maxCount: 1 }),
     validationCode("T3AMS_ATTACHMENT_COUNT"),
@@ -194,5 +258,14 @@ test("enforces a bounded attachment list and supports an explicit MIME policy ex
   assert.equal(
     normalizeT3amsAttachmentRef(custom, { allowedMimeTypes: ["application/vnd.custom.document"] }).kind,
     "document",
+  );
+  assert.equal(isT3amsAttachmentMimeAllowed(["video/*"], "video/mp4"), true);
+  assert.equal(isT3amsAttachmentMimeAllowed(["video/*"], "audio/mpeg"), false);
+  assert.equal(isT3amsAttachmentMimeAllowed(["*/*"], "application/x-custom-blob"), true);
+  assert.throws(
+    () => normalizeT3amsAttachmentRef(imageRef({ mimeType: "application/zip", storageUrl: imageHop({ mime: "application/zip" }) }), {
+      allowedMimeTypes: ["image/*"],
+    }),
+    validationCode("T3AMS_ATTACHMENT_UNSUPPORTED_MIME"),
   );
 });

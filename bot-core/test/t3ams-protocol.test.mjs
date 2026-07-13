@@ -126,6 +126,209 @@ test("a DM without a pinned handshake signing key never reaches the bot", () => 
   assert.equal(unpinned.protocol.receiveDm(unpinned.peer, unpinned.input), null);
 });
 
+test("authenticated DM edit/delete operations normalize independently of message carriers", () => {
+  const self = bytes(0xa1);
+  const peer = bytes(0xb2);
+  const messageId = bytes(0xc3);
+  const editInput = Uint8Array.of(31);
+  const deleteInput = Uint8Array.of(32);
+  const channelEditInput = Uint8Array.of(33);
+  const channelDeleteInput = Uint8Array.of(34);
+  const signedEdit = {
+    expression: {
+      functionName: "editMessage",
+      parameters: {
+        messageId: parameter(messageId),
+        body: parameter("edited body"),
+        editedAt: parameter(20),
+        to: parameter(self),
+      },
+    },
+  };
+  const signedDelete = {
+    expression: {
+      functionName: "deleteMessage",
+      parameters: {
+        messageId: parameter(messageId),
+        timestamp: parameter(21),
+        to: parameter(self),
+      },
+    },
+  };
+  const signedChannelEdit = {
+    expression: {
+      functionName: "channelEditMessage",
+      parameters: {
+        id: parameter(messageId),
+        body: parameter("wrong route"),
+        senderXid: parameter(peer),
+        editedAt: parameter(22),
+        to: parameter(self),
+      },
+    },
+  };
+  const signedChannelDelete = {
+    expression: {
+      functionName: "channelDeleteMessage",
+      parameters: {
+        messageId: parameter(messageId),
+        senderXid: parameter(peer),
+        timestamp: parameter(23),
+        to: parameter(self),
+      },
+    },
+  };
+  const envelopes = new Map([
+    [editInput, { signed: signedEdit }],
+    [deleteInput, { signed: signedDelete }],
+    [channelEditInput, { signed: signedChannelEdit }],
+    [channelDeleteInput, { signed: signedChannelDelete }],
+  ]);
+  const bcts = {
+    formatXID: xid,
+    envelopeFromBytes: (value) => envelopes.get(value) ?? value,
+    decryptDMEnvelope: (value) => value.signed,
+    parseGSTPMessage: (value) => ({ type: "request", body: value.expression }),
+    extractFunctionName: (value) => value.functionName,
+    extractParameter: (value, name) => value.parameters[name] ?? null,
+    verifyGSTPRequestSignature: () => true,
+    SigningPublicKey: { fromTaggedCborData: () => ({}) },
+  };
+  const protocol = createT3amsProtocol({
+    bcts,
+    identity: { xid: self, signingPrivateKey: bytes(0xd4) },
+    displayName: "Atlas",
+    submit: async () => {},
+  });
+  protocol.addPeer(xid(peer), { signingPubKeyHex: "11" });
+  const chatId = t3amsConversationKey({ kind: "dm", peerXidHex: xid(peer) });
+  assert.deepEqual(protocol.receiveDmOperation(xid(peer), editInput), {
+    kind: "edit", conversation: { kind: "dm", peerXidHex: xid(peer) }, chatId,
+    messageId: xid(messageId), senderXid: xid(peer), text: "edited body", timestamp: 20,
+  });
+  assert.deepEqual(protocol.receiveDmOperation(xid(peer), deleteInput), {
+    kind: "delete", conversation: { kind: "dm", peerXidHex: xid(peer) }, chatId,
+    messageId: xid(messageId), senderXid: xid(peer), timestamp: 21,
+  });
+  assert.equal(protocol.receiveDmOperation(xid(peer), channelEditInput), null);
+  assert.equal(protocol.receiveDmOperation(xid(peer), channelDeleteInput), null);
+});
+
+test("authenticated channel edit/delete operations use the workspace roster binding", () => {
+  const self = bytes(0xa1);
+  const peer = bytes(0xb2);
+  const workspaceId = xid(bytes(0xc3));
+  const channelId = xid(bytes(0xd4));
+  const messageId = bytes(0xe5);
+  const editInput = Uint8Array.of(41);
+  const deleteInput = Uint8Array.of(42);
+  const dmEditInput = Uint8Array.of(43);
+  const dmDeleteInput = Uint8Array.of(44);
+  const signedEdit = {
+    expression: {
+      functionName: "channelEditMessage",
+      parameters: {
+        id: parameter(messageId),
+        body: parameter("channel edited"),
+        senderXid: parameter(peer),
+        editedAt: parameter(30),
+      },
+    },
+  };
+  const signedDelete = {
+    expression: {
+      functionName: "channelDeleteMessage",
+      parameters: {
+        messageId: parameter(messageId),
+        senderXid: parameter(peer),
+        timestamp: parameter(31),
+      },
+    },
+  };
+  const signedDmEdit = {
+    expression: {
+      functionName: "editMessage",
+      parameters: {
+        messageId: parameter(messageId),
+        body: parameter("wrong route"),
+        senderXid: parameter(peer),
+        editedAt: parameter(32),
+      },
+    },
+  };
+  const signedDmDelete = {
+    expression: {
+      functionName: "deleteMessage",
+      parameters: {
+        messageId: parameter(messageId),
+        senderXid: parameter(peer),
+        timestamp: parameter(33),
+      },
+    },
+  };
+  const envelopes = new Map([
+    [editInput, { signed: signedEdit }],
+    [deleteInput, { signed: signedDelete }],
+    [dmEditInput, { signed: signedDmEdit }],
+    [dmDeleteInput, { signed: signedDmDelete }],
+  ]);
+  const bcts = {
+    formatXID: xid,
+    envelopeFromBytes: (value) => envelopes.get(value) ?? value,
+    decryptWorkspaceChannelEnvelope: (value) => value.signed,
+    parseGSTPMessage: (value) => ({ type: "request", body: value.expression }),
+    extractFunctionName: (value) => value.functionName,
+    extractParameter: (value, name) => value.parameters[name] ?? null,
+    verifyGSTPRequestSignature: () => true,
+    SigningPublicKey: { fromTaggedCborData: () => ({}) },
+    deriveWorkspaceKey: () => Uint8Array.of(1),
+  };
+  const protocol = createT3amsProtocol({
+    bcts,
+    identity: { xid: self, signingPrivateKey: bytes(0xd4) },
+    displayName: "Atlas",
+    state: {
+      v: T3AMS_STATE_VERSION,
+      workspaces: {
+        [workspaceId]: {
+          doc: {
+            wsId: workspaceId,
+            creatorXid: xid(self),
+            version: 1,
+            members: [
+              { xid: xid(self), role: "member", signingPubKeyHex: "11" },
+              { xid: xid(peer), role: "member", signingPubKeyHex: "22" },
+            ],
+            admins: [],
+          },
+          channels: [{ idHex: channelId, creatorXid: xid(self), isPrivate: false, kind: "standard" }],
+        },
+      },
+    },
+    submit: async () => {},
+  });
+  const chatId = t3amsConversationKey({ kind: "channel", wsId: workspaceId, channelIdHex: channelId });
+  assert.deepEqual(protocol.receiveChannelOperation(workspaceId, channelId, editInput), {
+    kind: "edit",
+    conversation: { kind: "channel", wsId: workspaceId, channelIdHex: channelId, isPrivate: false },
+    chatId,
+    messageId: xid(messageId),
+    senderXid: xid(peer),
+    text: "channel edited",
+    timestamp: 30,
+  });
+  assert.deepEqual(protocol.receiveChannelOperation(workspaceId, channelId, deleteInput), {
+    kind: "delete",
+    conversation: { kind: "channel", wsId: workspaceId, channelIdHex: channelId, isPrivate: false },
+    chatId,
+    messageId: xid(messageId),
+    senderXid: xid(peer),
+    timestamp: 31,
+  });
+  assert.equal(protocol.receiveChannelOperation(workspaceId, channelId, dmEditInput), null);
+  assert.equal(protocol.receiveChannelOperation(workspaceId, channelId, dmDeleteInput), null);
+});
+
 test("carrier messages are claimed before durable admission, then committed or released explicitly", () => {
   const fixture = directMessageFixture();
   const chatId = t3amsConversationKey({ kind: "dm", peerXidHex: fixture.peer });
@@ -504,4 +707,96 @@ test("outbound operations reject malformed targets, reactions, and unavailable p
   const unavailable = outboundOperationFixture({ kind: "channel", isPrivate: true, privateKey: false });
   await assert.rejects(unavailable.protocol.sendTyping(unavailable.chatId), { code: "T3AMS_CHANNEL_KEY_MISSING" });
   assert.equal(unavailable.submitted.length, 0);
+});
+
+function outboundDmWakeFixture({ established = true, rejectWake = false } = {}) {
+  const self = bytes(0xa1);
+  const peer = bytes(0xb2);
+  const messageId = bytes(0xc3);
+  const submitted = [];
+  const expressions = [];
+  const events = [];
+  let encoded = 0;
+  const tag = (value) => (value instanceof Uint8Array ? xid(value) : value);
+  const bcts = {
+    PERSONAL_SCOPE: "personal",
+    formatXID: xid,
+    buildChatMessage: (message) => ({ ...message, id: messageId, timestamp: 123 }),
+    createEncryptedDMMessage: (message) => ({ envelope: { kind: "encrypted", message }, topics: ["dm-topic"] }),
+    buildMessageCarrier: (message, prior) => ({ kind: "carrier", message, prior }),
+    envelopeToBytes: (envelope) => {
+      expressions.push({ functionName: "encoded", envelope });
+      encoded += 1;
+      return Uint8Array.of(encoded);
+    },
+    derivePersonalDMChannel: (from, to) => `dm:${tag(from)}:${tag(to)}`,
+    derivePersonalInboxChannel: (to) => `inbox:${tag(to)}`,
+    dmMessageRequestExpression: (...args) => ({ functionName: "dmMessageRequest", args }),
+    createGSTPRequest: (expression) => {
+      expressions.push(expression);
+      return { envelope: { expression } };
+    },
+    signGSTPRequest: (envelope) => ({ signed: envelope }),
+  };
+  const protocol = createT3amsProtocol({
+    bcts,
+    identity: {
+      xid: self,
+      signingPrivateKey: bytes(0xd4),
+      signingPublicKey: { taggedCborData: () => Uint8Array.of(0x99) },
+    },
+    displayName: "Atlas",
+    submit: async (statement) => {
+      submitted.push(statement);
+      if (rejectWake && statement.channel.startsWith("inbox:")) throw new Error("wake submit failed");
+    },
+    log: (event, extra) => events.push({ event, ...extra }),
+  });
+  if (established) assert.ok(protocol.addPeer(xid(peer), { signingPubKeyHex: "11" }));
+  const chatId = t3amsConversationKey({ kind: "dm", peerXidHex: xid(peer) });
+  assert.equal(protocol.restoreInboundConversation({
+    accepted: true,
+    conversationKey: chatId,
+    message: {
+      messageId: xid(bytes(0xe5)),
+      conversationType: "dm",
+      senderXid: xid(peer),
+      threadRootId: null,
+    },
+  }), true);
+  return { protocol, self, peer, chatId, submitted, expressions, events };
+}
+
+test("an established DM mirrors one carrier to the recipient inbox and bounds repeat wakes", async () => {
+  const fixture = outboundDmWakeFixture();
+  const { protocol, self, peer, chatId, submitted, expressions } = fixture;
+
+  await protocol.sendText(chatId, "first reply");
+  assert.equal(submitted.length, 2);
+  assert.equal(submitted[0].channel, `dm:${xid(self)}:${xid(peer)}`);
+  assert.equal(submitted[1].channel, `inbox:${xid(peer)}`);
+  assert.deepEqual(submitted[1].topics, [`inbox:${xid(peer)}`]);
+  const wake = expressions.find((expression) => expression.functionName === "dmMessageRequest");
+  assert.ok(wake);
+  assert.equal(xid(wake.args[0]), xid(self));
+  assert.equal(wake.args[1], "Atlas");
+  assert.equal(wake.args[2], `dm:${xid(self)}:${xid(peer)}`);
+  assert.equal(wake.args[3], "personal");
+  assert.deepEqual([...wake.args[5]], [...submitted[0].data], "the inbox wake must carry the full DM carrier");
+
+  await protocol.sendText(chatId, "second reply");
+  assert.equal(submitted.length, 3, "a silent peer gets at most one inbox wake per backoff window");
+});
+
+test("DM inbox wakes are skipped for unknown peers and never fail the primary carrier", async () => {
+  const unknown = outboundDmWakeFixture({ established: false });
+  await unknown.protocol.sendText(unknown.chatId, "first contact reply");
+  assert.equal(unknown.submitted.length, 1);
+
+  const failing = outboundDmWakeFixture({ rejectWake: true });
+  const result = await failing.protocol.sendText(failing.chatId, "reply survives wake failure");
+  assert.equal(result.messageId, xid(bytes(0xc3)));
+  assert.equal(failing.submitted.length, 2);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(failing.events.some((event) => event.event === "T3AMS_DM_WAKE_FAILED" && event.error === "wake submit failed"));
 });

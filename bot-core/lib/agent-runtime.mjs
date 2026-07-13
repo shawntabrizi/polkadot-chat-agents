@@ -15,6 +15,14 @@
 //   sendText(peerHex, text)  — plain message (command replies, errors)
 //   deliver(peerHex, text)   — final answer (chunking + live-placeholder
 //                              finalize live transport-side)
+//   deliverArtifacts(peerHex, artifacts) — optional final-turn files. Each
+//                              artifact is { filePath, filename, size }; the
+//                              callback consumes a transport-owned immutable
+//                              snapshot before this runtime removes it.
+//   deliverTurn(peerHex, { text, artifacts }) — optional atomic final-turn
+//                              handoff for a transport with a durable outbox.
+//                              When supplied it replaces the separate
+//                              deliverArtifacts + deliver calls below.
 //   beginTurn(peerHex)       — a turn is starting: arm the "thinking"
 //                              placeholder; returns an onAction(title)
 //                              progress callback or null
@@ -42,9 +50,13 @@ const INHERITED_AGENT_ENV = [
 ];
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const SENSITIVE_ENV_NAME_RE = /(?:^|_)(?:API_?KEY|ACCESS_?KEY|AUTH(?:ORIZATION)?|TOKEN|SECRET|PASSWORD|CREDENTIALS?|SEED|PRIVATE_?KEY|SESSION|KEY)(?:$|_)/i;
+const RESERVED_AGENT_ENV_NAMES = new Set(["PCA_OUTPUT_DIR"]);
 
 const isForbiddenAgentEnvName = (name) =>
-  !ENV_NAME_RE.test(name) || /^(?:BOT_|FAUCET_)/i.test(name) || SENSITIVE_ENV_NAME_RE.test(name);
+  !ENV_NAME_RE.test(name)
+  || RESERVED_AGENT_ENV_NAMES.has(name)
+  || /^(?:BOT_|FAUCET_)/i.test(name)
+  || SENSITIVE_ENV_NAME_RE.test(name);
 
 // Exported for direct unit coverage and for embedding runtimes that want to
 // inspect the capability boundary before constructing one.
@@ -140,6 +152,17 @@ export const createAgentRuntime = ({
   maxQueuedTurns = 100,
   maxOutputBytes = 1_000_000,
   maxEventLineBytes = 64 * 1024,
+  // A direct agent can return a bounded set of files by writing top-level
+  // regular files into PCA_OUTPUT_DIR. This remains disabled unless the
+  // transport supplies chat.deliverArtifacts() or chat.deliverTurn().
+  maxOutputArtifacts = 8,
+  // Per-file cap for agent-created artifacts. The caller should set this to
+  // the transport's attachment cap; keeping it here avoids retrying an agent
+  // turn forever because an output cannot possibly be delivered.
+  maxOutputArtifactBytes = 25 * 1024 * 1024,
+  // Cumulative cap for one turn's generated files. The default keeps staging
+  // use bounded independently of the per-file cap and artifact-count cap.
+  maxOutputArtifactTotalBytes = 64 * 1024 * 1024,
   // Optional POSIX identity for spawned agent CLIs. Container deployments run
   // the transport as root solely to protect signing state, then drop agents to
   // an unprivileged workspace owner before executing any model-directed tool.
@@ -171,6 +194,18 @@ export const createAgentRuntime = ({
   const queuedTurnLimit = boundedInt(maxQueuedTurns, 100, 0);
   const outputLimit = boundedInt(maxOutputBytes, 1_000_000, 1024);
   const eventLineLimit = Math.min(boundedInt(maxEventLineBytes, 64 * 1024, 1024), outputLimit);
+  const outputArtifactLimit = Math.min(boundedInt(maxOutputArtifacts, 8, 0), 32);
+  const outputArtifactScanLimit = Math.max(32, Math.min(outputArtifactLimit * 8, 256));
+  const outputArtifactByteLimit = Math.min(
+    boundedInt(maxOutputArtifactBytes, 25 * 1024 * 1024, 1),
+    512 * 1024 * 1024,
+  );
+  const outputArtifactTotalByteLimit = Math.min(
+    boundedInt(maxOutputArtifactTotalBytes, 64 * 1024 * 1024, 1),
+    512 * 1024 * 1024,
+  );
+  const supportsArtifactDelivery = (typeof chat?.deliverArtifacts === "function" || typeof chat?.deliverTurn === "function")
+    && outputArtifactLimit > 0;
   const childUid = agentUid == null ? null : boundedInt(agentUid, -1, 0);
   const childGid = agentGid == null ? null : boundedInt(agentGid, -1, 0);
   if (childUid === -1 || childGid === -1) throw new Error("agentUid and agentGid must be non-negative integer IDs");
@@ -178,6 +213,10 @@ export const createAgentRuntime = ({
   const queuedTurnsByPeer = new Map();
   const activeTurnsByPeer = new Map();
   const activeTurnPromises = new Set();
+  // The engine process may be finished while a transport is still consuming a
+  // protected artifact snapshot or publishing the final reply. Keep those
+  // handoffs visible to shutdown so it cannot remove private staging midway.
+  const activeReplyHandoffs = new Set();
   let activeTurnCount = 0;
   let shuttingDown = false;
   const sendReply = async (method, peerHex, text) => {
@@ -187,6 +226,34 @@ export const createAgentRuntime = ({
       log("BOT_REPLY_FAILED", { error: String(error?.message ?? error) });
       if (throwOnReplyFailure) throw error;
     }
+  };
+  const sendArtifacts = async (peerHex, artifacts) => {
+    if (!artifacts.length || !supportsArtifactDelivery) return;
+    try {
+      await chat.deliverArtifacts(peerHex, artifacts);
+    } catch (error) {
+      log("BOT_ARTIFACT_DELIVERY_FAILED", { to: peerHex, count: artifacts.length, error: String(error?.message ?? error) });
+      if (throwOnReplyFailure) throw error;
+    }
+  };
+  const sendTurn = async (peerHex, text, artifacts) => {
+    if (typeof chat?.deliverTurn === "function") {
+      try {
+        await chat.deliverTurn(peerHex, { text, artifacts });
+      } catch (error) {
+        log("BOT_TURN_DELIVERY_FAILED", { to: peerHex, artifacts: artifacts.length, error: String(error?.message ?? error) });
+        if (throwOnReplyFailure) throw error;
+      }
+      return;
+    }
+    await sendArtifacts(peerHex, artifacts);
+    await sendReply("deliver", peerHex, text);
+  };
+  const runReplyHandoff = async (operation) => {
+    const handoff = Promise.resolve().then(operation);
+    activeReplyHandoffs.add(handoff);
+    try { return await handoff; }
+    finally { activeReplyHandoffs.delete(handoff); }
   };
   // The root transport must never create/chown files below an agent-writable
   // workspace. A root-owned, traversal-only parent lets the child reach the
@@ -224,6 +291,180 @@ export const createAgentRuntime = ({
     try { fs.rmSync(privateStagingRoot, { recursive: true, force: true, maxRetries: 2 }); }
     catch (error) { log("BOT_ATTACHMENT_STAGING_ROOT_CLEANUP_FAILED", { error: String(error?.message ?? error) }); }
     privateStagingRoot = null;
+  };
+
+  // An agent output directory follows the same ownership model as inbound
+  // attachment staging. In a privilege-dropped deployment, root creates the
+  // directory under its protected traversal-only parent, then hands the leaf
+  // to the agent. Never fall back to an agent-writable workspace in that case.
+  const createTurnOutputDirectory = (turnCwd) => {
+    if (!supportsArtifactDelivery) return null;
+    if (needsPrivilegedStaging && !privateStagingRoot) {
+      throw new Error("private artifact output staging is unavailable");
+    }
+    let outputDir = null;
+    try {
+      outputDir = fs.mkdtempSync(path.join(privateStagingRoot ?? turnCwd, ".pca-output-"));
+      fs.chmodSync(outputDir, 0o700);
+      if (childUid != null) fs.chownSync(outputDir, childUid, childGid ?? childUid);
+      return outputDir;
+    } catch (error) {
+      if (outputDir) {
+        try { fs.rmSync(outputDir, { recursive: true, force: true, maxRetries: 2 }); } catch { /* best effort */ }
+      }
+      throw error;
+    }
+  };
+
+  const cleanupTurnOutputDirectory = (outputDir) => {
+    if (!outputDir) return;
+    try { fs.rmSync(outputDir, { recursive: true, force: true, maxRetries: 2 }); }
+    catch (error) { log("BOT_ARTIFACT_OUTPUT_CLEANUP_FAILED", { error: String(error?.message ?? error) }); }
+  };
+
+  // The agent-owned output directory is hostile after its CLI exits: a model
+  // can leave a background process behind to swap a path or mutate a file.
+  // Open sources with O_NOFOLLOW, copy bytes from the stable descriptor into
+  // a transport-owned snapshot, and give only that immutable path to a media
+  // uploader. In a privilege-dropped deployment `privateStagingRoot` is root
+  // owned, so the agent cannot replace or read the snapshot after handoff.
+  const outputFilenameIsSafe = (filename) => typeof filename === "string"
+    && filename.length > 0
+    && filename === filename.trim()
+    && filename !== "."
+    && filename !== ".."
+    && path.basename(filename) === filename
+    && Buffer.byteLength(filename, "utf8") <= 255
+    && !/[\u0000-\u001f\u007f\\/]/.test(filename);
+  const createTurnOutputSnapshotDirectory = (turnCwd) => {
+    const parent = privateStagingRoot ?? turnCwd;
+    let snapshotDir = null;
+    try {
+      snapshotDir = fs.mkdtempSync(path.join(parent, ".pca-output-snapshot-"));
+      fs.chmodSync(snapshotDir, 0o700);
+      return snapshotDir;
+    } catch (error) {
+      if (snapshotDir) {
+        try { fs.rmSync(snapshotDir, { recursive: true, force: true, maxRetries: 2 }); } catch { /* best effort */ }
+      }
+      throw error;
+    }
+  };
+  const copyOutputArtifactToSnapshot = (sourcePath, snapshotPath, remainingBytes = outputArtifactTotalByteLimit) => {
+    const noFollow = fs.constants.O_NOFOLLOW;
+    if (!Number.isInteger(noFollow)) throw new Error("O_NOFOLLOW is unavailable");
+    let sourceFd = null;
+    let snapshotFd = null;
+    let copied = false;
+    try {
+      sourceFd = fs.openSync(sourcePath, fs.constants.O_RDONLY | noFollow);
+      const before = fs.fstatSync(sourceFd);
+      // Reject hardlinks as well as symlinks. A dropped agent must never turn
+      // a link to an arbitrary host file into a transport-upload capability.
+      if (!before.isFile() || before.nlink !== 1 || !Number.isSafeInteger(before.size) || before.size < 0
+          || (needsPrivilegedStaging && before.uid !== childUid)) return null;
+      if (before.size > outputArtifactByteLimit) return { skipped: "too-large", size: before.size };
+      if (before.size > remainingBytes) return { skipped: "total-limit", size: before.size };
+      snapshotFd = fs.openSync(
+        snapshotPath,
+        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow,
+        0o600,
+      );
+      const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, Math.max(1, before.size)));
+      let offset = 0;
+      while (offset < before.size) {
+        const wanted = Math.min(buffer.length, before.size - offset);
+        const read = fs.readSync(sourceFd, buffer, 0, wanted, null);
+        if (read <= 0) throw new Error("artifact source ended before its recorded size");
+        let written = 0;
+        while (written < read) {
+          const count = fs.writeSync(snapshotFd, buffer, written, read - written);
+          if (count <= 0) throw new Error("artifact snapshot write failed");
+          written += count;
+        }
+        offset += read;
+      }
+      const after = fs.fstatSync(sourceFd);
+      if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size
+          || after.nlink !== 1 || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) {
+        throw new Error("artifact source changed while it was being snapshotted");
+      }
+      fs.fsyncSync(snapshotFd);
+      copied = true;
+      return { size: before.size };
+    } finally {
+      try { if (sourceFd != null) fs.closeSync(sourceFd); } catch { /* best effort */ }
+      try { if (snapshotFd != null) fs.closeSync(snapshotFd); } catch { /* best effort */ }
+      if (!copied) {
+        try { fs.rmSync(snapshotPath, { force: true, maxRetries: 2 }); } catch { /* best effort */ }
+      }
+    }
+  };
+  const snapshotTurnOutputArtifacts = (outputDir, turnCwd) => {
+    if (!outputDir || !supportsArtifactDelivery) return null;
+    let snapshotDir = null;
+    let directory;
+    const candidates = [];
+    let artifactBytes = 0;
+    try {
+      snapshotDir = createTurnOutputSnapshotDirectory(turnCwd);
+      directory = fs.opendirSync(outputDir);
+      const names = [];
+      for (let scanned = 0; scanned < outputArtifactScanLimit; scanned += 1) {
+        const entry = directory.readSync();
+        if (!entry) break;
+        const filename = entry.name;
+        if (!outputFilenameIsSafe(filename)) continue;
+        names.push(filename);
+      }
+      // Do not copy every regular file merely to discover that it falls past
+      // the count cap. A hostile turn can create many files, but it cannot
+      // make the transport duplicate more than the bounded output budget.
+      for (const filename of names.sort((a, b) => a.localeCompare(b))) {
+        if (candidates.length >= outputArtifactLimit) break;
+        let copied;
+        try {
+          copied = copyOutputArtifactToSnapshot(
+            path.join(outputDir, filename),
+            path.join(snapshotDir, filename),
+            outputArtifactTotalByteLimit - artifactBytes,
+          );
+        } catch (error) {
+          log("BOT_ARTIFACT_OUTPUT_SKIPPED", { reason: "unsafe-or-changed", error: String(error?.message ?? error) });
+          continue;
+        }
+        if (copied?.skipped === "too-large") {
+          log("BOT_ARTIFACT_OUTPUT_SKIPPED", { reason: "too-large", bytes: copied.size, maxBytes: outputArtifactByteLimit });
+          continue;
+        }
+        if (copied?.skipped === "total-limit") {
+          log("BOT_ARTIFACT_OUTPUT_SKIPPED", {
+            reason: "total-limit",
+            bytes: copied.size,
+            usedBytes: artifactBytes,
+            maxBytes: outputArtifactTotalByteLimit,
+          });
+          // Preserve deterministic filename order: once the next file cannot
+          // fit, later artifacts are not considered for this bounded turn.
+          break;
+        }
+        if (copied == null) continue;
+        candidates.push({ filePath: path.join(snapshotDir, filename), filename, size: copied.size });
+        artifactBytes += copied.size;
+      }
+      const artifacts = candidates;
+      if (artifacts.length === 0) {
+        cleanupTurnOutputDirectory(snapshotDir);
+        return null;
+      }
+      return { snapshotDir, artifacts };
+    } catch (error) {
+      log("BOT_ARTIFACT_OUTPUT_SCAN_FAILED", { error: String(error?.message ?? error) });
+      if (snapshotDir) cleanupTurnOutputDirectory(snapshotDir);
+      return null;
+    } finally {
+      try { directory?.closeSync(); } catch { /* already closed or unavailable */ }
+    }
   };
 
   // Token/cost usage: the engines already report it per turn — log it and keep
@@ -345,7 +586,7 @@ export const createAgentRuntime = ({
   // answer is accumulated. No wall-clock limit — an idle-silence backstop
   // kills a wedged process (and unblocks the peer queue). Returns { answer },
   // { stopped: true } (user /stop), or null on failure.
-  const runEngine = (peerHex, userText, onAction = null, cwd = workspace, job = null) => new Promise((resolve) => {
+  const runEngine = (peerHex, userText, onAction = null, cwd = workspace, job = null, outputDir = null) => new Promise((resolve) => {
     const k = norm(peerHex);
     if (job?.cancelled) { resolve({ stopped: true }); return; }
     let child;
@@ -356,7 +597,8 @@ export const createAgentRuntime = ({
       const argv = buildArgs({ prompt: userText, model: turnModel, resume, effort: effort || null });
       // Detached: a new process group, so killProcessGroup reaps the CLI's children.
       // stdin ignored: some CLIs (codex) otherwise block on "Reading additional input".
-      const options = { stdio: ["ignore", "pipe", "pipe"], cwd, env: childEnv, detached: true };
+      const env = outputDir ? { ...childEnv, PCA_OUTPUT_DIR: outputDir } : childEnv;
+      const options = { stdio: ["ignore", "pipe", "pipe"], cwd, env, detached: true };
       if (childUid != null) options.uid = childUid;
       if (childGid != null) options.gid = childGid;
       child = spawn(engineCommand, argv, options);
@@ -555,40 +797,67 @@ export const createAgentRuntime = ({
         return true;
       }
       const onAction = chat.beginTurn(peerHex); // arms the "thinking" placeholder
-      const result = await queueEngineTurn(peerHex, async (job) => {
-        const cleanupAttachments = stageAttachmentsForTurn(turnCwd, msg.attachments);
-        try {
-          // Verbatim prompt — the engine keeps its own session; the transport's
-          // renderer only adds attachment/reply/edit context, not a persona.
-          return await runEngine(peerHex, renderMessage(msg), onAction, turnCwd, job);
-        } finally {
-          cleanupAttachments();
+      let artifactHandoff = null;
+      try {
+        const result = await queueEngineTurn(peerHex, async (job) => {
+          const cleanupAttachments = stageAttachmentsForTurn(turnCwd, msg.attachments);
+          let outputDir = null;
+          try {
+            if (supportsArtifactDelivery) {
+              try { outputDir = createTurnOutputDirectory(turnCwd); }
+              catch (error) { log("BOT_ARTIFACT_OUTPUT_DIR_FAILED", { to: peerHex, error: String(error?.message ?? error) }); }
+            }
+            // Verbatim prompt — the engine keeps its own session; the transport's
+            // renderer only adds attachment/reply/edit context, not a persona.
+            // `outputDir` is transport-owned capability context, so surface it
+            // to a renderer only for the turn in which it actually exists.
+            const promptMessage = outputDir == null ? msg : { ...msg, outputDir };
+            const engineResult = await runEngine(peerHex, renderMessage(promptMessage), onAction, turnCwd, job, outputDir);
+            if (engineResult && !engineResult.stopped && outputDir) {
+              // The callback must never receive a path still writable by the
+              // agent. Snapshot it now, while the root transport controls the
+              // destination, then remove the original handoff directory.
+              artifactHandoff = snapshotTurnOutputArtifacts(outputDir, turnCwd);
+            }
+            return engineResult;
+          } finally {
+            cleanupAttachments();
+            cleanupTurnOutputDirectory(outputDir);
+          }
+        });
+        // A user /stop is a completed action, but a process-wide shutdown must
+        // leave the durable owed record for the next process to resume.
+        if (result?.stopped) return !shuttingDown;
+        if (result?.busy) {
+          await sendReply("deliver", peerHex, "I'm busy with other requests right now. Please try again in a moment.");
+          return true;
         }
-      });
-      // A user /stop is a completed action, but a process-wide shutdown must
-      // leave the durable owed record for the next process to resume.
-      if (result?.stopped) return !shuttingDown;
-      if (result?.busy) {
-        await sendReply("deliver", peerHex, "I'm busy with other requests right now. Please try again in a moment.");
-        return true;
-      }
-      if (!result) {
+        if (!result) {
+          if (shuttingDown) return false;
+          // Don't leave the user hanging after the "thinking" placeholder.
+          await sendReply("deliver", peerHex, "Sorry — I couldn't reach my agent just now. Please try again in a moment.");
+          return true;
+        }
+        // A shutdown that happens after the child exits but before a reply
+        // handoff starts must leave the durable ingress record for the next
+        // process. Once a handoff starts, shutdown waits for it below.
         if (shuttingDown) return false;
-        // Don't leave the user hanging after the "thinking" placeholder.
-        await sendReply("deliver", peerHex, "Sorry — I couldn't reach my agent just now. Please try again in a moment.");
+        await runReplyHandoff(async () => {
+          // Discovery: the very first reply to a peer carries a one-time /help
+          // hint (persisted, so a restart doesn't repeat it).
+          let outgoing = result.answer || "(no output)";
+          if (!introducedPeers.has(k)) {
+            introducedPeers.add(k);
+            trimSet(introducedPeers, peerCap);
+            persist();
+            outgoing += "\n\n(Tip: send /help to see my commands.)";
+          }
+          await sendTurn(peerHex, outgoing, artifactHandoff?.artifacts ?? []);
+        });
         return true;
+      } finally {
+        cleanupTurnOutputDirectory(artifactHandoff?.snapshotDir);
       }
-      // Discovery: the very first reply to a peer carries a one-time /help
-      // hint (persisted, so a restart doesn't repeat it).
-      let outgoing = result.answer || "(no output)";
-      if (!introducedPeers.has(k)) {
-        introducedPeers.add(k);
-        trimSet(introducedPeers, peerCap);
-        persist();
-        outgoing += "\n\n(Tip: send /help to see my commands.)";
-      }
-      await sendReply("deliver", peerHex, outgoing);
-      return true;
     },
 
     // /stop lever: cancel a peer's queued or in-flight turn. The transport
@@ -626,7 +895,7 @@ export const createAgentRuntime = ({
         for (const child of runningChildren.values()) killProcessGroup(child);
         log("BOT_AI_SHUTDOWN", { active: activeTurnCount });
       }
-      return Promise.allSettled([...activeTurnPromises]).finally(cleanupPrivateStagingRoot);
+      return Promise.allSettled([...activeTurnPromises, ...activeReplyHandoffs]).finally(cleanupPrivateStagingRoot);
     },
 
     queueStats: () => ({ active: activeTurnCount, queued: queuedTurns.length, activeCap: turnLimit, queuedCap: queuedTurnLimit }),

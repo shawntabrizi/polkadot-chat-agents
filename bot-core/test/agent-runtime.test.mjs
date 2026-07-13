@@ -183,6 +183,230 @@ test("agent children receive a minimal environment with no bot or provider secre
   assert.match(h.delivered[0], /^clean/);
 });
 
+test("direct-agent output artifacts are flat, bounded, snapshotted before delivery, and expose PCA_OUTPUT_DIR only for an artifact transport", async () => {
+  let observed = [];
+  let snapshotDir = null;
+  let renderedOutputDir = null;
+  const h = makeRuntime({
+    maxOutputArtifacts: 2,
+    script: [
+      'test -n "$PCA_OUTPUT_DIR"',
+      'printf "first" > "$PCA_OUTPUT_DIR/b.txt"',
+      'printf "second" > "$PCA_OUTPUT_DIR/a.txt"',
+      'printf "third" > "$PCA_OUTPUT_DIR/c.txt"',
+      'mkdir "$PCA_OUTPUT_DIR/nested"',
+      'printf "nested" > "$PCA_OUTPUT_DIR/nested/ignored.txt"',
+      'ln -s a.txt "$PCA_OUTPUT_DIR/linked.txt"',
+      'printf \'{"type":"result","result":"done"}\\n\'',
+    ].join("; "),
+    renderMessage: (message) => {
+      renderedOutputDir = message.outputDir ?? null;
+      return message.text;
+    },
+    chat: {
+      sendText: async () => {},
+      deliver: async () => {},
+      beginTurn: () => null,
+      deliverArtifacts: async (peerHex, artifacts) => {
+        assert.equal(peerHex, "peer");
+        snapshotDir = path.dirname(artifacts[0].filePath);
+        assert.equal(fs.existsSync(snapshotDir), true, "the callback must receive files before cleanup");
+        assert.notEqual(snapshotDir, renderedOutputDir, "the transport must receive a snapshot, not the agent-writable directory");
+        assert.equal(fs.existsSync(renderedOutputDir), false, "the agent-writable handoff directory must be gone before delivery");
+        observed = artifacts.map((artifact) => ({
+          ...artifact,
+          contents: fs.readFileSync(artifact.filePath, "utf8"),
+        }));
+      },
+    },
+  });
+
+  await h.runtime.handleMessage("peer", { text: "make files", messageId: "M1", kind: "text" });
+
+  assert.deepEqual(observed, [
+    { filename: "a.txt", filePath: path.join(snapshotDir, "a.txt"), size: 6, contents: "second" },
+    { filename: "b.txt", filePath: path.join(snapshotDir, "b.txt"), size: 5, contents: "first" },
+  ]);
+  assert.match(renderedOutputDir, /\.pca-output-/);
+  assert.equal(fs.existsSync(snapshotDir), false, "the private transport snapshot must be removed after delivery");
+});
+
+test("a durable deliverTurn handoff receives immutable artifacts and final text together", async () => {
+  const turns = [];
+  const h = makeRuntime({
+    script: 'printf image > "$PCA_OUTPUT_DIR/chart.png"; printf \'{"type":"result","result":"done"}\\n\'',
+    chat: {
+      sendText: async () => {},
+      deliver: async () => { throw new Error("separate delivery must not run"); },
+      deliverArtifacts: async () => { throw new Error("separate artifact delivery must not run"); },
+      deliverTurn: async (peerHex, turn) => {
+        assert.equal(peerHex, "peer");
+        assert.equal(turn.text.startsWith("done"), true);
+        assert.equal(turn.artifacts.length, 1);
+        assert.equal(fs.readFileSync(turn.artifacts[0].filePath, "utf8"), "image");
+        turns.push({ text: turn.text, filename: turn.artifacts[0].filename });
+      },
+      beginTurn: () => null,
+    },
+  });
+
+  await h.runtime.handleMessage("peer", { text: "make chart", messageId: "M1", kind: "text" });
+  assert.deepEqual(turns, [{ text: "done\n\n(Tip: send /help to see my commands.)", filename: "chart.png" }]);
+});
+
+test("a failed durable deliverTurn propagates and cleans its immutable snapshot", async () => {
+  let snapshotDir = null;
+  const h = makeRuntime({
+    throwOnReplyFailure: true,
+    script: 'printf output > "$PCA_OUTPUT_DIR/report.txt"; printf \'{"type":"result","result":"done"}\\n\'',
+    chat: {
+      sendText: async () => {},
+      deliver: async () => { throw new Error("separate delivery must not run"); },
+      deliverArtifacts: async () => { throw new Error("separate artifact delivery must not run"); },
+      deliverTurn: async (_peerHex, turn) => {
+        snapshotDir = path.dirname(turn.artifacts[0].filePath);
+        assert.equal(fs.readFileSync(turn.artifacts[0].filePath, "utf8"), "output");
+        throw new Error("durable handoff unavailable");
+      },
+      beginTurn: () => null,
+    },
+  });
+
+  await assert.rejects(
+    h.runtime.handleMessage("peer", { text: "make report", messageId: "M1", kind: "text" }),
+    /durable handoff unavailable/,
+  );
+  assert.equal(fs.existsSync(snapshotDir), false, "the runtime must always remove its private snapshot");
+  assert.ok(h.events.some((event) => event.event === "BOT_TURN_DELIVERY_FAILED"));
+});
+
+test("oversized direct-agent artifacts are skipped before delivery while the final reply succeeds", async () => {
+  let observed = [];
+  const h = makeRuntime({
+    maxOutputArtifactBytes: 5,
+    script: [
+      'printf "small" > "$PCA_OUTPUT_DIR/ok.txt"',
+      'printf "too-large" > "$PCA_OUTPUT_DIR/skip.txt"',
+      'printf \'{"type":"result","result":"done"}\\n\'',
+    ].join("; "),
+    chat: {
+      sendText: async () => {},
+      deliver: async (_peerHex, text) => { observed.push({ text }); },
+      beginTurn: () => null,
+      deliverArtifacts: async (_peerHex, artifacts) => {
+        observed.push({ artifacts: artifacts.map((artifact) => ({ filename: artifact.filename, size: artifact.size })) });
+      },
+    },
+  });
+
+  await h.runtime.handleMessage("peer", { text: "make files", messageId: "M1", kind: "text" });
+
+  assert.deepEqual(observed[0], { artifacts: [{ filename: "ok.txt", size: 5 }] });
+  assert.match(observed[1].text, /^done/);
+  assert.ok(h.events.some((event) => event.event === "BOT_ARTIFACT_OUTPUT_SKIPPED" && event.reason === "too-large"));
+});
+
+test("cumulative direct-agent artifact cap stops later snapshots while the final reply succeeds", async () => {
+  const observed = [];
+  const h = makeRuntime({
+    maxOutputArtifactBytes: 10,
+    maxOutputArtifactTotalBytes: 7,
+    script: [
+      'printf "one" > "$PCA_OUTPUT_DIR/a.txt"',
+      'printf "second" > "$PCA_OUTPUT_DIR/b.txt"',
+      // This file would exceed the total cap. `c.txt` would fit after `a.txt`,
+      // but deterministic ordering stops the turn at the first overflow.
+      'printf "four" > "$PCA_OUTPUT_DIR/c.txt"',
+      'printf "later" > "$PCA_OUTPUT_DIR/d.txt"',
+      'printf \'{"type":"result","result":"done"}\\n\'',
+    ].join("; "),
+    chat: {
+      sendText: async () => {},
+      deliver: async (_peerHex, text) => { observed.push({ text }); },
+      beginTurn: () => null,
+      deliverArtifacts: async (_peerHex, artifacts) => {
+        observed.push({ artifacts: artifacts.map((artifact) => ({ filename: artifact.filename, size: artifact.size })) });
+      },
+    },
+  });
+
+  await h.runtime.handleMessage("peer", { text: "make files", messageId: "M1", kind: "text" });
+
+  assert.deepEqual(observed[0], { artifacts: [{ filename: "a.txt", size: 3 }] });
+  assert.match(observed[1].text, /^done/);
+  assert.ok(h.events.some((event) => event.event === "BOT_ARTIFACT_OUTPUT_SKIPPED"
+    && event.reason === "total-limit" && event.bytes === 6 && event.usedBytes === 3 && event.maxBytes === 7));
+});
+
+test("direct-agent artifact output is disabled without a delivery callback", async () => {
+  const h = makeRuntime({
+    agentEnv: { PCA_OUTPUT_DIR: "/must-not-reach-the-agent" },
+    script: 'test -z "${PCA_OUTPUT_DIR+x}" && printf \'{"type":"result","result":"clean"}\\n\'',
+  });
+
+  await h.runtime.handleMessage("peer", { text: "hi", messageId: "M1", kind: "text" });
+
+  assert.match(h.delivered[0], /^clean/);
+  assert.ok(h.events.some((event) => event.event === "BOT_AI_ENV_REJECTED" && event.key === "PCA_OUTPUT_DIR"));
+});
+
+test("artifact output is cleaned when a durable artifact delivery fails", async () => {
+  let outputDir = null;
+  const h = makeRuntime({
+    throwOnReplyFailure: true,
+    script: 'printf output > "$PCA_OUTPUT_DIR/report.txt"; printf \'{"type":"result","result":"done"}\\n\'',
+    chat: {
+      sendText: async () => {},
+      deliver: async () => {},
+      beginTurn: () => null,
+      deliverArtifacts: async (_peerHex, artifacts) => {
+        outputDir = path.dirname(artifacts[0].filePath);
+        throw new Error("upload unavailable");
+      },
+    },
+  });
+
+  await assert.rejects(
+    h.runtime.handleMessage("peer", { text: "make file", messageId: "M1", kind: "text" }),
+    /upload unavailable/,
+  );
+  assert.equal(fs.existsSync(outputDir), false, "cleanup must run even when artifact delivery rejects");
+  assert.ok(h.events.some((event) => event.event === "BOT_ARTIFACT_DELIVERY_FAILED"));
+});
+
+test("shutdown waits for an in-flight artifact handoff before removing its snapshot", async () => {
+  let snapshotDir = null;
+  let releaseDelivery;
+  const deliveryGate = new Promise((resolve) => { releaseDelivery = resolve; });
+  let signalStarted;
+  const deliveryStarted = new Promise((resolve) => { signalStarted = resolve; });
+  const h = makeRuntime({
+    script: 'printf output > "$PCA_OUTPUT_DIR/report.txt"; printf \'{"type":"result","result":"done"}\\n\'',
+    chat: {
+      sendText: async () => {},
+      deliver: async () => {},
+      beginTurn: () => null,
+      deliverArtifacts: async (_peerHex, artifacts) => {
+        snapshotDir = path.dirname(artifacts[0].filePath);
+        signalStarted();
+        await deliveryGate;
+        assert.equal(fs.existsSync(artifacts[0].filePath), true, "shutdown must retain the snapshot while the transport reads it");
+      },
+    },
+  });
+
+  const turn = h.runtime.handleMessage("peer", { text: "make file", messageId: "M1", kind: "text" });
+  await deliveryStarted;
+  let shutdownSettled = false;
+  const shutdown = h.runtime.shutdown().then(() => { shutdownSettled = true; });
+  await delay(25);
+  assert.equal(shutdownSettled, false);
+  assert.equal(fs.existsSync(snapshotDir), true);
+  releaseDelivery();
+  await Promise.all([turn, shutdown]);
+  assert.equal(fs.existsSync(snapshotDir), false);
+});
+
 test("the global turn budget queues work, rejects overflow, and lets /stop cancel queued work", async () => {
   const h = makeRuntime({
     script: 'sleep 0.4; printf \'{"type":"result","result":"done"}\\n\'',

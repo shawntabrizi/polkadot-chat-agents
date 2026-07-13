@@ -20,8 +20,13 @@ import { RUNNERS, resolveEngine } from "./lib/runners.mjs";
 import { deriveT3amsIdentity } from "./lib/t3ams-identity.mjs";
 import { createT3amsProtocol, hexToBytes, bareHex } from "./lib/t3ams-protocol.mjs";
 import { createT3amsMedia } from "./lib/t3ams-media.mjs";
-import { DEFAULT_T3AMS_ATTACHMENT_MIME_TYPES } from "./lib/t3ams-attachments.mjs";
+import {
+  DEFAULT_T3AMS_ATTACHMENT_MIME_TYPES,
+  isT3amsAttachmentMimeAllowed,
+  normalizeT3amsAttachmentRefs,
+} from "./lib/t3ams-attachments.mjs";
 import { createT3amsChannelContext } from "./lib/t3ams-channel-context.mjs";
+import { createT3amsMessageLifecycle } from "./lib/t3ams-message-lifecycle.mjs";
 import {
   MAX_T3AMS_TEXT_BYTES,
   normalizeT3amsInbound,
@@ -71,6 +76,20 @@ try {
 }
 const stateStore = createStateStore(path.join(stateDir, "t3ams-state.json"));
 const restored = stateStore.load();
+// Generated direct-agent files are copied here before any network upload.
+// This is deliberately inside the transport's private state directory rather
+// than the agent-writable PCA_OUTPUT_DIR, so a retried handoff has immutable
+// bytes even after the child process and its staging directory have gone.
+const agentArtifactOutboxRoot = path.join(stateDir, "agent-outbox");
+try {
+  fs.mkdirSync(agentArtifactOutboxRoot, { recursive: true, mode: 0o700 });
+  fs.chmodSync(agentArtifactOutboxRoot, 0o700);
+  const stat = fs.lstatSync(agentArtifactOutboxRoot);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("not a private directory");
+} catch (error) {
+  console.error(`BOT_STATE_DIR cannot hold a private generated-artifact outbox: ${String(error?.message ?? error)}`);
+  process.exit(2);
+}
 
 // @t3ams/bcts is intentionally loaded at runtime so ordinary Polkadot-app
 // installations do not need the optional, currently local T3ams SDK package.
@@ -105,6 +124,20 @@ if (bridgeToken.length < 32) {
   console.error("BOT_BRIDGE_TOKEN must be set to a 32+ character random secret");
   process.exit(2);
 }
+// A framework normally earns the right to publish by holding a leased inbound
+// delivery. Some framework facilities (for example OpenClaw attached results
+// from a scheduled task) have no inbound delivery to bind. Keep that
+// exceptional outbound authority separate from the all-purpose bridge token,
+// optional, and deliberately scoped to /send, /react, and /typing below.
+const bridgeProactiveToken = (env.BOT_BRIDGE_PROACTIVE_TOKEN ?? "").trim();
+if (bridgeProactiveToken && bridgeProactiveToken.length < 32) {
+  console.error("BOT_BRIDGE_PROACTIVE_TOKEN must be empty or a 32+ character random secret");
+  process.exit(2);
+}
+if (bridgeProactiveToken && bridgeProactiveToken === bridgeToken) {
+  console.error("BOT_BRIDGE_PROACTIVE_TOKEN must differ from BOT_BRIDGE_TOKEN");
+  process.exit(2);
+}
 const brain = (env.BOT_BRAIN ?? "bridge").trim().toLowerCase();
 if (!new Set(["echo", "claude", "codex", "opencode", "bridge", "hermes"]).has(brain)) {
   console.error("BOT_BRAIN must be echo, claude, codex, opencode, bridge, or hermes");
@@ -123,7 +156,16 @@ const liveProgress = env.BOT_LIVE_PROGRESS !== "0";
 const liveTtlMs = numberEnv("BOT_LIVE_TTL_MS", 600_000, { min: 1000, max: 7 * 86_400_000 });
 const liveTimeoutText = env.BOT_LIVE_TIMEOUT_TEXT
   ?? "⚠️ I lost track of this one — something went wrong on my end. Please send it again.";
-const replyChunkBytes = numberEnv("BOT_REPLY_CHUNK_BYTES", 4_000, { min: 128, max: MAX_T3AMS_TEXT_BYTES });
+const configuredReplyChunkBytes = numberEnv("BOT_REPLY_CHUNK_BYTES", 4_000, { min: 128, max: MAX_T3AMS_TEXT_BYTES });
+// splitMessageText has a 256-byte UTF-8 safety floor. Normalize the transport
+// setting to that same effective value so a valid 128–255 configuration never
+// stages chunks that its own durable validator later rejects.
+const replyChunkBytes = Math.max(256, configuredReplyChunkBytes);
+// Keep the durable final-turn journal bounded by the same response cap the
+// runner enforces. A small allowance covers the persisted one-time help hint.
+const aiMaxOutputBytes = numberEnv("BOT_AI_MAX_OUTPUT_BYTES", 1_000_000, { min: 1024, max: 64 * 1024 * 1024 });
+const agentReplyOutboxMaxBytes = Math.min(64 * 1024 * 1024 + 8 * 1024, aiMaxOutputBytes + 8 * 1024);
+const agentReplyOutboxMaxParts = Math.ceil(agentReplyOutboxMaxBytes / 256);
 
 // T3ams puts a small encrypted HOP capability inside each BCTS attachment
 // reference.  Keep the accepted surface explicit: bot-core treats the bytes
@@ -131,21 +173,67 @@ const replyChunkBytes = numberEnv("BOT_REPLY_CHUNK_BYTES", 4_000, { min: 128, ma
 // MIME list for a public deployment.  These caps are shared by protocol
 // decoding, the private media cache, and outbound file delivery.
 const attachmentMaxBytes = numberEnv("BOT_T3AMS_ATTACHMENT_MAX_BYTES", 25 * 1024 * 1024, { min: 1, max: 25 * 1024 * 1024 });
-const attachmentMaxCount = numberEnv("BOT_T3AMS_ATTACHMENT_MAX_COUNT", 4, { min: 0, max: 4 });
+const attachmentMaxCount = numberEnv("BOT_T3AMS_ATTACHMENT_MAX_COUNT", 8, { min: 0, max: 16 });
+const attachmentMaxDurationMs = numberEnv(
+  "BOT_T3AMS_ATTACHMENT_MAX_DURATION_MS",
+  7 * 24 * 60 * 60 * 1000,
+  { min: 0, max: 31 * 24 * 60 * 60 * 1000 },
+);
 const attachmentMimeRaw = env.BOT_T3AMS_ATTACHMENT_MIME_TYPES;
 const attachmentMimeTypes = attachmentMimeRaw == null || attachmentMimeRaw.trim() === ""
   ? [...DEFAULT_T3AMS_ATTACHMENT_MIME_TYPES]
   : attachmentMimeRaw.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean);
-const attachmentMimePattern = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/;
+const attachmentMimePattern = /^(?:\*\/\*|[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/(?:\*|[a-z0-9][a-z0-9!#$&^_.+-]{0,126}))$/;
 if (attachmentMimeTypes.length === 0 || attachmentMimeTypes.some((mime) => !attachmentMimePattern.test(mime))) {
-  console.error("BOT_T3AMS_ATTACHMENT_MIME_TYPES must be a comma-separated list of MIME types");
+  console.error("BOT_T3AMS_ATTACHMENT_MIME_TYPES must be comma-separated exact MIME types, type/* patterns, or */*");
   process.exit(2);
 }
 const attachmentOptions = {
   maxBytes: attachmentMaxBytes,
   maxCount: attachmentMaxCount,
+  maxDurationMs: attachmentMaxDurationMs,
   allowedMimeTypes: [...new Set(attachmentMimeTypes)],
 };
+// Direct Claude/Codex/OpenCode sessions may hand back files by writing them
+// to their per-turn PCA_OUTPUT_DIR. Keep this independently configurable so a
+// public bot can accept inbound media while declining generated artifacts.
+const agentOutputArtifactMaxCount = numberEnv(
+  "BOT_T3AMS_AGENT_OUTPUT_MAX_ARTIFACTS",
+  attachmentMaxCount,
+  { min: 0, max: 16 },
+);
+const agentOutputArtifactMaxTotalBytes = numberEnv(
+  "BOT_T3AMS_AGENT_OUTPUT_MAX_TOTAL_BYTES",
+  Math.max(
+    attachmentMaxBytes,
+    Math.min(64 * 1024 * 1024, attachmentMaxBytes * Math.max(1, agentOutputArtifactMaxCount)),
+  ),
+  { min: 1, max: 512 * 1024 * 1024 },
+);
+// A per-turn artifact cap alone is not enough: many retained ingress rows
+// can otherwise fill BOT_STATE_DIR after an outage. These limits apply only
+// to immutable, not-yet-delivered generated files; the regular media/file
+// stores keep their own independent quotas.
+const agentArtifactOutboxMaxEntries = numberEnv(
+  "BOT_T3AMS_AGENT_OUTBOX_MAX_ENTRIES",
+  Math.min(1_024, Math.max(16, 128 * Math.max(1, agentOutputArtifactMaxCount))),
+  { min: 1, max: 100_000 },
+);
+const agentArtifactOutboxMaxBytes = numberEnv(
+  "BOT_T3AMS_AGENT_OUTBOX_MAX_BYTES",
+  Math.max(agentOutputArtifactMaxTotalBytes, Math.min(512 * 1024 * 1024, agentOutputArtifactMaxTotalBytes * 8)),
+  { min: agentOutputArtifactMaxTotalBytes, max: 4 * 1024 * 1024 * 1024 },
+);
+const agentReplyOutboxMaxEntries = numberEnv(
+  "BOT_T3AMS_REPLY_OUTBOX_MAX_ENTRIES",
+  128,
+  { min: 1, max: 100_000 },
+);
+const agentReplyOutboxMaxTotalBytes = numberEnv(
+  "BOT_T3AMS_REPLY_OUTBOX_MAX_BYTES",
+  Math.max(agentReplyOutboxMaxBytes, Math.min(128 * 1024 * 1024, agentReplyOutboxMaxBytes * 32)),
+  { min: agentReplyOutboxMaxBytes, max: 4 * 1024 * 1024 * 1024 },
+);
 // Explicit empty value turns retrieval/upload off, which is useful for an
 // operator who wants metadata-only bot behavior.  Otherwise use the exact
 // Bulletin network configured by the current T3ams SPA.
@@ -263,6 +351,7 @@ const submit = createSerializedSubmitter(async ({ channel, topics, data }) => {
 
 let protocol;
 let agentRuntime = null;
+let messageLifecycle = null;
 // Every authenticated message is first placed in this bounded, disk-backed
 // journal. This is deliberately shared by direct brains and HTTP harnesses:
 // a full dispatcher, a bridge restart, or an unflushed lease must cause a
@@ -284,6 +373,155 @@ const knownChats = createT3amsKnownChats({
   isValid: isT3amsConversationKey,
 });
 const deadLetters = [];
+// A deleted queued turn is removed before its next model dispatch. If the
+// durable journal write is temporarily unavailable, keep its route pinned
+// until the retry succeeds rather than evicting reply metadata too early.
+const deferredIngressUnpins = [];
+// Outbox directories are only removed after the matching journal mutation is
+// durable. That way a power loss cannot leave state claiming a retryable
+// artifact while this process has already discarded its immutable bytes.
+const deferredAgentArtifactOutboxCleanup = [];
+const ARTIFACT_OUTBOX_STORED_NAME_RE = /^artifact-[0-9]{1,2}-[a-f0-9]{16}$/;
+const ARTIFACT_FILENAME_CONTROL_RE = /[\u0000-\u001f\u007f\\/]/;
+const ARTIFACT_MIME_RE = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/;
+const fsyncDirectory = (directory) => {
+  // Some platforms/filesystems do not permit syncing a directory. The data
+  // file itself is always fsynced; this is the best available extra barrier
+  // before a manifest starts referring to a newly-created dirent.
+  try {
+    const fd = fs.openSync(directory, "r");
+    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  } catch { /* unavailable on this filesystem */ }
+};
+const artifactOutboxDirectory = (id) => {
+  if (typeof id !== "string" || !/^[A-Za-z0-9-]{1,128}$/.test(id)) return null;
+  return path.join(agentArtifactOutboxRoot, id);
+};
+const validAgentArtifactFilename = (value) => typeof value === "string"
+  && value === value.trim()
+  && value !== "."
+  && value !== ".."
+  && Buffer.byteLength(value, "utf8") > 0
+  && Buffer.byteLength(value, "utf8") <= 255
+  && !ARTIFACT_FILENAME_CONTROL_RE.test(value);
+const serializeUploadedAttachmentRef = (ref) => {
+  if (ref == null || !(ref.id instanceof Uint8Array) || !(ref.hash instanceof Uint8Array)
+      || typeof ref.storageUrl !== "string" || typeof ref.mimeType !== "string"
+      || !Number.isSafeInteger(ref.fileSize) || typeof ref.filename !== "string") return null;
+  return {
+    id: Buffer.from(ref.id).toString("hex"),
+    hash: Buffer.from(ref.hash).toString("hex"),
+    storageUrl: ref.storageUrl,
+    mimeType: ref.mimeType,
+    fileSize: ref.fileSize,
+    filename: ref.filename,
+    ...(Number.isSafeInteger(ref.width) ? { width: ref.width } : {}),
+    ...(Number.isSafeInteger(ref.height) ? { height: ref.height } : {}),
+    ...(Number.isSafeInteger(ref.durationMs) ? { durationMs: ref.durationMs } : {}),
+  };
+};
+const restoreUploadedAttachmentRef = (raw, file) => {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)
+      || typeof raw.id !== "string" || !/^[0-9a-f]{64}$/i.test(raw.id)
+      || typeof raw.hash !== "string" || !/^[0-9a-f]{64}$/i.test(raw.hash)
+      || typeof raw.storageUrl !== "string" || typeof raw.mimeType !== "string"
+      || !Number.isSafeInteger(raw.fileSize) || typeof raw.filename !== "string") return null;
+  const ref = {
+    id: hexToBytes(raw.id),
+    hash: hexToBytes(raw.hash),
+    storageUrl: raw.storageUrl,
+    mimeType: raw.mimeType,
+    fileSize: raw.fileSize,
+    filename: raw.filename,
+    ...(raw.width == null ? {} : { width: raw.width }),
+    ...(raw.height == null ? {} : { height: raw.height }),
+    ...(raw.durationMs == null ? {} : { durationMs: raw.durationMs }),
+  };
+  try {
+    const [attachment] = normalizeT3amsAttachmentRefs([ref], attachmentOptions);
+    if (attachment.filename !== file.filename || attachment.mime !== file.mime || attachment.size !== file.size) return null;
+    return { ref, attachment };
+  } catch {
+    return null;
+  }
+};
+const restoreAgentArtifactOutbox = (raw, revision) => {
+  if (raw == null) return { outbox: null, invalid: false };
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)
+      || !Number.isSafeInteger(raw.revision) || raw.revision !== revision
+      || !Array.isArray(raw.files) || raw.files.length === 0 || raw.files.length > 16) {
+    return { outbox: null, invalid: true };
+  }
+  const files = [];
+  const storedNames = new Set();
+  let totalBytes = 0;
+  for (const item of raw.files) {
+    const filename = item?.filename;
+    const storedName = item?.storedName;
+    const size = Number(item?.size);
+    const mime = typeof item?.mime === "string" ? item.mime.toLowerCase() : "";
+    const sent = item?.sent === true;
+    const messageId = item?.messageId == null ? null : bareHex(item.messageId);
+    if (!validAgentArtifactFilename(filename) || !ARTIFACT_OUTBOX_STORED_NAME_RE.test(storedName)
+        || storedNames.has(storedName) || !Number.isSafeInteger(size) || size < 0 || size > attachmentMaxBytes
+        || !ARTIFACT_MIME_RE.test(mime) || (messageId != null && !/^[0-9a-f]{64}$/.test(messageId))) {
+      return { outbox: null, invalid: true };
+    }
+    totalBytes += size;
+    if (!Number.isSafeInteger(totalBytes) || totalBytes > agentOutputArtifactMaxTotalBytes) {
+      return { outbox: null, invalid: true };
+    }
+    const file = { filename, storedName, size, mime, sent, ...(messageId == null ? {} : { messageId }) };
+    const uploaded = item?.uploaded == null ? null : restoreUploadedAttachmentRef(item.uploaded, file);
+    if (item?.uploaded != null && uploaded == null) return { outbox: null, invalid: true };
+    storedNames.add(storedName);
+    files.push({ ...file, ...(uploaded == null ? {} : { uploaded }) });
+  }
+  return { outbox: { revision, files }, invalid: false };
+};
+const restoreAgentReplyOutbox = (raw, revision) => {
+  if (raw == null) return { outbox: null, invalid: false };
+  if (typeof raw !== "object" || Array.isArray(raw) || raw.revision !== revision
+      || typeof raw.text !== "string" || Buffer.byteLength(raw.text, "utf8") > agentReplyOutboxMaxBytes
+      || !Array.isArray(raw.parts) || raw.parts.length < 1 || raw.parts.length > agentReplyOutboxMaxParts
+      || !Number.isSafeInteger(raw.nextPart) || raw.nextPart < 0 || raw.nextPart > raw.parts.length
+      || raw.parts.some((part) => typeof part !== "string" || Buffer.byteLength(part, "utf8") > MAX_T3AMS_TEXT_BYTES)) {
+    return { outbox: null, invalid: true };
+  }
+  // Chunking intentionally trims paragraph separators and may add/reopen a
+  // fenced-code marker, so concatenating parts is not a valid integrity
+  // check. Keep the exact already-planned chunks across a config change.
+  return { outbox: { revision, text: raw.text, parts: [...raw.parts], nextPart: raw.nextPart }, invalid: false };
+};
+const snapshotAgentArtifactOutbox = (outbox) => ({
+  revision: outbox.revision,
+  files: outbox.files.map((file) => {
+    const uploaded = file.uploaded?.ref == null ? null : serializeUploadedAttachmentRef(file.uploaded.ref);
+    return {
+      filename: file.filename,
+      storedName: file.storedName,
+      size: file.size,
+      mime: file.mime,
+      sent: file.sent === true,
+      ...(file.messageId == null ? {} : { messageId: file.messageId }),
+      ...(uploaded == null ? {} : { uploaded }),
+    };
+  }),
+});
+const removeAgentArtifactOutbox = (id) => {
+  const directory = artifactOutboxDirectory(id);
+  if (directory == null) return;
+  try {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 2 });
+    fsyncDirectory(agentArtifactOutboxRoot);
+  }
+  catch (error) { log("T3AMS_AGENT_ARTIFACT_OUTBOX_CLEANUP_FAILED", { id, error: String(error?.message ?? error) }); }
+};
+const cleanupDeferredAgentArtifactOutboxes = () => {
+  while (deferredAgentArtifactOutboxCleanup.length > 0) {
+    removeAgentArtifactOutbox(deferredAgentArtifactOutbox.shift());
+  }
+};
 const bridgeWaiters = new Set();
 const wakeBridge = () => {
   for (const resolve of [...bridgeWaiters]) {
@@ -299,6 +537,13 @@ for (const raw of Array.isArray(restored?.ingress) ? restored.ingress.slice(-ing
     : null;
   const kind = raw?.kind === "bridge" || raw?.kind === "turn" ? raw.kind : null;
   if (routed == null || id == null || kind == null) continue;
+  const revision = Number.isSafeInteger(raw.revision) && raw.revision >= 0 ? raw.revision : 0;
+  const restoredOutbox = kind === "turn"
+    ? restoreAgentArtifactOutbox(raw.agentArtifactOutbox, revision)
+    : { outbox: null, invalid: false };
+  const restoredReplyOutbox = kind === "turn"
+    ? restoreAgentReplyOutbox(raw.agentReplyOutbox, revision)
+    : { outbox: null, invalid: false };
   restoredIngressIds.add(id);
   ingress.push({
     id,
@@ -308,6 +553,11 @@ for (const raw of Array.isArray(restored?.ingress) ? restored.ingress.slice(-ing
     attempts: Number.isSafeInteger(raw.attempts) && raw.attempts >= 0 ? raw.attempts : 0,
     retryAt: Number.isSafeInteger(raw.retryAt) && raw.retryAt > Date.now() ? raw.retryAt : 0,
     completedAt: Number.isSafeInteger(raw.completedAt) && raw.completedAt > 0 ? raw.completedAt : 0,
+    revision,
+    artifactOutbox: restoredOutbox.outbox,
+    artifactOutboxInvalid: restoredOutbox.invalid,
+    replyOutbox: restoredReplyOutbox.outbox,
+    replyOutboxInvalid: restoredReplyOutbox.invalid,
     // A process restart intentionally releases all harness leases. The next
     // adapter poll receives the durable delivery again rather than losing it.
     leaseId: null,
@@ -329,7 +579,9 @@ const stateSnapshot = () => ({
   v: 1,
   submissionPriority: priorityClock.priority().toString(),
   t3ams: protocol?.snapshot?.() ?? restored?.t3ams ?? null,
+  messageLifecycle: messageLifecycle?.snapshot?.() ?? restored?.messageLifecycle ?? null,
   agent: agentRuntime?.snapshotAgent?.() ?? restored?.agent ?? null,
+  agentIntroduced: agentRuntime?.introducedList?.() ?? restored?.agentIntroduced ?? [],
   agentPeers: agentRuntime == null ? [] : knownChats.keys().flatMap((chatId) => {
     const peer = agentRuntime.peerSnapshot(chatId);
     return Object.keys(peer).length > 0 ? [{ chatId, ...peer }] : [];
@@ -342,6 +594,9 @@ const stateSnapshot = () => ({
     attempts: entry.attempts ?? 0,
     retryAt: entry.retryAt ?? 0,
     completedAt: entry.completedAt ?? 0,
+    revision: entry.revision ?? 0,
+    ...(entry.artifactOutbox == null ? {} : { agentArtifactOutbox: snapshotAgentArtifactOutbox(entry.artifactOutbox) }),
+    ...(entry.replyOutbox == null ? {} : { agentReplyOutbox: entry.replyOutbox }),
     leaseId: entry.leaseId ?? null,
     leaseUntil: entry.leaseUntil ?? 0,
   })),
@@ -383,6 +638,8 @@ const scheduleIngressDurabilityRetry = () => {
         scheduleIngressDurabilityRetry();
         return false;
       }
+      while (deferredIngressUnpins.length > 0) protocol.unpinConversation(deferredIngressUnpins.shift());
+      cleanupDeferredAgentArtifactOutboxes();
       ingressDurable = true;
       wakeBridge();
       pumpIngress();
@@ -395,7 +652,10 @@ const scheduleIngressDurabilityRetry = () => {
 const subscriptions = new Map();
 const subscriptionRetryTimers = new Map();
 const subscriptionRetryAttempts = new Map();
-const subscriptionCap = numberEnv("BOT_T3AMS_SUBSCRIPTION_CAP", 256, { min: 4, max: 4_096 });
+// A known DM needs both its carrier and ops route so user redactions/edits
+// reconcile before dispatch. Leave room for the default known-chat roster as
+// well as workspace control/channel routes.
+const subscriptionCap = numberEnv("BOT_T3AMS_SUBSCRIPTION_CAP", 1_024, { min: 4, max: 4_096 });
 const inboundCallbackCap = numberEnv("BOT_T3AMS_INGRESS_CALLBACK_CAP", 128, { min: 1, max: 1_024 });
 const inboundCallbackConcurrency = numberEnv("BOT_T3AMS_INGRESS_CALLBACK_CONCURRENCY", 1, { min: 1, max: 16 });
 const inboundCallbacks = [];
@@ -530,8 +790,14 @@ const sendT3amsAttachment = async (chatId, {
   text = null,
   filename = null,
   threadRootId = undefined,
+  // Durable direct-agent delivery can resume after Bulletin upload without
+  // buying/uploading the same encrypted blob again. The ref stays private in
+  // BOT_STATE_DIR and is never returned by the bridge API.
+  uploaded: persistedUpload = null,
+  onUploaded = null,
+  beforeSend = null,
 } = {}) => {
-  if (!t3amsMedia.enabled) {
+  if (!t3amsMedia.enabled && persistedUpload == null) {
     throw new Error("T3ams file delivery is disabled; configure BOT_T3AMS_BULLETIN_RPC and a funded Bulletin allowance");
   }
   // A bridge vault can preserve a more specific MIME than T3ams has elected
@@ -539,15 +805,24 @@ const sendT3amsAttachment = async (chatId, {
   // standards-defined generic type, rather than making saved arbitrary files
   // impossible to retrieve through the chat.
   const requestedMime = typeof mime === "string" ? mime.trim().toLowerCase() : "";
-  const outgoingMime = attachmentOptions.allowedMimeTypes.includes(requestedMime)
+  const outgoingMime = requestedMime && isT3amsAttachmentMimeAllowed(attachmentOptions.allowedMimeTypes, requestedMime)
     ? requestedMime
-    : attachmentOptions.allowedMimeTypes.includes("application/octet-stream")
+    : isT3amsAttachmentMimeAllowed(attachmentOptions.allowedMimeTypes, "application/octet-stream")
       ? "application/octet-stream"
       : null;
   if (outgoingMime == null) {
     throw new Error("file MIME is outside this bot's T3ams attachment policy");
   }
-  const uploaded = await t3amsMedia.upload({ filePath, mime: outgoingMime, size, filename });
+  let uploaded = persistedUpload;
+  if (uploaded == null) {
+    uploaded = await t3amsMedia.upload({ filePath, mime: outgoingMime, size, filename });
+    if (typeof onUploaded === "function") await onUploaded(uploaded);
+  }
+  if (uploaded?.ref == null || uploaded?.attachment == null
+      || uploaded.attachment.mime !== outgoingMime || uploaded.attachment.size !== size) {
+    throw new Error("persisted T3ams attachment upload is invalid");
+  }
+  if (typeof beforeSend === "function") await beforeSend(uploaded);
   const body = typeof text === "string" ? text : uploaded.attachment.filename;
   const root = threadRootId === undefined ? replyThreadFor(chatId) : threadRootId;
   const sent = await protocol.sendRichText(chatId, body, {
@@ -558,6 +833,551 @@ const sendT3amsAttachment = async (chatId, {
   log("T3AMS_SENT_FILE", { chatId, mime: uploaded.attachment.mime, bytes: uploaded.attachment.size });
   return { ...sent, attachment: uploaded.attachment };
 };
+// Node does not depend on a heavyweight media-sniffing library merely to
+// label a direct agent's generated artifact. Prefer a conservative extension
+// mapping for client rendering; unknown output remains a safe opaque file.
+const mimeForT3amsFilename = (filename) => {
+  const extension = path.extname(String(filename ?? "")).toLowerCase();
+  return {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif",
+    ".webp": "image/webp", ".avif": "image/avif", ".heic": "image/heic", ".bmp": "image/bmp", ".tif": "image/tiff", ".tiff": "image/tiff",
+    ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime", ".m4v": "video/x-m4v",
+    ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg", ".m4a": "audio/mp4", ".flac": "audio/flac",
+    ".pdf": "application/pdf", ".txt": "text/plain", ".md": "text/markdown", ".csv": "text/csv",
+    ".json": "application/json", ".xml": "application/xml", ".rtf": "application/rtf",
+    ".doc": "application/msword", ".xls": "application/vnd.ms-excel", ".ppt": "application/vnd.ms-powerpoint",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".zip": "application/zip", ".gz": "application/gzip", ".tar": "application/x-tar",
+    ".7z": "application/x-7z-compressed", ".rar": "application/vnd.rar",
+  }[extension] ?? "application/octet-stream";
+};
+// Direct-agent final turns are staged as one durable handoff: immutable files
+// plus every final-text chunk. The journal is committed before the first HOP
+// upload or chat statement, so a retry drains this exact output and never
+// asks the model/tools to produce a second answer.
+const activeAgentArtifactDeliveries = new Map(); // chatId -> { id, revision }
+// Snapshot copies happen outside the journal mutex so a large PDF does not
+// block ingress bookkeeping. Reserve their global capacity first, otherwise
+// several concurrent turns could all pass the quota check before any one
+// manifest is visible in `ingress`.
+const pendingAgentArtifactReservations = new Map(); // entryId -> { revision, entries, bytes }
+const pendingAgentReplyReservations = new Map(); // entryId -> { revision, bytes }
+const artifactOutboxPath = (entryId, storedName) => {
+  const directory = artifactOutboxDirectory(entryId);
+  if (directory == null || !ARTIFACT_OUTBOX_STORED_NAME_RE.test(storedName)) return null;
+  return path.join(directory, storedName);
+};
+const ensureAgentArtifactOutboxDirectory = (entryId) => {
+  const directory = artifactOutboxDirectory(entryId);
+  if (directory == null) throw new Error("invalid generated-artifact outbox ID");
+  let created = false;
+  try { fs.mkdirSync(directory, { mode: 0o700 }); created = true; }
+  catch (error) { if (error?.code !== "EEXIST") throw error; }
+  const stat = fs.lstatSync(directory);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("generated-artifact outbox directory is unsafe");
+  try { fs.chmodSync(directory, 0o700); } catch { /* state-dir permissions were verified at startup */ }
+  if (created) fsyncDirectory(agentArtifactOutboxRoot);
+  return directory;
+};
+const artifactOutboxError = (code, message) => {
+  const error = new Error(message);
+  error.code = code;
+  error.t3amsTerminal = true;
+  return error;
+};
+const artifactHandoffSuperseded = () => {
+  const error = new Error("generated-artifact handoff was superseded by an edit or delete");
+  error.code = "T3AMS_INGRESS_SUPERSEDED";
+  error.t3amsSuperseded = true;
+  return error;
+};
+const copyAgentArtifactToOutbox = (entryId, artifact, index) => {
+  if (artifact == null || typeof artifact.filePath !== "string" || !validAgentArtifactFilename(artifact.filename)
+      || !Number.isSafeInteger(artifact.size) || artifact.size < 0 || artifact.size > attachmentMaxBytes) {
+    throw artifactOutboxError("T3AMS_ARTIFACT_OUTBOX_INVALID", "agent artifact metadata is invalid");
+  }
+  const directory = ensureAgentArtifactOutboxDirectory(entryId);
+  const storedName = `artifact-${index}-${createHash("sha256")
+    .update(randomUUID())
+    .update("\\0")
+    .update(artifact.filename)
+    .update("\\0")
+    .update(String(artifact.size))
+    .digest("hex")
+    .slice(0, 16)}`;
+  const destination = artifactOutboxPath(entryId, storedName);
+  if (destination == null || path.dirname(destination) !== directory) {
+    throw artifactOutboxError("T3AMS_ARTIFACT_OUTBOX_INVALID", "agent artifact outbox path is invalid");
+  }
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+  let sourceFd = null;
+  let destinationFd = null;
+  let copied = false;
+  try {
+    sourceFd = fs.openSync(artifact.filePath, fs.constants.O_RDONLY | noFollow);
+    const source = fs.fstatSync(sourceFd);
+    if (!source.isFile() || source.nlink !== 1 || !Number.isSafeInteger(source.size) || source.size !== artifact.size) {
+      throw artifactOutboxError("T3AMS_ARTIFACT_OUTBOX_INVALID", "agent artifact snapshot is unsafe or changed");
+    }
+    destinationFd = fs.openSync(
+      destination,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow,
+      0o600,
+    );
+    const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, Math.max(1, source.size)));
+    let copiedBytes = 0;
+    while (copiedBytes < source.size) {
+      const read = fs.readSync(sourceFd, buffer, 0, Math.min(buffer.length, source.size - copiedBytes), null);
+      if (read <= 0) throw new Error("agent artifact snapshot ended before its recorded size");
+      let written = 0;
+      while (written < read) {
+        const count = fs.writeSync(destinationFd, buffer, written, read - written);
+        if (count <= 0) throw new Error("generated-artifact outbox write failed");
+        written += count;
+      }
+      copiedBytes += read;
+    }
+    const after = fs.fstatSync(sourceFd);
+    if (after.dev !== source.dev || after.ino !== source.ino || after.size !== source.size || after.nlink !== 1) {
+      throw artifactOutboxError("T3AMS_ARTIFACT_OUTBOX_INVALID", "agent artifact snapshot changed during copy");
+    }
+    fs.fsyncSync(destinationFd);
+    fsyncDirectory(directory);
+    copied = true;
+    return {
+      filename: artifact.filename,
+      storedName,
+      size: source.size,
+      mime: mimeForT3amsFilename(artifact.filename),
+      sent: false,
+    };
+  } finally {
+    try { if (sourceFd != null) fs.closeSync(sourceFd); } catch { /* best effort */ }
+    try { if (destinationFd != null) fs.closeSync(destinationFd); } catch { /* best effort */ }
+    if (!copied) {
+      try { fs.rmSync(destination, { force: true, maxRetries: 2 }); } catch { /* best effort */ }
+    }
+  }
+};
+const assertOutboxFile = (entryId, file) => {
+  const filePath = artifactOutboxPath(entryId, file.storedName);
+  if (filePath == null) throw artifactOutboxError("T3AMS_ARTIFACT_OUTBOX_CORRUPT", "generated-artifact outbox path is invalid");
+  let stat;
+  try { stat = fs.lstatSync(filePath); }
+  catch { throw artifactOutboxError("T3AMS_ARTIFACT_OUTBOX_CORRUPT", "generated-artifact outbox file is missing"); }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0 || stat.size !== file.size) {
+    throw artifactOutboxError("T3AMS_ARTIFACT_OUTBOX_CORRUPT", "generated-artifact outbox file is invalid");
+  }
+  return filePath;
+};
+const artifactOutboxUsage = ({ exceptId = null } = {}) => {
+  let entries = 0;
+  let bytes = 0;
+  for (const entry of ingress) {
+    if (entry.id === exceptId || entry.artifactOutbox == null) continue;
+    for (const file of entry.artifactOutbox.files) {
+      // An upload reference is enough to resume the statement submission; the
+      // private source bytes can be reclaimed as soon as that reference is
+      // durable. Sent files are similarly no longer needed.
+      if (file.sent || file.uploaded != null) continue;
+      entries += 1;
+      bytes += file.size;
+    }
+  }
+  return { entries, bytes };
+};
+const replyOutboxByteCost = (reply) => Buffer.byteLength(reply.text, "utf8")
+  + reply.parts.reduce((total, part) => total + Buffer.byteLength(part, "utf8"), 0)
+  + 256;
+const replyOutboxUsage = ({ exceptId = null } = {}) => {
+  let entries = 0;
+  let bytes = 0;
+  for (const entry of ingress) {
+    if (entry.id === exceptId || entry.replyOutbox == null) continue;
+    if (entry.replyOutbox.nextPart >= entry.replyOutbox.parts.length) continue;
+    entries += 1;
+    bytes += replyOutboxByteCost(entry.replyOutbox);
+  }
+  return { entries, bytes };
+};
+const pendingArtifactOutboxUsage = ({ exceptId = null } = {}) => {
+  let entries = 0;
+  let bytes = 0;
+  for (const [id, reservation] of pendingAgentArtifactReservations) {
+    if (id === exceptId) continue;
+    entries += reservation.entries;
+    bytes += reservation.bytes;
+  }
+  return { entries, bytes };
+};
+const reserveAgentArtifactOutboxCapacity = async (context, entries, bytes) => mutateIngress(async () => {
+  const current = ingress.find((entry) => entry.id === context.id);
+  if (current == null || ingressRevision(current) !== context.revision) return "superseded";
+  const used = artifactOutboxUsage({ exceptId: context.id });
+  const pending = pendingArtifactOutboxUsage({ exceptId: context.id });
+  if (used.entries + pending.entries + entries > agentArtifactOutboxMaxEntries
+      || used.bytes + pending.bytes + bytes > agentArtifactOutboxMaxBytes) {
+    throw artifactOutboxError("T3AMS_ARTIFACT_OUTBOX_FULL", "generated-artifact outbox capacity is exhausted");
+  }
+  pendingAgentArtifactReservations.set(context.id, { revision: context.revision, entries, bytes });
+  return true;
+});
+const releaseAgentArtifactOutboxCapacity = (context) => {
+  const pending = pendingAgentArtifactReservations.get(context.id);
+  if (pending?.revision === context.revision) pendingAgentArtifactReservations.delete(context.id);
+};
+const pendingReplyOutboxUsage = ({ exceptId = null } = {}) => {
+  let entries = 0;
+  let bytes = 0;
+  for (const [id, reservation] of pendingAgentReplyReservations) {
+    if (id === exceptId) continue;
+    entries += 1;
+    bytes += reservation.bytes;
+  }
+  return { entries, bytes };
+};
+const reserveAgentReplyOutboxCapacity = async (context, bytes) => mutateIngress(async () => {
+  const current = ingress.find((entry) => entry.id === context.id);
+  if (current == null || ingressRevision(current) !== context.revision) return "superseded";
+  const used = replyOutboxUsage({ exceptId: context.id });
+  const pending = pendingReplyOutboxUsage({ exceptId: context.id });
+  if (used.entries + pending.entries + 1 > agentReplyOutboxMaxEntries
+      || used.bytes + pending.bytes + bytes > agentReplyOutboxMaxTotalBytes) {
+    throw artifactOutboxError("T3AMS_REPLY_OUTBOX_FULL", "generated reply outbox capacity is exhausted");
+  }
+  pendingAgentReplyReservations.set(context.id, { revision: context.revision, bytes });
+  return true;
+});
+const releaseAgentReplyOutboxCapacity = (context) => {
+  const pending = pendingAgentReplyReservations.get(context.id);
+  if (pending?.revision === context.revision) pendingAgentReplyReservations.delete(context.id);
+};
+const validateAgentArtifactBatch = (artifacts) => {
+  if (!Array.isArray(artifacts) || artifacts.length > agentOutputArtifactMaxCount) {
+    throw artifactOutboxError("T3AMS_ARTIFACT_OUTBOX_INVALID", "generated-artifact batch is invalid");
+  }
+  let totalBytes = 0;
+  for (const artifact of artifacts) {
+    if (artifact == null || !Number.isSafeInteger(artifact.size) || artifact.size < 0 || artifact.size > attachmentMaxBytes) {
+      throw artifactOutboxError("T3AMS_ARTIFACT_OUTBOX_INVALID", "agent artifact metadata is invalid");
+    }
+    totalBytes += artifact.size;
+    if (!Number.isSafeInteger(totalBytes) || totalBytes > agentOutputArtifactMaxTotalBytes) {
+      throw artifactOutboxError("T3AMS_ARTIFACT_OUTBOX_INVALID", "generated-artifact batch exceeds its total byte limit");
+    }
+  }
+  return totalBytes;
+};
+const mutateAgentTurnOutbox = async (context, operation) => mutateIngress(async () => {
+  const entry = ingress.find((candidate) => candidate.id === context.id);
+  if (entry == null || ingressRevision(entry) !== context.revision) return "superseded";
+  const value = await operation(entry);
+  const durable = await persistCritical();
+  if (!durable) {
+    ingressDurable = false;
+    scheduleIngressDurabilityRetry();
+    return false;
+  }
+  ingressDurable = true;
+  return value;
+});
+const removeOutboxFile = (entryId, file) => {
+  const filePath = artifactOutboxPath(entryId, file.storedName);
+  if (filePath == null) return;
+  try {
+    fs.rmSync(filePath, { force: true, maxRetries: 2 });
+    const directory = artifactOutboxDirectory(entryId);
+    if (directory != null) fsyncDirectory(directory);
+  } catch (error) {
+    log("T3AMS_AGENT_ARTIFACT_OUTBOX_FILE_CLEANUP_FAILED", { id: entryId, file: file.storedName, error: String(error?.message ?? error) });
+  }
+};
+const prepareAgentTurnOutbox = async (context, { text, artifacts }) => {
+  const current = ingress.find((entry) => entry.id === context.id);
+  if (current == null || ingressRevision(current) !== context.revision) throw artifactHandoffSuperseded();
+  if (current.artifactOutboxInvalid || current.replyOutboxInvalid) {
+    throw artifactOutboxError("T3AMS_AGENT_OUTBOX_CORRUPT", "generated-turn outbox metadata is invalid");
+  }
+  if (current.replyOutbox != null) {
+    if (current.replyOutbox.revision !== context.revision) throw artifactHandoffSuperseded();
+    return { artifacts: current.artifactOutbox, reply: current.replyOutbox };
+  }
+  if (typeof text !== "string" || Buffer.byteLength(text, "utf8") > agentReplyOutboxMaxBytes) {
+    throw artifactOutboxError("T3AMS_REPLY_OUTBOX_INVALID", "generated reply is invalid or too large");
+  }
+  const parts = splitMessageText(text, replyChunkBytes);
+  if (parts.length === 0 || parts.length > agentReplyOutboxMaxParts
+      || parts.some((part) => Buffer.byteLength(part, "utf8") > replyChunkBytes)) {
+    throw artifactOutboxError("T3AMS_REPLY_OUTBOX_INVALID", "generated reply cannot be chunked safely");
+  }
+  const reply = { revision: context.revision, text, parts, nextPart: 0 };
+  const replyReservation = await reserveAgentReplyOutboxCapacity(context, replyOutboxByteCost(reply));
+  if (replyReservation === "superseded") throw artifactHandoffSuperseded();
+  let outbox = current.artifactOutbox;
+  let createdOutbox = false;
+  let reservedCapacity = false;
+  try {
+    if (outbox != null) {
+      if (outbox.revision !== context.revision) throw artifactHandoffSuperseded();
+      // A legacy artifact-only manifest can be upgraded into a complete final
+      // turn. Files already uploaded/sent intentionally do not need to exist.
+      for (const file of outbox.files) if (!file.sent && file.uploaded == null) assertOutboxFile(context.id, file);
+    } else {
+      const totalBytes = validateAgentArtifactBatch(artifacts);
+      if (artifacts.length > 0) {
+        let reservation = null;
+        try {
+          reservation = await reserveAgentArtifactOutboxCapacity(context, artifacts.length, totalBytes);
+        } catch (error) {
+          if (error?.code !== "T3AMS_ARTIFACT_OUTBOX_FULL") throw error;
+          // Preserve the text answer when storage pressure prevents optional
+          // generated files. The agent has already completed; retrying its tools
+          // cannot free capacity and would turn a full outbox into a loop.
+          log("T3AMS_AGENT_ARTIFACTS_SKIPPED", { id: context.id, count: artifacts.length, bytes: totalBytes, reason: "outbox-full" });
+        }
+        if (reservation === "superseded") throw artifactHandoffSuperseded();
+        if (reservation === true) {
+          reservedCapacity = true;
+          const files = [];
+          try {
+            for (const [index, artifact] of artifacts.entries()) files.push(copyAgentArtifactToOutbox(context.id, artifact, index));
+            const directory = artifactOutboxDirectory(context.id);
+            if (directory != null) fsyncDirectory(directory);
+          } catch (error) {
+            removeAgentArtifactOutbox(context.id);
+            throw error;
+          }
+          outbox = { revision: context.revision, files };
+          createdOutbox = true;
+        }
+      }
+    }
+    const saved = await mutateAgentTurnOutbox(context, async (entry) => {
+      entry.artifactOutbox = outbox;
+      entry.artifactOutboxInvalid = false;
+      entry.replyOutbox = reply;
+      entry.replyOutboxInvalid = false;
+      return true;
+    });
+    if (saved === "superseded") {
+      if (createdOutbox) removeAgentArtifactOutbox(context.id);
+      throw artifactHandoffSuperseded();
+    }
+    if (saved !== true) {
+      const error = new Error("generated turn outbox persistence is pending");
+      error.code = "T3AMS_AGENT_OUTBOX_PERSIST_PENDING";
+      throw error;
+    }
+    return { artifacts: outbox, reply };
+  } finally {
+    if (reservedCapacity) releaseAgentArtifactOutboxCapacity(context);
+    releaseAgentReplyOutboxCapacity(context);
+  }
+};
+const markAgentArtifactUploaded = async (context, outbox, file, uploaded) => {
+  const marked = await mutateAgentTurnOutbox(context, async (entry) => {
+    if (entry.artifactOutbox !== outbox) return "superseded";
+    const current = entry.artifactOutbox?.files.find((candidate) => candidate.storedName === file.storedName);
+    if (current == null) return "superseded";
+    current.uploaded = uploaded;
+    return true;
+  });
+  if (marked === "superseded") throw artifactHandoffSuperseded();
+  if (marked !== true) {
+    const error = new Error("generated-artifact upload state is pending");
+    error.code = "T3AMS_AGENT_OUTBOX_PERSIST_PENDING";
+    throw error;
+  }
+  removeOutboxFile(context.id, file);
+};
+const markAgentArtifactSent = async (context, outbox, file, messageId) => {
+  const marked = await mutateAgentTurnOutbox(context, async (entry) => {
+    if (entry.artifactOutbox !== outbox) return "superseded";
+    const current = entry.artifactOutbox?.files.find((candidate) => candidate.storedName === file.storedName);
+    if (current == null) return "superseded";
+    current.sent = true;
+    current.messageId = messageId;
+    return true;
+  });
+  if (marked === "superseded") throw artifactHandoffSuperseded();
+  if (marked !== true) {
+    const error = new Error("generated-artifact delivery state is pending");
+    error.code = "T3AMS_AGENT_OUTBOX_PERSIST_PENDING";
+    throw error;
+  }
+  removeOutboxFile(context.id, file);
+};
+const deliverPersistedAgentArtifacts = async (chatId, context, outbox) => {
+  if (outbox == null) return;
+  const threadRootId = replyThreadFor(chatId);
+  for (const file of outbox.files) {
+    if (!ingressEntryCurrent(context.id, context.revision)) throw artifactHandoffSuperseded();
+    if (file.sent) continue;
+    const filePath = file.uploaded == null ? assertOutboxFile(context.id, file) : null;
+    const sent = await sendT3amsAttachment(chatId, {
+      filePath,
+      filename: file.filename,
+      size: file.size,
+      mime: file.mime,
+      text: `Generated file: ${file.filename}`,
+      threadRootId,
+      uploaded: file.uploaded,
+      onUploaded: async (uploaded) => markAgentArtifactUploaded(context, outbox, file, uploaded),
+      beforeSend: async () => {
+        if (!ingressEntryCurrent(context.id, context.revision)) throw artifactHandoffSuperseded();
+      },
+    });
+    await markAgentArtifactSent(context, outbox, file, sent.messageId);
+  }
+};
+const markAgentReplyPart = async (context, reply, nextPart) => {
+  const marked = await mutateAgentTurnOutbox(context, async (entry) => {
+    if (entry.replyOutbox !== reply) return "superseded";
+    entry.replyOutbox.nextPart = nextPart;
+    return true;
+  });
+  if (marked === "superseded") throw artifactHandoffSuperseded();
+  if (marked !== true) {
+    const error = new Error("generated reply delivery state is pending");
+    error.code = "T3AMS_REPLY_OUTBOX_PERSIST_PENDING";
+    throw error;
+  }
+};
+const deliverPersistedAgentReply = async (chatId, context, reply) => {
+  disarmThinking(chatId);
+  if (reply.parts.length > 1) log("T3AMS_REPLY_CHUNKED", { chatId, parts: reply.parts.length, chars: reply.text.length });
+  while (reply.nextPart < reply.parts.length) {
+    if (!ingressEntryCurrent(context.id, context.revision)) throw artifactHandoffSuperseded();
+    const index = reply.nextPart;
+    const part = reply.parts[index];
+    if (index === 0) {
+      const placeholder = await takeLivePlaceholder(chatId);
+      if (placeholder != null) await placeholder.handle.finalize(part);
+      else await sendAgentReply(chatId, part);
+    } else {
+      await sendAgentReply(chatId, part);
+    }
+    await markAgentReplyPart(context, reply, index + 1);
+  }
+};
+const deliverAgentTurn = async (chatId, { text, artifacts = [] } = {}) => {
+  const context = activeAgentArtifactDeliveries.get(chatId) ?? null;
+  if (context == null) {
+    // Keep the generic runtime surface usable outside the journal. T3ams's
+    // deployed direct brains always take the durable branch below.
+    for (const artifact of artifacts) {
+      await sendT3amsAttachment(chatId, {
+        filePath: artifact.filePath,
+        filename: artifact.filename,
+        size: artifact.size,
+        mime: mimeForT3amsFilename(artifact.filename),
+        text: `Generated file: ${artifact.filename}`,
+      });
+    }
+    await deliverAgentReply(chatId, text);
+    return;
+  }
+  const prepared = await prepareAgentTurnOutbox(context, { text, artifacts });
+  await deliverPersistedAgentArtifacts(chatId, context, prepared.artifacts);
+  await deliverPersistedAgentReply(chatId, context, prepared.reply);
+};
+const deliverAgentArtifacts = async (chatId, artifacts) => {
+  // Legacy callback retained for an embedding that has not moved to
+  // deliverTurn(). The T3ams runtime itself advertises deliverTurn, so this
+  // path never participates in a durable direct-agent ingress turn.
+  if (activeAgentArtifactDeliveries.has(chatId)) {
+    throw new Error("direct agent artifact delivery requires atomic deliverTurn");
+  }
+  for (const artifact of artifacts) {
+    await sendT3amsAttachment(chatId, {
+      filePath: artifact.filePath,
+      filename: artifact.filename,
+      size: artifact.size,
+      mime: mimeForT3amsFilename(artifact.filename),
+      text: `Generated file: ${artifact.filename}`,
+    });
+  }
+};
+// A crash can happen after copying a file but before its journal row reaches
+// disk. Reclaim those unreferenced directories on boot, and prune source bytes
+// for persisted uploads/sends (their private HOP ref is sufficient to resume).
+// This also makes the global outbox quota reflect actual recoverable work
+// instead of a forever-growing collection of abandoned staging directories.
+const sweepAgentArtifactOutboxes = () => {
+  const expected = new Map();
+  for (const entry of ingress) {
+    if (entry.artifactOutbox == null) continue;
+    expected.set(entry.id, entry);
+  }
+  let changed = false;
+  try {
+    for (const dirent of fs.readdirSync(agentArtifactOutboxRoot, { withFileTypes: true })) {
+      const entry = expected.get(dirent.name) ?? null;
+      const directory = path.join(agentArtifactOutboxRoot, dirent.name);
+      if (entry == null || !dirent.isDirectory() || dirent.isSymbolicLink()) {
+        try { fs.rmSync(directory, { recursive: true, force: true, maxRetries: 2 }); changed = true; }
+        catch (error) { log("T3AMS_AGENT_ARTIFACT_OUTBOX_SWEEP_FAILED", { id: dirent.name, error: String(error?.message ?? error) }); }
+        continue;
+      }
+      const files = new Map(entry.artifactOutbox.files.map((file) => [file.storedName, file]));
+      for (const child of fs.readdirSync(directory, { withFileTypes: true })) {
+        const file = files.get(child.name) ?? null;
+        const childPath = path.join(directory, child.name);
+        if (file == null || file.sent || file.uploaded != null) {
+          try { fs.rmSync(childPath, { recursive: true, force: true, maxRetries: 2 }); changed = true; }
+          catch (error) { log("T3AMS_AGENT_ARTIFACT_OUTBOX_SWEEP_FAILED", { id: entry.id, file: child.name, error: String(error?.message ?? error) }); }
+          continue;
+        }
+        try {
+          const stat = fs.lstatSync(childPath);
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0 || stat.size !== file.size) {
+            entry.artifactOutboxInvalid = true;
+            changed = true;
+          }
+        } catch {
+          entry.artifactOutboxInvalid = true;
+          changed = true;
+        }
+      }
+      // A missing expected unsent file is just as corrupt as an unexpected
+      // replacement. Let normal ingress handling dead-letter it explicitly.
+      for (const file of entry.artifactOutbox.files) {
+        if (file.sent || file.uploaded != null) continue;
+        const filePath = artifactOutboxPath(entry.id, file.storedName);
+        if (filePath == null || !fs.existsSync(filePath)) {
+          entry.artifactOutboxInvalid = true;
+          changed = true;
+        }
+      }
+      fsyncDirectory(directory);
+    }
+    if (changed) fsyncDirectory(agentArtifactOutboxRoot);
+  } catch (error) {
+    log("T3AMS_AGENT_ARTIFACT_OUTBOX_SWEEP_FAILED", { error: String(error?.message ?? error) });
+  }
+  const usage = artifactOutboxUsage();
+  if (usage.entries > agentArtifactOutboxMaxEntries || usage.bytes > agentArtifactOutboxMaxBytes) {
+    log("T3AMS_AGENT_ARTIFACT_OUTBOX_OVER_CAP", {
+      entries: usage.entries,
+      bytes: usage.bytes,
+      maxEntries: agentArtifactOutboxMaxEntries,
+      maxBytes: agentArtifactOutboxMaxBytes,
+    });
+  }
+  const replies = replyOutboxUsage();
+  if (replies.entries > agentReplyOutboxMaxEntries || replies.bytes > agentReplyOutboxMaxTotalBytes) {
+    log("T3AMS_REPLY_OUTBOX_OVER_CAP", {
+      entries: replies.entries,
+      bytes: replies.bytes,
+      maxEntries: agentReplyOutboxMaxEntries,
+      maxBytes: agentReplyOutboxMaxTotalBytes,
+    });
+  }
+  if (changed) persist();
+};
+sweepAgentArtifactOutboxes();
 const fileCommandChats = new Map();
 // The durable file store is configured only after the authenticated protocol
 // is restored below. Defer this binding so module initialization never reads
@@ -605,7 +1425,25 @@ const livePlaceholders = new Map(); // chatId -> Promise<{handle, tracker, timer
 // A framework can stream `edit_of` frames without labeling the final frame.
 // Per-chat bridge leasing lets its eventual ACK safely promote this latest
 // value into a terminal edit.
-const bridgePendingEdits = new Map(); // chatId -> { messageId, text }
+const bridgePendingEdits = new Map(); // chatId -> { messageId, text, deliveryId, leaseId }
+// Keep every bridge side effect bound to the exact lease that produced it.
+// In particular, a live edit is often deliberately delayed by the throttle,
+// so checking only when /send is received would let a revoked worker publish
+// its stale progress after a user edit/delete or lease expiry.
+const bridgeLeaseIsActive = (chatId, deliveryId, leaseId, current = Date.now()) => ingress.some((entry) => entry.kind === "bridge"
+  && entry.id === deliveryId
+  && entry.leaseId === leaseId
+  && entry.routed.conversationKey === chatId
+  && Number(entry.leaseUntil) > current);
+const bridgePendingEditIsActive = (chatId, edit) => bridgePendingEdits.get(chatId) === edit
+  && bridgeLeaseIsActive(chatId, edit.deliveryId, edit.leaseId);
+const cancelBridgePendingEdit = (chatId, expected = null) => {
+  const edit = bridgePendingEdits.get(chatId);
+  if (edit == null || (expected != null && edit !== expected)) return false;
+  bridgePendingEdits.delete(chatId);
+  liveReplies.cancelExisting(chatId, edit.messageId);
+  return true;
+};
 const disarmThinking = (chatId) => {
   const timer = thinkingTimers.get(chatId);
   if (timer != null) clearTimeout(timer);
@@ -753,6 +1591,11 @@ const admitIngress = async (event, routed) => mutateIngress(async () => {
     attempts: 0,
     retryAt: 0,
     completedAt: 0,
+    revision: 0,
+    artifactOutbox: null,
+    artifactOutboxInvalid: false,
+    replyOutbox: null,
+    replyOutboxInvalid: false,
     leaseId: null,
     leaseUntil: 0,
   };
@@ -785,6 +1628,26 @@ const routeOneInbound = async (event, { historyOnly = false } = {}) => {
     protocol.releaseInbound(event);
     return;
   }
+  const lifecycle = messageLifecycle.applyMessage({
+    chatId: event.chatId,
+    messageId: event.messageId,
+    senderXid: event.senderXid,
+    text: event.text,
+    timestamp: event.timestamp,
+  });
+  if (!lifecycle.accepted) {
+    protocol.releaseInbound(event);
+    return;
+  }
+  // A delete can arrive on its independent op slot before the retained
+  // message carrier. Deduplicate the carrier without ever exposing its body
+  // to a model, bridge, or passive channel-context buffer.
+  if (lifecycle.deleted) {
+    await commitHistoryOnly(event);
+    log("T3AMS_INBOUND_REDACTED", { chatId: event.chatId, messageId: event.messageId });
+    return;
+  }
+  const effectiveText = lifecycle.text;
   const routed = normalizeT3amsInbound({
     conversationType: event.conversation.kind,
     senderXid: event.senderXid,
@@ -792,7 +1655,7 @@ const routeOneInbound = async (event, { historyOnly = false } = {}) => {
     workspaceId: event.conversation.wsId,
     channelId: event.conversation.channelIdHex,
     messageId: event.messageId,
-    text: event.text,
+    text: effectiveText,
     threadRootId: event.threadRootId,
     mentions: event.mentions,
     attachments: event.attachments,
@@ -805,12 +1668,12 @@ const routeOneInbound = async (event, { historyOnly = false } = {}) => {
     if (!historyOnly && routed.reason === "unmentioned-channel-message"
         && event.conversation?.kind === "channel"
         && (!Array.isArray(event.attachments) || event.attachments.length === 0)
-        && typeof event.text === "string" && event.text.trim() !== "") {
+        && typeof effectiveText === "string" && effectiveText.trim() !== "") {
       const stored = channelContext.append(event.chatId, {
         messageId: event.messageId,
         senderXid: event.senderXid,
         senderName: event.senderName,
-        text: event.text,
+        text: effectiveText,
         threadRootId: event.threadRootId,
       });
       if (stored.accepted) log("T3AMS_CHANNEL_CONTEXT_APPENDED", { chatId: event.chatId, messageId: event.messageId });
@@ -860,6 +1723,169 @@ const routeInbound = async (event) => {
   await routeOneInbound(primary);
 };
 
+const rerouteEditedIngress = (routed, text) => {
+  const legacyMentionGate = routed.message.legacyMentionGate === true;
+  const rerouted = normalizeT3amsInbound({
+    conversationType: routed.message.conversationType,
+    senderXid: routed.message.senderXid,
+    senderName: routed.message.senderName,
+    workspaceId: routed.message.workspaceId,
+    channelId: routed.message.channelId,
+    messageId: routed.message.messageId,
+    text,
+    threadRootId: routed.message.threadRootId,
+    mentions: routed.message.mentions ?? [],
+    attachments: routed.message.attachments ?? [],
+    attachmentError: routed.message.attachmentError,
+    channelContext: routed.message.channelContext ?? [],
+  }, { xid: selfXidHex, aliases: [username, displayName] }, {
+    // Old durable channel rows predate persisted structured mentions. They
+    // reached the queue only after an earlier process accepted them, so keep
+    // their existing routing eligibility through an edit rather than turning a
+    // rolling upgrade into a silent cancellation. New entries retain mentions
+    // and are still mention-gated normally.
+    requireMentionInChannels: !legacyMentionGate,
+  });
+  if (rerouted.accepted && legacyMentionGate) rerouted.message.legacyMentionGate = true;
+  return rerouted;
+};
+
+// Reconcile a retained edit/delete into work that has not finished yet. This
+// runs under the same journal mutation queue as admission/ACKs, so an edited
+// prompt cannot race a later bridge lease or direct-agent dispatch.
+const reconcileQueuedIngressOperation = async (operation, lifecycle) => mutateIngress(async () => {
+  if (!lifecycle.changed) return { changed: false, stopped: false };
+  let changed = false;
+  let stopped = false;
+  const removed = [];
+  const invalidatedOutboxes = [];
+  const revokedBridgeChats = new Map();
+  for (let index = ingress.length - 1; index >= 0; index -= 1) {
+    const entry = ingress[index];
+    const message = entry?.routed?.message;
+    if (entry?.routed?.conversationKey !== operation.chatId || message?.messageId !== operation.messageId
+        || message?.senderXid !== operation.senderXid || Number(entry.completedAt) > 0) continue;
+    if (lifecycle.deleted) {
+      ingress.splice(index, 1);
+      removed.push(entry);
+      changed = true;
+      if (runningIngress.has(entry.id)) stopped = true;
+      continue;
+    }
+    const rerouted = rerouteEditedIngress(entry.routed, lifecycle.text ?? "");
+    if (!rerouted.accepted) {
+      ingress.splice(index, 1);
+      removed.push(entry);
+      changed = true;
+      if (runningIngress.has(entry.id)) stopped = true;
+      continue;
+    }
+    entry.routed = rerouted;
+    if (entry.artifactOutbox != null || entry.artifactOutboxInvalid || entry.replyOutbox != null || entry.replyOutboxInvalid) {
+      entry.artifactOutbox = null;
+      entry.artifactOutboxInvalid = false;
+      entry.replyOutbox = null;
+      entry.replyOutboxInvalid = false;
+      invalidatedOutboxes.push(entry.id);
+    }
+    // A task may already have snapshotted the prior route or be waiting for
+    // media retrieval. Bump its generation so every phase checks out before
+    // handing old text/files to a command, engine, or echo response.
+    entry.revision = (Number(entry.revision) || 0) + 1;
+    entry.retryAt = 0;
+    // A bridge worker only owns a specific leased version of an inbound row.
+    // Releasing the old lease forces a new poll of the edited prompt and, in
+    // combination with claim-bound /send below, prevents an old worker from
+    // replying after an edit or mention removal.
+    if (entry.kind === "bridge" && entry.leaseId != null) {
+      revokedBridgeChats.set(entry.routed.conversationKey, "✎ Message updated — restarting.");
+      entry.leaseId = null;
+      entry.leaseUntil = 0;
+    }
+    changed = true;
+    if (runningIngress.has(entry.id)) stopped = true;
+  }
+  if (!changed) return { changed: false, stopped: false };
+  const saved = await persistCritical();
+  if (saved) {
+    for (const entry of removed) protocol.unpinConversation(entry.routed.conversationKey);
+    for (const entry of removed) removeAgentArtifactOutbox(entry.id);
+    for (const id of invalidatedOutboxes) removeAgentArtifactOutbox(id);
+    for (const entry of removed) {
+      if (entry.kind === "bridge" && entry.leaseId != null) {
+        revokedBridgeChats.set(entry.routed.conversationKey, "🗑️ Message deleted.");
+      }
+    }
+    for (const [chatId, status] of revokedBridgeChats) {
+      bridgeReplyThreads.delete(chatId);
+      cancelBridgePendingEdit(chatId);
+      disarmThinking(chatId);
+      void takeLivePlaceholder(chatId).then((placeholder) => {
+        if (placeholder == null) return;
+        return placeholder.handle.finalize(status);
+      }).catch((error) => log("T3AMS_BRIDGE_REVOKE_FINALIZE_FAILED", { chatId, error: String(error?.message ?? error) }));
+    }
+    knownChats.trim();
+    ingressDurable = true;
+    wakeBridge();
+    pumpIngress();
+  } else {
+    // Freeze dispatch until this changed queue is durable. The retained op
+    // will also replay after restart, but we must not run stale prompt bytes
+    // in the current process while the local journal is uncertain.
+    deferredIngressUnpins.push(...removed.map((entry) => entry.routed.conversationKey));
+    deferredAgentArtifactOutboxCleanup.push(
+      ...removed.map((entry) => entry.id),
+      ...invalidatedOutboxes,
+    );
+    ingressDurable = false;
+    scheduleIngressDurabilityRetry();
+  }
+  return { changed: true, stopped };
+});
+
+const routeInboundOperation = async (operation) => {
+  if (operation == null || !isAllowed(operation.senderXid)) return;
+  const lifecycle = messageLifecycle.applyOperation(operation);
+  if (!lifecycle.accepted || !lifecycle.changed) return;
+  if (operation.conversation?.kind === "channel") {
+    if (lifecycle.deleted || lifecycle.text === "") {
+      channelContext.remove(operation.chatId, operation.messageId, { senderXid: operation.senderXid });
+    } else if (lifecycle.text != null) {
+      channelContext.replace(operation.chatId, operation.messageId, {
+        senderXid: operation.senderXid,
+        text: lifecycle.text,
+      });
+    }
+  }
+  const reconciled = await reconcileQueuedIngressOperation(operation, lifecycle);
+  // A retained operation can precede its carrier, in which case it has no
+  // journal row to mutate yet. Persist that bounded tombstone/edit explicitly
+  // so a restart between the two retained subscriptions cannot resurrect the
+  // old prompt or lose the user's newer text.
+  if (!reconciled.changed) {
+    const saved = await mutateIngress(async () => {
+      const durable = await persistCritical();
+      if (!durable) {
+        ingressDurable = false;
+        scheduleIngressDurabilityRetry();
+        return false;
+      }
+      ingressDurable = true;
+      return true;
+    });
+    if (!saved) log("T3AMS_MESSAGE_LIFECYCLE_PERSIST_PENDING", { chatId: operation.chatId, messageId: operation.messageId });
+  }
+  if (reconciled.stopped && agentRuntime != null) agentRuntime.stop(operation.chatId);
+  log("T3AMS_INBOUND_OPERATION_APPLIED", {
+    kind: operation.kind,
+    chatId: operation.chatId,
+    messageId: operation.messageId,
+    queued: reconciled.changed,
+    ...(lifecycle.deleted ? { deleted: true } : { edited: true }),
+  });
+};
+
 const syncSubscriptions = ({ forceIds = new Set() } = {}) => {
   if (protocol == null) return;
   const desired = new Set();
@@ -871,6 +1897,29 @@ const syncSubscriptions = ({ forceIds = new Set() } = {}) => {
     }
     desired.add(id);
     subscription(id, topic, callback, accepts, { force: forceIds.has(id) });
+    return true;
+  };
+  // Some protocol features are only safe when their retained routes arrive as
+  // a set. In particular a DM carrier without its edit/delete slot makes a
+  // redaction race permanent, and a workspace discovery plane without its
+  // notification route can strand membership/key updates. Admit a whole
+  // group or none of it instead of consuming the final slot mid-pair.
+  const subscribeGroup = (routes) => {
+    const unique = [];
+    const seen = new Set();
+    for (const route of routes) {
+      if (route == null || typeof route.id !== "string" || seen.has(route.id)) continue;
+      seen.add(route.id);
+      if (!desired.has(route.id)) unique.push(route);
+    }
+    if (desired.size + unique.length > subscriptionCap) {
+      omitted += unique.length;
+      return false;
+    }
+    for (const route of routes) {
+      if (route == null || typeof route.id !== "string") continue;
+      subscribe(route.id, route.topic, route.callback, route.accepts);
+    }
     return true;
   };
   const inbox = bcts.derivePersonalInboxChannel(identity.xid);
@@ -897,12 +1946,24 @@ const syncSubscriptions = ({ forceIds = new Set() } = {}) => {
       }
       return expected.some((channel) => bytesEqual(actual, channel));
     };
-    subscribe(planeId, planeTopic, (data) => {
-      if (protocol.receiveWorkspacePlane(wsId, data)) syncSubscriptions();
-    }, planeChannelMatches);
-    subscribe(notificationId, notificationTopic, (data) => {
-      if (protocol.receiveWorkspaceNotification(wsId, data)) syncSubscriptions();
-    }, (statement) => bytesEqual(asBytes(statement.channel), notificationTopic));
+    subscribeGroup([
+      {
+        id: planeId,
+        topic: planeTopic,
+        callback: (data) => {
+          if (protocol.receiveWorkspacePlane(wsId, data)) syncSubscriptions();
+        },
+        accepts: planeChannelMatches,
+      },
+      {
+        id: notificationId,
+        topic: notificationTopic,
+        callback: (data) => {
+          if (protocol.receiveWorkspaceNotification(wsId, data)) syncSubscriptions();
+        },
+        accepts: (statement) => bytesEqual(asBytes(statement.channel), notificationTopic),
+      },
+    ]);
   }
   // Control-plane subscriptions come first. A channel-heavy early workspace
   // must not crowd out key/membership reconciliation for later workspaces.
@@ -928,7 +1989,22 @@ const syncSubscriptions = ({ forceIds = new Set() } = {}) => {
         : bcts.createPublicChannelTopics(channelId, identity.xid, true)[0];
       const id = `channel:${wsId}:${bareHex(channel.idHex)}`;
       const messageChannel = channel.isPrivate ? bcts.derivePrivateChannel(channelId) : bcts.derivePublicChannel(channelId);
-      subscribe(id, topic, (data) => routeInbound(protocol.receiveChannel(wsId, channel.idHex, data)), (statement) => bytesEqual(asBytes(statement.channel), messageChannel));
+      const opsChannel = channel.isPrivate
+        ? bcts.derivePrivateChannelOpsChannel(channelId)
+        : bcts.derivePublicChannelOpsChannel(channelId);
+      // Channel message/ops slots share the message topic family. Route an
+      // authenticated operation separately so a late edit/delete can update
+      // passive context or cancel a queued bot turn without becoming a model
+      // prompt by itself.
+      subscribe(id, topic, (data, statement) => {
+        const actual = asBytes(statement.channel);
+        if (bytesEqual(actual, messageChannel)) return routeInbound(protocol.receiveChannel(wsId, channel.idHex, data));
+        if (bytesEqual(actual, opsChannel)) return routeInboundOperation(protocol.receiveChannelOperation(wsId, channel.idHex, data));
+        return undefined;
+      }, (statement) => {
+        const actual = asBytes(statement.channel);
+        return bytesEqual(actual, messageChannel) || bytesEqual(actual, opsChannel);
+      });
     }
   }
   for (const peerXidHex of protocol.peerIds()) {
@@ -936,9 +2012,18 @@ const syncSubscriptions = ({ forceIds = new Set() } = {}) => {
     const dmChannel = bcts.derivePersonalDMChannel(identity.xid, peer);
     // The pairwise topic is keyed by the remote peer. Using our own XID here
     // would subscribe to the wrong half of the DM channel and miss replies.
-    const topic = bcts.createDMTopics(dmChannel, peer, true)[0];
-    const id = `dm:${peerXidHex}`;
-    subscribe(id, topic, (data) => routeInbound(protocol.receiveDm(peerXidHex, data)), (statement) => bytesEqual(asBytes(statement.channel), dmChannel));
+    const dmRoutes = [
+      { id: `dm:${peerXidHex}`, channel: dmChannel, message: true },
+      { id: `dmops:${peerXidHex}`, channel: bcts.derivePersonalDMOpsChannel(identity.xid, peer), message: false },
+    ];
+    subscribeGroup(dmRoutes.map((route) => ({
+      id: route.id,
+      topic: bcts.createDMTopics(route.channel, peer, true)[0],
+      callback: (data) => route.message
+        ? routeInbound(protocol.receiveDm(peerXidHex, data))
+        : routeInboundOperation(protocol.receiveDmOperation(peerXidHex, data)),
+      accepts: (statement) => bytesEqual(asBytes(statement.channel), route.channel),
+    })));
   }
   for (const [id, active] of subscriptions) {
     if (desired.has(id)) continue;
@@ -1112,6 +2197,16 @@ const channelContext = createT3amsChannelContext({
   maxTotalBytes: numberEnv("BOT_T3AMS_CHANNEL_CONTEXT_MAX_TOTAL_BYTES", 256 * 1024, { min: 1024, max: 16 * 1024 * 1024 }),
   isValidChat: isT3amsConversationKey,
 });
+// Message carriers and their edit/delete operations are retained on separate
+// slots and can replay in either order. Keep a bounded local lifecycle index
+// so a redacted or edited prompt/context row is reconciled before dispatch.
+messageLifecycle = createT3amsMessageLifecycle({
+  maxRecords: numberEnv("BOT_T3AMS_MESSAGE_LIFECYCLE_MAX_RECORDS", Math.max(1_024, ingressCap * 4), { min: 128, max: 100_000 }),
+  ttlMs: numberEnv("BOT_T3AMS_MESSAGE_LIFECYCLE_TTL_MS", 6 * 60 * 60_000, { min: 0, max: 31 * 24 * 3_600_000 }),
+  maxTextBytes: MAX_T3AMS_TEXT_BYTES,
+  maxStateBytes: numberEnv("BOT_T3AMS_MESSAGE_LIFECYCLE_MAX_BYTES", 8 * 1024 * 1024, { min: 1024, max: 64 * 1024 * 1024 }),
+  initialSnapshot: restored?.messageLifecycle ?? null,
+});
 // A channel has one shared native model session. Let ordinary members invoke
 // the bot, but do not let one member silently reset or reconfigure everyone
 // else's session. `/stop` remains available to the group as a liveness lever.
@@ -1196,6 +2291,22 @@ if (engine && aiReasoning && !engine.effortLevels?.includes(aiReasoning)) {
   console.error(`BOT_AI_REASONING=${aiReasoning} is not valid for this engine${engine.effortLevels ? ` (levels: ${engine.effortLevels.join(", ")})` : " (it has no reasoning control)"}`);
   process.exit(2);
 }
+// Do not hand an agent a writable output directory unless every generated
+// file can actually be delivered. Without this gate, a disabled Bulletin
+// endpoint or a MIME policy that rejects generic files would create a durable
+// retry loop that blocks the conversation forever.
+const agentArtifactDeliveryEnabled = agentOutputArtifactMaxCount > 0
+  && attachmentMaxCount > 0
+  && t3amsMedia.enabled
+  && isT3amsAttachmentMimeAllowed(attachmentOptions.allowedMimeTypes, "application/octet-stream");
+const effectiveAgentOutputArtifactMaxCount = agentArtifactDeliveryEnabled ? agentOutputArtifactMaxCount : 0;
+if (engine != null && !agentArtifactDeliveryEnabled && agentOutputArtifactMaxCount > 0) {
+  log("T3AMS_AGENT_ARTIFACTS_DISABLED", {
+    mediaEnabled: t3amsMedia.enabled,
+    attachmentMaxCount,
+    genericMimeAllowed: isT3amsAttachmentMimeAllowed(attachmentOptions.allowedMimeTypes, "application/octet-stream"),
+  });
+}
 const renderT3amsForBrain = (message) => {
   const sender = message.senderName || message.senderXid || "unknown sender";
   const scope = message.conversationType === "channel"
@@ -1203,13 +2314,24 @@ const renderT3amsForBrain = (message) => {
     : "direct message";
   const thread = message.threadRootId ? `; thread ${message.threadRootId}` : "";
   const attachmentNotes = (message.attachments ?? []).map((attachment) => {
-    const noun = attachment.kind === "image" ? "photo" : "document";
+    const noun = attachment.kind === "image"
+      ? "photo"
+      : attachment.kind === "video"
+        ? "video"
+        : attachment.kind === "audio"
+          ? "audio file"
+          : "document";
     const size = attachment.size >= 1024 * 1024
       ? `${(attachment.size / (1024 * 1024)).toFixed(1)} MB`
       : `${Math.max(1, Math.round(attachment.size / 1024))} KB`;
+    const duration = attachment.durationMs == null ? "" : `; ${(attachment.durationMs / 1000).toFixed(1)}s`;
+    // The private cache path is deliberately content-addressed, so it does
+    // not preserve the sender-visible filename. Keep that validated filename
+    // beside the usable path: it is often the only clue for an otherwise
+    // opaque document (for example, an unknown browser File.type).
     return attachment.downloaded && attachment.path
-      ? `[User attached a ${noun} saved at ${attachment.path} (${attachment.mime}, ${size})]`
-      : `[User attached a ${noun} (${attachment.filename}; ${attachment.mime}, ${size}) — file bytes are unavailable: ${attachment.error ?? "download is not configured"}]`;
+      ? `[User attached a ${noun} saved at ${attachment.path} (${attachment.filename}; ${attachment.mime}, ${size}${duration})]`
+      : `[User attached a ${noun} (${attachment.filename}; ${attachment.mime}, ${size}${duration}) — file bytes are unavailable: ${attachment.error ?? "download is not configured"}]`;
   });
   if (message.attachmentError) attachmentNotes.push(`[Attachment warning: ${message.attachmentError}]`);
   const contextNotes = (message.channelContext ?? []).map((record) => {
@@ -1217,10 +2339,13 @@ const renderT3amsForBrain = (message) => {
     const thread = record.threadRootId ? `; thread ${record.threadRootId}` : "";
     return `[Earlier channel message from ${name}${thread}]: ${record.text}`;
   });
+  const outputInstruction = message.outputDir == null
+    ? null
+    : `[To return a generated file to the user, write up to ${effectiveAgentOutputArtifactMaxCount} regular files directly inside ${message.outputDir}. Do not create subdirectories or symlinks; only those top-level files will be attached to your reply.]`;
   // Channel sessions intentionally share memory. Include the authenticated
   // sender/scope so a direct brain can distinguish participants without
   // changing the transport-neutral message API.
-  return [`[T3ams ${scope}; sender ${sender}${thread}]`, ...contextNotes, message.text, ...attachmentNotes].filter(Boolean).join("\n");
+  return [`[T3ams ${scope}; sender ${sender}${thread}]`, ...contextNotes, message.text, ...attachmentNotes, outputInstruction].filter(Boolean).join("\n");
 };
 if (engine != null) {
   fs.mkdirSync(aiWorkspace, { recursive: true, mode: 0o700 });
@@ -1251,7 +2376,10 @@ if (engine != null) {
     maxMs: numberEnv("BOT_AI_MAX_MS", 3_600_000, { min: 1000, max: 7 * 86_400_000 }),
     maxConcurrentTurns: numberEnv("BOT_AI_MAX_CONCURRENT_TURNS", 4, { min: 1, max: 128 }),
     maxQueuedTurns: numberEnv("BOT_AI_MAX_QUEUED_TURNS", 100, { min: 0, max: 10_000 }),
-    maxOutputBytes: numberEnv("BOT_AI_MAX_OUTPUT_BYTES", 1_000_000, { min: 1024, max: 64 * 1024 * 1024 }),
+    maxOutputBytes: aiMaxOutputBytes,
+    maxOutputArtifacts: effectiveAgentOutputArtifactMaxCount,
+    maxOutputArtifactBytes: attachmentMaxBytes,
+    maxOutputArtifactTotalBytes: agentOutputArtifactMaxTotalBytes,
     peerCap: knownChatCap,
     agentUid: aiAgentUid,
     agentGid: aiAgentGid,
@@ -1259,6 +2387,8 @@ if (engine != null) {
     chat: {
       sendText: sendAgentReply,
       deliver: deliverAgentReply,
+      deliverArtifacts: deliverAgentArtifacts,
+      deliverTurn: deliverAgentTurn,
       beginTurn: beginTurnProgress,
     },
     throwOnReplyFailure: true,
@@ -1268,6 +2398,9 @@ if (engine != null) {
     persist,
   });
   agentRuntime.noteRestoredAgent(restored?.agent ?? null);
+  agentRuntime.restoreIntroduced(Array.isArray(restored?.agentIntroduced)
+    ? restored.agentIntroduced.slice(-(knownChatCap + ingressCap))
+    : []);
   // A current snapshot contains at most the bounded known-chat index plus
   // its bounded durable ingress overflow. Cap legacy/corrupt state too.
   const restoredAgentPeers = Array.isArray(restored?.agentPeers)
@@ -1284,9 +2417,11 @@ if (engine != null) {
 // The entry stays durable until the turn completes, yielding at-least-once
 // processing after a crash rather than a prompt silently disappearing.
 const runningIngress = new Set();
-const completeIngressTurn = async (entry) => mutateIngress(async () => {
+const ingressRevision = (entry) => Number.isSafeInteger(entry?.revision) && entry.revision >= 0 ? entry.revision : 0;
+const ingressEntryCurrent = (id, revision) => ingress.some((candidate) => candidate.id === id && ingressRevision(candidate) === revision);
+const completeIngressTurn = async (entry, expectedRevision) => mutateIngress(async () => {
   const index = ingress.findIndex((candidate) => candidate.id === entry.id);
-  if (index < 0) return true;
+  if (index < 0 || ingressRevision(ingress[index]) !== expectedRevision) return "superseded";
   const current = ingress[index];
   // First durably mark that the external side effect has completed. If the
   // later removal write fails, retries only finish the journal cleanup rather
@@ -1305,6 +2440,7 @@ const completeIngressTurn = async (entry) => mutateIngress(async () => {
   const saved = await persistCritical();
   if (saved) {
     protocol.unpinConversation(removed.routed.conversationKey);
+    removeAgentArtifactOutbox(removed.id);
     // A completed turn is the most recently useful native session. Refresh
     // it after releasing its journal pin, then contract any temporary
     // protected-only known-chat overflow.
@@ -1332,9 +2468,9 @@ const isTerminalIngressError = (error) => error?.t3amsTerminal === true
     "T3AMS_CHANNEL_KEY_MISSING",
     "T3AMS_INVALID_INGRESS",
   ]).has(error?.code);
-const deadLetterIngressTurn = async (entry, error) => mutateIngress(async () => {
+const deadLetterIngressTurn = async (entry, error, expectedRevision) => mutateIngress(async () => {
   const index = ingress.findIndex((candidate) => candidate.id === entry.id);
-  if (index < 0) return true;
+  if (index < 0 || ingressRevision(ingress[index]) !== expectedRevision) return "superseded";
   const [removed] = ingress.splice(index, 1);
   const priorDeadLetters = deadLetters.map((candidate) => ({ ...candidate }));
   const record = {
@@ -1348,6 +2484,7 @@ const deadLetterIngressTurn = async (entry, error) => mutateIngress(async () => 
   const saved = await persistCritical();
   if (saved) {
     protocol.unpinConversation(removed.routed.conversationKey);
+    removeAgentArtifactOutbox(removed.id);
     knownChats.trim();
     ingressDurable = true;
     log("T3AMS_DISPATCH_DEAD_LETTER", { id: removed.id, chatId: record.conversationKey, code: record.code });
@@ -1360,10 +2497,10 @@ const deadLetterIngressTurn = async (entry, error) => mutateIngress(async () => 
   scheduleIngressDurabilityRetry();
   return false;
 });
-const deferIngressTurn = async (entry, error) => {
+const deferIngressTurn = async (entry, error, expectedRevision) => {
   const delay = await mutateIngress(async () => {
     const current = ingress.find((candidate) => candidate.id === entry.id);
-    if (current == null) return null;
+    if (current == null || ingressRevision(current) !== expectedRevision) return null;
     current.attempts = Math.min(100, (Number(current.attempts) || 0) + 1);
     const retryDelay = Math.min(60_000, 1000 * (2 ** Math.min(current.attempts - 1, 6)));
     current.retryAt = Date.now() + retryDelay;
@@ -1379,7 +2516,11 @@ const deferIngressTurn = async (entry, error) => {
   if (delay != null) scheduleIngressPump(delay);
   log("T3AMS_DISPATCH_FAILED", { error: String(error?.message ?? error) });
 };
-const executeIngressTurn = async (entry) => {
+const executeIngressTurn = async (entry, expectedRevision) => {
+  if (!ingressEntryCurrent(entry.id, expectedRevision)) return null;
+  if (entry.artifactOutboxInvalid || entry.replyOutboxInvalid) {
+    throw artifactOutboxError("T3AMS_AGENT_OUTBOX_CORRUPT", "generated-turn outbox metadata is invalid");
+  }
   const routed = entry.routed;
   if (!protocol.restoreInboundConversation(routed)) {
     const error = new Error("invalid durable T3ams ingress route");
@@ -1406,33 +2547,64 @@ const executeIngressTurn = async (entry) => {
   const previous = activeReplyThreads.get(routed.conversationKey);
   activeReplyThreads.set(routed.conversationKey, routed.replyTarget.threadRootId);
   try {
+    // A complete persisted handoff means the model already ran. Drain the
+    // exact files/text/chunks only; this is the key recovery boundary that
+    // prevents a failed final delivery from rerunning tools or Claude.
+    if (entry.replyOutbox != null) {
+      const priorArtifactContext = activeAgentArtifactDeliveries.get(routed.conversationKey);
+      activeAgentArtifactDeliveries.set(routed.conversationKey, { id: entry.id, revision: expectedRevision });
+      try {
+        await deliverPersistedAgentArtifacts(routed.conversationKey, { id: entry.id, revision: expectedRevision }, entry.artifactOutbox);
+        await deliverPersistedAgentReply(routed.conversationKey, { id: entry.id, revision: expectedRevision }, entry.replyOutbox);
+      } finally {
+        if (priorArtifactContext == null) activeAgentArtifactDeliveries.delete(routed.conversationKey);
+        else activeAgentArtifactDeliveries.set(routed.conversationKey, priorArtifactContext);
+      }
+      return ingressEntryCurrent(entry.id, expectedRevision) ? expectedRevision : null;
+    }
     if (Array.isArray(message.attachments) && message.attachments.length > 0) {
       message.attachments = await fetchT3amsAttachments(message.attachments);
     }
+    if (!ingressEntryCurrent(entry.id, expectedRevision)) return null;
     const fileResult = await handleT3amsFileCommand(routed.conversationKey, message);
     if (fileResult?.handled) {
+      if (!ingressEntryCurrent(entry.id, expectedRevision)) return null;
       if (fileResult.reply) await sendAgentReply(routed.conversationKey, fileResult.reply);
-      return;
+      return expectedRevision;
     }
     if (brain === "echo") {
+      if (!ingressEntryCurrent(entry.id, expectedRevision)) return null;
       await sendAgentReply(routed.conversationKey, `Echo: ${message.text}`);
-      return;
+      return expectedRevision;
     }
     if (agentRuntime == null) throw new Error("no direct T3ams agent runtime is configured");
     const commandInput = typeof message.commandText === "string" ? message.commandText : message.text;
     if (/^\/stop\s*$/i.test(commandInput)) {
       // The cancellation request was issued immediately when the authenticated
       // event arrived; this ordered, durable turn is just its confirmation.
+      if (!ingressEntryCurrent(entry.id, expectedRevision)) return null;
       await sendAgentReply(routed.conversationKey, "⏹️ Stopped any active work for this chat.");
-      return;
+      return expectedRevision;
     }
     if (stateChangingChannelCommand(commandInput) && !canControlChannel(message)) {
       const label = channelControlRole === "mod" ? "a workspace moderator" : "a workspace owner or admin";
+      if (!ingressEntryCurrent(entry.id, expectedRevision)) return null;
       await sendAgentReply(routed.conversationKey, `Only ${label} can change this channel bot's shared session settings.`);
-      return;
+      return expectedRevision;
     }
-    const handled = await agentRuntime.handleMessage(routed.conversationKey, message);
+    if (!ingressEntryCurrent(entry.id, expectedRevision)) return null;
+    const priorArtifactContext = activeAgentArtifactDeliveries.get(routed.conversationKey);
+    activeAgentArtifactDeliveries.set(routed.conversationKey, { id: entry.id, revision: expectedRevision });
+    let handled;
+    try {
+      handled = await agentRuntime.handleMessage(routed.conversationKey, message);
+    } finally {
+      if (priorArtifactContext == null) activeAgentArtifactDeliveries.delete(routed.conversationKey);
+      else activeAgentArtifactDeliveries.set(routed.conversationKey, priorArtifactContext);
+    }
+    if (!ingressEntryCurrent(entry.id, expectedRevision)) return null;
     if (handled !== true) throw new Error("agent turn was interrupted before completion");
+    return expectedRevision;
   } finally {
     if (hadPrevious) activeReplyThreads.set(routed.conversationKey, previous);
     else activeReplyThreads.delete(routed.conversationKey);
@@ -1456,15 +2628,24 @@ pumpIngress = () => {
       nextRetryAt = nextRetryAt == null ? entry.retryAt : Math.min(nextRetryAt, entry.retryAt);
       continue;
     }
+    const scheduledRevision = ingressRevision(entry);
     const task = dispatcher.run(chatId, async () => {
       try {
+        let completedRevision = scheduledRevision;
         if (!Number.isSafeInteger(entry.completedAt) || entry.completedAt <= 0) {
-          await executeIngressTurn(entry);
+          completedRevision = await executeIngressTurn(entry, scheduledRevision);
         }
-        if (!await completeIngressTurn(entry)) throw new Error("ingress completion is not durable yet");
+        if (completedRevision == null) return;
+        const completion = await completeIngressTurn(entry, completedRevision);
+        if (completion === "superseded") return;
+        if (completion !== true) throw new Error("ingress completion is not durable yet");
       } catch (error) {
-        if (isTerminalIngressError(error) && await deadLetterIngressTurn(entry, error)) return;
-        await deferIngressTurn(entry, error);
+        // A concurrent authenticated edit/delete supersedes the old task. It
+        // must not turn an aborted old prompt into a retry delay or a dead
+        // letter for the revised durable entry.
+        if (!ingressEntryCurrent(entry.id, scheduledRevision)) return;
+        if (isTerminalIngressError(error) && await deadLetterIngressTurn(entry, error, scheduledRevision) === true) return;
+        await deferIngressTurn(entry, error, scheduledRevision);
         throw error;
       }
     });
@@ -1503,6 +2684,10 @@ const leaseBridgeIngress = async (limit) => mutateIngress(async () => {
     if (occupiedChats.has(entry.routed.conversationKey)) continue;
     entry.leaseId = randomUUID();
     entry.leaseUntil = current + leaseMs;
+    const pending = bridgePendingEdits.get(entry.routed.conversationKey);
+    if (pending != null && (pending.deliveryId !== entry.id || pending.leaseId !== entry.leaseId)) {
+      cancelBridgePendingEdit(entry.routed.conversationKey, pending);
+    }
     leased.push(entry);
     occupiedChats.add(entry.routed.conversationKey);
   }
@@ -1536,13 +2721,19 @@ const leaseBridgeIngress = async (limit) => mutateIngress(async () => {
 const updateBridgeLeases = async (claims, acknowledge) => mutateIngress(async () => {
   const before = ingress.map((entry) => ({ ...entry }));
   const acknowledged = [];
+  const current = Date.now();
   let changed = 0;
   for (const claim of claims) {
     if (claim == null || typeof claim.delivery_id !== "string" || typeof claim.lease_id !== "string") continue;
-    const index = ingress.findIndex((entry) => entry.id === claim.delivery_id && entry.leaseId === claim.lease_id);
+    // ACK and renewal are themselves privileged lease operations. An expired
+    // worker must not be able to resurrect or consume a turn before a newer
+    // worker gets to poll it.
+    const index = ingress.findIndex((entry) => entry.id === claim.delivery_id
+      && entry.leaseId === claim.lease_id
+      && Number(entry.leaseUntil) > current);
     if (index < 0) continue;
     if (acknowledge) acknowledged.push(...ingress.splice(index, 1));
-    else ingress[index].leaseUntil = Date.now() + leaseMs;
+    else ingress[index].leaseUntil = current + leaseMs;
     changed += 1;
   }
   if (changed === 0) return { changed: 0, durable: true };
@@ -1572,24 +2763,36 @@ const updateBridgeLeases = async (claims, acknowledge) => mutateIngress(async ()
 });
 const finalizeBridgeEdits = async (claims) => {
   const chats = new Set();
+  const current = Date.now();
   for (const claim of claims) {
     if (claim == null || typeof claim.delivery_id !== "string" || typeof claim.lease_id !== "string") continue;
     const entry = ingress.find((candidate) => candidate.kind === "bridge"
       && candidate.id === claim.delivery_id
-      && candidate.leaseId === claim.lease_id);
-    if (entry != null) chats.add(entry.routed.conversationKey);
+      && candidate.leaseId === claim.lease_id
+      && Number(candidate.leaseUntil) > current);
+    if (entry != null) chats.add(`${entry.routed.conversationKey}\u0000${claim.delivery_id}\u0000${claim.lease_id}`);
   }
-  for (const chatId of chats) {
+  for (const packed of chats) {
+    const [chatId, deliveryId, leaseId] = packed.split("\u0000");
     const edit = bridgePendingEdits.get(chatId);
-    if (edit == null) continue;
+    // A chat may be re-leased after a worker expires. Never let the old
+    // worker's ACK promote a frame belonging to a different claim.
+    if (edit == null || edit.deliveryId !== deliveryId || edit.leaseId !== leaseId
+        || !bridgePendingEditIsActive(chatId, edit)) continue;
     const placeholder = await takeLivePlaceholder(chatId);
+    // `takeLivePlaceholder` can await its delayed creation; the lease may
+    // have changed while it did so. Do not even retire a placeholder on
+    // behalf of an old worker.
+    if (!bridgePendingEditIsActive(chatId, edit)) continue;
     if (placeholder != null && bareHex(placeholder.handle.messageId) !== bareHex(edit.messageId)) {
       // The framework chose to stream an earlier bot message rather than the
       // current placeholder. Retire the placeholder so it never dangles.
       await placeholder.handle.finalize("✓");
     }
-    await liveReplies.finalizeExisting(chatId, edit.messageId, edit.text);
-    bridgePendingEdits.delete(chatId);
+    await liveReplies.finalizeExisting(chatId, edit.messageId, edit.text, {
+      guard: () => bridgePendingEditIsActive(chatId, edit),
+    });
+    cancelBridgePendingEdit(chatId, edit);
   }
 };
 // A bridge must never receive the encrypted HOP ticket. Give each capability
@@ -1692,10 +2895,63 @@ const readBody = (request, max = 1_000_000) => new Promise((resolve, reject) => 
   request.on("error", reject);
 });
 const json = (response, status, body) => { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(body)); };
-const authorized = (request) => {
-  const supplied = String(request.headers.authorization ?? request.headers["x-bridge-token"] ?? "").replace(/^Bearer\s+/i, "");
-  const a = Buffer.from(supplied); const b = Buffer.from(bridgeToken);
+const requestHeader = (request, name) => {
+  const raw = request.headers[name];
+  return Array.isArray(raw) ? String(raw[0] ?? "") : String(raw ?? "");
+};
+const tokenMatches = (supplied, expected) => {
+  const a = Buffer.from(supplied); const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
+};
+const authorized = (request) => {
+  const supplied = (requestHeader(request, "authorization") || requestHeader(request, "x-bridge-token")).replace(/^Bearer\s+/i, "");
+  return tokenMatches(supplied, bridgeToken);
+};
+// This is intentionally *not* an alternative Authorization header: an
+// operator must grant both normal bridge access and this narrowly-scoped
+// proactive-send capability. It is only consulted when a bridge/hermes
+// request has no delivery lease at all.
+const proactiveAuthorized = (request) => bridgeProactiveToken.length > 0
+  && tokenMatches(requestHeader(request, "x-bridge-proactive-token"), bridgeProactiveToken);
+// A framework adapter receives a lease for one specific incoming turn. Do
+// not let it publish by bare chat ID: after a user edits or deletes the prompt
+// an old worker may still be running, but its claim has been revoked. Native
+// direct brains do not use this HTTP handoff and retain their normal transport
+// reply path.
+const validateBridgeOutboundClaim = (body, chatId, request) => {
+  const deliveryId = body?.delivery_id;
+  const leaseId = body?.lease_id;
+  const hasDelivery = deliveryId != null;
+  const hasLease = leaseId != null;
+  if (hasDelivery !== hasLease || (hasDelivery && (typeof deliveryId !== "string" || typeof leaseId !== "string"))) {
+    return { valid: false, status: 400, error: "delivery_id and lease_id must be provided together" };
+  }
+  const claimRequired = brain === "bridge" || brain === "hermes";
+  if (!claimRequired && !hasDelivery) return { valid: true };
+  // A proactive capability only authorizes a request which did not claim a
+  // delivery. A stale/malformed claim must never silently downgrade to this
+  // broader mode: workers always retain the stronger lease fence.
+  if (!hasDelivery && proactiveAuthorized(request)) return { valid: true, proactive: true };
+  if (!hasDelivery) return { valid: false, status: 409, error: "an active delivery lease or proactive capability is required for this bridge operation" };
+  const entry = ingress.find((candidate) => candidate.kind === "bridge"
+    && candidate.id === deliveryId
+    && candidate.leaseId === leaseId
+    && candidate.routed.conversationKey === chatId
+    && Number(candidate.leaseUntil) > Date.now());
+  if (entry == null) return { valid: false, status: 409, error: "delivery lease is stale or has been revoked" };
+  return { valid: true, entry };
+};
+const bridgeClaimGuard = (claim, chatId) => claim?.entry == null
+  ? null
+  : () => bridgeLeaseIsActive(chatId, claim.entry.id, claim.entry.leaseId);
+const staleBridgeClaimError = () => {
+  const error = new Error("delivery lease is stale or has been revoked");
+  error.code = "T3AMS_BRIDGE_LEASE_STALE";
+  error.bridgeClaimStale = true;
+  return error;
+};
+const assertBridgeClaimCurrent = (guard) => {
+  if (guard != null && !guard()) throw staleBridgeClaimError();
 };
 const bridge = http.createServer(async (request, response) => {
   try {
@@ -1705,7 +2961,11 @@ const bridge = http.createServer(async (request, response) => {
       return json(response, 200, {
         ok: isChainConnected(), transport: "t3ams", account: material.accountIdHex, identifierKey: null,
         xid: selfXidHex, username, subscriptions: subscriptions.size,
-        bridge: { queued: bridgeQueued() },
+        bridge: {
+          queued: bridgeQueued(),
+          claimBoundSends: brain === "bridge" || brain === "hermes",
+          proactiveOutbound: bridgeProactiveToken.length > 0,
+        },
         media: {
           enabled: t3amsMedia.enabled,
           cached: t3amsMedia.stats(),
@@ -1823,6 +3083,9 @@ const bridge = http.createServer(async (request, response) => {
       const filePath = body.file_path == null ? null : body.file_path;
       if (!chatId || (!hasText && filePath == null)) return json(response, 400, { success: false, error: "chat_id and text or file_path are required" });
       if (!isT3amsConversationKey(chatId)) return json(response, 400, { success: false, error: "invalid chat_id" });
+      const claim = validateBridgeOutboundClaim(body, chatId, request);
+      if (!claim.valid) return json(response, claim.status, { success: false, error: claim.error });
+      const claimGuard = bridgeClaimGuard(claim, chatId);
       if (Buffer.byteLength(text, "utf8") > MAX_T3AMS_TEXT_BYTES) return json(response, 413, { success: false, error: "text too large" });
       if (filePath != null && (typeof filePath !== "string" || !filePath)) {
         return json(response, 400, { success: false, error: "file_path must be a saved file path" });
@@ -1850,8 +3113,18 @@ const bridge = http.createServer(async (request, response) => {
           return json(response, 409, { success: false, error: "edit_of must name a message issued by this bot process" });
         }
         disarmThinking(chatId);
-        bridgePendingEdits.set(chatId, { messageId: editOf, text });
-        liveReplies.throttledEdit(chatId, editOf, text);
+        const pending = {
+          messageId: editOf,
+          text,
+          deliveryId: claim.entry?.id ?? null,
+          leaseId: claim.entry?.leaseId ?? null,
+        };
+        bridgePendingEdits.set(chatId, pending);
+        liveReplies.throttledEdit(chatId, editOf, text, {
+          // Native/manual bridge calls retain their historical no-lease
+          // behavior; harness brains always have the claim captured above.
+          guard: claim.entry == null ? null : () => bridgePendingEditIsActive(chatId, pending),
+        });
         return json(response, 200, { success: true, message_id: editOf, coalesced: true });
       }
       const root = body.thread_root_id == null
@@ -1859,19 +3132,20 @@ const bridge = http.createServer(async (request, response) => {
         : bareHex(body.thread_root_id);
       if (root != null && !/^[0-9a-f]{64}$/.test(root)) return json(response, 400, { success: false, error: "thread_root_id must be a 32-byte hexadecimal message ID" });
       disarmThinking(chatId);
-      bridgePendingEdits.delete(chatId);
+      cancelBridgePendingEdit(chatId);
       if (filePath != null) {
         let file;
         try { file = fileStore.get(fileNamespaceForChat(chatId), filePath); }
         catch (error) { return json(response, fileBridgeStatus(error), { success: false, error: String(error?.message ?? error).slice(0, 300) }); }
         if (file == null) return json(response, 404, { success: false, error: "file not found" });
+        assertBridgeClaimCurrent(claimGuard);
         const placeholder = await takeLivePlaceholder(chatId);
         if (placeholder != null) {
           // Attachments cannot be added by an edit, so keep the live message
           // as a clear delivery status while the actual rich-file message is
           // submitted below. `reply_to` must not turn it into an unexplained
           // checkmark bubble.
-          await placeholder.handle.finalize("📎 Sending file…");
+          await placeholder.handle.finalize("📎 Sending file…", { guard: claimGuard });
         }
         try {
           const sent = await sendT3amsAttachment(chatId, {
@@ -1880,6 +3154,7 @@ const bridge = http.createServer(async (request, response) => {
             size: file.size,
             text: hasText ? text : file.path,
             threadRootId: root,
+            beforeSend: async () => assertBridgeClaimCurrent(claimGuard),
           });
           return json(response, 200, { success: true, message_id: sent.messageId, attachment: {
             id: sent.attachment.id,
@@ -1889,23 +3164,28 @@ const bridge = http.createServer(async (request, response) => {
           } });
         } catch (error) {
           log("T3AMS_BRIDGE_FILE_SEND_FAILED", { chatId, path: file.path, error: String(error?.message ?? error) });
-          return json(response, 502, { success: false, error: "file delivery failed" });
+          return json(response, error?.bridgeClaimStale === true ? 409 : 502, {
+            success: false,
+            error: error?.bridgeClaimStale === true ? "delivery lease is stale or has been revoked" : "file delivery failed",
+          });
         }
       }
       const parts = splitMessageText(text, replyChunkBytes);
       if (parts.length > 1) log("T3AMS_REPLY_CHUNKED", { chatId, parts: parts.length, chars: text.length });
       let firstId = null;
+      assertBridgeClaimCurrent(claimGuard);
       const placeholder = await takeLivePlaceholder(chatId);
       if (placeholder != null) {
         // A bridge lease records the triggering thread before the harness
         // begins work, so the placeholder is already in the correct T3ams
         // reply/thread. `reply_to` is normally supplied by both shipped
         // adapters and must not force a redundant \"✓\" plus a second bubble.
-        firstId = (await placeholder.handle.finalize(parts[0])).messageId;
+        firstId = (await placeholder.handle.finalize(parts[0], { guard: claimGuard })).messageId;
         noteBotIssuedMessage(chatId, firstId);
       }
       for (const [index, part] of parts.entries()) {
         if (index === 0 && firstId != null) continue;
+        assertBridgeClaimCurrent(claimGuard);
         const sent = await protocol.sendText(chatId, part, { threadRootId: root });
         noteBotIssuedMessage(chatId, sent.messageId);
         if (index === 0) firstId = sent.messageId;
@@ -1920,6 +3200,9 @@ const bridge = http.createServer(async (request, response) => {
       if (!isT3amsConversationKey(chatId) || !messageId || !emoji) {
         return json(response, 400, { success: false, error: "chat_id, message_id and emoji are required" });
       }
+      const claim = validateBridgeOutboundClaim(body, chatId, request);
+      if (!claim.valid) return json(response, claim.status, { success: false, error: claim.error });
+      assertBridgeClaimCurrent(bridgeClaimGuard(claim, chatId));
       await protocol.sendReaction(chatId, messageId, emoji, { removed: body.remove === true });
       return json(response, 200, { success: true });
     }
@@ -1927,12 +3210,18 @@ const bridge = http.createServer(async (request, response) => {
       const body = JSON.parse((await readBody(request)).toString("utf8") || "{}");
       const chatId = typeof body.chat_id === "string" ? body.chat_id : "";
       if (!isT3amsConversationKey(chatId)) return json(response, 400, { success: false, error: "invalid chat_id" });
+      const claim = validateBridgeOutboundClaim(body, chatId, request);
+      if (!claim.valid) return json(response, claim.status, { success: false, error: claim.error });
+      assertBridgeClaimCurrent(bridgeClaimGuard(claim, chatId));
       try { await protocol.sendTyping(chatId); }
       catch (error) { log("T3AMS_BRIDGE_TYPING_FAILED", { chatId, error: String(error?.message ?? error) }); }
       return json(response, 200, { success: true });
     }
     return json(response, 404, { success: false, error: "not found" });
   } catch (error) {
+    if (error?.bridgeClaimStale === true || error?.code === "LIVE_EDIT_FENCED") {
+      return json(response, 409, { success: false, error: "delivery lease is stale or has been revoked" });
+    }
     return json(response, 500, { success: false, error: String(error?.message ?? error).slice(0, 300) });
   }
 });

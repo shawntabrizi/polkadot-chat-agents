@@ -184,6 +184,11 @@ class PolkadotAdapter(BasePlatformAdapter):
         # ordered per chat, so this short-lived context safely routes Hermes's
         # synchronous answer (and command/error replies) back to that thread.
         self._active_thread_roots: Dict[str, Optional[str]] = {}
+        # A bridge delivery is also a capability to publish a reply. Keep its
+        # lease with the thread context for the duration of the synchronous
+        # Hermes turn, so every bridge /send can prove it still owns the
+        # inbound delivery that prompted the response.
+        self._active_delivery_claims: Dict[str, Tuple[str, str]] = {}
         self._running = False
         self._bot_account: Optional[str] = None
         self._bridge_file_max_bytes = _MAX_OUTBOUND_ATTACHMENT_BYTES
@@ -520,6 +525,16 @@ class PolkadotAdapter(BasePlatformAdapter):
         if not chat_id or not text:
             logger.warning("Polkadot bridge delivery is missing chat_id or text")
             return False
+        delivery_id = msg.get("delivery_id")
+        lease_id = msg.get("lease_id")
+        if (
+            not isinstance(delivery_id, str)
+            or not delivery_id
+            or not isinstance(lease_id, str)
+            or not lease_id
+        ):
+            logger.warning("Polkadot bridge delivery is missing delivery_id or lease_id")
+            return False
         attachments = msg.get("attachments") or []
         if not isinstance(attachments, list):
             raise RuntimeError("bridge delivery attachments must be an array")
@@ -529,7 +544,9 @@ class PolkadotAdapter(BasePlatformAdapter):
             thread_root = None
         had_previous_root = chat_id in self._active_thread_roots
         previous_root = self._active_thread_roots.get(chat_id)
+        previous_claim = self._active_delivery_claims.get(chat_id)
         self._active_thread_roots[chat_id] = thread_root
+        self._active_delivery_claims[chat_id] = (delivery_id, lease_id)
         try:
             sender_id = msg.get("sender_xid") or chat_id
             sender_name = msg.get("sender_name") or msg.get("user_name") or str(sender_id)[:8]
@@ -557,7 +574,17 @@ class PolkadotAdapter(BasePlatformAdapter):
                 self._active_thread_roots[chat_id] = previous_root
             else:
                 self._active_thread_roots.pop(chat_id, None)
+            if previous_claim is not None:
+                self._active_delivery_claims[chat_id] = previous_claim
+            else:
+                self._active_delivery_claims.pop(chat_id, None)
             await self._cleanup_attachments(temp_dir)
+
+    def _add_active_delivery_claim(self, chat_id: str, body: Dict[str, Any]) -> None:
+        """Attach the inbound lease that authorizes this synchronous reply."""
+        claim = self._active_delivery_claims.get(chat_id)
+        if claim is not None:
+            body["delivery_id"], body["lease_id"] = claim
 
     async def send(self, chat_id: str, content: str, reply_to=None, metadata=None) -> SendResult:
         if not self._session:
@@ -567,6 +594,7 @@ class PolkadotAdapter(BasePlatformAdapter):
             thread_root = self._active_thread_roots.get(chat_id)
             if thread_root:
                 body["thread_root_id"] = thread_root
+            self._add_active_delivery_claim(chat_id, body)
             if reply_to:
                 body["reply_to"] = str(reply_to)
             async with self._session.post(
@@ -694,6 +722,7 @@ class PolkadotAdapter(BasePlatformAdapter):
             thread_root = self._active_thread_roots.get(chat_id)
             if thread_root:
                 body["thread_root_id"] = thread_root
+            self._add_active_delivery_claim(chat_id, body)
             if reply_to:
                 body["reply_to"] = str(reply_to)
             async with self._session.post(
@@ -813,9 +842,11 @@ class PolkadotAdapter(BasePlatformAdapter):
         if not self._session:
             return SendResult(success=False, error="Polkadot bridge not connected")
         try:
+            body: Dict[str, Any] = {"chat_id": chat_id, "text": content, "edit_of": message_id}
+            self._add_active_delivery_claim(chat_id, body)
             async with self._session.post(
                 f"{self.bridge_url}/send",
-                json={"chat_id": chat_id, "text": content, "edit_of": message_id},
+                json=body,
                 timeout=60,
             ) as resp:
                 data = await resp.json()
@@ -830,8 +861,10 @@ class PolkadotAdapter(BasePlatformAdapter):
         if not self._session:
             return
         try:
+            body: Dict[str, Any] = {"chat_id": chat_id}
+            self._add_active_delivery_claim(chat_id, body)
             async with self._session.post(
-                f"{self.bridge_url}/typing", json={"chat_id": chat_id}, timeout=5
+                f"{self.bridge_url}/typing", json=body, timeout=5
             ):
                 pass
         except Exception:  # noqa: BLE001

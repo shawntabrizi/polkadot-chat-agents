@@ -16,6 +16,7 @@
           "enabled": { "type": "boolean" },
           "bridgeUrl": { "type": "string", "description": "Base URL of the bot-core bridge, e.g. http://127.0.0.1:8799" },
           "bridgeToken": { "type": "string", "format": "password", "description": "Bearer token for the bot-core bridge" },
+          "bridgeProactiveToken": { "type": "string", "format": "password", "description": "Optional T3ams proactive outbound capability; only for attached results without a leased delivery" },
           "dmPolicy": { "type": "string", "enum": ["open", "pairing", "allowlist", "closed"] },
           "allowFrom": { "type": "array", "items": { "type": "string" }, "description": "Allowed peer chat ids (account-id hex)" },
           "defaultAccount": { "type": "string" },
@@ -24,6 +25,6 @@
       }
     }
   },
-  "channelEnvVars": { "polkadot": ["POLKADOT_BRIDGE_URL", "POLKADOT_BRIDGE_TOKEN"] },
+  "channelEnvVars": { "polkadot": ["POLKADOT_BRIDGE_URL", "POLKADOT_BRIDGE_TOKEN", "POLKADOT_BRIDGE_PROACTIVE_TOKEN"] },
   "configSchema": { "type": "object", "additionalProperties": false, "properties": {} }
 }

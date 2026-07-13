@@ -130,7 +130,7 @@ const extensionForMime = (mime: string): string => {
 };
 
 const attachmentKind = (value: unknown): string =>
-  value === "image" || value === "document" || value === "video" || value === "general" ? value : "file";
+  value === "image" || value === "document" || value === "video" || value === "audio" || value === "general" ? value : "file";
 
 const validMime = (value: unknown): string | null => {
   const mime = String(value ?? "").trim();
@@ -421,6 +421,8 @@ const deliverOutboundReply = async ({
   chatId,
   replyTo,
   threadRootId,
+  deliveryId,
+  leaseId,
   payload,
 }: {
   bridge: BridgeClient;
@@ -428,6 +430,8 @@ const deliverOutboundReply = async ({
   chatId: string;
   replyTo: string;
   threadRootId?: string;
+  deliveryId?: string;
+  leaseId?: string;
   payload: OutboundReplyPayload;
 }): Promise<boolean> => {
   const text = String(payload.text ?? "").trim();
@@ -436,7 +440,7 @@ const deliverOutboundReply = async ({
   // Preserve the exact text-only behavior used before file delivery existed.
   if (media.length === 0) {
     if (!text) return false;
-    const result = await bridge.send(chatId, text, { replyTo, threadRootId });
+    const result = await bridge.send(chatId, text, { replyTo, threadRootId, deliveryId, leaseId });
     if (!result.success) throw new Error(`polkadot /send failed: ${result.error ?? "unknown"}`);
     return true;
   }
@@ -454,6 +458,8 @@ const deliverOutboundReply = async ({
         filePath: item.vaultPath,
         ...(index === 0 ? { replyTo } : {}),
         threadRootId,
+        deliveryId,
+        leaseId,
       });
       if (!result.success) throw new Error(`polkadot file /send failed: ${result.error ?? "unknown"}`);
     } finally {
@@ -658,6 +664,8 @@ async function dispatchInbound(
                   chatId,
                   replyTo: msg.message_id,
                   threadRootId,
+                  deliveryId: msg.delivery_id,
+                  leaseId: msg.lease_id,
                   payload: (payload ?? {}) as OutboundReplyPayload,
                 });
                 return { visibleReplySent };

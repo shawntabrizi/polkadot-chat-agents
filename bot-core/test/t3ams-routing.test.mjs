@@ -100,6 +100,30 @@ test("a restored durable channel command retains its command candidate", () => {
   assert.equal(invalidCommand?.message.commandText, undefined);
 });
 
+test("a legacy durable channel row without mention metadata remains eligible after restore", () => {
+  const workspaceId = "a1".repeat(32);
+  const channelId = "b2".repeat(32);
+  const senderXid = "c3".repeat(32);
+  const messageId = "d4".repeat(32);
+  const restored = restoreT3amsIngressRoute({
+    accepted: true,
+    conversationKey: `t3ams:channel:${workspaceId}:${channelId}`,
+    message: {
+      kind: "text",
+      messageId,
+      text: "@dotbot summarize this",
+      conversationType: "channel",
+      workspaceId,
+      channelId,
+      threadRootId: null,
+      senderXid,
+      senderName: "Alice",
+    },
+  });
+  assert.equal(restored?.message.legacyMentionGate, true);
+  assert.equal(restored?.message.mentions, undefined);
+});
+
 test("reply target preserves a thread root and always addresses the triggering message", () => {
   assert.deepEqual(replyTargetFor({ messageId: "m-1" }), { replyToMessageId: "m-1", threadRootId: null });
   assert.deepEqual(
@@ -241,4 +265,48 @@ test("a bounded channel-context snapshot survives the private journal and reache
     channelContext: [{ messageId: "not-an-xid", senderXid: priorSender, text: "nope" }],
   }, bot);
   assert.deepEqual(invalid, { accepted: false, reason: "invalid-channel-context" });
+});
+
+test("routing retains safe audio/video metadata for a bridge or direct brain", () => {
+  const ws = "a1".repeat(32);
+  const channel = "b2".repeat(32);
+  const sender = "c3".repeat(32);
+  const messageId = "d4".repeat(32);
+  const attachmentId = "e5".repeat(32);
+  const routed = normalizeT3amsInbound({
+    conversationType: "channel",
+    workspaceId: ws,
+    channelId: channel,
+    senderXid: sender,
+    messageId,
+    text: "@Atlas review the recording",
+    attachments: [{
+      id: attachmentId,
+      hopId: attachmentId,
+      claimTicketHex: "f6".repeat(32),
+      contentHashHex: "07".repeat(32),
+      attachmentIdHex: "08".repeat(32),
+      kind: "video",
+      mime: "video/mp4",
+      size: 1234,
+      filename: "walkthrough.mp4",
+      width: 1280,
+      height: 720,
+      durationMs: 45_000,
+    }],
+  }, bot);
+  assert.equal(routed.accepted, true);
+  assert.equal(routed.message.attachments[0].kind, "video");
+  assert.equal(routed.message.attachments[0].durationMs, 45_000);
+  assert.deepEqual(toT3amsBridgeInbound(routed).attachments, [{
+    id: attachmentId,
+    kind: "video",
+    mime: "video/mp4",
+    size: 1234,
+    filename: "walkthrough.mp4",
+    width: 1280,
+    height: 720,
+    duration_ms: 45_000,
+  }]);
+  assert.equal(restoreT3amsIngressRoute(routed)?.message.attachments[0].durationMs, 45_000);
 });

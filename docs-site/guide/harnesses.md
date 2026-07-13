@@ -88,6 +88,15 @@ not an inbound message to answer independently. See the
 [T3ams files](/guide/files#t3ams-photos-media-and-documents) for the
 transport-specific limits and allowance requirements.
 
+For `BOT_BRAIN=bridge` or `hermes`, normal `/send`, `/react`, and `/typing`
+calls carry the active inbound `delivery_id` and `lease_id`; a prompt edit or
+delete revokes that claim. A framework action with no inbound turn (such as an
+OpenClaw attached result) can instead use the opt-in, distinct
+`BOT_BRIDGE_PROACTIVE_TOKEN` in `x-bridge-proactive-token`, in addition to
+ordinary bridge authentication. It is accepted only for an entirely unleased
+operation and never validates a supplied stale lease. Leave it unset unless
+that proactive path is required.
+
 ## Bundled framework deployments
 
 The generated Hermes and OpenClaw deployments use bundled adapter packages. Run

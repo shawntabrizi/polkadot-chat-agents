@@ -143,14 +143,15 @@ the one-hour admission window. Operators may tune these limits with
 capacity review supports changing them.
 
 The live subscription set and outbound Statement Store queue are bounded as
-well. `BOT_T3AMS_SUBSCRIPTION_CAP` (default 256),
+well. `BOT_T3AMS_SUBSCRIPTION_CAP` (default 1024),
 `BOT_T3AMS_INGRESS_CALLBACK_CAP` (default 128), and
 `BOT_T3AMS_SUBMIT_QUEUE_CAP` (default 128) are defensive limits, not traffic
-targets. `BOT_T3AMS_KNOWN_CHAT_CAP` (default 128 for a public bot, 500 for a
+targets. A known DM uses a carrier route and a separate edit/delete operation
+route. `BOT_T3AMS_KNOWN_CHAT_CAP` (default 128 for a public bot, 500 for a
 private bot) also bounds persisted native-agent session state; active durable
 ingress items are protected until they finish. A full submit queue or exhausted
-allowance leaves the prompt in the durable journal and retries with backoff,
-so restore publishing allowance to resume those replies. The transport refreshes
+allowance leaves the prompt in the durable journal and retries with backoff, so
+restore publishing allowance to resume those replies. The transport refreshes
 retained subscriptions every two minutes by default; tune
 `BOT_T3AMS_SUBSCRIPTION_REFRESH_MS` only when the Statement Store and VPS have
 been sized for the resulting replay traffic.
@@ -179,6 +180,9 @@ been sized for the resulting replay traffic.
 - A bridge harness can use `POST /send` with `edit_of`, `POST /react`, and
   `POST /typing`; `GET /health` advertises those live capabilities. See
   [HARNESSES.md](HARNESSES.md#t3ams-transport-fields) for the exact contract.
+- Authenticated edits and deletions reconcile before queued work is dispatched.
+  An edit updates pending input/context; a deletion removes pending input or
+  stops an active direct turn. Neither can retract a reply already published.
 - Incoming reactions, typing, calls, and other non-message events are not
   agent prompts. They remain outside the direct-brain input contract.
 
@@ -217,14 +221,16 @@ and never exposes the raw reference or ticket through bridge payloads or logs.
 Rejecting arbitrary `http:`, `https:`, `file:`, or `data:` values prevents a
 message from turning into an SSRF or local-file fetch request.
 
-The default inbound policy permits at most four attachments, each no larger
-than 25 MiB. It admits common image and document MIME types (including PDF,
-plain/structured text, Office documents, and `application/octet-stream` for
-clients that cannot identify a document precisely); operators should narrow the
-allowlist for public bots. Invalid attachment metadata does not make the
-message trusted: a valid text body can still be delivered with a safe attachment
-warning, while an attachment-only invalid message is represented only as an
-unavailable-file notice—never as fetched bytes.
+The default inbound policy permits up to eight attachments, each no larger than
+25 MiB, with a hard count of 16. It accepts any syntactically valid MIME type,
+so photos, video, audio, PDFs, Office documents, archives, and application
+files work without a framework-specific allowlist. Operators can narrow the
+policy to exact MIME types or `type/*` patterns for a public bot. Image
+dimensions and declared audio/video duration are retained as safe metadata.
+Invalid attachment metadata does not make a message trusted: a valid text body
+can still be delivered with a safe attachment warning, while an attachment-only
+invalid message is represented only as an unavailable-file notice—never as
+fetched bytes.
 
 Only a configured, trusted T3ams Bulletin endpoint may retrieve the encrypted
 bytes. Until retrieval is configured, direct brains receive attachment metadata
@@ -234,13 +240,42 @@ turn, not the media-cache path itself. `/file put <path>` can retain one such
 attachment in the conversation vault, and `/file get <path>` publishes a new
 encrypted attachment back into that same DM or channel.
 
+Direct Claude, Codex, and OpenCode turns can also return generated files. For a
+turn, the bot creates a private `PCA_OUTPUT_DIR`; only bounded top-level regular
+files written there are uploaded as fresh native attachments, and the directory
+is removed after handoff. Nested paths and symlinks are ignored. Set
+`BOT_T3AMS_AGENT_OUTPUT_MAX_ARTIFACTS=0` to disable this return path; otherwise
+it defaults to the attachment-count limit and uses the same outbound size/MIME
+policy. `BOT_T3AMS_AGENT_OUTPUT_MAX_TOTAL_BYTES` independently caps the whole
+file batch. Before any upload or final-answer statement, bot-core persists the
+accepted file snapshots and final reply chunks in a private durable turn outbox.
+A normal delivery retry drains that exact turn rather than asking the agent to
+recreate a document, image, or answer; a successfully uploaded Bulletin
+reference is persisted before its chat statement. The outbox has independent
+global file and reply caps (`BOT_T3AMS_AGENT_OUTBOX_*` and
+`BOT_T3AMS_REPLY_OUTBOX_*`). If Bulletin upload, attachment count, or generic
+file MIME delivery is disabled, the bot withholds `PCA_OUTPUT_DIR` so an
+undeliverable file cannot block an otherwise valid text answer.
+
 Bridge harnesses receive an opaque `media_id` and authenticated `/media` URL
 for a valid attachment only when Bulletin retrieval is enabled; the original
 attachment id is metadata, not a fetch credential. The opaque id is bounded and
 expires, while `GET/PUT/DELETE /files/<chat_id>[/<path>]` stays scoped to that
 one conversation. A bridge `POST /send` may deliver a vault `file_path` with a
-caption or reply target, but never as an edit. See
+caption or reply target, but never as an edit. In bridge/Hermes mode it must
+also include the active inbound `delivery_id` and `lease_id`; the same claim is
+required for bridge `POST /react` and `POST /typing`. An edit or delete revokes
+the old claim before a stale worker can reply or emit stale live activity. See
 [HARNESSES.md](HARNESSES.md#t3ams-transport-fields) for that API contract.
+
+Some framework facilities deliberately originate outside an inbound turn (for
+example OpenClaw attached results). If those need to post to T3ams, configure
+the distinct optional `BOT_BRIDGE_PROACTIVE_TOKEN` and present it in the
+`x-bridge-proactive-token` header as well as normal bridge authentication. It
+permits only an entirely unleased `/send`, `/react`, or `/typing`; it is not a
+replacement for `BOT_BRIDGE_TOKEN`, does not grant vault access by itself, and
+cannot make a stale supplied lease valid. Leave it unset when proactive output
+is not required.
 
 Keep the media cache and any durable file vault below the private state volume,
 with disk quotas and retention limits sized for the 25 MiB per-attachment cap.

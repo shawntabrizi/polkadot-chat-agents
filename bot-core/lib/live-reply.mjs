@@ -58,6 +58,10 @@ export const createLiveReplies = ({
       finalized: false,
       inFlight: null, // Promise while an edit submit is in flight
       pendingText: null,
+      // Optional fence for a queued external edit.  Bridge workers lease an
+      // inbound turn, and a coalesced edit may not leave the process after
+      // that lease is revoked or expires.
+      pendingGuard: null,
       lastSentText: null,
       editsSent: 0,
       lastEditAt: null, // null = never sent on this lane -> first flush is immediate
@@ -75,11 +79,21 @@ export const createLiveReplies = ({
   const flush = async (lane) => {
     clearLaneTimer(lane);
     if (lane.finalized || lane.inFlight) return;
-    if (lane.pendingText == null || lane.pendingText === lane.lastSentText) { lane.pendingText = null; return; }
+    if (lane.pendingText == null || lane.pendingText === lane.lastSentText) {
+      lane.pendingText = null;
+      lane.pendingGuard = null;
+      return;
+    }
     const text = lane.pendingText;
+    const guard = lane.pendingGuard;
     lane.pendingText = null;
+    lane.pendingGuard = null;
     lane.inFlight = (async () => {
       try {
+        if (guard != null && !guard()) {
+          log("BOT_LIVE_EDIT_FENCED", { to: lane.peerHex, messageId: lane.messageId });
+          return;
+        }
         await send({ peerHex: lane.peerHex, text, editOf: lane.messageId });
         lane.lastSentText = text;
         lane.editsSent += 1;
@@ -106,9 +120,10 @@ export const createLiveReplies = ({
     lane.timer = timers.set(() => { lane.timer = null; void flush(lane); }, wait);
   };
 
-  const update = (lane, text) => {
+  const update = (lane, text, guard = null) => {
     if (lane.finalized) return;
     lane.pendingText = text;
+    lane.pendingGuard = guard;
     scheduleFlush(lane);
   };
 
@@ -123,13 +138,19 @@ export const createLiveReplies = ({
     return lane.ackState === "pending" ? "failed" : lane.ackState;
   };
 
-  const finalize = async (lane, text) => {
+  const finalize = async (lane, text, guard = null) => {
     if (lane.finalized) throw new Error("live message already finalized");
     lane.finalized = true;
     clearLaneTimer(lane);
     lane.pendingText = null;
+    lane.pendingGuard = null;
     if (lane.inFlight) await lane.inFlight.catch(noop);
     const ack = await settleAck(lane);
+    if (guard != null && !guard()) {
+      const error = new Error("live edit fence is no longer active");
+      error.code = "LIVE_EDIT_FENCED";
+      throw error;
+    }
     if (ack === "acked" || ack === "assumed") {
       if (text === lane.lastSentText) return { messageId: lane.messageId, edited: true };
       await send({ peerHex: lane.peerHex, text, editOf: lane.messageId });
@@ -160,28 +181,41 @@ export const createLiveReplies = ({
         messageId,
         get finalized() { return lane.finalized; },
         update: (t) => update(lane, t),
-        finalize: (t) => finalize(lane, t),
+        finalize: (t, { guard = null } = {}) => finalize(lane, t, guard),
       };
     },
 
     // Throttle a harness-driven edit of an existing bot message (the target
     // is presumed delivered — it was a previously ACK-tracked send or an old
     // message). Fire-and-forget: frames coalesce latest-wins.
-    throttledEdit(peerHex, messageId, text) {
+    throttledEdit(peerHex, messageId, text, { guard = null } = {}) {
       let lane = lanes.get(messageId);
       if (!lane) { lane = makeLane(peerHex, messageId, "assumed"); lane.ackResolvers = []; }
       if (lane.finalized) lane.finalized = false; // harness may keep editing a finalized live message
-      update(lane, text);
+      update(lane, text, guard);
+    },
+
+    // Drop a queued harness-driven edit when its surrounding turn is
+    // invalidated.  An already-submitted protocol request cannot be
+    // cancelled, but its caller's fence is checked immediately before send.
+    cancelExisting(peerHex, messageId) {
+      const lane = lanes.get(messageId);
+      if (lane == null || lane.peerHex !== peerHex) return false;
+      lane.finalized = true;
+      clearLaneTimer(lane);
+      lane.pendingText = null;
+      lane.pendingGuard = null;
+      return true;
     },
 
     // A bridge delivery is acknowledged only after its framework completed a
     // streamed turn. Promote the latest throttled frame to the terminal edit
     // at that point so no coalesced progress timer can overwrite the final
     // answer after the worker has ACKed its lease.
-    async finalizeExisting(peerHex, messageId, text) {
+    async finalizeExisting(peerHex, messageId, text, { guard = null } = {}) {
       let lane = lanes.get(messageId);
       if (!lane) { lane = makeLane(peerHex, messageId, "assumed"); lane.ackResolvers = []; }
-      return finalize(lane, text);
+      return finalize(lane, text, guard);
     },
   };
 };

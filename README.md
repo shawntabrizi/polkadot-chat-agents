@@ -115,7 +115,8 @@ tool progress, and finish. Its authenticated framework bridge can do the same
 through message edits, reactions, and typing signals. Rich-text attachment
 references are authenticated and constrained before they reach a brain or a
 bridge; see the T3ams guide for Bulletin media, private-state, and file-vault
-requirements.
+requirements. Direct Claude, Codex, and OpenCode turns can also return bounded
+generated photos, documents, and other files as native attachments.
 
 ## Brains
 

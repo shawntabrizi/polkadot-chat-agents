@@ -1,6 +1,6 @@
 // Thin HTTP client for the bot-core bridge (the Polkadot transport daemon).
 // Contract: authenticated GET /health, leased GET /inbound?wait=<secs>,
-// POST /inbound/ack, POST /send {chat_id,text?,file_path?,reply_to?,thread_root_id?},
+// POST /inbound/ack, POST /send {chat_id,text?,file_path?,reply_to?,thread_root_id?,delivery_id?,lease_id?},
 // GET/PUT/DELETE /files/:chat/:path (peer-scoped artifact vault), and GET
 // /media/:id (authenticated attachment retrieval, cached or on-demand).
 
@@ -9,12 +9,12 @@
 // first use. `downloaded` is only an advisory cache-status bit.
 export type InboundAttachment = {
   id: string;
-  kind: "image" | "document" | "video" | "general";
+  kind: "image" | "document" | "video" | "audio" | "general";
   mime: string;
   size: number;
   width?: number;
   height?: number;
-  duration?: number;
+  duration_ms?: number;
   downloaded: boolean;
   url?: string;
   error?: string;
@@ -55,13 +55,23 @@ export type InboundMsg = {
   }>;
 };
 export type SendResult = { success: boolean; message_id?: string; error?: string };
+export type ProactiveRequestOptions = {
+  // Send the separately-configured T3ams proactive capability header. This
+  // is for framework-originated work with no leased inbound delivery; normal
+  // gateway replies continue to send their delivery/lease pair instead.
+  proactive?: boolean;
+};
 export type SendOptions = {
   replyTo?: string;
   threadRootId?: string | null;
+  // Bind a reply to the currently leased inbound delivery. Both values are
+  // omitted for non-leased/legacy sends; the bridge validates an active pair.
+  deliveryId?: string;
+  leaseId?: string;
   // A vault-relative path previously written with putFile for this exact chat.
   // The bridge never accepts a host filesystem path in /send.
   filePath?: string;
-};
+} & ProactiveRequestOptions;
 
 export type PutFileResult = {
   success: boolean;
@@ -91,10 +101,16 @@ const requireSuccess = async (response: Response, operation: string): Promise<Br
   return data;
 };
 
-export function createBridge(baseUrl: string, token: string) {
+export function createBridge(baseUrl: string, token: string, proactiveToken = "") {
   const base = baseUrl.replace(/\/+$/, "");
   if (!token?.trim()) throw new Error("polkadot bridge token is required");
   const headers = { authorization: `Bearer ${token}` };
+  const proactive = proactiveToken.trim();
+  const proactiveHeaders = (requested: boolean): Record<string, string> => {
+    if (!requested) return {};
+    if (!proactive) throw new Error("polkadot proactive bridge token is not configured");
+    return { "x-bridge-proactive-token": proactive };
+  };
   const fileUrl = (chatId: string, filePath: string): string => {
     if (!chatId) throw new Error("cannot access a file vault with an empty chat id");
     if (!filePath) throw new Error("cannot access an empty file path");
@@ -148,10 +164,12 @@ export function createBridge(baseUrl: string, token: string) {
         ...(typeof options.filePath === "string" ? { file_path: options.filePath } : {}),
         ...(typeof options.replyTo === "string" ? { reply_to: options.replyTo } : {}),
         ...(typeof options.threadRootId === "string" ? { thread_root_id: options.threadRootId } : {}),
+        ...(typeof options.deliveryId === "string" ? { delivery_id: options.deliveryId } : {}),
+        ...(typeof options.leaseId === "string" ? { lease_id: options.leaseId } : {}),
       };
       const res = await fetch(`${base}/send`, {
         method: "POST",
-        headers: { ...headers, "content-type": "application/json" },
+        headers: { ...headers, ...proactiveHeaders(options.proactive === true), "content-type": "application/json" },
         body: JSON.stringify(body),
       });
       const data = await responseJson<SendResult>(res);
@@ -187,13 +205,28 @@ export function createBridge(baseUrl: string, token: string) {
       await requireSuccess(res, "file removal");
     },
 
-    react: async (chatId: string, messageId: string, emoji: string, remove = false): Promise<void> => {
+    react: async (
+      chatId: string,
+      messageId: string,
+      emoji: string,
+      remove = false,
+      options: ProactiveRequestOptions = {},
+    ): Promise<void> => {
       const res = await fetch(`${base}/react`, {
         method: "POST",
-        headers: { ...headers, "content-type": "application/json" },
+        headers: { ...headers, ...proactiveHeaders(options.proactive === true), "content-type": "application/json" },
         body: JSON.stringify({ chat_id: chatId, message_id: messageId, emoji, remove }),
       });
       await requireSuccess(res, "reaction");
+    },
+
+    typing: async (chatId: string, options: ProactiveRequestOptions = {}): Promise<void> => {
+      const res = await fetch(`${base}/typing`, {
+        method: "POST",
+        headers: { ...headers, ...proactiveHeaders(options.proactive === true), "content-type": "application/json" },
+        body: JSON.stringify({ chat_id: chatId }),
+      });
+      await requireSuccess(res, "typing");
     },
 
     fetchMedia: async (relativePath: string, signal?: AbortSignal): Promise<Response> => {

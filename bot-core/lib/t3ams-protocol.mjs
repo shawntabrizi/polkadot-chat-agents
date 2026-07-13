@@ -6,7 +6,7 @@
 // makes the transport testable with an in-memory statement store and lets the
 // existing direct-engine and HTTP-bridge runtimes stay transport-agnostic.
 
-import { conversationKeyFor } from "./t3ams-routing.mjs";
+import { conversationKeyFor, MAX_T3AMS_TEXT_BYTES } from "./t3ams-routing.mjs";
 import { normalizeT3amsAttachmentRefs } from "./t3ams-attachments.mjs";
 
 export const T3AMS_STATE_VERSION = 1;
@@ -24,6 +24,9 @@ export const T3AMS_WORKSPACE_CAP = 100;
 export const T3AMS_CHANNEL_CAP = 1_000;
 export const T3AMS_KEY_CAP_PER_WORKSPACE = 256;
 export const T3AMS_KEY_CAP = 2_048;
+// A healthy peer does not need every pairwise message mirrored to their
+// personal inbox. Keep the re-onboard wake conservative, matching the SPA.
+const T3AMS_DM_WAKE_BACKOFF_MS = 60_000;
 const T3AMS_TAGGED_KEY_HEX_RE = /^[0-9a-f]{2,4096}$/;
 const T3AMS_XID_HEX_RE = /^[0-9a-f]{64}$/;
 const T3AMS_ROLES = new Set(["owner", "admin", "mod", "member", "guest"]);
@@ -642,6 +645,11 @@ export function createT3amsProtocol({
   const conversations = new Map();
   const pinnedConversations = new Map();
   const replyTargets = new Map();
+  // Per-peer re-onboard wake state is intentionally process-local: it is only
+  // a best-effort supplement to the retained pairwise Statement Store route.
+  // Bound it independently so an evicted public peer cannot leave unbounded
+  // transient state behind.
+  const dmWakeState = new Map();
   // Typing is deliberately ephemeral. Keep only a bounded local cadence map;
   // the SPA clears a true indicator by TTL, so there is no durable state or
   // false indicator to publish when a turn ends.
@@ -789,6 +797,71 @@ export function createT3amsProtocol({
     if (peer == null) return false;
     state.peers[key] = { ...peer, lastActivityAt: now() };
     return true;
+  };
+  const retainDmWakeState = (peerXidHex, value) => {
+    const key = bareHex(peerXidHex);
+    dmWakeState.delete(key);
+    dmWakeState.set(key, value);
+    while (dmWakeState.size > peerLimit) dmWakeState.delete(dmWakeState.keys().next().value);
+  };
+  // Any valid inbound DM is fresh evidence the peer has the pairwise route.
+  // That suppresses further inbox wake-ups until the peer goes silent again.
+  const markPeerReachable = (peerXidHex) => {
+    const key = bareHex(peerXidHex);
+    const current = dmWakeState.get(key);
+    retainDmWakeState(key, {
+      lastWokeAt: current?.lastWokeAt ?? 0,
+      lastInboundAt: now(),
+    });
+  };
+  const shouldWakePeerInbox = (peerXidHex, current) => {
+    const stateForPeer = dmWakeState.get(bareHex(peerXidHex));
+    if (stateForPeer == null || stateForPeer.lastWokeAt === 0) return true;
+    if (stateForPeer.lastInboundAt > stateForPeer.lastWokeAt) return false;
+    return current - stateForPeer.lastWokeAt >= T3AMS_DM_WAKE_BACKOFF_MS;
+  };
+  const notePeerInboxWake = (peerXidHex, current) => {
+    const key = bareHex(peerXidHex);
+    const prior = dmWakeState.get(key);
+    retainDmWakeState(key, {
+      lastWokeAt: current,
+      lastInboundAt: prior?.lastInboundAt ?? 0,
+    });
+  };
+  // Mirror a just-sent carrier to an established peer's inbox. This covers a
+  // peer that re-onboarded without its pairwise subscription; first contact is
+  // still handled by the explicit DM request handshake. It intentionally
+  // absorbs every failure so a successful primary send stays successful.
+  const maybeWakePeerInbox = async (peerXidHex, sealed) => {
+    const key = bareHex(peerXidHex);
+    if (state.peers[key] == null || !(sealed instanceof Uint8Array)) return;
+    const current = now();
+    if (!shouldWakePeerInbox(key, current)) return;
+    notePeerInboxWake(key, current);
+    try {
+      const peer = hexToBytes(key);
+      const expression = bcts.dmMessageRequestExpression(
+        identity.xid,
+        displayName,
+        bcts.derivePersonalDMChannel(identity.xid, peer),
+        bcts.PERSONAL_SCOPE,
+        current,
+        sealed,
+        null,
+        null,
+        identity.signingPublicKey.taggedCborData(),
+      );
+      const { envelope } = bcts.createGSTPRequest(expression);
+      const signed = bcts.signGSTPRequest(envelope, identity.signingPrivateKey);
+      const inbox = bcts.derivePersonalInboxChannel(peer);
+      await submitStatement({ channel: inbox, topics: [inbox], data: bcts.envelopeToBytes(signed) });
+    } catch (error) {
+      try {
+        log("T3AMS_DM_WAKE_FAILED", { peer: key, error: String(error?.message ?? error) });
+      } catch {
+        // Logging must not turn a best-effort wake into a send failure.
+      }
+    }
   };
   const addPeer = (peerXidHex, details = {}) => {
     const key = bareHex(peerXidHex);
@@ -1004,6 +1077,7 @@ export function createT3amsProtocol({
         if (threadRootId != null && !validXidHex(threadRootId)) return null;
         const { attachments, attachmentError } = decodeAttachments(expression);
         touchPeer(peerHex);
+        markPeerReachable(peerHex);
         return {
           conversation,
           chatId,
@@ -1098,6 +1172,112 @@ export function createT3amsProtocol({
       }
     };
     return acceptCarrierMessages(carrier, decode);
+  };
+
+  // Operations are retained in a separate slot from message carriers. Decode
+  // only the authenticated edit/delete subset that changes bot input or local
+  // passive context; reactions/typing/profile updates are still authenticated
+  // for reachability/presence but intentionally do not become model prompts.
+  const decodeEditOrDelete = ({
+    expression,
+    conversation,
+    chatId,
+    senderXid,
+    editFunction,
+    deleteFunction,
+    editId = "messageId",
+    deleteId = "messageId",
+  }) => {
+    const functionName = bcts.extractFunctionName(expression);
+    if (functionName === editFunction) {
+      const id = extractBytes(bcts, expression, editId);
+      const text = extractString(bcts, expression, "body");
+      const editedAt = Number(extractNumber(bcts, expression, "editedAt"));
+      const messageId = id == null ? null : bareHex(bcts.formatXID(id));
+      if (!validXidHex(messageId) || typeof text !== "string" || Buffer.byteLength(text, "utf8") > MAX_T3AMS_TEXT_BYTES
+          || !Number.isSafeInteger(editedAt) || editedAt < 0) return null;
+      return { kind: "edit", conversation, chatId, messageId, senderXid, text, timestamp: editedAt };
+    }
+    if (functionName === deleteFunction) {
+      const id = extractBytes(bcts, expression, deleteId);
+      const deletedAt = Number(extractNumber(bcts, expression, "timestamp"));
+      const messageId = id == null ? null : bareHex(bcts.formatXID(id));
+      if (!validXidHex(messageId) || !Number.isSafeInteger(deletedAt) || deletedAt < 0) return null;
+      return { kind: "delete", conversation, chatId, messageId, senderXid, timestamp: deletedAt };
+    }
+    return null;
+  };
+
+  const directMessageOperation = (peerXidHex, data) => {
+    const peerHex = bareHex(peerXidHex);
+    const peer = state.peers[peerHex];
+    if (peer == null || !(data instanceof Uint8Array) || data.byteLength > T3AMS_MAX_ENVELOPE_BYTES) return null;
+    try {
+      const signed = bcts.decryptDMEnvelope(bcts.envelopeFromBytes(data), hexToBytes(peerHex), identity.xid);
+      if (!verifySigned(bcts, signed, peerSigningKey(bcts, peer))) return null;
+      const expression = parseRequest(bcts, signed);
+      if (expression == null) return null;
+      const target = extractBytes(bcts, expression, "to");
+      if (target == null || bareHex(bcts.formatXID(target)) !== selfXidHex) return null;
+      touchPeer(peerHex);
+      markPeerReachable(peerHex);
+      const conversation = { kind: "dm", peerXidHex: peerHex };
+      return decodeEditOrDelete({
+        expression,
+        conversation,
+        chatId: t3amsConversationKey(conversation),
+        senderXid: peerHex,
+        editFunction: "editMessage",
+        deleteFunction: "deleteMessage",
+      });
+    } catch {
+      return null;
+    }
+  };
+
+  const workspaceChannelOperation = (wsId, channelIdHex, data) => {
+    const workspace = stateWorkspace(state, wsId);
+    const channel = stateChannel(workspace, channelIdHex);
+    if (workspace == null || channel == null || !isWorkspaceMember(workspace, selfXidHex)
+        || !canReadWorkspaceChannel(workspace, channel, selfXidHex)
+        || !trustedRosterBindingsValid(workspace.doc)
+        || !(data instanceof Uint8Array) || data.byteLength > T3AMS_MAX_ENVELOPE_BYTES) return null;
+    const keySlot = channel.isPrivate ? stateKey(state, wsId, channel.idHex) : null;
+    const keys = channel.isPrivate
+      ? [keySlot?.current?.keyHex, ...(keySlot?.previous ?? []).map((entry) => entry?.keyHex)].filter((value) => typeof value === "string")
+      : [bytesToHex(bcts.deriveWorkspaceKey(wsId))];
+    if (keys.length === 0) return null;
+    try {
+      let signed = null;
+      for (const key of keys) {
+        try { signed = bcts.decryptWorkspaceChannelEnvelope(bcts.envelopeFromBytes(data), hexToBytes(key)); break; }
+        catch { /* try the previous epoch */ }
+      }
+      if (signed == null) return null;
+      const expression = parseRequest(bcts, signed);
+      if (expression == null) return null;
+      const sender = extractBytes(bcts, expression, "senderXid");
+      const senderXid = sender == null ? null : bareHex(bcts.formatXID(sender));
+      if (!validXidHex(senderXid) || senderXid === selfXidHex || !isPeerAllowed(senderXid)
+          || !isWorkspaceMember(workspace, senderXid)) return null;
+      const trustedKey = trustedPeers.get(senderXid) ?? null;
+      if ((requireTrustedPeers && trustedKey == null)
+          || (trustedKey != null && rosterSigningKeyHex(workspace.doc, senderXid) !== trustedKey)
+          || !verifySigned(bcts, signed, memberSigningKey(bcts, workspace, senderXid))) return null;
+      const conversation = { kind: "channel", wsId, channelIdHex: bareHex(channel.idHex), isPrivate: Boolean(channel.isPrivate) };
+      touchWorkspace(wsId);
+      return decodeEditOrDelete({
+        expression,
+        conversation,
+        chatId: t3amsConversationKey(conversation),
+        senderXid,
+        editFunction: "channelEditMessage",
+        deleteFunction: "channelDeleteMessage",
+        editId: "id",
+      });
+    } catch {
+      return null;
+    }
   };
 
   const receiveInbox = async (data) => {
@@ -1757,6 +1937,10 @@ export function createT3amsProtocol({
       messageId = bareHex(bcts.formatXID(bcts.extractParameter(expression, "id").extractBytes()));
     }
     await submitOutboundStatement(statement);
+    // Match the SPA's best-effort re-onboard wake: launch it only after the
+    // pairwise carrier was accepted, and never make the primary reply await
+    // or depend on a second inbox submission.
+    if (conversation.kind === "dm") void maybeWakePeerInbox(conversation.peerXidHex, statement.data);
     appendBackfill(state, chatId, { id: messageId, senderXid: selfXidHex, timestamp: messageTimestamp, blob: bytesToHex(blob) });
     persist();
     log("T3AMS_SENT_TEXT", { chatId, chars: text.length, ...(attachments.length > 0 ? { attachments: attachments.length } : {}) });
@@ -1799,7 +1983,9 @@ export function createT3amsProtocol({
     restoreInboundConversation,
     receiveInbox,
     receiveDm: directMessage,
+    receiveDmOperation: directMessageOperation,
     receiveChannel: workspaceChannel,
+    receiveChannelOperation: workspaceChannelOperation,
     receiveWorkspacePlane,
     receiveWorkspaceNotification,
     commitInbound,

@@ -16,8 +16,9 @@
 
 export const MAX_T3AMS_ID_LENGTH = 512;
 export const MAX_T3AMS_TEXT_BYTES = 64 * 1024;
-export const MAX_T3AMS_ATTACHMENT_COUNT = 4;
+export const MAX_T3AMS_ATTACHMENT_COUNT = 16;
 export const MAX_T3AMS_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+export const MAX_T3AMS_ATTACHMENT_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
 export const MAX_T3AMS_CHANNEL_CONTEXT_RECORDS = 64;
 export const MAX_T3AMS_CHANNEL_CONTEXT_BYTES = 64 * 1024;
 
@@ -85,17 +86,20 @@ const normalizeAttachment = (raw) => {
   const filename = typeof raw.filename === "string" ? raw.filename : "";
   if (!HEX_32_RE.test(id) || !HEX_32_RE.test(hopId) || id !== hopId || !HEX_32_RE.test(ticket)
       || !HEX_32_RE.test(contentHash) || !HEX_32_RE.test(attachmentId)
-      || (raw.kind !== "image" && raw.kind !== "document") || !MIME_RE.test(mime)
+      || !["image", "video", "audio", "document"].includes(raw.kind) || !MIME_RE.test(mime)
       || !Number.isSafeInteger(size) || size < 0 || size > MAX_T3AMS_ATTACHMENT_BYTES
       || !filename || Buffer.byteLength(filename, "utf8") > 255 || CONTROL_RE.test(filename) || /[\\/]/.test(filename)) return null;
   const width = raw.width == null ? null : Number(raw.width);
   const height = raw.height == null ? null : Number(raw.height);
+  const durationMs = raw.durationMs == null ? null : Number(raw.durationMs);
   if ((width == null) !== (height == null)
       || (width != null && (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1 || width > 100_000 || height > 100_000))) return null;
+  if (durationMs != null && (!Number.isSafeInteger(durationMs) || durationMs < 0 || durationMs > MAX_T3AMS_ATTACHMENT_DURATION_MS)) return null;
   return {
     id, hopId, claimTicketHex: ticket, contentHashHex: contentHash, attachmentIdHex: attachmentId,
     kind: raw.kind, mime, size, filename,
     ...(width == null ? {} : { width, height }),
+    ...(durationMs == null ? {} : { durationMs }),
   };
 };
 
@@ -159,7 +163,13 @@ const normalizeChannelContext = (raw, conversationType) => {
 
 const attachmentPlaceholder = (attachments, attachmentError) => {
   if (attachments.length > 0) return attachments.map((attachment) => {
-    const kind = attachment.kind === "image" ? "photo" : "file";
+    const kind = attachment.kind === "image"
+      ? "photo"
+      : attachment.kind === "video"
+        ? "video"
+        : attachment.kind === "audio"
+          ? "audio file"
+          : "file";
     const size = attachment.size >= 1024 * 1024
       ? `${(attachment.size / (1024 * 1024)).toFixed(1)} MB`
       : `${Math.max(1, Math.round(attachment.size / 1024))} KB`;
@@ -212,6 +222,24 @@ const mentionXid = (mention) => {
   if (typeof mention === "string") return id(mention.startsWith("@") ? mention.slice(1) : mention);
   if (mention && typeof mention === "object") return id(mention.xid);
   return null;
+};
+
+// Structured mentions have no source-text offsets, but retaining their small
+// canonical list inside a durable ingress record lets an authenticated body
+// edit be re-evaluated without accidentally changing the original addressed
+// audience. The transport never forwards this internal routing metadata to a
+// bridge unless it deliberately grows that contract later.
+const normalizeMentions = (raw) => {
+  if (!Array.isArray(raw) || raw.length > 256) return null;
+  const seen = new Set();
+  const mentions = [];
+  for (const item of raw) {
+    const value = mentionXid(item);
+    if (value == null || seen.has(value)) continue;
+    seen.add(value);
+    mentions.push(value);
+  }
+  return mentions;
 };
 
 // Structured mentions are exact XID matches.  The text fallback is intentionally
@@ -271,12 +299,14 @@ export const normalizeT3amsInbound = (event, bot, {
   const attachments = normalizeAttachments(fields.attachments);
   const attachmentError = safeAttachmentError(fields.attachmentError);
   const channelContext = normalizeChannelContext(fields.channelContext, fields.conversationType);
+  const mentions = normalizeMentions(fields.mentions);
 
   if (!conversationKey) return ignored("invalid-conversation");
   if (!replyTarget || !fields.senderXid) return ignored("invalid-message");
   if (fields.kind !== "text" && fields.kind !== "richText") return ignored("unsupported-content");
   if (attachments == null) return ignored("invalid-attachments");
   if (channelContext == null) return ignored("invalid-channel-context");
+  if (mentions == null) return ignored("invalid-mentions");
   if (fields.text === null || Buffer.byteLength(fields.text, "utf8") > MAX_T3AMS_TEXT_BYTES) return ignored("invalid-text");
   if (fields.text === "" && attachments.length === 0 && attachmentError == null) return ignored("invalid-text");
   if (botXid && fields.senderXid === botXid) return ignored("self-message");
@@ -284,7 +314,7 @@ export const normalizeT3amsInbound = (event, bot, {
   if (fields.conversationType === "channel" && requireMentionInChannels) {
     const mentioned = allowTextMentions
       ? isExplicitBotMention(event, bot)
-      : fields.mentions.some((mention) => mentionXid(mention) === botXid);
+      : mentions.some((mention) => mention === botXid);
     if (!mentioned) return ignored("unmentioned-channel-message");
   }
 
@@ -308,6 +338,7 @@ export const normalizeT3amsInbound = (event, bot, {
       threadRootId: fields.threadRootId,
       senderXid: fields.senderXid,
       senderName: fields.senderName,
+      ...(mentions.length > 0 ? { mentions } : {}),
       ...(attachments.length > 0 ? { attachments } : {}),
       ...(attachmentError == null ? {} : { attachmentError }),
       ...(channelContext.length > 0 ? { channelContext } : {}),
@@ -332,9 +363,17 @@ export const restoreT3amsIngressRoute = (raw) => {
   const threadRootId = message.threadRootId == null ? null : bareHex(message.threadRootId);
   const attachments = normalizeAttachments(message.attachments ?? []);
   const attachmentError = safeAttachmentError(message.attachmentError);
+  // Versions before structured mentions were persisted did not include this
+  // field at all.  Such a row was already accepted by the old process, so an
+  // edit after upgrade must not silently cancel it merely because we cannot
+  // reconstruct the original mention metadata.  New rows always carry an
+  // array when relevant and continue to be re-gated on every edit.
+  const hasStoredMentions = Object.prototype.hasOwnProperty.call(message, "mentions");
+  const mentions = normalizeMentions(hasStoredMentions ? message.mentions : []);
   if (!isT3amsHexId(senderXid) || !isT3amsHexId(messageId) || typeof message.text !== "string"
       || Buffer.byteLength(message.text, "utf8") > MAX_T3AMS_TEXT_BYTES
       || attachments == null
+      || mentions == null
       || (message.text === "" && attachments.length === 0 && attachmentError == null)
       || (threadRootId != null && !isT3amsHexId(threadRootId))) return null;
   if ((message.kind != null && message.kind !== "text" && message.kind !== "richText")
@@ -369,6 +408,7 @@ export const restoreT3amsIngressRoute = (raw) => {
       threadRootId,
       senderXid,
       senderName,
+      ...(hasStoredMentions ? { mentions } : { legacyMentionGate: true }),
       ...(attachments.length > 0 ? { attachments } : {}),
       ...(attachmentError == null ? {} : { attachmentError }),
       ...(channelContext.length > 0 ? { channelContext } : {}),
@@ -404,6 +444,7 @@ export const toT3amsBridgeInbound = (routed) => {
         size: attachment.size,
         filename: attachment.filename,
         ...(attachment.width == null ? {} : { width: attachment.width, height: attachment.height }),
+        ...(attachment.durationMs == null ? {} : { duration_ms: attachment.durationMs }),
       })),
     } : {}),
     ...(message.attachmentError ? { attachment_error: message.attachmentError } : {}),

@@ -81,3 +81,38 @@ test("T3ams media uploads through positional HOP RPC and fetches BLAKE2b-256-ver
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("T3ams media preserves safe video metadata in the emitted AttachmentRef", async () => {
+  const node = await startNode();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "t3ams-media-video-test-"));
+  try {
+    const source = path.join(root, "walkthrough.mp4");
+    fs.writeFileSync(source, crypto.randomBytes(32 * 1024), { mode: 0o600 });
+    const media = createT3amsMedia({
+      bcts: { generateARID: () => new Uint8Array(32) },
+      bulletinUrl: node.url,
+      uploadSigner,
+      dir: path.join(root, "cache"),
+      allowInsecure: true,
+      maxTotalMb: 8,
+    });
+    const { ref, attachment } = await media.upload({
+      filePath: source,
+      mime: "video/mp4",
+      filename: "walkthrough.mp4",
+      width: 1280,
+      height: 720,
+      durationMs: 45_000,
+    });
+    assert.equal(ref.width, 1280);
+    assert.equal(ref.height, 720);
+    assert.equal(ref.durationMs, 45_000);
+    assert.equal(attachment.kind, "video");
+    assert.equal(attachment.durationMs, 45_000);
+    const hop = parseT3amsHopReference(ref.storageUrl);
+    assert.equal(hop.width, 1280);
+    assert.equal(hop.height, 720);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

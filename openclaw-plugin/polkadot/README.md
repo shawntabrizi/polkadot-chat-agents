@@ -29,6 +29,9 @@ Polkadot app ⇄ bot-core (--brain hermes) ⇄ HTTP bridge ⇄ this plugin ⇄ O
        "enabled": true,
        "bridgeUrl": "http://127.0.0.1:8799",   // or set POLKADOT_BRIDGE_URL
        "bridgeToken": "<BOT_BRIDGE_TOKEN>",    // or set POLKADOT_BRIDGE_TOKEN
+       // Optional: only for OpenClaw attached results that are not a reply
+       // to an active inbound delivery (or POLKADOT_BRIDGE_PROACTIVE_TOKEN).
+       "bridgeProactiveToken": "<BOT_BRIDGE_PROACTIVE_TOKEN>",
        "dmPolicy": "closed",                    // open | pairing | closed
        "allowFrom": ["<peer account-id hex>"]   // who may DM the agent
      }
@@ -42,6 +45,14 @@ gates senders before they reach the bridge.
 `bridgeToken` must match `BOT_BRIDGE_TOKEN` for the bot-core process. Keep it
 in the gateway secret store or `POLKADOT_BRIDGE_TOKEN`, not in a checked-in
 configuration file.
+
+For a T3ams bridge/Hermes bot, ordinary gateway replies carry their leased
+`delivery_id` and `lease_id`, so they do not need another credential.
+`bridgeProactiveToken` is optional and is used only by OpenClaw's generic
+attached-results sender, which can run outside such a delivery. It must match
+the distinct 32+ character `BOT_BRIDGE_PROACTIVE_TOKEN` secret and is sent as
+`x-bridge-proactive-token` alongside the normal bridge authorization. Leave it
+unset unless those proactive results are needed.
 
 ## Status
 

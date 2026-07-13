@@ -29,7 +29,7 @@ A framework plugin needs this small authenticated API:
 | Route | Purpose |
 |---|---|
 | `GET /health` | returns `{ ok, account, identifierKey, username }` |
-| `GET /inbound?wait=<secs>&limit=<n>` | long-poll; returns at most the requested bounded batch of leased `[{ delivery_id, lease_id, lease_ms, chat_id, text, message_id }, ...]`, or an empty array on timeout. `chat_id` is transport-specific (a peer account-id hex for the default transport; T3ams is described below). `text` is always non-empty (a placeholder like `[photo, image/jpeg, 245 KB]` is synthesized for caption-less attachments). Items may carry `kind` (`richText`/`reply`/`edited`), `reply_to`, `edit_of`, and `attachments: [{ id, kind, mime, size, width?, height?, duration?, media_id?, downloaded, url?, error? }]`. Add `&events=1` to also receive non-message signals (`kind`: `reaction`, `coinageSend`, `leftChat`, `contactAdded`) — opt-in, so a harness that ignores them never chat-replies to a reaction. |
+| `GET /inbound?wait=<secs>&limit=<n>` | long-poll; returns at most the requested bounded batch of leased `[{ delivery_id, lease_id, lease_ms, chat_id, text, message_id }, ...]`, or an empty array on timeout. `chat_id` is transport-specific (a peer account-id hex for the default transport; T3ams is described below). `text` is always non-empty (a placeholder like `[photo, image/jpeg, 245 KB]` is synthesized for caption-less attachments). Items may carry `kind` (`richText`/`reply`/`edited`), `reply_to`, `edit_of`, and `attachments: [{ id, kind, mime, size, width?, height?, duration_ms?, media_id?, downloaded, url?, error? }]`. Add `&events=1` to also receive non-message signals (`kind`: `reaction`, `coinageSend`, `leftChat`, `contactAdded`) — opt-in, so a harness that ignores them never chat-replies to a reaction. |
 | `POST /inbound/ack { delivery_id, lease_id }` | permanently acknowledges a leased inbound row after the framework has successfully handed it to its own runtime. Accepts `deliveries: [{ delivery_id, lease_id }, ...]` for a batch. Unacknowledged rows are retried after their lease expires; a stale claim acknowledges zero rows. |
 | `POST /inbound/renew { delivery_id, lease_id }` | extends an active lease for a long-running turn. Renew before `lease_ms` elapses, then ACK only the current lease. |
 | `GET /media/<id>` | bytes of a downloaded attachment (`url` from the inbound item), served with its content type; T3ams uses its opaque `media_id` rather than the attachment metadata id. |
@@ -68,7 +68,19 @@ cadence. `POST /react` publishes or removes an emoji reaction, and
 `live: { supportsEdit, supportsTyping, supportsReaction, minEditMs,
 placeholderAfterMs }`. A leased T3ams turn can acquire a thinking placeholder;
 the first ordinary send finalizes it, while the lease ACK flushes a coalesced
-streaming edit.
+streaming edit. In `BOT_BRAIN=bridge` or `hermes` mode, every outbound
+`POST /send`, `POST /react`, and `POST /typing` for that turn must also carry
+its `delivery_id` and `lease_id`. An edit/delete revokes the old claim, so an
+already-running stale worker cannot answer or publish stale live activity for
+the superseded prompt.
+
+For an explicit framework-originated action with no inbound turn (such as an
+OpenClaw attached result), configure a distinct `BOT_BRIDGE_PROACTIVE_TOKEN`.
+The request still requires normal bridge authentication and must also carry the
+secret in `x-bridge-proactive-token`. It permits only an entirely unleased
+`/send`, `/react`, or `/typing`; a request that supplies a lease still has to
+match an active lease. Leave this optional capability unset when it is not
+needed.
 
 T3ams rich-text inbound rows may include `attachments` with only safe metadata
 (`id`, `kind`, `mime`, `size`, `filename`, and optional dimensions), plus an

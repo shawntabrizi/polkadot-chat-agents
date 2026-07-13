@@ -178,7 +178,15 @@ export const createT3amsMedia = ({
     }
     return attachments;
   };
-  const upload = async ({ filePath, mime, size = null, filename = null } = {}) => {
+  const upload = async ({
+    filePath,
+    mime,
+    size = null,
+    filename = null,
+    width = null,
+    height = null,
+    durationMs = null,
+  } = {}) => {
     if (rpcUrl == null) throw new Error("T3ams Bulletin media upload is not configured");
     if (uploadSigner == null) throw new Error("T3ams Bulletin upload signer is not configured");
     if (typeof filePath !== "string" || !filePath) throw new Error("file path is required");
@@ -212,6 +220,7 @@ export const createT3amsMedia = ({
       mime,
       size: stat.size,
       filename: safeName,
+      ...(width == null ? {} : { width, height }),
     }, attachmentOptions);
     const ref = {
       id: bcts.generateARID(),
@@ -220,6 +229,8 @@ export const createT3amsMedia = ({
       mimeType: mime,
       fileSize: stat.size,
       filename: safeName,
+      ...(width == null ? {} : { width, height }),
+      ...(durationMs == null ? {} : { durationMs }),
     };
     const [attachment] = normalizeT3amsAttachmentRefs([ref], attachmentOptions);
     return { ref, attachment };
