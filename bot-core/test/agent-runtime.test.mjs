@@ -102,6 +102,32 @@ test("the resume token is captured, persisted, and exposed for the snapshot", as
   assert.ok(h.events.some((e) => e.event === "BOT_AI_USAGE" && e.inputTokens === 100));
 });
 
+test("a transport can isolate model sessions while keeping one delivery target", async () => {
+  const deliveries = [];
+  const h = makeRuntime({
+    chat: {
+      sendText: async () => {},
+      deliver: async (peer, text) => deliveries.push({ peer, text }),
+      beginTurn: () => null,
+    },
+  });
+  const chat = "t3ams:channel:workspace:general";
+  const firstThread = `${chat}:thread:first`;
+  const secondThread = `${chat}:thread:second`;
+
+  await h.runtime.handleMessage(chat, { text: "first", messageId: "M1", kind: "text", sessionKey: firstThread });
+  await h.runtime.handleMessage(chat, { text: "second", messageId: "M2", kind: "text", sessionKey: secondThread });
+
+  assert.deepEqual(h.runtime.peerSnapshot(firstThread), { rs: "S1" });
+  assert.deepEqual(h.runtime.peerSnapshot(secondThread), { rs: "S1" });
+  assert.deepEqual(h.runtime.peerSnapshot(chat), {});
+  assert.deepEqual(new Set(h.runtime.stateKeys()), new Set([firstThread, secondThread]));
+  assert.deepEqual(deliveries.map(({ peer }) => peer), [chat, chat]);
+  // Discovery remains one hint per visible chat, not one hint per thread.
+  assert.match(deliveries[0].text, /\/help/);
+  assert.doesNotMatch(deliveries[1].text, /\/help/);
+});
+
 test("commands answer via sendText without spawning the engine", async () => {
   const h = makeRuntime({ script: "exit 9" }); // would fail loudly if spawned
   await h.runtime.handleMessage("peer", { text: "/ping", messageId: "M1", kind: "text" });
@@ -134,6 +160,36 @@ test("model overrides are persisted and removed with /model default", async () =
   assert.ok(h.persists() >= 2, "reverting the model must remove the persisted override");
 });
 
+test("a thread-only reasoning override persists and restores with its session", async () => {
+  const chat = "t3ams:channel:workspace:general";
+  const thread = `${chat}:thread:thread-one`;
+  const source = makeRuntime({ reasoning: "medium" });
+  await source.runtime.handleMessage(chat, {
+    text: "/reasoning high", messageId: "M1", kind: "text", sessionKey: thread,
+  });
+  assert.deepEqual(source.runtime.peerSnapshot(thread), { ro: "high" });
+  assert.deepEqual(source.runtime.peerSnapshot(chat), {});
+  assert.deepEqual(source.runtime.stateKeys(), [thread]);
+
+  const restored = makeRuntime({ reasoning: "medium" });
+  restored.runtime.restorePeer(thread, source.runtime.peerSnapshot(thread));
+  assert.deepEqual(restored.runtime.peerSnapshot(thread), { ro: "high" });
+
+  const revoked = makeRuntime({ engine: { ...RUNNERS.claude, effortLevels: ["low"] } });
+  revoked.runtime.restorePeer(thread, { ro: "high" });
+  assert.deepEqual(revoked.runtime.peerSnapshot(thread), {});
+  assert.ok(revoked.events.some((event) => event.event === "BOT_REASONING_OVERRIDE_DROPPED"));
+});
+
+test("usage-only state is excluded from durable session keys", async () => {
+  const h = makeRuntime({
+    script: `printf '{"type":"result","result":"done","usage":{"input_tokens":1}}\\n'`,
+  });
+  await h.runtime.handleMessage("usage-only", { text: "hi", messageId: "M1", kind: "text" });
+  assert.deepEqual(h.runtime.peerSnapshot("usage-only"), {});
+  assert.deepEqual(h.runtime.stateKeys(), []);
+});
+
 test("an engine failure delivers the apology, not silence", async () => {
   const h = makeRuntime({ script: "echo nope >&2; exit 1" });
   await h.runtime.handleMessage("peer", { text: "hi", messageId: "M1", kind: "text" });
@@ -150,6 +206,23 @@ test("/stop kills the running turn and the turn resolves without delivering", as
   await turn;
   assert.equal(h.delivered.length, 0, "a stopped turn must not deliver");
   assert.equal(h.runtime.stop("peer"), false, "nothing left to stop");
+});
+
+test("/stop can target a threaded session without cancelling by its base delivery chat", async () => {
+  const h = makeRuntime({ script: "sleep 30" });
+  const chat = "t3ams:channel:workspace:general";
+  const thread = `${chat}:thread:root-message`;
+  const turn = h.runtime.handleMessage(chat, {
+    text: "long threaded job",
+    messageId: "M1",
+    kind: "text",
+    sessionKey: thread,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 300)); // let the child spawn
+  assert.equal(h.runtime.stop(chat), false, "the base delivery chat is not this thread session");
+  assert.equal(h.runtime.stop(chat, thread), true);
+  await turn;
+  assert.equal(h.delivered.length, 0, "a targeted threaded stop must suppress its reply");
 });
 
 test("agent children receive a minimal environment with no bot or provider secrets", async () => {

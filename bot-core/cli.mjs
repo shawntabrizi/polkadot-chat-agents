@@ -129,7 +129,7 @@ const fail = (s) => { console.error(`${c("✗", "31")} ${s}`); process.exit(1); 
 
 // Flags that are always boolean — they must never consume the following token,
 // or `pca create --public mybot` would swallow the bot name into --public.
-const BOOLEAN_FLAGS = new Set(["public", "dry-run", "no-register", "follow", "greet", "yes", "help", "version", "t3ams-auto-accept-workspaces", "t3ams-no-auto-accept-workspaces"]);
+const BOOLEAN_FLAGS = new Set(["public", "dry-run", "no-register", "follow", "greet", "yes", "help", "version", "safe-tools", "full-autonomy", "t3ams-auto-accept-workspaces", "t3ams-no-auto-accept-workspaces"]);
 const SHORT_FLAGS = { "-f": "follow", "-h": "help", "-V": "version" };
 function parseFlags(argv) {
   const flags = {};
@@ -1272,7 +1272,7 @@ const DEPLOY_ENGINES = {
 const KEY_FLAGS = { ANTHROPIC_API_KEY: "anthropic-key", OPENAI_API_KEY: "openai-key", OPENROUTER_API_KEY: "openrouter-key", GEMINI_API_KEY: "gemini-key", GROQ_API_KEY: "groq-key" };
 
 async function cmdDeploy(name, flags) {
-  if (!name) fail("Usage: pca deploy <name> --host <ssh-target> [--harness openclaw|hermes] [--model <m>] [--safe-tools] [--dry-run]");
+  if (!name) fail("Usage: pca deploy <name> --host <ssh-target> [--harness openclaw|hermes] [--model <m>] [--safe-tools|--allowed-tools <list>|--full-autonomy] [--dry-run]");
   const host = flags.host ? sshTarget(flags.host) : null;
   if (!host) fail(`--host <ssh-target> is required, e.g.  pca deploy ${name} --host root@1.2.3.4`);
   const cfg = readConfig(name);
@@ -1303,10 +1303,27 @@ async function cmdDeploy(name, flags) {
   const cn = containerName(`pca-${name.replace(/\./g, "-")}`);
   const base = remoteDir(flags["remote-dir"] ?? `pca-bots/${name}`);
   const sshOpts = ["-o", "ConnectTimeout=10", "-o", "BatchMode=yes"];
-  // Full autonomy by default: the container IS the sandbox, and the point of a
-  // dockerized coding agent is to run tools without prompting. --safe-tools
-  // restricts to the Bash,Read,Edit,Write allowlist instead.
-  const skipPerms = spec.pkg && flags["safe-tools"] !== true;
+  // A public prompt must never gain filesystem/shell access merely because an
+  // agent CLI is logged in with OAuth. Deploy text-only by default. Private
+  // operators can deliberately choose the conventional reviewed allowlist or
+  // full autonomy; both remain unsuitable for a public bot without a separate
+  // tool/auth isolation boundary.
+  const publicBot = (cfg.allow ?? []).length === 0;
+  const requestedFullAutonomy = flags["full-autonomy"] === true;
+  const requestedSafeTools = flags["safe-tools"] === true;
+  const configuredToolList = flags["allowed-tools"] == null
+    ? null
+    : flagValue(flags["allowed-tools"], "allowed-tools").split(",").map((tool) => tool.trim()).filter(Boolean);
+  if (requestedFullAutonomy && (requestedSafeTools || configuredToolList != null)) {
+    fail("--full-autonomy cannot be combined with --safe-tools or --allowed-tools");
+  }
+  if (spec.pkg && publicBot && cfg.brain !== "claude") {
+    fail("Public direct deployment currently supports only Claude's hardened no-tools profile; use an allowlisted bot or an externally isolated bridge runtime for other engines");
+  }
+  if (spec.pkg && publicBot && (requestedFullAutonomy || requestedSafeTools || configuredToolList?.length)) {
+    fail("Public direct bots must use the default no-tools profile; attachment/tool analysis requires an externally isolated runtime");
+  }
+  const configuredTools = configuredToolList ?? (requestedSafeTools ? ["Bash", "Read", "Edit", "Write"] : null);
 
   // Generate env + compose + Dockerfile locally, then (unless dry-run) ship & launch.
   const bridgeToken = ensureBridgeToken(name, cfg);
@@ -1336,7 +1353,8 @@ async function cmdDeploy(name, flags) {
       envLines.push(envLine(key, value));
     }
   }
-  if (skipPerms) envLines.push("BOT_AI_SKIP_PERMISSIONS=1");
+  if (configuredTools != null) envLines.push(envLine("BOT_AI_ALLOWED_TOOLS", configuredTools.join(",")));
+  if (requestedFullAutonomy && spec.pkg) envLines.push("BOT_AI_SKIP_PERMISSIONS=1");
   if (flags.greet === true) envLines.push("BOT_GREET=1");
   if (spec.pkg) {
     envLines.push(
@@ -1772,13 +1790,16 @@ create flags:
 model controls:  show current policy  ·  set <model> pins the default model  ·  allow <a,b>
   restricts chat-side switching  ·  lock disables it  ·  open permits it only for allowlisted bots
 
-deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --model <m>  ·  --safe-tools  ·  --dry-run
+deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --model <m>  ·  --safe-tools | --allowed-tools <list> | --full-autonomy  ·  --dry-run
   Needs Docker on the server + SSH access. Direct engines (echo/claude/codex/opencode)
   deploy with root-only transport state and a non-root agent CLI, with a persistent
-  /workspace the agent works in; bridge bots deploy a two-container stack. The
-  agent runs tools autonomously by default (--safe-tools restricts to a
-  read/write/edit/bash allowlist). The deploy output gives the one-time OAuth login
-  command for direct engines; logs/status/stop reuse the saved host (override with --host).
+  /workspace the agent works in; bridge bots deploy a two-container stack. Direct
+  agents start with no tools. For a private bot, --safe-tools opts into the
+  Bash/Read/Edit/Write allowlist, --allowed-tools selects a narrower list, and
+  --full-autonomy is the explicit unrestricted override. Public direct bots stay
+  no-tools until their tools and OAuth credentials are isolated. The deploy output
+  gives the one-time OAuth login command for direct engines; logs/status/stop reuse
+  the saved host (override with --host).
 
 Brains:  echo (test)  ·  claude/codex/opencode (direct agent engines — verbatim prompts,
   native session resume, tools in a container; opencode reaches many providers via
@@ -1794,7 +1815,7 @@ const COMMAND_FLAGS = {
   create: ["brain", "transport", "owner", "allow", "t3ams-peer-key", "t3ams-display-name", "t3ams-auto-accept-workspaces", "t3ams-no-auto-accept-workspaces", "public", "network", "endpoint", "backend", "username", "digits", "model", "port", "wait", "no-register"],
   register: ["username", "digits", "wait"],
   run: ["model", "greet"],
-  deploy: ["host", "harness", "anthropic-key", "openai-key", "openrouter-key", "gemini-key", "groq-key", "safe-tools", "model", "dry-run", "remote-dir", "greet"],
+  deploy: ["host", "harness", "anthropic-key", "openai-key", "openrouter-key", "gemini-key", "groq-key", "safe-tools", "allowed-tools", "full-autonomy", "model", "dry-run", "remote-dir", "greet"],
   logs: ["host", "follow", "tail"],
   status: ["host"],
   stop: ["host"],

@@ -36,9 +36,15 @@ test("resolveEngine / ENGINES", () => {
 });
 
 // ---- claude ----------------------------------------------------------------
-test("claude buildArgs: fresh, resume, tools, skip-permissions", () => {
+test("claude buildArgs: explicit no-tools default, allowlist, and bypass", () => {
+  const none = RUNNERS.claude.buildArgs({ prompt: "hi" });
+  assert.ok(none.includes("--permission-mode") && none[none.indexOf("--permission-mode") + 1] === "dontAsk");
+  assert.ok(none.includes("--tools") && none[none.indexOf("--tools") + 1] === "");
+  assert.ok(!none.includes("--allowedTools"));
+
   const fresh = RUNNERS.claude.buildArgs({ prompt: "hi", allowedTools: ["Bash", "Read", "Edit", "Write"] });
-  assert.deepEqual(fresh, ["-p", "--output-format", "stream-json", "--verbose", "--allowedTools", "Bash,Read,Edit,Write", "--", "hi"]);
+  assert.ok(fresh.includes("--tools") && fresh[fresh.indexOf("--tools") + 1] === "Bash,Read,Edit,Write");
+  assert.ok(fresh.includes("--allowedTools") && fresh[fresh.indexOf("--allowedTools") + 1] === "Bash,Read,Edit,Write");
   // prompt is always last, after `--` (leading-dash safety)
   assert.equal(fresh.at(-2), "--");
   assert.equal(fresh.at(-1), "hi");
@@ -50,6 +56,12 @@ test("claude buildArgs: fresh, resume, tools, skip-permissions", () => {
   const skip = RUNNERS.claude.buildArgs({ prompt: "hi", skipPermissions: true, allowedTools: ["Bash"] });
   assert.ok(skip.includes("--dangerously-skip-permissions"));
   assert.ok(!skip.includes("--allowedTools"), "skip-permissions supersedes the allowlist");
+  assert.ok(!skip.includes("--tools"), "skip-permissions supersedes the availability boundary");
+
+  const hardened = RUNNERS.claude.buildArgs({ prompt: "hi", safeMode: true });
+  assert.ok(hardened.includes("--safe-mode"));
+  assert.ok(hardened.includes("--strict-mcp-config"));
+  assert.ok(hardened.includes("--disable-slash-commands"));
 });
 
 test("claude parseEvent: session, tool action, text, result", () => {

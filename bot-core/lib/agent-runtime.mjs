@@ -470,9 +470,9 @@ export const createAgentRuntime = ({
   // Token/cost usage: the engines already report it per turn — log it and keep
   // an in-memory per-peer tally for /usage (observability, not billing; resets
   // on restart).
-  const recordUsage = (peerHex, usage) => {
+  const recordUsage = (peerHex, usage, sessionKey = peerHex) => {
     if (!usage) return;
-    const k = norm(peerHex);
+    const k = norm(sessionKey);
     const t = peerUsage.get(k) ?? { turns: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 };
     t.turns += 1;
     t.inputTokens += usage.inputTokens ?? 0;
@@ -556,9 +556,9 @@ export const createAgentRuntime = ({
     }
   };
 
-  const queueEngineTurn = (peerHex, run) => {
+  const queueEngineTurn = (peerHex, run, sessionKey = peerHex) => {
     if (shuttingDown) return Promise.resolve({ stopped: true });
-    const peerKey = norm(peerHex);
+    const peerKey = norm(sessionKey);
     if (activeTurnCount >= turnLimit && queuedTurns.length >= queuedTurnLimit) {
       log("BOT_AI_QUEUE_FULL", { to: peerHex, active: activeTurnCount, queued: queuedTurns.length, cap: queuedTurnLimit });
       return Promise.resolve({ busy: true });
@@ -586,8 +586,8 @@ export const createAgentRuntime = ({
   // answer is accumulated. No wall-clock limit — an idle-silence backstop
   // kills a wedged process (and unblocks the peer queue). Returns { answer },
   // { stopped: true } (user /stop), or null on failure.
-  const runEngine = (peerHex, userText, onAction = null, cwd = workspace, job = null, outputDir = null) => new Promise((resolve) => {
-    const k = norm(peerHex);
+  const runEngine = (peerHex, userText, onAction = null, cwd = workspace, job = null, outputDir = null, sessionKey = peerHex) => new Promise((resolve) => {
+    const k = norm(sessionKey);
     if (job?.cancelled) { resolve({ stopped: true }); return; }
     let child;
     try {
@@ -688,7 +688,7 @@ export const createAgentRuntime = ({
       if (outputExceeded) return finish(null);
       const finalAnswer = (resultText ?? answer).trim();
       if (errored) { log("BOT_AI_FAILED", { to: peerHex, error: String(errored).slice(-300) }); return finish(null); }
-      if (code === 0 || finalAnswer) { recordUsage(peerHex, usage); return finish({ answer: finalAnswer }); }
+      if (code === 0 || finalAnswer) { recordUsage(peerHex, usage, k); return finish({ answer: finalAnswer }); }
       // Classify the failure so the operator knows the remedy (re-auth vs. retry).
       const authRevoked = /401|unauthorized|refresh token|could not be refreshed|log ?out and sign in/i.test(err);
       log(authRevoked ? "BOT_AI_AUTH_REVOKED" : "BOT_AI_FAILED", { to: peerHex, code, stderr: err.trim().slice(-500) });
@@ -771,9 +771,13 @@ export const createAgentRuntime = ({
   return {
     // One inbound chat message -> command reply or full engine turn. The
     // caller has already fetched attachments; `msg` is the normalized shape
-    // ({ text, messageId, kind, attachments?, replyTo?, editOf? }).
+    // ({ text, messageId, kind, attachments?, replyTo?, editOf?, sessionKey? }).
+    // `peerHex` is always the transport delivery target. A transport can give
+    // a threaded message a distinct `sessionKey` so native model memory and
+    // commands stay isolated without changing where replies are published.
     async handleMessage(peerHex, msg) {
-      const k = norm(peerHex);
+      const k = norm(msg?.sessionKey ?? peerHex);
+      const deliveryKey = norm(peerHex);
       // T3ams channel messages preserve their raw `@bot …` prompt for the
       // model, but may supply the slash-command suffix separately. Other
       // transports and DMs continue to use their raw text as before.
@@ -812,7 +816,7 @@ export const createAgentRuntime = ({
             // `outputDir` is transport-owned capability context, so surface it
             // to a renderer only for the turn in which it actually exists.
             const promptMessage = outputDir == null ? msg : { ...msg, outputDir };
-            const engineResult = await runEngine(peerHex, renderMessage(promptMessage), onAction, turnCwd, job, outputDir);
+            const engineResult = await runEngine(peerHex, renderMessage(promptMessage), onAction, turnCwd, job, outputDir, k);
             if (engineResult && !engineResult.stopped && outputDir) {
               // The callback must never receive a path still writable by the
               // agent. Snapshot it now, while the root transport controls the
@@ -824,7 +828,7 @@ export const createAgentRuntime = ({
             cleanupAttachments();
             cleanupTurnOutputDirectory(outputDir);
           }
-        });
+        }, k);
         // A user /stop is a completed action, but a process-wide shutdown must
         // leave the durable owed record for the next process to resume.
         if (result?.stopped) return !shuttingDown;
@@ -846,8 +850,8 @@ export const createAgentRuntime = ({
           // Discovery: the very first reply to a peer carries a one-time /help
           // hint (persisted, so a restart doesn't repeat it).
           let outgoing = result.answer || "(no output)";
-          if (!introducedPeers.has(k)) {
-            introducedPeers.add(k);
+          if (!introducedPeers.has(deliveryKey)) {
+            introducedPeers.add(deliveryKey);
             trimSet(introducedPeers, peerCap);
             persist();
             outgoing += "\n\n(Tip: send /help to see my commands.)";
@@ -863,8 +867,8 @@ export const createAgentRuntime = ({
     // /stop lever: cancel a peer's queued or in-flight turn. The transport
     // intercepts /stop BEFORE its per-peer work queue, so it can also cancel
     // a turn waiting for the global execution budget.
-    stop(peerHex) {
-      const k = norm(peerHex);
+    stop(peerHex, sessionKey = peerHex) {
+      const k = norm(sessionKey);
       let stopped = cancelQueuedTurns(k) > 0;
       for (const job of activeTurnsByPeer.get(k) ?? []) {
         job.cancelled = true;
@@ -900,6 +904,19 @@ export const createAgentRuntime = ({
 
     queueStats: () => ({ active: activeTurnCount, queued: queuedTurns.length, activeCap: turnLimit, queuedCap: queuedTurnLimit }),
 
+    // State keys with durable agent state. A transport that deliberately uses
+    // a session key distinct from its delivery target (for example a T3ams
+    // thread) uses this to persist and restore every native conversation.
+    stateKeys: () => {
+      const keys = new Set([
+        ...peerResume.keys(),
+        ...peerModelOverrides.keys(),
+        ...peerEffortOverrides.keys(),
+        ...peerProjects.keys(),
+      ]);
+      return [...keys].slice(-peerCap);
+    },
+
     // ---- persistence (the transport owns the snapshot file; the runtime
     // owns what its fields mean) ----
     // Resume tokens are scoped to the engine, base model, and cwd. A change to
@@ -913,6 +930,10 @@ export const createAgentRuntime = ({
         // Model overrides are part of a native session's identity. Persist
         // them so a valid token never resumes later under the default model.
         ...(peerModelOverrides.has(peerKey) ? { mo: peerModelOverrides.get(peerKey) } : {}),
+        // Reasoning effort changes future native CLI argv just like a model
+        // override. Preserve it per native session (including a T3ams thread)
+        // so a restart does not silently reset the user's choice.
+        ...(peerEffortOverrides.has(peerKey) ? { ro: peerEffortOverrides.get(peerKey) } : {}),
         // Active project/branch — the resume token above is only valid in
         // this cwd, so both restore together or not at all.
         ...(proj ? { pj: proj.alias, ...(proj.branch ? { br: proj.branch } : {}) } : {}),
@@ -930,7 +951,7 @@ export const createAgentRuntime = ({
         log("BOT_RESUME_INVALIDATED", { was: agentMeta, now: { engine: engineName, workspace, model } });
       }
     },
-    restorePeer(peerKey, { rs, mo, pj, br } = {}) {
+    restorePeer(peerKey, { rs, mo, ro, pj, br } = {}) {
       const proj = pj && workspaces?.has(pj) ? { alias: pj, branch: br ?? null } : null;
       if (proj) { peerProjects.set(peerKey, proj); trimMap(peerProjects, peerCap); }
       else if (pj) log("BOT_PROJECT_DROPPED", { peer: peerKey, alias: pj, reason: "no longer registered" });
@@ -943,6 +964,16 @@ export const createAgentRuntime = ({
         trimMap(peerModelOverrides, peerCap);
       } else if (hasStoredOverride) {
         log("BOT_MODEL_OVERRIDE_DROPPED", { peer: peerKey, model: mo, reason: "no longer allowed" });
+      }
+      const hasStoredEffort = ro != null;
+      const validStoredEffort = typeof ro === "string"
+        && Array.isArray(engine?.effortLevels)
+        && engine.effortLevels.includes(ro);
+      if (validStoredEffort) {
+        peerEffortOverrides.set(peerKey, ro);
+        trimMap(peerEffortOverrides, peerCap);
+      } else if (hasStoredEffort) {
+        log("BOT_REASONING_OVERRIDE_DROPPED", { peer: peerKey, effort: ro, reason: "no longer allowed" });
       }
       // If a persisted override is no longer allowed, its token is necessarily
       // for a different effective model and must not be reused.

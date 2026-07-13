@@ -35,6 +35,7 @@ test("T3ams media uploads through positional HOP RPC and fetches BLAKE2b-256-ver
     const bcts = {
       generateARID: () => Uint8Array.from({ length: 32 }, (_, index) => (index === 31 ? ++arid : 0)),
     };
+    const logs = [];
     const media = createT3amsMedia({
       bcts,
       bulletinUrl: node.url,
@@ -42,6 +43,7 @@ test("T3ams media uploads through positional HOP RPC and fetches BLAKE2b-256-ver
       dir: path.join(root, "cache"),
       allowInsecure: true,
       maxTotalMb: 8,
+      log: (event, data) => logs.push({ event, data }),
     });
 
     const { ref, attachment } = await media.upload({
@@ -58,14 +60,30 @@ test("T3ams media uploads through positional HOP RPC and fetches BLAKE2b-256-ver
     assert.equal(attachment.mime, "application/pdf");
     assert.equal(attachment.filename, "evidence.pdf");
 
-    const [downloaded] = await media.fetchAttachments([attachment]);
+    const progress = [];
+    const [downloaded] = await media.fetchAttachments([attachment], {
+      onStart: (item) => progress.push(`start:${item.filename}`),
+      onSuccess: (item) => progress.push(`success:${item.filename}`),
+      onError: (item) => progress.push(`error:${item.filename}`),
+    });
     assert.equal(downloaded, attachment);
     assert.equal(attachment.downloaded, true);
     assert.equal(typeof attachment.path, "string");
+    assert.deepEqual(progress, ["start:evidence.pdf", "success:evidence.pdf"]);
     const recovered = fs.readFileSync(attachment.path);
     assert.deepEqual(recovered, original);
     assert.equal(blake2b256(recovered), expectedHash);
     assert.equal(media.findCached(attachment), attachment.path);
+
+    // UI progress is best-effort. A failed status renderer must not turn an
+    // otherwise cached attachment into a failed media transfer.
+    const [observerFailure] = await media.fetchAttachments([{ ...attachment }], {
+      onStart: () => { throw new Error("status renderer unavailable"); },
+      onSuccess: () => { throw new Error("status renderer unavailable"); },
+    });
+    assert.equal(observerFailure.downloaded, true);
+    assert.equal(typeof observerFailure.path, "string");
+    assert.equal(logs.filter(({ event }) => event === "T3AMS_MEDIA_PROGRESS_CALLBACK_FAILED").length, 2);
 
     // The content hash participates in the cache key. A wrong BLAKE2b-256 must
     // trigger a fresh HOP claim and fail before the cache is populated.

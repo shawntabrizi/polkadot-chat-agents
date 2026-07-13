@@ -39,13 +39,26 @@ export const toolActionTitle = (name, input = {}) => {
 const claude = {
   command: "claude",
   effortLevels: ["low", "medium", "high", "xhigh", "max"],
-  buildArgs({ prompt, model, resume, allowedTools, skipPermissions, effort }) {
+  buildArgs({ prompt, model, resume, allowedTools, skipPermissions, safeMode = false, effort }) {
     const args = ["-p", "--output-format", "stream-json", "--verbose"];
     if (resume) args.push("--resume", resume);
     if (model) args.push("--model", model);
     if (effort) args.push("--effort", effort);
-    if (skipPermissions) args.push("--dangerously-skip-permissions");
-    else if (allowedTools?.length) args.push("--allowedTools", allowedTools.join(","));
+    if (skipPermissions) {
+      args.push("--dangerously-skip-permissions");
+    } else {
+      // `--allowedTools` only pre-approves listed tools; it does not remove
+      // every other built-in capability. `--tools` is the availability
+      // boundary. Always emit it so an unset/empty operator setting means
+      // *no tools*, rather than whatever the CLI happens to enable by default.
+      const tools = Array.isArray(allowedTools)
+        ? allowedTools.map((tool) => String(tool).trim()).filter(Boolean)
+        : [];
+      args.push("--permission-mode", "dontAsk");
+      if (safeMode) args.push("--safe-mode", "--strict-mcp-config", "--disable-slash-commands");
+      if (tools.length === 0) args.push("--tools", "");
+      else args.push("--tools", tools.join(","), "--allowedTools", tools.join(","));
+    }
     args.push("--", prompt);
     return args;
   },

@@ -163,17 +163,35 @@ export const createT3amsMedia = ({
     }).catch(() => {});
     return promise;
   };
-  const fetchAttachments = async (attachments) => {
+  // Progress observers only inform the chat UX. They must never become part
+  // of the authenticated media path: a rendering/logging failure should not
+  // turn a successfully claimable photo or document into an unavailable one.
+  const reportProgress = (callback, phase, attachment) => {
+    if (typeof callback !== "function") return;
+    try {
+      callback(attachment);
+    } catch (error) {
+      log("T3AMS_MEDIA_PROGRESS_CALLBACK_FAILED", {
+        phase,
+        id: String(attachment?.id ?? "").slice(0, 16),
+        error: privateError(error),
+      });
+    }
+  };
+  const fetchAttachments = async (attachments, { onStart = null, onSuccess = null, onError = null } = {}) => {
     for (const attachment of attachments ?? []) {
       try {
+        reportProgress(onStart, "start", attachment);
         attachment.path = await download(attachment);
         attachment.downloaded = true;
         delete attachment.error;
+        reportProgress(onSuccess, "success", attachment);
       } catch (error) {
         attachment.downloaded = false;
         attachment.error = privateError(error);
         delete attachment.path;
         log("T3AMS_MEDIA_DOWNLOAD_FAILED", { id: String(attachment.id ?? "").slice(0, 16), error: attachment.error });
+        reportProgress(onError, "error", attachment);
       }
     }
     return attachments;

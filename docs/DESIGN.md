@@ -310,6 +310,7 @@ app username) or an explicit `--public` for any brain that costs money.
   spawns the CLI as uid/gid 1000 with a read-only source mount and access only to
   `/workspace`, `/home/node`, and private per-turn attachment directories. The
   container has an init reaper, no-new-privileges, and process/memory/CPU limits.
-  The container remains the tool boundary (open egress, nothing from the host);
-  the allowlist gates who can drive it.
-  `--safe-tools` restricts to a read/write/edit/bash allowlist.
+  The container limits host exposure, but it is not a credential boundary for a
+  tool-enabled OAuth CLI: the model can otherwise reach its own login. Direct
+  deployment therefore starts with no tools; private allowlisted operators can
+  opt into `--safe-tools`, `--allowed-tools`, or `--full-autonomy` deliberately.

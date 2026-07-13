@@ -1757,12 +1757,28 @@ export function createT3amsProtocol({
     };
   };
 
-  const submitDmOperation = async (conversation, expression, channel) => {
+  // A transport may have accepted an outbound request under a short-lived
+  // capability (for example a bridge delivery lease).  Build the encrypted
+  // statement normally, but fence the irreversible submit immediately before
+  // it enters the shared submitter.  A synchronous guard deliberately keeps
+  // the check and enqueue in one turn of the event loop.
+  const assertOutboundGuard = (guard) => {
+    if (guard == null) return;
+    if (typeof guard !== "function") throw new TypeError("outbound guard must be a function");
+    if (guard() === false) {
+      const error = new Error("outbound operation is no longer permitted");
+      error.code = "T3AMS_OUTBOUND_FENCED";
+      throw error;
+    }
+  };
+
+  const submitDmOperation = async (conversation, expression, channel, guard = null) => {
     const peer = hexToBytes(conversation.peerXidHex);
     const operationChannel = channel(peer);
     const { envelope } = bcts.createGSTPRequest(expression(peer));
     const signed = bcts.signGSTPRequest(envelope, identity.signingPrivateKey);
     const sealed = bcts.encryptDMEnvelope(signed, identity.xid, peer);
+    assertOutboundGuard(guard);
     await submitOutboundStatement({
       channel: operationChannel,
       topics: bcts.createDMTopics(operationChannel, identity.xid, true),
@@ -1770,11 +1786,12 @@ export function createT3amsProtocol({
     });
   };
 
-  const submitWorkspaceOperation = async (conversation, expression, channelFor, operation) => {
+  const submitWorkspaceOperation = async (conversation, expression, channelFor, operation, guard = null) => {
     const route = workspaceOperationRoute(conversation, operation);
     const { envelope } = bcts.createGSTPRequest(expression(route.channelId));
     const signed = bcts.signGSTPRequest(envelope, identity.signingPrivateKey);
     const sealed = bcts.encryptWorkspaceChannelEnvelope(signed, route.key);
+    assertOutboundGuard(guard);
     await submitOutboundStatement({
       channel: channelFor(route.channelEntry, route.channelId),
       topics: route.topics,
@@ -1782,7 +1799,7 @@ export function createT3amsProtocol({
     });
   };
 
-  const editText = async (chatId, messageId, text) => {
+  const editText = async (chatId, messageId, text, { guard = null } = {}) => {
     const conversation = requireConversation(chatId);
     const target = requireTargetMessageId(messageId);
     const replacement = requireOperationText(text);
@@ -1792,6 +1809,7 @@ export function createT3amsProtocol({
         conversation,
         (peer) => bcts.editMessageExpression(hexToBytes(target), replacement, editedAt, peer),
         (peer) => bcts.derivePersonalDMOpsChannel(identity.xid, peer),
+        guard,
       );
     } else {
       await submitWorkspaceOperation(
@@ -1801,13 +1819,14 @@ export function createT3amsProtocol({
           ? bcts.derivePrivateChannelOpsChannel(channelId)
           : bcts.derivePublicChannelOpsChannel(channelId),
         "edit messages",
+        guard,
       );
     }
     log("T3AMS_EDITED_TEXT", { chatId, target });
     return { messageId: target, edited: true };
   };
 
-  const sendReaction = async (chatId, messageId, emoji, { removed = false } = {}) => {
+  const sendReaction = async (chatId, messageId, emoji, { removed = false, guard = null } = {}) => {
     const conversation = requireConversation(chatId);
     const target = requireTargetMessageId(messageId);
     const reaction = requireEmoji(emoji);
@@ -1817,6 +1836,7 @@ export function createT3amsProtocol({
         conversation,
         (peer) => (removed ? bcts.removeReactionExpression : bcts.addReactionExpression)(hexToBytes(target), reaction, reactedAt, peer),
         (peer) => bcts.derivePersonalDMOpsChannel(identity.xid, peer),
+        guard,
       );
     } else {
       await submitWorkspaceOperation(
@@ -1828,13 +1848,14 @@ export function createT3amsProtocol({
           ? bcts.derivePrivateChannelOpsChannel(channelId)
           : bcts.derivePublicChannelOpsChannel(channelId),
         "react to messages",
+        guard,
       );
     }
     log("T3AMS_SENT_REACTION", { chatId, target, removed });
     return { messageId: target, removed };
   };
 
-  const sendTyping = async (chatId, { force = false, minIntervalMs = 4_000 } = {}) => {
+  const sendTyping = async (chatId, { force = false, minIntervalMs = 4_000, guard = null } = {}) => {
     const conversation = requireConversation(chatId);
     const interval = boundedInteger(minIntervalMs, 4_000, { min: 250, max: 60_000 });
     const current = now();
@@ -1845,6 +1866,7 @@ export function createT3amsProtocol({
         conversation,
         (peer) => bcts.typingIndicatorExpression(bcts.derivePersonalDMChannel(identity.xid, peer), true, current, peer),
         (peer) => bcts.derivePersonalDMTypingChannel(identity.xid, peer),
+        guard,
       );
     } else {
       await submitWorkspaceOperation(
@@ -1854,6 +1876,7 @@ export function createT3amsProtocol({
           ? bcts.derivePrivateChannelTypingChannel(channelId)
           : bcts.derivePublicChannelTypingChannel(channelId),
         "show typing",
+        guard,
       );
     }
     lastTypingAt.delete(chatId);
@@ -1936,6 +1959,7 @@ export function createT3amsProtocol({
       };
       messageId = bareHex(bcts.formatXID(bcts.extractParameter(expression, "id").extractBytes()));
     }
+    assertOutboundGuard(options.guard);
     await submitOutboundStatement(statement);
     // Match the SPA's best-effort re-onboard wake: launch it only after the
     // pairwise carrier was accepted, and never make the primary reply await

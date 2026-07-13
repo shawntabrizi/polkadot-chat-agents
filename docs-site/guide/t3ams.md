@@ -92,9 +92,10 @@ direct-agent turn. It cannot retract a reply already published before the bot
 received the deletion. Reactions and typing never become prompts.
 
 In a channel, normal mentioned prompts and `/stop` are available to members.
-By default, only workspace owners/admins may change a shared direct-brain
-session with `/reset`, `/model`, `/reasoning`, or `/project`; tune the threshold
-with `BOT_T3AMS_CHANNEL_CONTROL_ROLE`.
+Top-level prompts share a channel session, while each reply thread has its own
+native session. By default, only workspace owners/admins may change the current
+channel/thread session with `/reset`, `/model`, `/reasoning`, or `/project`;
+tune the threshold with `BOT_T3AMS_CHANNEL_CONTROL_ROLE`.
 
 ## Photos, documents, audio, video, and other files
 
@@ -149,6 +150,9 @@ full flow.
   The normal `pca storage` flow for the default transport does not provision it.
 - Restrict a public bot's attachment count/size/MIME policy, media cache, vault,
   and model/agent capacity before inviting untrusted users.
+- An open direct engine defaults to two active turns and 20 queued turns; its
+  authenticated `GET /health` response includes `direct.queue` so the operator
+  can observe active and queued work plus the configured caps.
 
 The [configuration reference](/reference/configuration#t3ams-media-and-file-vault)
 lists the transport-specific limits, cache controls, and group settings.

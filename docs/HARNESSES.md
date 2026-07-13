@@ -234,9 +234,10 @@ Related settings:
   Switching is locked by default. `allow` persists an approved list;
   `open` is an explicit option for allowlisted bots only. Public bots cannot
   allow unrestricted switching.
-- Tools are on by default (`BOT_AI_ALLOWED_TOOLS`, default `Bash,Read,Edit,Write`).
-  `BOT_AI_SKIP_PERMISSIONS=1` grants full autonomy (all tools) — safe because a
-  deployed engine runs inside its own container (see the safety model below).
+- Claude starts with no tools. For a private, allowlisted bot, set
+  `BOT_AI_ALLOWED_TOOLS` deliberately (or deploy with `--safe-tools` for the
+  conventional `Bash,Read,Edit,Write` list). `BOT_AI_SKIP_PERMISSIONS=1` is the
+  explicit full-autonomy override and is rejected for public direct bots.
 - The agent works in a persistent non-secret workspace (`BOT_AI_WORKSPACE`,
   defaulting to a sibling of `BOT_STATE_DIR`) that survives restarts.
 - `BOT_AI_CMD`/`BOT_AI_ARGS` wire in a custom CLI that speaks claude-shaped
@@ -260,17 +261,17 @@ Related settings:
 
 ### Safety model for containerized agents
 
-A deployed engine runs its tools autonomously, so the boundary is the
-**container**, not a permission prompt. `pca deploy` runs the transport as root
-only to own `/state` (the signing seed, session keys, and bridge token), then
-spawns the agent as the non-root `node` user with only persistent `/workspace`
-and `/home/node` access plus private per-turn attachment directories. The source
-mount is read-only; the container uses an init reaper, no-new-privileges, and
-process/memory/CPU ceilings. Provider API keys are not injected into the agent
-process; authenticate the CLI once through its native OAuth login in `/home/node`.
-An agent with tool access can still use its own provider credentials, so restrict
-senders with `--owner`/`--allow` and use `--safe-tools` when full autonomy is not
-appropriate. Sessions and the workspace persist across redeploys.
+`pca deploy` runs the transport as root only to own `/state` (the signing seed,
+session keys, and bridge token), then spawns the agent as the non-root `node`
+user with persistent `/workspace` and `/home/node` access. The source mount is
+read-only; the container uses an init reaper, no-new-privileges, and
+process/memory/CPU ceilings. Those are useful hardening layers, but they do not
+make an OAuth home safe from the model: a tool-enabled agent can read or misuse
+its own provider credential. Therefore direct deployments start with no tools;
+use `--safe-tools`, `--allowed-tools`, or `--full-autonomy` only for an explicit
+allowlist of trusted senders. Public direct bots remain Claude/no-tools until an
+external runtime isolates model tools from authentication. Sessions and the
+workspace persist across redeploys.
 
 An AI brain spends quota, so `create` requires an allowlist or an explicit
 `--public`.

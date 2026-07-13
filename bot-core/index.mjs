@@ -48,7 +48,7 @@
 //   Direct engines (BOT_BRAIN=claude|codex|opencode): BOT_AI_MODEL (opencode
 //   takes a provider/model slug), BOT_AI_ALLOWED_MODELS (comma-sep /model
 //   allowlist; unset/empty = locked), BOT_AI_MODEL_SWITCHING (locked|open;
-//   open requires a non-public bot), BOT_AI_ALLOWED_TOOLS (Bash,Read,Edit,Write),
+//   open requires a non-public bot), BOT_AI_ALLOWED_TOOLS (empty = no tools),
 //   BOT_AI_SKIP_PERMISSIONS (1 = full autonomy), BOT_AI_IDLE_TIMEOUT_MS
 //   (600000, kills a silent/wedged turn), BOT_AI_MAX_MS (3600000 default hard
 //   cap), BOT_AI_MAX_CONCURRENT_TURNS / BOT_AI_MAX_QUEUED_TURNS, BOT_AI_WORKSPACE
@@ -168,8 +168,9 @@ const greet = env.BOT_GREET === "1" || env.BOT_GREET === "true";
 const greetText = env.BOT_GREET_TEXT ?? `👋 ${env.BOT_USERNAME || env.FAUCET_CHAT_SERVICE_USERNAME || "Your bot"} here — I'm alive! Say hi, or /help for what I can do.`;
 
 // Direct engine "brains": bot-core runs a headless coding-agent CLI (claude /
-// codex / opencode) as an autonomous agent — verbatim prompt, native session
-// resume, tools on. The engine table (lib/runners.mjs) turns a
+// codex / opencode) as an autonomous agent — verbatim prompt and native
+// session resume. Tools require an explicit operator choice. The engine table
+// (lib/runners.mjs) turns a
 // (prompt, model, resume) into argv and normalizes each CLI's JSONL stream;
 // the runtime around it (spawn/stream/idle-backstop, per-peer state, in-chat
 // commands) is lib/agent-runtime.mjs, driven through the `chat` surface
@@ -179,9 +180,12 @@ const aiModel = (env.BOT_AI_MODEL ?? "").trim();
 // aiAllowedModels (the /model switching policy) is derived below, once the
 // peer allowlist is known. It is locked by default; open switching requires an
 // explicit non-public operator opt-in. See resolveModelPolicy.
-// Tools are on by default (the container is the sandbox). The allowlist is the
-// safe default; BOT_AI_SKIP_PERMISSIONS=1 grants full autonomy (all tools).
-const allowedTools = (env.BOT_AI_ALLOWED_TOOLS ?? "Bash,Read,Edit,Write").split(",").map((s) => s.trim()).filter(Boolean);
+// Claude defaults to an explicit no-tools profile. A process that can use an
+// OAuth login must not also be able to read that login just because it received
+// an arbitrary public prompt or attachment. Private operators can opt in to a
+// narrow allowlist; BOT_AI_SKIP_PERMISSIONS=1 remains an explicit full-autonomy
+// override for trusted deployments.
+const allowedTools = (env.BOT_AI_ALLOWED_TOOLS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 const skipPermissions = env.BOT_AI_SKIP_PERMISSIONS === "1";
 // No wall-clock timeout: a long agent turn (a big build/test) is legitimate.
 // Instead an idle-silence backstop kills a process that has emitted nothing for
@@ -235,7 +239,15 @@ if (engine && aiReasoning && !engine.effortLevels?.includes(aiReasoning)) {
 }
 const buildEngineArgs = ({ prompt, model, resume, effort }) => {
   if (customCmd) return customArgsTmpl ? customArgsTmpl.map((a) => (a === "__PROMPT__" ? prompt : a)) : [prompt];
-  return engine.buildArgs({ prompt, model, resume, effort, allowedTools, skipPermissions });
+  return engine.buildArgs({
+    prompt,
+    model,
+    resume,
+    effort,
+    allowedTools,
+    skipPermissions,
+    safeMode: brain === "claude" && (publicBuiltInDirectAgent || allowedTools.length === 0),
+  });
 };
 const lookbackDays = numberEnv("BOT_REQUEST_LOOKBACK_DAYS", 7, { min: 0, max: 365 });
 const futureDays = numberEnv("BOT_REQUEST_FUTURE_DAYS", 2, { min: 0, max: 30 });
@@ -268,6 +280,24 @@ const SEEN_CAP = 5000; // bound the persisted dedup set
 const allowedPeers = new Set(
   String(env.BOT_ALLOWED_PEERS ?? "").split(",").map((s) => s.trim().replace(/^0x/i, "").toLowerCase()).filter(Boolean),
 );
+// Public direct bots must not give a model process filesystem/shell access to
+// its own OAuth credential store. Claude can run in the hardened no-tools
+// profile below; other built-in engines need a separately isolated runtime
+// before they are safe to expose publicly. BOT_AI_CMD is an explicit custom
+// operator integration and owns its own sandbox policy.
+const publicBuiltInDirectAgent = engine != null && !customCmd && allowedPeers.size === 0;
+if (publicBuiltInDirectAgent && brain !== "claude") {
+  console.error("Public direct bots currently support only Claude's hardened no-tools profile; use a private allowlist or an externally isolated bridge runtime for other engines");
+  process.exit(2);
+}
+if (publicBuiltInDirectAgent && skipPermissions) {
+  console.error("BOT_AI_SKIP_PERMISSIONS=1 is not allowed for a public direct bot; use the default no-tools profile or an externally isolated runtime");
+  process.exit(2);
+}
+if (publicBuiltInDirectAgent && allowedTools.length > 0) {
+  console.error("BOT_AI_ALLOWED_TOOLS must be empty for a public direct bot; attachment/tool analysis requires an externally isolated runtime");
+  process.exit(2);
+}
 // /model switching policy: explicit BOT_AI_ALLOWED_MODELS always wins (empty
 // string = a deliberate lock). Unconfigured bots are locked. An operator may
 // set BOT_AI_MODEL_SWITCHING=open only for a bot with an explicit peer

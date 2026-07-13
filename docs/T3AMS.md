@@ -156,22 +156,28 @@ retained subscriptions every two minutes by default; tune
 `BOT_T3AMS_SUBSCRIPTION_REFRESH_MS` only when the Statement Store and VPS have
 been sized for the resulting replay traffic.
 
+For an open direct engine, the model budget also defaults to two active turns
+and 20 queued turns (private direct bots retain four and 100). An authenticated
+`GET /health` includes `direct.queue` for this public profile, showing active,
+queued, and configured capacity without exposing it to chat users.
+
 ## Current scope
 
 - Text DMs, channel messages, and authenticated rich-text attachment references
   are supported.
 - Thread-root context is retained; replies to a threaded prompt are sent in the
   same thread.
-- Every DM and every workspace channel has its own AI session identity; threads
-  in one channel share that channel's session.
+- Every DM and every workspace channel has its own AI session identity.
+  Top-level channel prompts use that session, while each reply thread has its
+  own isolated native session.
 - Channel turns remain mention-gated. If `BOT_T3AMS_CHANNEL_CONTEXT=1`, a
   bounded, memory-only snapshot of recent authenticated unmentioned **text**
   can accompany a later explicit mention in that same channel or thread; it
   never independently triggers a brain.
-- A channel shares one direct-brain session. By default, only a workspace owner
-  or admin can use its session-changing `/reset`, `/model`, `/reasoning`, and
-  `/project` commands; ordinary mentioned prompts and `/stop` remain available
-  to channel members. Configure the threshold with
+- By default, only a workspace owner or admin can use a channel/thread
+  session-changing `/reset`, `/model`, `/reasoning`, or `/project` command;
+  ordinary mentioned prompts and `/stop` remain available to channel members.
+  `/stop` targets the current thread/conversation. Configure the threshold with
   `BOT_T3AMS_CHANNEL_CONTROL_ROLE`.
 - Slow direct-brain turns use a live message: a thinking placeholder appears
   after `BOT_THINKING_AFTER_MS`, progress can edit that message in place, and

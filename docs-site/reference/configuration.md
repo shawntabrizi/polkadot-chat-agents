@@ -50,7 +50,9 @@ BOT_BRIDGE_PORT=8799            # port the bridge listens on
 BOT_BRIDGE_TOKEN=Xk3…≥32chars   # shared secret; every bridge request must present it. MANDATORY (process exits without it)
 
 # agent sandboxing (direct engines)
-BOT_AI_SKIP_PERMISSIONS=1       # full tool autonomy (the container IS the sandbox); see the engine-specific note below for the non-autonomous mode
+BOT_AI_SKIP_PERMISSIONS=0       # default: Claude has no tools
+# Private, trusted bot only: BOT_AI_ALLOWED_TOOLS=Read (or a deliberate narrow list)
+# Private, trusted bot only: BOT_AI_SKIP_PERMISSIONS=1 for full autonomy
 BOT_AI_AGENT_UID=1000           # spawned agent CLI is dropped to this uid — cannot read /state or the seed
 BOT_AI_AGENT_GID=1000           # …and this gid (transport stays root solely to hold the seed)
 
@@ -122,17 +124,20 @@ BOT_FILE_MAX_PEER_ENTRIES=2000
 
 `BOT_AI_SKIP_PERMISSIONS=1` gives a direct agent full tool autonomy inside its
 container. Use it only when every allowlisted sender is trusted with the bot's
-workspace and services it can reach. For a production HOP configuration, pin
-the download and upload nodes you trust, and provision its allowance through
-the appropriate operator flow. The generated framework deployment exposes its
-bridge only to the private Compose network; do not publish that port.
+workspace, services it can reach, and the CLI's own OAuth home: a tool-enabled
+agent can read or misuse its own provider credential. For a production HOP
+configuration, pin the download and upload nodes you trust, and provision its
+allowance through the appropriate operator flow. The generated framework
+deployment exposes its bridge only to the private Compose network; do not
+publish that port.
 
 ### Public bot: deliberately bounded
 
 A public bot has `BOT_ALLOWED_PEERS` unset or empty. It must assume arbitrary
 prompts, attachment floods, repeated requests, and attempts to spend model or
 storage capacity. Give it one narrow task, a pinned low-cost model, and a
-read-only or disposable workspace.
+read-only or disposable workspace. Built-in public direct deployment currently
+supports Claude's hardened no-tools profile only.
 
 ```sh
 BOT_ALLOWED_PEERS=
@@ -141,9 +146,8 @@ BOT_ALLOWED_PEERS=
 BOT_AI_MODEL=<pinned-low-cost-model>
 BOT_AI_ALLOWED_MODELS=<pinned-low-cost-model>,<second-low-cost-model>
 BOT_AI_SKIP_PERMISSIONS=0
-# Claude honors this allowlist. Codex and OpenCode do not; use a disposable
-# workspace or container and their own engine controls for those engines.
-BOT_AI_ALLOWED_TOOLS=Read
+# Do not set BOT_AI_ALLOWED_TOOLS. Public direct bots use Claude's hardened
+# no-tools profile; it can answer text but cannot inspect staged file bytes.
 BOT_AI_MAX_CONCURRENT_TURNS=2
 BOT_AI_MAX_QUEUED_TURNS=20
 BOT_AI_MAX_OUTPUT_BYTES=262144
@@ -169,6 +173,12 @@ BOT_HOP_ALLOWED_NODES=<trusted-hop-host>
 # BOT_HOP_UPLOAD_NODE=
 ```
 
+For a public **T3ams** direct engine, `2` active turns and `20` queued turns are
+runtime defaults when those variables are unset; the explicit values above make
+the intended budget visible in deployment configuration. Authenticated `GET /health`
+also exposes `direct.queue` for this open direct profile, so an operator can see
+active, queued, and configured capacity without exposing it to chat users.
+
 Those HOP settings are for the default transport. A public T3ams bot instead
 uses the `BOT_T3AMS_ATTACHMENT_*` and `BOT_T3AMS_MEDIA_*` bounds below, plus an
 explicit MIME policy such as `image/*,application/pdf` when broad file support
@@ -183,10 +193,11 @@ Do not publish the authenticated bridge port. The deploy container and resource
 limits help, but they cannot make a sensitive host mount or exposed bridge token
 safe.
 
-`BOT_AI_ALLOWED_TOOLS` is a Claude setting, not a general sandbox. With
-`BOT_AI_SKIP_PERMISSIONS=0`, Codex uses its `workspace-write` sandbox and
-OpenCode follows its own normal permission mode. Keep either one in a disposable
-workspace or container when the bot is public.
+`BOT_AI_ALLOWED_TOOLS` is a Claude setting, not a general sandbox. Public
+direct deployment rejects built-in Codex/OpenCode until their tool execution is
+separately isolated from the model's authentication material. Use a bridge
+runtime with its own isolation boundary when a public bot needs tools or file
+analysis.
 
 ---
 
@@ -260,13 +271,13 @@ variables `pca deploy` writes into `bot.env` automatically.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BOT_AI_ALLOWED_TOOLS` | `Bash,Read,Edit,Write` | Claude-only `--allowedTools` list when permissions are not skipped. Codex and OpenCode do not consume it. |
-| `BOT_AI_SKIP_PERMISSIONS` | `0` | `1` = full tool autonomy (the container is the sandbox). With `0`, Claude uses its allowlist, Codex uses `workspace-write`, and OpenCode uses its normal CLI mode. **gen unless --safe-tools** |
+| `BOT_AI_ALLOWED_TOOLS` | `""` | Claude-only explicit tool availability/approval list. Unset or empty disables all built-in tools. Public direct bots must leave it empty. |
+| `BOT_AI_SKIP_PERMISSIONS` | `0` | `1` = explicit full autonomy for a trusted, allowlisted bot only; rejected for public direct bots. Deploy emits it only with `--full-autonomy`. |
 | `BOT_AI_AGENT_UID` / `BOT_AI_AGENT_GID` | unset | Drop the spawned agent to this uid/gid so it can't read `/state` or the seed. **gen (deploy: 1000)** |
 | `BOT_AI_IDLE_TIMEOUT_MS` | 600000 | Kill a turn that has emitted nothing for this long (wedge backstop). |
 | `BOT_AI_MAX_MS` | 3600000 | Hard per-turn wall-clock cap. |
-| `BOT_AI_MAX_CONCURRENT_TURNS` | 4 | Global cap on simultaneously-running agent turns. |
-| `BOT_AI_MAX_QUEUED_TURNS` | 100 | Global cap on queued turns before backpressure. |
+| `BOT_AI_MAX_CONCURRENT_TURNS` | 4; public T3ams direct: 2 | Global cap on simultaneously-running agent turns. An explicit value always overrides the T3ams profile default. |
+| `BOT_AI_MAX_QUEUED_TURNS` | 100; public T3ams direct: 20 | Global cap on queued turns before backpressure. An explicit value always overrides the T3ams profile default. |
 | `BOT_AI_MAX_OUTPUT_BYTES` | 1000000 | Cap on captured agent output per turn. |
 | `BOT_AI_CMD` / `BOT_AI_ARGS` | unset | Escape hatch: a custom CLI speaking claude-shaped stream-json (`BOT_AI_ARGS` is a JSON array; `__PROMPT__` is substituted). |
 
@@ -467,7 +478,7 @@ different random secret, is required in the `x-bridge-proactive-token` header
 in addition to normal bridge authentication, and never makes a stale supplied
 lease valid. Leave it unset unless that explicit proactive behavior is needed.
 
-### T3ams channels and shared sessions
+### T3ams channels and direct-brain sessions
 
 T3ams channels remain mention-gated: ordinary unmentioned traffic does not
 start a model turn. These settings can make a later explicit mention more useful
@@ -482,12 +493,13 @@ without turning the bot into an always-on listener.
 | `BOT_T3AMS_CHANNEL_CONTEXT_MAX_RECORD_BYTES` | 2048 | Largest retained message. |
 | `BOT_T3AMS_CHANNEL_CONTEXT_MAX_RECORDS_PER_SENDER` / `MAX_BYTES_PER_SENDER` | 4 / 2048 | Fairness limits for one sender. |
 | `BOT_T3AMS_CHANNEL_CONTEXT_MAX_TOTAL_BYTES` | 262144 | Process-wide passive-context memory budget. |
-| `BOT_T3AMS_CHANNEL_CONTROL_ROLE` | `admin` | Minimum role for direct-brain shared-session commands: `admin` allows owners/admins, `mod` includes moderators, `all` allows any authenticated channel member. |
+| `BOT_T3AMS_CHANNEL_CONTROL_ROLE` | `admin` | Minimum role for direct-brain channel/thread session commands: `admin` allows owners/admins, `mod` includes moderators, `all` allows any authenticated channel member. |
 
-Normal mentioned prompts and `/stop` remain usable by channel members. The role
-gate applies only to direct-brain session-changing commands such as `/reset`,
-`/model`, `/reasoning`, and `/project`; it does not control a bridge framework's
-own command vocabulary.
+Top-level prompts share the channel session; a reply thread has its own native
+session. Normal mentioned prompts and `/stop` remain usable by channel members;
+`/stop` targets the current thread/conversation. The role gate applies only to
+direct-brain session-changing commands such as `/reset`, `/model`, `/reasoning`,
+and `/project`; it does not control a bridge framework's own command vocabulary.
 
 ### T3ams message-operation reconciliation
 

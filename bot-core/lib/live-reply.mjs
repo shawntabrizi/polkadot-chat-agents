@@ -50,7 +50,7 @@ export const createLiveReplies = ({
   const intervalFor = (editsSent) =>
     Math.min(minIntervalMs * 2 ** Math.floor(editsSent / 3), maxIntervalMs);
 
-  const makeLane = (peerHex, messageId, ackState) => {
+  const makeLane = (peerHex, messageId, ackState, defaultGuard = null) => {
     const lane = {
       peerHex,
       messageId,
@@ -62,6 +62,10 @@ export const createLiveReplies = ({
       // inbound turn, and a coalesced edit may not leave the process after
       // that lease is revoked or expires.
       pendingGuard: null,
+      // A placeholder can itself be owned by a leased bridge turn. Keep its
+      // fence for heartbeat updates and terminal fallback frames unless a
+      // newer caller explicitly supplies a different claim.
+      defaultGuard,
       lastSentText: null,
       editsSent: 0,
       lastEditAt: null, // null = never sent on this lane -> first flush is immediate
@@ -94,7 +98,7 @@ export const createLiveReplies = ({
           log("BOT_LIVE_EDIT_FENCED", { to: lane.peerHex, messageId: lane.messageId });
           return;
         }
-        await send({ peerHex: lane.peerHex, text, editOf: lane.messageId });
+        await send({ peerHex: lane.peerHex, text, editOf: lane.messageId, guard });
         lane.lastSentText = text;
         lane.editsSent += 1;
         lane.lastEditAt = now();
@@ -120,7 +124,7 @@ export const createLiveReplies = ({
     lane.timer = timers.set(() => { lane.timer = null; void flush(lane); }, wait);
   };
 
-  const update = (lane, text, guard = null) => {
+  const update = (lane, text, guard = lane.defaultGuard) => {
     if (lane.finalized) return;
     lane.pendingText = text;
     lane.pendingGuard = guard;
@@ -138,7 +142,7 @@ export const createLiveReplies = ({
     return lane.ackState === "pending" ? "failed" : lane.ackState;
   };
 
-  const finalize = async (lane, text, guard = null) => {
+  const finalize = async (lane, text, guard = lane.defaultGuard) => {
     if (lane.finalized) throw new Error("live message already finalized");
     lane.finalized = true;
     clearLaneTimer(lane);
@@ -153,21 +157,21 @@ export const createLiveReplies = ({
     }
     if (ack === "acked" || ack === "assumed") {
       if (text === lane.lastSentText) return { messageId: lane.messageId, edited: true };
-      await send({ peerHex: lane.peerHex, text, editOf: lane.messageId });
+      await send({ peerHex: lane.peerHex, text, editOf: lane.messageId, guard });
       return { messageId: lane.messageId, edited: true };
     }
     // Peer never fetched the placeholder: send the answer as a plain message
     // that supersedes it, so the slot ends up holding only the answer.
     log("BOT_LIVE_FALLBACK", { to: lane.peerHex, placeholder: lane.messageId });
-    const sent = await send({ peerHex: lane.peerHex, text, supersedes: [lane.messageId] });
+    const sent = await send({ peerHex: lane.peerHex, text, supersedes: [lane.messageId], guard });
     return { messageId: sent.messageId, edited: false };
   };
 
   return {
     // Send a live placeholder message; edits unlock when the peer ACKs it.
-    async begin(peerHex, text) {
-      const { messageId, delivered } = await send({ peerHex, text });
-      const lane = makeLane(peerHex, messageId, "pending");
+    async begin(peerHex, text, { guard = null } = {}) {
+      const { messageId, delivered } = await send({ peerHex, text, guard });
+      const lane = makeLane(peerHex, messageId, "pending", guard);
       lane.lastSentText = text;
       lane.lastEditAt = now();
       lane.ackResolvers = [];
@@ -181,7 +185,11 @@ export const createLiveReplies = ({
         messageId,
         get finalized() { return lane.finalized; },
         update: (t) => update(lane, t),
-        finalize: (t, { guard = null } = {}) => finalize(lane, t, guard),
+        finalize: (t, options = {}) => finalize(
+          lane,
+          t,
+          Object.hasOwn(options, "guard") ? options.guard : lane.defaultGuard,
+        ),
       };
     },
 
@@ -212,10 +220,10 @@ export const createLiveReplies = ({
     // streamed turn. Promote the latest throttled frame to the terminal edit
     // at that point so no coalesced progress timer can overwrite the final
     // answer after the worker has ACKed its lease.
-    async finalizeExisting(peerHex, messageId, text, { guard = null } = {}) {
+    async finalizeExisting(peerHex, messageId, text, options = {}) {
       let lane = lanes.get(messageId);
       if (!lane) { lane = makeLane(peerHex, messageId, "assumed"); lane.ackResolvers = []; }
-      return finalize(lane, text, guard);
+      return finalize(lane, text, Object.hasOwn(options, "guard") ? options.guard : lane.defaultGuard);
     },
   };
 };
@@ -242,5 +250,43 @@ export const createProgressTracker = ({ label = "working", maxActions = 3, now =
       const header = `⏳ ${label} · ${elapsed()}${step > 0 ? ` · step ${step}` : ""}`;
       return [header, ...actions.map((a) => `▸ ${a}`)].join("\n");
     },
+  };
+};
+
+// A turn may do useful work before its visible placeholder can be created:
+// for example, a transport can be downloading an attached PDF while the
+// outbound statement lane is still quiet. Retain those actions and attach a
+// live handle later so the first visible progress frame accurately describes
+// work that has already happened. This deliberately owns no timers or
+// transport state; the caller remains responsible for throttling/finalizing
+// the actual live reply.
+export const createDeferredProgressTracker = (options = {}) => {
+  const tracker = createProgressTracker(options);
+  let handle = null;
+  let disposed = false;
+  const flush = () => {
+    if (disposed || handle == null || handle.finalized) return;
+    handle.update(tracker.render());
+  };
+  return {
+    add(title) {
+      if (disposed) return;
+      tracker.add(title);
+      flush();
+    },
+    attach(nextHandle) {
+      if (disposed || nextHandle == null) return;
+      handle = nextHandle;
+      // Do not replace a fresh "thinking…" bubble with a redundant working
+      // frame unless there is real pre-placeholder work to report.
+      if (tracker.step > 0) flush();
+    },
+    detach() { handle = null; },
+    dispose() {
+      disposed = true;
+      handle = null;
+    },
+    get step() { return tracker.step; },
+    render: () => tracker.render(),
   };
 };

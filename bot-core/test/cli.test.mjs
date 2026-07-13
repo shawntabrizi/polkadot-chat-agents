@@ -113,7 +113,7 @@ test("create persists the selected transport and deployment passes it to the run
     writeBot(botsDir, "t3amsdirect", {
       name: "t3amsdirect",
       endpoint: "ws://127.0.0.1:9944",
-      brain: "codex",
+      brain: "claude",
       transport: "t3ams",
       allow: [],
       bridgePort: 8799,
@@ -244,6 +244,69 @@ test("pca model persists a safe policy and serializes it for direct deploys", ()
     result = runCli(botsDir, ["model", publicName, "open"]);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /Cannot open model switching for public bot/);
+  } finally {
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
+});
+
+test("direct deployment defaults to no tools and makes private tool access explicit", () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
+  try {
+    writeBot(botsDir, "privateclaude", {
+      name: "privateclaude",
+      endpoint: "ws://127.0.0.1:9944",
+      brain: "claude",
+      allow: [ACCOUNT],
+      bridgePort: 8799,
+      bridgeToken: "a-long-enough-bridge-token-for-tests",
+    });
+    let result = runCli(botsDir, ["deploy", "privateclaude", "--host", "root@example.test", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, /BOT_AI_SKIP_PERMISSIONS=/);
+    assert.doesNotMatch(result.stdout, /BOT_AI_ALLOWED_TOOLS=/);
+
+    result = runCli(botsDir, ["deploy", "privateclaude", "--host", "root@example.test", "--safe-tools", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /BOT_AI_ALLOWED_TOOLS=Bash,Read,Edit,Write/);
+    assert.doesNotMatch(result.stdout, /BOT_AI_SKIP_PERMISSIONS=/);
+
+    result = runCli(botsDir, ["deploy", "privateclaude", "--host", "root@example.test", "--allowed-tools", "Read", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /BOT_AI_ALLOWED_TOOLS=Read/);
+
+    result = runCli(botsDir, ["deploy", "privateclaude", "--host", "root@example.test", "--full-autonomy", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /BOT_AI_SKIP_PERMISSIONS=1/);
+    assert.doesNotMatch(result.stdout, /BOT_AI_ALLOWED_TOOLS=/);
+
+    writeBot(botsDir, "publicclaude", {
+      name: "publicclaude",
+      endpoint: "ws://127.0.0.1:9944",
+      brain: "claude",
+      allow: [],
+      bridgePort: 8799,
+      bridgeToken: "a-long-enough-bridge-token-for-tests",
+    });
+    result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, /BOT_AI_SKIP_PERMISSIONS=/);
+    assert.doesNotMatch(result.stdout, /BOT_AI_ALLOWED_TOOLS=/);
+
+    result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--safe-tools", "--dry-run"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Public direct bots must use the default no-tools profile/);
+
+    writeBot(botsDir, "publiccodex", {
+      name: "publiccodex",
+      endpoint: "ws://127.0.0.1:9944",
+      brain: "codex",
+      allow: [],
+      bridgePort: 8799,
+      bridgeToken: "a-long-enough-bridge-token-for-tests",
+    });
+    result = runCli(botsDir, ["deploy", "publiccodex", "--host", "root@example.test", "--dry-run"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Public direct deployment currently supports only Claude/);
   } finally {
     fs.rmSync(botsDir, { recursive: true, force: true });
   }

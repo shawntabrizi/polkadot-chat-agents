@@ -709,6 +709,28 @@ test("outbound operations reject malformed targets, reactions, and unavailable p
   assert.equal(unavailable.submitted.length, 0);
 });
 
+test("outbound operation guards fence a revoked claim immediately before statement submission", async () => {
+  const fixture = outboundOperationFixture();
+  let checks = 0;
+  const revoked = () => { checks += 1; return false; };
+
+  await assert.rejects(
+    fixture.protocol.editText(fixture.chatId, fixture.targetId, "replacement", { guard: revoked }),
+    { code: "T3AMS_OUTBOUND_FENCED" },
+  );
+  await assert.rejects(
+    fixture.protocol.sendReaction(fixture.chatId, fixture.targetId, "👍", { guard: revoked }),
+    { code: "T3AMS_OUTBOUND_FENCED" },
+  );
+  await assert.rejects(
+    fixture.protocol.sendTyping(fixture.chatId, { guard: revoked }),
+    { code: "T3AMS_OUTBOUND_FENCED" },
+  );
+
+  assert.equal(checks, 3);
+  assert.equal(fixture.submitted.length, 0, "a revoked claim must not enter the shared submitter");
+});
+
 function outboundDmWakeFixture({ established = true, rejectWake = false } = {}) {
   const self = bytes(0xa1);
   const peer = bytes(0xb2);
@@ -799,4 +821,17 @@ test("DM inbox wakes are skipped for unknown peers and never fail the primary ca
   assert.equal(failing.submitted.length, 2);
   await new Promise((resolve) => setImmediate(resolve));
   assert.ok(failing.events.some((event) => event.event === "T3AMS_DM_WAKE_FAILED" && event.error === "wake submit failed"));
+});
+
+test("rich-text guard fences a revoked claim before the primary carrier and inbox wake", async () => {
+  const fixture = outboundDmWakeFixture();
+  let checked = 0;
+  await assert.rejects(
+    fixture.protocol.sendText(fixture.chatId, "must not publish", {
+      guard: () => { checked += 1; return false; },
+    }),
+    { code: "T3AMS_OUTBOUND_FENCED" },
+  );
+  assert.equal(checked, 1);
+  assert.equal(fixture.submitted.length, 0);
 });

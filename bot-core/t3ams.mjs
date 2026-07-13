@@ -11,7 +11,7 @@ import { createStateStore } from "./lib/session-store.mjs";
 import { createAgentRuntime } from "./lib/agent-runtime.mjs";
 import { resolveModelPolicy } from "./lib/commands.mjs";
 import { splitMessageText } from "./lib/chunk.mjs";
-import { createLiveReplies, createProgressTracker } from "./lib/live-reply.mjs";
+import { createDeferredProgressTracker, createLiveReplies } from "./lib/live-reply.mjs";
 import { createWorkspaces } from "./lib/workspaces.mjs";
 import { createKeyedDispatcher } from "./lib/keyed-dispatcher.mjs";
 import { createFileStore } from "./lib/file-store.mjs";
@@ -27,6 +27,7 @@ import {
 } from "./lib/t3ams-attachments.mjs";
 import { createT3amsChannelContext } from "./lib/t3ams-channel-context.mjs";
 import { createT3amsMessageLifecycle } from "./lib/t3ams-message-lifecycle.mjs";
+import { t3amsDirectCapacityDefaults } from "./lib/t3ams-direct-capacity.mjs";
 import {
   MAX_T3AMS_TEXT_BYTES,
   normalizeT3amsInbound,
@@ -35,6 +36,12 @@ import {
 } from "./lib/t3ams-routing.mjs";
 import { createSerializedSubmitter, createT3amsPriorityClock } from "./lib/t3ams-submission.mjs";
 import { createT3amsKnownChats } from "./lib/t3ams-known-chats.mjs";
+import { deliverAgentReplyBeforeArtifacts } from "./lib/t3ams-agent-turn.mjs";
+import {
+  agentSessionKeyForT3ams,
+  conversationForAgentSessionKey,
+  isT3amsConversationKey,
+} from "./lib/t3ams-agent-session.mjs";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
 import { submitAppStatement, scaleEncodeBytes } from "./vendor/app-chat-codec.mjs";
 import { createLazyClient } from "@novasamatech/statement-store";
@@ -365,8 +372,6 @@ const knownChatCap = numberEnv(
   publicTofuEnrollment ? publicPeerCap : 500,
   { min: 1, max: 10_000 },
 );
-const isT3amsConversationKey = (chatId) => /^t3ams:dm:[0-9a-f]{64}$/i.test(chatId)
-  || /^t3ams:channel:[0-9a-f]{64}:[0-9a-f]{64}$/i.test(chatId);
 const knownChats = createT3amsKnownChats({
   cap: knownChatCap,
   isProtected: (chatId) => ingress.some((entry) => entry.routed.conversationKey === chatId),
@@ -582,9 +587,16 @@ const stateSnapshot = () => ({
   messageLifecycle: messageLifecycle?.snapshot?.() ?? restored?.messageLifecycle ?? null,
   agent: agentRuntime?.snapshotAgent?.() ?? restored?.agent ?? null,
   agentIntroduced: agentRuntime?.introducedList?.() ?? restored?.agentIntroduced ?? [],
-  agentPeers: agentRuntime == null ? [] : knownChats.keys().flatMap((chatId) => {
-    const peer = agentRuntime.peerSnapshot(chatId);
-    return Object.keys(peer).length > 0 ? [{ chatId, ...peer }] : [];
+  // A threaded turn has its own native session key but still belongs to one
+  // valid delivery conversation. Persist the base chat separately so restore
+  // can retain normal conversation validation and known-chat bounds.
+  agentPeers: agentRuntime == null ? [] : agentRuntime.stateKeys().flatMap((sessionKey) => {
+    const chatId = conversationForAgentSessionKey(sessionKey);
+    if (chatId == null) return [];
+    const peer = agentRuntime.peerSnapshot(sessionKey);
+    return Object.keys(peer).length > 0
+      ? [{ chatId, ...(sessionKey === chatId ? {} : { sessionKey }), ...peer }]
+      : [];
   }),
   ingress: ingress.map((entry) => ({
     id: entry.id,
@@ -776,12 +788,28 @@ const fileNamespaceForChat = (chatId) => {
   if (!isT3amsConversationKey(chatId)) throw new Error("invalid T3ams file namespace");
   return createHash("sha256").update("pca:t3ams-file-v1\0").update(chatId).digest("hex");
 };
-const fetchT3amsAttachments = async (attachments) => {
+const attachmentProgressTitle = (attachment, action) => {
+  const filename = typeof attachment?.filename === "string" && attachment.filename
+    ? attachment.filename
+    : attachment?.kind === "image"
+      ? "photo"
+      : attachment?.kind === "video"
+        ? "video"
+        : attachment?.kind === "audio"
+          ? "audio file"
+          : "attachment";
+  return `${action} ${filename}`;
+};
+const fetchT3amsAttachments = async (attachments, { onProgress = null } = {}) => {
   if (!Array.isArray(attachments) || attachments.length === 0) return [];
   // Never mutate an ingress entry's durable route with an ephemeral cache
   // path.  A restart can safely re-fetch from the encrypted capability.
   const prepared = attachments.map((attachment) => ({ ...attachment }));
-  return t3amsMedia.fetchAttachments(prepared);
+  return t3amsMedia.fetchAttachments(prepared, {
+    onStart: (attachment) => onProgress?.(attachmentProgressTitle(attachment, "downloading")),
+    onSuccess: (attachment) => onProgress?.(attachmentProgressTitle(attachment, "downloaded")),
+    onError: (attachment) => onProgress?.(attachmentProgressTitle(attachment, "couldn't download")),
+  });
 };
 const sendT3amsAttachment = async (chatId, {
   filePath,
@@ -796,6 +824,7 @@ const sendT3amsAttachment = async (chatId, {
   uploaded: persistedUpload = null,
   onUploaded = null,
   beforeSend = null,
+  guard = null,
 } = {}) => {
   if (!t3amsMedia.enabled && persistedUpload == null) {
     throw new Error("T3ams file delivery is disabled; configure BOT_T3AMS_BULLETIN_RPC and a funded Bulletin allowance");
@@ -828,6 +857,7 @@ const sendT3amsAttachment = async (chatId, {
   const sent = await protocol.sendRichText(chatId, body, {
     ...(root == null ? {} : { threadRootId: root }),
     attachments: [uploaded.ref],
+    guard,
   });
   noteBotIssuedMessage(chatId, sent.messageId);
   log("T3AMS_SENT_FILE", { chatId, mime: uploaded.attachment.mime, bytes: uploaded.attachment.size });
@@ -854,9 +884,10 @@ const mimeForT3amsFilename = (filename) => {
   }[extension] ?? "application/octet-stream";
 };
 // Direct-agent final turns are staged as one durable handoff: immutable files
-// plus every final-text chunk. The journal is committed before the first HOP
-// upload or chat statement, so a retry drains this exact output and never
-// asks the model/tools to produce a second answer.
+// plus every final-text chunk. The journal is committed before the first chat
+// statement or HOP upload, so a retry drains this exact output and never asks
+// the model/tools to produce a second answer. The textual answer drains first:
+// an unavailable optional attachment must not hide the useful final response.
 const activeAgentArtifactDeliveries = new Map(); // chatId -> { id, revision }
 // Snapshot copies happen outside the journal mutex so a large PDF does not
 // block ingress bookkeeping. Reserve their global capacity first, otherwise
@@ -1262,6 +1293,10 @@ const deliverPersistedAgentReply = async (chatId, context, reply) => {
     await markAgentReplyPart(context, reply, index + 1);
   }
 };
+const deliverPersistedAgentTurn = async (chatId, context, { artifacts, reply }) => deliverAgentReplyBeforeArtifacts({
+  deliverReply: () => deliverPersistedAgentReply(chatId, context, reply),
+  deliverArtifacts: () => deliverPersistedAgentArtifacts(chatId, context, artifacts),
+});
 const deliverAgentTurn = async (chatId, { text, artifacts = [] } = {}) => {
   const context = activeAgentArtifactDeliveries.get(chatId) ?? null;
   if (context == null) {
@@ -1280,8 +1315,7 @@ const deliverAgentTurn = async (chatId, { text, artifacts = [] } = {}) => {
     return;
   }
   const prepared = await prepareAgentTurnOutbox(context, { text, artifacts });
-  await deliverPersistedAgentArtifacts(chatId, context, prepared.artifacts);
-  await deliverPersistedAgentReply(chatId, context, prepared.reply);
+  await deliverPersistedAgentTurn(chatId, context, prepared);
 };
 const deliverAgentArtifacts = async (chatId, artifacts) => {
   // Legacy callback retained for an embedding that has not moved to
@@ -1405,12 +1439,16 @@ const handleT3amsFileCommand = async (chatId, message) => {
 // arrives before its original message. Unlike the legacy session slot, an
 // explicit peer ACK is not required before we may edit the placeholder.
 const liveReplies = createLiveReplies({
-  send: async ({ peerHex: chatId, text, editOf }) => {
+  send: async ({ peerHex: chatId, text, editOf, guard = null }) => {
+    const submitGuard = claimSubmissionGuard(guard);
     if (editOf != null) {
-      const edited = await protocol.editText(chatId, editOf, text);
+      const edited = await protocol.editText(chatId, editOf, text, { guard: submitGuard });
       return { messageId: edited.messageId, delivered: true };
     }
-    const sent = await protocol.sendText(chatId, text, { threadRootId: replyThreadFor(chatId) });
+    const sent = await protocol.sendText(chatId, text, {
+      threadRootId: replyThreadFor(chatId),
+      guard: submitGuard,
+    });
     noteBotIssuedMessage(chatId, sent.messageId);
     return { messageId: sent.messageId, delivered: true };
   },
@@ -1422,6 +1460,24 @@ const liveReplies = createLiveReplies({
 });
 const thinkingTimers = new Map(); // chatId -> timeout
 const livePlaceholders = new Map(); // chatId -> Promise<{handle, tracker, timer, ttl} | null>
+// Tool actions and media retrieval can start before the delayed visible
+// placeholder exists. Keep their compact activity state per serialized chat
+// so the first frame is useful instead of a blank generic spinner.
+const pendingProgressTrackers = new Map(); // chatId -> deferred progress tracker
+const progressTrackerFor = (chatId) => {
+  let tracker = pendingProgressTrackers.get(chatId);
+  if (tracker == null) {
+    tracker = createDeferredProgressTracker({ label: "working" });
+    pendingProgressTrackers.set(chatId, tracker);
+  }
+  return tracker;
+};
+const disposeProgressTracker = (chatId) => {
+  const tracker = pendingProgressTrackers.get(chatId);
+  if (tracker == null) return;
+  pendingProgressTrackers.delete(chatId);
+  tracker.dispose();
+};
 // A framework can stream `edit_of` frames without labeling the final frame.
 // Per-chat bridge leasing lets its eventual ACK safely promote this latest
 // value into a terminal edit.
@@ -1448,6 +1504,7 @@ const disarmThinking = (chatId) => {
   const timer = thinkingTimers.get(chatId);
   if (timer != null) clearTimeout(timer);
   thinkingTimers.delete(chatId);
+  disposeProgressTracker(chatId);
 };
 const takeLivePlaceholder = async (chatId) => {
   const pending = livePlaceholders.get(chatId);
@@ -1458,24 +1515,29 @@ const takeLivePlaceholder = async (chatId) => {
     clearInterval(placeholder.timer);
     clearTimeout(placeholder.ttl);
   }
+  disposeProgressTracker(chatId);
   return placeholder;
 };
 const peekLivePlaceholder = (chatId) => livePlaceholders.get(chatId) ?? null;
-const bestEffortTyping = (chatId) => {
-  void protocol.sendTyping(chatId).catch((error) => {
+const bestEffortTyping = (chatId, { guard = null } = {}) => {
+  if (guard != null && !guard()) return;
+  void protocol.sendTyping(chatId, { guard: claimSubmissionGuard(guard) }).catch((error) => {
+    if (error?.bridgeClaimStale === true) return;
     log("T3AMS_TYPING_FAILED", { chatId, error: String(error?.message ?? error) });
   });
 };
-const armThinking = (chatId) => {
-  if (!thinkingText || thinkingAfterMs <= 0 || thinkingTimers.has(chatId)) return;
+const armThinking = (chatId, { guard = null } = {}) => {
+  if (!thinkingText || thinkingAfterMs <= 0 || thinkingTimers.has(chatId) || livePlaceholders.has(chatId)) return;
   const timer = setTimeout(() => {
     thinkingTimers.delete(chatId);
+    if (guard != null && !guard()) return;
     if (livePlaceholders.has(chatId)) return;
     livePlaceholders.set(chatId, (async () => {
-      const handle = await liveReplies.begin(chatId, thinkingText);
-      const tracker = createProgressTracker({ label: "working" });
+      const handle = await liveReplies.begin(chatId, thinkingText, { guard });
+      const tracker = progressTrackerFor(chatId);
+      tracker.attach(handle);
       const heartbeat = setInterval(() => {
-        bestEffortTyping(chatId);
+        bestEffortTyping(chatId, { guard });
         if (!handle.finalized) handle.update(tracker.render());
       }, liveHeartbeatMs);
       heartbeat.unref?.();
@@ -1483,16 +1545,21 @@ const armThinking = (chatId) => {
         const placeholder = await takeLivePlaceholder(chatId);
         if (placeholder == null) return;
         log("T3AMS_LIVE_TTL_EXPIRED", { chatId, messageId: placeholder.handle.messageId });
-        placeholder.handle.finalize(liveTimeoutText).catch((error) => {
+        // TTL expiry is transport-owned cleanup, not an action by the worker
+        // which created the placeholder.  Its lease can legitimately have
+        // expired or been reissued by now, so bypass that old worker fence
+        // rather than leaving a permanently spinning message behind.
+        placeholder.handle.finalize(liveTimeoutText, { guard: null }).catch((error) => {
           log("T3AMS_LIVE_FINALIZE_FAILED", { chatId, error: String(error?.message ?? error) });
         });
       }, liveTtlMs);
       ttl.unref?.();
-      bestEffortTyping(chatId);
+      bestEffortTyping(chatId, { guard });
       log("T3AMS_LIVE_PLACEHOLDER", { chatId, messageId: handle.messageId });
       return { handle, tracker, timer: heartbeat, ttl };
     })().catch((error) => {
       log("T3AMS_THINKING_FAILED", { chatId, error: String(error?.message ?? error) });
+      disposeProgressTracker(chatId);
       return null;
     }));
   }, thinkingAfterMs);
@@ -1522,16 +1589,10 @@ const deliverAgentReply = async (chatId, text) => {
 };
 const beginTurnProgress = (chatId) => {
   bestEffortTyping(chatId);
+  const tracker = progressTrackerFor(chatId);
   armThinking(chatId);
   if (!liveProgress) return null;
-  return (title) => {
-    const pending = peekLivePlaceholder(chatId);
-    pending?.then((placeholder) => {
-      if (placeholder == null || placeholder.handle.finalized) return;
-      placeholder.tracker.add(title);
-      placeholder.handle.update(placeholder.tracker.render());
-    }).catch(() => {});
-  };
+  return (title) => tracker.add(title);
 };
 
 const inboundRetryTimers = new Map();
@@ -1697,7 +1758,8 @@ const routeOneInbound = async (event, { historyOnly = false } = {}) => {
     ? routed.message.commandText
     : routed.message.text;
   if (agentRuntime != null && /^\/stop\s*$/i.test(commandInput)) {
-    const stopped = agentRuntime.stop(routed.conversationKey);
+    const sessionKey = agentSessionKeyForT3ams(routed.conversationKey, routed.message.threadRootId);
+    const stopped = agentRuntime.stop(routed.conversationKey, sessionKey ?? routed.conversationKey);
     log("T3AMS_STOP_REQUESTED", { chatId: routed.conversationKey, stopped });
   }
   const admission = await admitIngress(event, routed);
@@ -1754,9 +1816,24 @@ const rerouteEditedIngress = (routed, text) => {
 // runs under the same journal mutation queue as admission/ACKs, so an edited
 // prompt cannot race a later bridge lease or direct-agent dispatch.
 const reconcileQueuedIngressOperation = async (operation, lifecycle) => mutateIngress(async () => {
-  if (!lifecycle.changed) return { changed: false, stopped: false };
+  if (!lifecycle.changed) return { changed: false, stopped: false, stoppedSessionKeys: [] };
   let changed = false;
   let stopped = false;
+  // Agent runtime work is keyed by the native model session, rather than the
+  // transport delivery chat.  A T3ams thread has a child session key, so an
+  // edit/delete must cancel that exact process rather than leaving it running
+  // (and potentially using private tools) behind an otherwise fenced reply.
+  const stoppedSessionKeys = new Set();
+  const noteStoppedTurn = (entry) => {
+    if (!runningIngress.has(entry.id)) return;
+    stopped = true;
+    if (entry.kind !== "turn") return;
+    const sessionKey = agentSessionKeyForT3ams(
+      entry.routed.conversationKey,
+      entry.routed.message?.threadRootId,
+    ) ?? entry.routed.conversationKey;
+    stoppedSessionKeys.add(sessionKey);
+  };
   const removed = [];
   const invalidatedOutboxes = [];
   const revokedBridgeChats = new Map();
@@ -1766,18 +1843,18 @@ const reconcileQueuedIngressOperation = async (operation, lifecycle) => mutateIn
     if (entry?.routed?.conversationKey !== operation.chatId || message?.messageId !== operation.messageId
         || message?.senderXid !== operation.senderXid || Number(entry.completedAt) > 0) continue;
     if (lifecycle.deleted) {
+      noteStoppedTurn(entry);
       ingress.splice(index, 1);
       removed.push(entry);
       changed = true;
-      if (runningIngress.has(entry.id)) stopped = true;
       continue;
     }
     const rerouted = rerouteEditedIngress(entry.routed, lifecycle.text ?? "");
     if (!rerouted.accepted) {
+      noteStoppedTurn(entry);
       ingress.splice(index, 1);
       removed.push(entry);
       changed = true;
-      if (runningIngress.has(entry.id)) stopped = true;
       continue;
     }
     entry.routed = rerouted;
@@ -1803,9 +1880,9 @@ const reconcileQueuedIngressOperation = async (operation, lifecycle) => mutateIn
       entry.leaseUntil = 0;
     }
     changed = true;
-    if (runningIngress.has(entry.id)) stopped = true;
+    noteStoppedTurn(entry);
   }
-  if (!changed) return { changed: false, stopped: false };
+  if (!changed) return { changed: false, stopped: false, stoppedSessionKeys: [] };
   const saved = await persistCritical();
   if (saved) {
     for (const entry of removed) protocol.unpinConversation(entry.routed.conversationKey);
@@ -1822,7 +1899,11 @@ const reconcileQueuedIngressOperation = async (operation, lifecycle) => mutateIn
       disarmThinking(chatId);
       void takeLivePlaceholder(chatId).then((placeholder) => {
         if (placeholder == null) return;
-        return placeholder.handle.finalize(status);
+        // This status belongs to the transport after it durably revoked the
+        // worker's claim, not to that old worker. Explicitly bypass the
+        // placeholder's lease guard so the stale turn cannot leave a forever
+        // spinning message behind.
+        return placeholder.handle.finalize(status, { guard: null });
       }).catch((error) => log("T3AMS_BRIDGE_REVOKE_FINALIZE_FAILED", { chatId, error: String(error?.message ?? error) }));
     }
     knownChats.trim();
@@ -1841,7 +1922,7 @@ const reconcileQueuedIngressOperation = async (operation, lifecycle) => mutateIn
     ingressDurable = false;
     scheduleIngressDurabilityRetry();
   }
-  return { changed: true, stopped };
+  return { changed: true, stopped, stoppedSessionKeys: [...stoppedSessionKeys] };
 });
 
 const routeInboundOperation = async (operation) => {
@@ -1876,7 +1957,14 @@ const routeInboundOperation = async (operation) => {
     });
     if (!saved) log("T3AMS_MESSAGE_LIFECYCLE_PERSIST_PENDING", { chatId: operation.chatId, messageId: operation.messageId });
   }
-  if (reconciled.stopped && agentRuntime != null) agentRuntime.stop(operation.chatId);
+  if (reconciled.stopped && agentRuntime != null) {
+    // Older snapshots/embedders may not supply the newer session-key list;
+    // retain the base-chat fallback for that compatibility edge.
+    const sessionKeys = reconciled.stoppedSessionKeys?.length
+      ? reconciled.stoppedSessionKeys
+      : [operation.chatId];
+    for (const sessionKey of sessionKeys) agentRuntime.stop(operation.chatId, sessionKey);
+  }
   log("T3AMS_INBOUND_OPERATION_APPLIED", {
     kind: operation.kind,
     chatId: operation.chatId,
@@ -2207,9 +2295,10 @@ messageLifecycle = createT3amsMessageLifecycle({
   maxStateBytes: numberEnv("BOT_T3AMS_MESSAGE_LIFECYCLE_MAX_BYTES", 8 * 1024 * 1024, { min: 1024, max: 64 * 1024 * 1024 }),
   initialSnapshot: restored?.messageLifecycle ?? null,
 });
-// A channel has one shared native model session. Let ordinary members invoke
-// the bot, but do not let one member silently reset or reconfigure everyone
-// else's session. `/stop` remains available to the group as a liveness lever.
+// Top-level channel prompts share the channel's native session; each thread
+// has its own derived session. Let ordinary members invoke the bot, but do not
+// let one member silently reset or reconfigure a group-visible channel/thread
+// session. `/stop` remains available to the group as a liveness lever.
 const channelControlRole = (env.BOT_T3AMS_CHANNEL_CONTROL_ROLE ?? "admin").trim().toLowerCase();
 if (!new Set(["all", "mod", "admin"]).has(channelControlRole)) {
   console.error("BOT_T3AMS_CHANNEL_CONTROL_ROLE must be all, mod, or admin");
@@ -2251,9 +2340,11 @@ if (!autoAcceptWorkspaces) {
   log("T3AMS_WORKSPACE_AUTO_ACCEPT_DISABLED", { publicBot: allowedXids.size === 0 });
 }
 
-// Direct-engine setup mirrors the existing transport.  Its session key is the
-// T3ams conversation key, so every DM and every channel has isolated native
-// model memory while all threads in that channel share context.
+// Direct-engine setup mirrors the existing transport. Every DM/channel has an
+// isolated native session, and a threaded turn receives a further stable
+// session key so unrelated threads cannot share model memory. Delivery stays
+// on the base conversation key and therefore still replies in the right UI
+// thread.
 const aiModel = (env.BOT_AI_MODEL ?? "").trim();
 const modelSwitching = (env.BOT_AI_MODEL_SWITCHING ?? "locked").trim().toLowerCase();
 const aiAllowedModels = resolveModelPolicy({
@@ -2268,6 +2359,34 @@ if (customCmd && env.BOT_AI_ARGS) {
   if (!Array.isArray(customArgs)) { console.error("BOT_AI_ARGS must be a JSON array"); process.exit(2); }
 }
 const engine = customCmd ? RUNNERS.custom : resolveEngine(brain);
+// A public direct bot receives hostile prompts and attachments. Claude's OAuth
+// login lives in its home directory, so an agent process with filesystem or
+// shell tools could read/exfiltrate its own credentials. Keep the public
+// built-in profile text-only until an operator supplies a separately isolated
+// tool runtime. A custom command is an explicit operator-managed boundary and
+// is deliberately left to that command's own sandbox policy.
+const aiAllowedTools = String(env.BOT_AI_ALLOWED_TOOLS ?? "")
+  .split(",")
+  .map((item) => item.trim())
+  .filter(Boolean);
+const aiSkipPermissions = env.BOT_AI_SKIP_PERMISSIONS === "1";
+// All public direct engines consume an operator-funded resource, including an
+// explicitly sandboxed custom command. Keep their default turn budget small;
+// a private allowlist retains the historical defaults below.
+const publicDirectAgent = engine != null && publicTofuEnrollment;
+const publicBuiltInDirectAgent = publicDirectAgent && !customCmd;
+if (publicBuiltInDirectAgent && brain !== "claude") {
+  console.error("Public direct bots currently support only Claude's hardened no-tools profile; use a private allowlist or an externally isolated bridge runtime for other engines");
+  process.exit(2);
+}
+if (publicBuiltInDirectAgent && aiSkipPermissions) {
+  console.error("BOT_AI_SKIP_PERMISSIONS=1 is not allowed for a public direct bot; use the default no-tools profile or an externally isolated runtime");
+  process.exit(2);
+}
+if (publicBuiltInDirectAgent && aiAllowedTools.length > 0) {
+  console.error("BOT_AI_ALLOWED_TOOLS must be empty for a public direct bot; attachment/tool analysis requires an externally isolated runtime");
+  process.exit(2);
+}
 const optionalPosixId = (name) => {
   if (env[name] == null || env[name] === "") return null;
   return numberEnv(name, 0, { min: 0, max: 2_147_483_647 });
@@ -2313,6 +2432,10 @@ const renderT3amsForBrain = (message) => {
     ? `channel ${message.workspaceId}/${message.channelId}`
     : "direct message";
   const thread = message.threadRootId ? `; thread ${message.threadRootId}` : "";
+  const claudeCanInspectStagedFiles = brain !== "claude"
+    || customCmd
+    || aiSkipPermissions
+    || aiAllowedTools.some((tool) => /^(?:read|bash)(?:\(|$)/i.test(tool));
   const attachmentNotes = (message.attachments ?? []).map((attachment) => {
     const noun = attachment.kind === "image"
       ? "photo"
@@ -2329,8 +2452,10 @@ const renderT3amsForBrain = (message) => {
     // not preserve the sender-visible filename. Keep that validated filename
     // beside the usable path: it is often the only clue for an otherwise
     // opaque document (for example, an unknown browser File.type).
-    return attachment.downloaded && attachment.path
+    return attachment.downloaded && attachment.path && claudeCanInspectStagedFiles
       ? `[User attached a ${noun} saved at ${attachment.path} (${attachment.filename}; ${attachment.mime}, ${size}${duration})]`
+      : attachment.downloaded && attachment.path
+        ? `[User attached a ${noun} (${attachment.filename}; ${attachment.mime}, ${size}${duration}) — bytes are staged but deliberately unavailable to this no-tools agent. Do not claim to have inspected them.]`
       : `[User attached a ${noun} (${attachment.filename}; ${attachment.mime}, ${size}${duration}) — file bytes are unavailable: ${attachment.error ?? "download is not configured"}]`;
   });
   if (message.attachmentError) attachmentNotes.push(`[Attachment warning: ${message.attachmentError}]`);
@@ -2339,15 +2464,20 @@ const renderT3amsForBrain = (message) => {
     const thread = record.threadRootId ? `; thread ${record.threadRootId}` : "";
     return `[Earlier channel message from ${name}${thread}]: ${record.text}`;
   });
-  const outputInstruction = message.outputDir == null
+  const claudeCanWriteArtifacts = brain !== "claude"
+    || customCmd
+    || aiSkipPermissions
+    || aiAllowedTools.some((tool) => /^(?:bash|edit|write)(?:\(|$)/i.test(tool));
+  const outputInstruction = message.outputDir == null || !claudeCanWriteArtifacts
     ? null
     : `[To return a generated file to the user, write up to ${effectiveAgentOutputArtifactMaxCount} regular files directly inside ${message.outputDir}. Do not create subdirectories or symlinks; only those top-level files will be attached to your reply.]`;
-  // Channel sessions intentionally share memory. Include the authenticated
-  // sender/scope so a direct brain can distinguish participants without
-  // changing the transport-neutral message API.
+  // The runtime owns the conversation/thread session key. Include the
+  // authenticated sender and scope so a direct brain can distinguish
+  // participants without changing the transport-neutral message API.
   return [`[T3ams ${scope}; sender ${sender}${thread}]`, ...contextNotes, message.text, ...attachmentNotes, outputInstruction].filter(Boolean).join("\n");
 };
 if (engine != null) {
+  const directCapacityDefaults = t3amsDirectCapacityDefaults({ publicDirect: publicDirectAgent });
   fs.mkdirSync(aiWorkspace, { recursive: true, mode: 0o700 });
   const workspaces = createWorkspaces({
     projects: aiProjects,
@@ -2364,8 +2494,12 @@ if (engine != null) {
       ? (customArgs ? customArgs.map((item) => item === "__PROMPT__" ? prompt : item) : [prompt])
       : engine.buildArgs({
         prompt, model, resume, effort,
-        allowedTools: String(env.BOT_AI_ALLOWED_TOOLS ?? "Bash,Read,Edit,Write").split(",").map((item) => item.trim()).filter(Boolean),
-        skipPermissions: env.BOT_AI_SKIP_PERMISSIONS === "1",
+        allowedTools: aiAllowedTools,
+        skipPermissions: aiSkipPermissions,
+        // With no configured tools (always the public profile), do not load
+        // user/project plugins, MCP servers, hooks, or slash commands that
+        // could reintroduce a capability outside the explicit CLI boundary.
+        safeMode: brain === "claude" && (publicBuiltInDirectAgent || aiAllowedTools.length === 0),
       }),
     workspace: aiWorkspace,
     workspaces,
@@ -2374,8 +2508,8 @@ if (engine != null) {
     reasoning: aiReasoning,
     idleMs: numberEnv("BOT_AI_IDLE_TIMEOUT_MS", 600_000, { min: 1000, max: 7 * 86_400_000 }),
     maxMs: numberEnv("BOT_AI_MAX_MS", 3_600_000, { min: 1000, max: 7 * 86_400_000 }),
-    maxConcurrentTurns: numberEnv("BOT_AI_MAX_CONCURRENT_TURNS", 4, { min: 1, max: 128 }),
-    maxQueuedTurns: numberEnv("BOT_AI_MAX_QUEUED_TURNS", 100, { min: 0, max: 10_000 }),
+    maxConcurrentTurns: numberEnv("BOT_AI_MAX_CONCURRENT_TURNS", directCapacityDefaults.maxConcurrentTurns, { min: 1, max: 128 }),
+    maxQueuedTurns: numberEnv("BOT_AI_MAX_QUEUED_TURNS", directCapacityDefaults.maxQueuedTurns, { min: 0, max: 10_000 }),
     maxOutputBytes: aiMaxOutputBytes,
     maxOutputArtifacts: effectiveAgentOutputArtifactMaxCount,
     maxOutputArtifactBytes: attachmentMaxBytes,
@@ -2398,6 +2532,9 @@ if (engine != null) {
     persist,
   });
   agentRuntime.noteRestoredAgent(restored?.agent ?? null);
+  if (publicDirectAgent) {
+    log("T3AMS_PUBLIC_DIRECT_CAPACITY", agentRuntime.queueStats());
+  }
   agentRuntime.restoreIntroduced(Array.isArray(restored?.agentIntroduced)
     ? restored.agentIntroduced.slice(-(knownChatCap + ingressCap))
     : []);
@@ -2408,8 +2545,10 @@ if (engine != null) {
     : [];
   for (const entry of restoredAgentPeers) {
     if (typeof entry?.chatId !== "string") continue;
-    if (!knownChats.note(entry.chatId)) continue;
-    agentRuntime.restorePeer(entry.chatId, entry);
+    const sessionKey = typeof entry.sessionKey === "string" ? entry.sessionKey : entry.chatId;
+    const chatId = conversationForAgentSessionKey(sessionKey);
+    if (chatId == null || chatId !== entry.chatId || !knownChats.note(chatId)) continue;
+    agentRuntime.restorePeer(sessionKey, entry);
   }
 }
 
@@ -2539,6 +2678,10 @@ const executeIngressTurn = async (entry, expectedRevision) => {
     channelId: routed.message.channelId,
     senderXid: routed.message.senderXid,
     senderName: routed.message.senderName,
+    // This affects only native model/session state. The delivery target stays
+    // `routed.conversationKey`, so replies and typing remain in the same
+    // T3ams thread/channel lane.
+    sessionKey: agentSessionKeyForT3ams(routed.conversationKey, routed.message.threadRootId) ?? routed.conversationKey,
     ...(Array.isArray(routed.message.attachments) ? { attachments: routed.message.attachments } : {}),
     ...(typeof routed.message.attachmentError === "string" ? { attachmentError: routed.message.attachmentError } : {}),
     ...(Array.isArray(routed.message.channelContext) ? { channelContext: routed.message.channelContext } : {}),
@@ -2554,8 +2697,10 @@ const executeIngressTurn = async (entry, expectedRevision) => {
       const priorArtifactContext = activeAgentArtifactDeliveries.get(routed.conversationKey);
       activeAgentArtifactDeliveries.set(routed.conversationKey, { id: entry.id, revision: expectedRevision });
       try {
-        await deliverPersistedAgentArtifacts(routed.conversationKey, { id: entry.id, revision: expectedRevision }, entry.artifactOutbox);
-        await deliverPersistedAgentReply(routed.conversationKey, { id: entry.id, revision: expectedRevision }, entry.replyOutbox);
+        await deliverPersistedAgentTurn(routed.conversationKey, { id: entry.id, revision: expectedRevision }, {
+          artifacts: entry.artifactOutbox,
+          reply: entry.replyOutbox,
+        });
       } finally {
         if (priorArtifactContext == null) activeAgentArtifactDeliveries.delete(routed.conversationKey);
         else activeAgentArtifactDeliveries.set(routed.conversationKey, priorArtifactContext);
@@ -2563,7 +2708,16 @@ const executeIngressTurn = async (entry, expectedRevision) => {
       return ingressEntryCurrent(entry.id, expectedRevision) ? expectedRevision : null;
     }
     if (Array.isArray(message.attachments) && message.attachments.length > 0) {
-      message.attachments = await fetchT3amsAttachments(message.attachments);
+      // Attachment retrieval precedes the agent process. Start the same live
+      // turn before it begins so a photo/PDF never looks ignored while its
+      // encrypted bytes are claimed and verified; later CLI tool actions join
+      // this one deferred tracker rather than replacing its history.
+      const onAttachmentProgress = agentRuntime == null
+        ? null
+        : beginTurnProgress(routed.conversationKey);
+      message.attachments = await fetchT3amsAttachments(message.attachments, {
+        onProgress: onAttachmentProgress,
+      });
     }
     if (!ingressEntryCurrent(entry.id, expectedRevision)) return null;
     const fileResult = await handleT3amsFileCommand(routed.conversationKey, message);
@@ -2583,13 +2737,13 @@ const executeIngressTurn = async (entry, expectedRevision) => {
       // The cancellation request was issued immediately when the authenticated
       // event arrived; this ordered, durable turn is just its confirmation.
       if (!ingressEntryCurrent(entry.id, expectedRevision)) return null;
-      await sendAgentReply(routed.conversationKey, "⏹️ Stopped any active work for this chat.");
+      await sendAgentReply(routed.conversationKey, "⏹️ Stopped any active work for this conversation.");
       return expectedRevision;
     }
     if (stateChangingChannelCommand(commandInput) && !canControlChannel(message)) {
       const label = channelControlRole === "mod" ? "a workspace moderator" : "a workspace owner or admin";
       if (!ingressEntryCurrent(entry.id, expectedRevision)) return null;
-      await sendAgentReply(routed.conversationKey, `Only ${label} can change this channel bot's shared session settings.`);
+      await sendAgentReply(routed.conversationKey, `Only ${label} can change this channel bot's session settings.`);
       return expectedRevision;
     }
     if (!ingressEntryCurrent(entry.id, expectedRevision)) return null;
@@ -2706,9 +2860,10 @@ const leaseBridgeIngress = async (limit) => mutateIngress(async () => {
   ingressDurable = true;
   for (const entry of leased) {
     const chatId = entry.routed.conversationKey;
+    const guard = () => bridgeLeaseIsActive(chatId, entry.id, entry.leaseId);
     bridgeReplyThreads.set(chatId, entry.routed.replyTarget.threadRootId ?? null);
-    bestEffortTyping(chatId);
-    armThinking(chatId);
+    bestEffortTyping(chatId, { guard });
+    armThinking(chatId, { guard });
   }
   return leased.map((entry) => ({
     ...bridgeInboundWithMedia(entry.routed),
@@ -2787,7 +2942,11 @@ const finalizeBridgeEdits = async (claims) => {
     if (placeholder != null && bareHex(placeholder.handle.messageId) !== bareHex(edit.messageId)) {
       // The framework chose to stream an earlier bot message rather than the
       // current placeholder. Retire the placeholder so it never dangles.
-      await placeholder.handle.finalize("✓");
+      // This is transport cleanup for a mismatched older placeholder, not a
+      // frame authored by the current/old bridge worker. Its original lease
+      // may already be stale after a re-lease, so it must not retain that
+      // default guard and leave the bubble dangling.
+      await placeholder.handle.finalize("✓", { guard: null });
     }
     await liveReplies.finalizeExisting(chatId, edit.messageId, edit.text, {
       guard: () => bridgePendingEditIsActive(chatId, edit),
@@ -2953,6 +3112,13 @@ const staleBridgeClaimError = () => {
 const assertBridgeClaimCurrent = (guard) => {
   if (guard != null && !guard()) throw staleBridgeClaimError();
 };
+// The protocol checks this synchronously immediately before it queues a
+// signed statement. Keep the bridge-specific error shape so an expired or
+// revoked worker receives a deterministic conflict rather than a generic
+// transport failure.
+const claimSubmissionGuard = (guard) => guard == null
+  ? null
+  : () => assertBridgeClaimCurrent(guard);
 const bridge = http.createServer(async (request, response) => {
   try {
     if (!authorized(request)) return json(response, 401, { success: false, error: "unauthorized" });
@@ -2961,6 +3127,9 @@ const bridge = http.createServer(async (request, response) => {
       return json(response, 200, {
         ok: isChainConnected(), transport: "t3ams", account: material.accountIdHex, identifierKey: null,
         xid: selfXidHex, username, subscriptions: subscriptions.size,
+        ...(publicDirectAgent && agentRuntime != null ? {
+          direct: { public: true, queue: agentRuntime.queueStats() },
+        } : {}),
         bridge: {
           queued: bridgeQueued(),
           claimBoundSends: brain === "bridge" || brain === "hermes",
@@ -3155,6 +3324,7 @@ const bridge = http.createServer(async (request, response) => {
             text: hasText ? text : file.path,
             threadRootId: root,
             beforeSend: async () => assertBridgeClaimCurrent(claimGuard),
+            guard: claimSubmissionGuard(claimGuard),
           });
           return json(response, 200, { success: true, message_id: sent.messageId, attachment: {
             id: sent.attachment.id,
@@ -3186,7 +3356,10 @@ const bridge = http.createServer(async (request, response) => {
       for (const [index, part] of parts.entries()) {
         if (index === 0 && firstId != null) continue;
         assertBridgeClaimCurrent(claimGuard);
-        const sent = await protocol.sendText(chatId, part, { threadRootId: root });
+        const sent = await protocol.sendText(chatId, part, {
+          threadRootId: root,
+          guard: claimSubmissionGuard(claimGuard),
+        });
         noteBotIssuedMessage(chatId, sent.messageId);
         if (index === 0) firstId = sent.messageId;
       }
@@ -3202,8 +3375,12 @@ const bridge = http.createServer(async (request, response) => {
       }
       const claim = validateBridgeOutboundClaim(body, chatId, request);
       if (!claim.valid) return json(response, claim.status, { success: false, error: claim.error });
-      assertBridgeClaimCurrent(bridgeClaimGuard(claim, chatId));
-      await protocol.sendReaction(chatId, messageId, emoji, { removed: body.remove === true });
+      const claimGuard = bridgeClaimGuard(claim, chatId);
+      assertBridgeClaimCurrent(claimGuard);
+      await protocol.sendReaction(chatId, messageId, emoji, {
+        removed: body.remove === true,
+        guard: claimSubmissionGuard(claimGuard),
+      });
       return json(response, 200, { success: true });
     }
     if (request.method === "POST" && url.pathname === "/typing") {
@@ -3212,9 +3389,13 @@ const bridge = http.createServer(async (request, response) => {
       if (!isT3amsConversationKey(chatId)) return json(response, 400, { success: false, error: "invalid chat_id" });
       const claim = validateBridgeOutboundClaim(body, chatId, request);
       if (!claim.valid) return json(response, claim.status, { success: false, error: claim.error });
-      assertBridgeClaimCurrent(bridgeClaimGuard(claim, chatId));
-      try { await protocol.sendTyping(chatId); }
-      catch (error) { log("T3AMS_BRIDGE_TYPING_FAILED", { chatId, error: String(error?.message ?? error) }); }
+      const claimGuard = bridgeClaimGuard(claim, chatId);
+      assertBridgeClaimCurrent(claimGuard);
+      try { await protocol.sendTyping(chatId, { guard: claimSubmissionGuard(claimGuard) }); }
+      catch (error) {
+        if (error?.bridgeClaimStale === true) throw error;
+        log("T3AMS_BRIDGE_TYPING_FAILED", { chatId, error: String(error?.message ?? error) });
+      }
       return json(response, 200, { success: true });
     }
     return json(response, 404, { success: false, error: "not found" });

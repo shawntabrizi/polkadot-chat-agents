@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createLiveReplies, createProgressTracker } from "../lib/live-reply.mjs";
+import { createDeferredProgressTracker, createLiveReplies, createProgressTracker } from "../lib/live-reply.mjs";
 
 // Deterministic clock + timers: advance() fires due timers in order.
 const makeClock = () => {
@@ -37,10 +37,10 @@ const makeHarness = ({ minIntervalMs = 1000, maxIntervalMs = 8000, finalAckWaitM
   let nextMsg = 1;
   const acks = new Map(); // requestId -> resolve
   const live = createLiveReplies({
-    send: async ({ peerHex, text, editOf, supersedes }) => {
+    send: async ({ peerHex, text, editOf, supersedes, guard }) => {
       const messageId = editOf ? null : `MSG-${nextMsg++}`;
       const token = `REQ-${sent.length + 1}`;
-      sent.push({ peerHex, text, editOf: editOf ?? null, messageId, supersedes: supersedes ?? null });
+      sent.push({ peerHex, text, editOf: editOf ?? null, messageId, supersedes: supersedes ?? null, guard: guard ?? null });
       return { messageId, delivered: token };
     },
     awaitAck: (token) => new Promise((resolve) => acks.set(token, resolve)),
@@ -65,6 +65,28 @@ test("no edits go out before the placeholder is ACKed", async () => {
   assert.equal(h.sent.length, 2);
   assert.equal(h.sent[1].editOf, handle.messageId);
   assert.equal(h.sent[1].text, "progress 1");
+});
+
+test("a lease guard follows a placeholder through progress and its final frame", async () => {
+  const h = makeHarness();
+  const guard = () => true;
+  const handle = await h.live.begin("peer", "thinking…", { guard });
+  assert.equal(h.sent[0].guard, guard);
+  await h.ack("REQ-1");
+  handle.update("progress");
+  await h.clock.advance(0);
+  assert.equal(h.sent.at(-1).guard, guard);
+  await handle.finalize("final");
+  assert.equal(h.sent.at(-1).guard, guard);
+});
+
+test("transport-owned cleanup can explicitly bypass a stale placeholder guard", async () => {
+  const h = makeHarness();
+  const handle = await h.live.begin("peer", "thinking…", { guard: () => false });
+  await h.ack("REQ-1");
+  await handle.finalize("timed out", { guard: null });
+  assert.equal(h.sent.at(-1).text, "timed out");
+  assert.equal(h.sent.at(-1).guard, null);
 });
 
 test("latest-wins coalescing under the min interval", async () => {
@@ -263,4 +285,27 @@ test("progress tracker renders elapsed, steps and a rolling action window", () =
   ].join("\n"));
   t = 84_000;
   assert.match(tracker.render(), /⏳ working · 1m 24s · step 3/);
+});
+
+test("deferred progress retains pre-placeholder actions and flushes them after attachment", () => {
+  const updates = [];
+  const tracker = createDeferredProgressTracker({ label: "working" });
+  tracker.add("downloading report.pdf");
+  assert.equal(updates.length, 0, "there is no live handle yet");
+
+  const handle = {
+    finalized: false,
+    update: (text) => updates.push(text),
+  };
+  tracker.attach(handle);
+  assert.match(updates[0], /step 1/);
+  assert.match(updates[0], /downloading report.pdf/);
+
+  tracker.add("reading report.pdf");
+  assert.match(updates.at(-1), /step 2/);
+  assert.match(updates.at(-1), /reading report.pdf/);
+
+  tracker.dispose();
+  tracker.add("must not render");
+  assert.equal(updates.length, 2);
 });

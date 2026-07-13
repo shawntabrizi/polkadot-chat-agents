@@ -47,7 +47,9 @@ BOT_BRIDGE_PORT=8799            # port the bridge listens on
 BOT_BRIDGE_TOKEN=Xk3…≥32chars   # shared secret; every bridge request must present it. MANDATORY (process exits without it)
 
 # agent sandboxing (direct engines)
-BOT_AI_SKIP_PERMISSIONS=1       # full tool autonomy (the container IS the sandbox); omit for a read/write/edit/bash allowlist
+BOT_AI_SKIP_PERMISSIONS=0       # default: Claude has no tools
+# Private, trusted bot only: BOT_AI_ALLOWED_TOOLS=Read (or a deliberate narrow list)
+# Private, trusted bot only: BOT_AI_SKIP_PERMISSIONS=1 for full autonomy
 BOT_AI_AGENT_UID=1000           # spawned agent CLI is dropped to this uid — cannot read /state or the seed
 BOT_AI_AGENT_GID=1000           # …and this gid (transport stays root solely to hold the seed)
 
@@ -124,17 +126,20 @@ BOT_HOP_UPLOAD_NODE=wss://hop.example.org
 
 `BOT_AI_SKIP_PERMISSIONS=1` gives the direct agent full tool autonomy inside its
 container. Use it only when every allowlisted sender is trusted with the bot's
-workspace and its reachable services. Keep the bridge on loopback for a local
-run; in a generated framework deployment, `BOT_BRIDGE_HOST=0.0.0.0` is only
-reachable on the private Compose network and no bridge port is published.
+workspace, reachable services, and the CLI's own OAuth home: a tool-enabled
+agent can read or misuse its own provider credential. Keep the bridge on
+loopback for a local run; in a generated framework deployment,
+`BOT_BRIDGE_HOST=0.0.0.0` is only reachable on the private Compose network and
+no bridge port is published.
 
 ### Public bot: deliberately bounded
 
 A public bot has `BOT_ALLOWED_PEERS` unset or empty. It must assume arbitrary
 prompts, attachment floods, repeated requests, and attempts to spend model or
 storage allowance. Prefer a narrow task, a fixed model allowlist, and a
-read-only or disposable workspace. The following is a usable conservative
-baseline for a directly hosted public bot:
+read-only or disposable workspace. Built-in public direct deployment currently
+supports Claude's hardened no-tools profile only. The following is a usable
+conservative baseline for a directly hosted public bot:
 
 ```sh
 BOT_ALLOWED_PEERS=
@@ -144,7 +149,8 @@ BOT_ALLOWED_PEERS=
 BOT_AI_MODEL=provider/model
 BOT_AI_ALLOWED_MODELS=provider/model,provider/low-cost-model
 BOT_AI_SKIP_PERMISSIONS=0
-BOT_AI_ALLOWED_TOOLS=Read
+# Do not set BOT_AI_ALLOWED_TOOLS. Public direct bots use Claude's hardened
+# no-tools profile; it can answer text but cannot inspect staged file bytes.
 BOT_AI_MAX_CONCURRENT_TURNS=2
 BOT_AI_MAX_QUEUED_TURNS=20
 BOT_AI_MAX_OUTPUT_BYTES=262144
@@ -164,6 +170,12 @@ BOT_MEDIA_DOWNLOAD_QUEUE_CAP=20
 # intentionally excludes public bots; inbound /file put remains quota-bounded.
 # BOT_HOP_UPLOAD_NODE=
 ```
+
+For a public **T3ams** direct engine, `2` active turns and `20` queued turns are
+runtime defaults when those variables are unset; the explicit values above make
+the intended budget visible in deployment configuration. Authenticated `GET /health`
+also exposes `direct.queue` for this open direct profile, so an operator can see
+active, queued, and configured capacity without exposing it to chat users.
 
 For a public bot, do not mount a valuable host repository, credentials, Docker
 socket, or home directory into the agent container. Run it under a separate
@@ -251,13 +263,13 @@ the directory is sensitive even if no model session has been created.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BOT_AI_ALLOWED_TOOLS` | `Bash,Read,Edit,Write` | Tool allowlist used when permissions are not skipped. |
-| `BOT_AI_SKIP_PERMISSIONS` | `0` | `1` = full tool autonomy (the container is the sandbox). **gen unless --safe-tools** |
+| `BOT_AI_ALLOWED_TOOLS` | `""` | Claude-only explicit tool availability/approval list. Unset or empty disables all built-in tools. Public direct bots must leave it empty. |
+| `BOT_AI_SKIP_PERMISSIONS` | `0` | `1` = explicit full autonomy for a trusted, allowlisted bot only; rejected for public direct bots. Deploy emits it only with `--full-autonomy`. |
 | `BOT_AI_AGENT_UID` / `BOT_AI_AGENT_GID` | unset | Drop the spawned agent to this uid/gid so it can't read `/state` or the seed. **gen (deploy: 1000)** |
 | `BOT_AI_IDLE_TIMEOUT_MS` | 600000 | Kill a turn that has emitted nothing for this long (wedge backstop). |
 | `BOT_AI_MAX_MS` | 3600000 | Hard per-turn wall-clock cap. |
-| `BOT_AI_MAX_CONCURRENT_TURNS` | 4 | Global cap on simultaneously-running agent turns. |
-| `BOT_AI_MAX_QUEUED_TURNS` | 100 | Global cap on queued turns before backpressure. |
+| `BOT_AI_MAX_CONCURRENT_TURNS` | 4; public T3ams direct: 2 | Global cap on simultaneously-running agent turns. An explicit value always overrides the T3ams profile default. |
+| `BOT_AI_MAX_QUEUED_TURNS` | 100; public T3ams direct: 20 | Global cap on queued turns before backpressure. An explicit value always overrides the T3ams profile default. |
 | `BOT_AI_MAX_OUTPUT_BYTES` | 1000000 | Cap on captured agent output per turn. |
 | `BOT_AI_CMD` / `BOT_AI_ARGS` | unset | Escape hatch: a custom CLI speaking claude-shaped stream-json (`BOT_AI_ARGS` is a JSON array; `__PROMPT__` is substituted). |
 
@@ -489,18 +501,19 @@ checks, and its caps should stay small on a public bot.
 | `BOT_T3AMS_CHANNEL_CONTEXT_MAX_BYTES_PER_SENDER` | 2048 | Per-sender text budget in one channel. |
 | `BOT_T3AMS_CHANNEL_CONTEXT_MAX_TOTAL_BYTES` | 262144 | Process-wide memory budget for passive context. |
 
-### T3ams shared-channel direct-brain controls
+### T3ams channel direct-brain controls
 
-A channel uses one shared direct-brain session. Normal mentioned prompts remain
-available to channel members, but the session-changing direct commands
+Top-level channel prompts use the channel's direct-brain session, while each
+thread receives its own isolated native session. Normal mentioned prompts
+remain available to channel members, but the session-changing direct commands
 `/reset`, `/model`, `/reasoning`, and `/project` are role-gated from the
 authenticated T3ams workspace state. This setting does not apply to DMs or a
 bridge framework's own commands. `/stop` remains available to any channel
-member so a stuck shared turn always has a group-visible cancellation lever.
+member and targets the current channel conversation/thread.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BOT_T3AMS_CHANNEL_CONTROL_ROLE` | `admin` | Minimum role for shared-session commands: `admin` permits owners/admins; `mod` also permits moderators; `all` permits any member whose message reaches the bot. |
+| `BOT_T3AMS_CHANNEL_CONTROL_ROLE` | `admin` | Minimum role for channel/thread session commands: `admin` permits owners/admins; `mod` also permits moderators; `all` permits any member whose message reaches the bot. |
 
 ### T3ams message-operation reconciliation
 

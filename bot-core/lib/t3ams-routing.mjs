@@ -178,9 +178,10 @@ const attachmentPlaceholder = (attachments, attachmentError) => {
   return attachmentError == null ? "" : "[attached file unavailable]";
 };
 
-// Runtime session state must be shared by every thread in a channel, but
-// never by two different channels (or a channel and a direct message).  The
-// escaping makes arbitrary valid protocol IDs unambiguous in persisted keys.
+// This is the stable transport delivery conversation shared by a channel and
+// all of its threads, never by two channels (or a channel and a direct
+// message). The direct-agent runtime may derive a narrower native session per
+// thread; the escaping here keeps the transport key unambiguous on disk.
 export const conversationKeyFor = (event) => {
   const fields = fieldsOf(event);
   if (fields.conversationType === "dm" && fields.senderXid) return `t3ams:dm:${segment(fields.senderXid)}`;
