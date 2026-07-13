@@ -1,0 +1,83 @@
+/* Polkadot design-system tokens (from Figma via the polkadot-design-system
+   skill). Light is :root; dark overrides under html.dark (VitePress toggles
+   that class). Never hardcode colors elsewhere — reference these vars. */
+
+:root {
+  /* neutral primitive scale (warm gray, Tailwind v3 aligned) */
+  --color-neutral-white: #ffffff;
+  --color-neutral-50: #fafafa;
+  --color-neutral-100: #f5f5f5;
+  --color-neutral-150: #ebebeb;
+  --color-neutral-200: #e5e5e5;
+  --color-neutral-300: #d4d4d4;
+  --color-neutral-400: #a3a3a3;
+  --color-neutral-500: #737373;
+  --color-neutral-600: #525252;
+  --color-neutral-700: #404040;
+  --color-neutral-800: #262626;
+  --color-neutral-850: #1f1f1f;
+  --color-neutral-900: #171717;
+  --color-neutral-950: #0a0a0a;
+  --color-neutral-black: #000000;
+
+  /* semantic — foreground */
+  --fg-primary: var(--color-neutral-950);
+  --fg-secondary: var(--color-neutral-600);
+  --fg-tertiary: var(--color-neutral-500);
+  --fg-primary-inverted: var(--color-neutral-100);
+  --fg-link: #2563eb;
+  --fg-link-hover: #3b82f6;
+
+  /* semantic — surfaces */
+  --bg-surface-main: var(--color-neutral-50);
+  --bg-surface-container: var(--color-neutral-white);
+  --bg-surface-nested: var(--color-neutral-50);
+  --bg-selection-hover: var(--color-neutral-100);
+  --bg-selection-active: var(--color-neutral-150);
+  --bg-action-primary: var(--color-neutral-black);
+  --bg-action-primary-hover: var(--color-neutral-850);
+
+  /* semantic — borders */
+  --border-default: var(--color-neutral-150);
+  --border-divider: var(--color-neutral-150);
+  --border-divider-tint: var(--color-neutral-200);
+
+  --focus-ring: #000000;
+
+  --shadow-1: 0 4px 24px -4px rgba(0, 0, 0, 0.16);
+  --shadow-2: 0 8px 32px -4px rgba(0, 0, 0, 0.24);
+
+  --radius-container: 16px;
+  --radius-nested: 12px;
+  --radius-small: 8px;
+  --radius-full: 9999px;
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-serif: "DM Serif Display", ui-serif, Georgia, serif;
+}
+
+.dark {
+  --fg-primary: var(--color-neutral-100);
+  --fg-secondary: var(--color-neutral-400);
+  --fg-tertiary: var(--color-neutral-600);
+  --fg-primary-inverted: var(--color-neutral-950);
+  --fg-link: #3b82f6;
+  --fg-link-hover: #60a5fa;
+
+  --bg-surface-main: var(--color-neutral-950);
+  --bg-surface-container: var(--color-neutral-900);
+  --bg-surface-nested: var(--color-neutral-850);
+  --bg-selection-hover: var(--color-neutral-850);
+  --bg-selection-active: var(--color-neutral-800);
+  --bg-action-primary: var(--color-neutral-150);
+  --bg-action-primary-hover: var(--color-neutral-200);
+
+  --border-default: var(--color-neutral-800);
+  --border-divider: var(--color-neutral-800);
+  --border-divider-tint: var(--color-neutral-700);
+
+  --focus-ring: #ffffff;
+
+  --shadow-1: 0 4px 24px -4px rgba(0, 0, 0, 0.24);
+  --shadow-2: 0 8px 32px -4px rgba(0, 0, 0, 0.48);
+}

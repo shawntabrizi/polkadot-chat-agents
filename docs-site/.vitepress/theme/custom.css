@@ -1,0 +1,115 @@
+/* Map VitePress's default-theme variables onto the Polkadot design tokens, so
+   the whole site inherits the system without per-component overrides. */
+
+@import "./tokens.css";
+
+:root {
+  /* brand → neutral high-contrast action token (the system has no chromatic
+     accent; interaction stands out through tonal weight, not color) */
+  --vp-c-brand-1: var(--fg-primary);
+  --vp-c-brand-2: var(--fg-secondary);
+  --vp-c-brand-3: var(--bg-action-primary);
+  --vp-c-brand-soft: var(--bg-selection-active);
+
+  /* links keep the one restrained accent the system allows */
+  --vp-c-brand-1: var(--fg-primary);
+  --vp-c-text-1: var(--fg-primary);
+  --vp-c-text-2: var(--fg-secondary);
+  --vp-c-text-3: var(--fg-tertiary);
+
+  /* surfaces — the three-tone layering model */
+  --vp-c-bg: var(--bg-surface-main);
+  --vp-c-bg-alt: var(--bg-surface-container);
+  --vp-c-bg-elv: var(--bg-surface-container);
+  --vp-c-bg-soft: var(--bg-surface-nested);
+
+  /* borders → dividers, never heavy lines */
+  --vp-c-border: var(--border-default);
+  --vp-c-divider: var(--border-divider);
+  --vp-c-gutter: var(--border-divider);
+
+  /* typography */
+  --vp-font-family-base: var(--font-sans);
+
+  /* radius — generous on containers */
+  --vp-code-block-bg: var(--bg-surface-nested);
+
+  /* home hero: use the system's high-contrast action token, not a gradient */
+  --vp-home-hero-name-color: var(--fg-primary);
+  --vp-button-brand-bg: var(--bg-action-primary);
+  --vp-button-brand-hover-bg: var(--bg-action-primary-hover);
+  --vp-button-brand-text: var(--fg-primary-inverted);
+  --vp-button-brand-active-bg: var(--bg-action-primary-hover);
+  --vp-button-brand-border: transparent;
+  --vp-button-brand-hover-border: transparent;
+  --vp-button-brand-active-border: transparent;
+}
+
+/* Links get the single restrained accent the system permits. */
+.vp-doc a {
+  color: var(--fg-link);
+  text-decoration-color: var(--border-divider-tint);
+}
+.vp-doc a:hover { color: var(--fg-link-hover); }
+
+/* Hero headline in DM Serif Display — the ONE place the display face is used. */
+.VPHero .name,
+.VPHero .text {
+  font-family: var(--font-serif);
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+}
+.VPHero .tagline {
+  color: var(--fg-secondary);
+  font-family: var(--font-sans);
+}
+
+/* Headings: Inter semibold, tight leading — confident, not shouting. */
+.vp-doc h1,
+.vp-doc h2,
+.vp-doc h3,
+.vp-doc h4 {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+}
+
+/* Generous container radius on cards, code, and custom blocks. */
+:root {
+  --vp-code-block-bg: var(--bg-surface-nested);
+}
+.vp-doc div[class*="language-"],
+.VPFeature,
+.custom-block {
+  border-radius: var(--radius-container);
+}
+.vp-doc :not(pre) > code {
+  border-radius: var(--radius-small);
+  background: var(--bg-selection-active);
+}
+
+/* Feature cards on the home page: surfaces, no borders, quiet hover. */
+.VPFeature {
+  background: var(--bg-surface-container);
+  border: 1px solid var(--border-divider);
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+.VPFeature:hover {
+  box-shadow: var(--shadow-1);
+  transform: translateY(-2px);
+}
+
+/* Keyboard focus: a visible ring everywhere, per the system's rule. */
+*:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+
+/* Sidebar/nav active + hover use selection surfaces, not accent color. */
+.VPSidebarItem.is-active > .item > .link > .text {
+  color: var(--fg-primary);
+  font-weight: 600;
+}
