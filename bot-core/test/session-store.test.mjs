@@ -6,7 +6,6 @@ import path from "node:path";
 import { createStateStore } from "../lib/session-store.mjs";
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "pca-store-test-"));
-const settle = () => new Promise((r) => setTimeout(r, 30)); // let the debounce fire
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 test("save then load round-trips the data", async () => {
@@ -15,7 +14,7 @@ test("save then load round-trips the data", async () => {
   const store = createStateStore(file, { debounceMs: 1 });
   const data = { v: 1, peers: [{ peerHex: "ab", devices: [] }], seen: ["x"] };
   store.save(data);
-  await settle();
+  assert.equal(await store.flush(), true);
   assert.deepEqual(store.load(), data);
 });
 
@@ -32,7 +31,7 @@ test("the state file is written 0600", async () => {
   const file = path.join(dir, "state.json");
   const store = createStateStore(file, { debounceMs: 1 });
   store.save({ v: 1 });
-  await settle();
+  assert.equal(await store.flush(), true);
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
 });
 
@@ -53,6 +52,10 @@ test("flush persists a newer save made during an in-flight write", async () => {
   const flushing = store.flush();
   store.save({ v: 2 });
   assert.equal(await flushing, true);
+  // The second save schedules the normal debounce while the first drain is
+  // active. The drain already persisted it, so explicitly clear that inert
+  // timer instead of leaving the test process alive for its 10-second delay.
+  assert.equal(await store.flush(), true);
   assert.deepEqual(store.load(), { v: 2 });
 });
 
@@ -61,7 +64,7 @@ test("write is atomic — a reader never sees a partial file", async () => {
   const file = path.join(dir, "state.json");
   const store = createStateStore(file, { debounceMs: 1 });
   store.save({ v: 1, big: "a".repeat(100000) });
-  await settle();
+  assert.equal(await store.flush(), true);
   // If writes went straight to `file` a crash mid-write would truncate it; the
   // store writes a .tmp then renames, so the live file is always complete JSON.
   assert.doesNotThrow(() => JSON.parse(fs.readFileSync(file, "utf8")));
@@ -75,7 +78,7 @@ test("a failed background write retries after the filesystem recovers", async ()
   const file = path.join(blockedParent, "state.json");
   const store = createStateStore(file, { debounceMs: 1, retryMs: 10 });
   store.save({ v: 9 });
-  await settle();
+  assert.equal(await store.flush(), false, "the initial write must fail while the parent is a file");
   assert.equal(store.load(), null, "the initial write must fail while the parent is a file");
 
   fs.rmSync(blockedParent);
