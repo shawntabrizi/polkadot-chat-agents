@@ -101,7 +101,10 @@ and restart/redeploy the bot. Private bots intentionally reject silent rekeys.
 
 1. Search for the bot's registered DotNS username in T3ams and send it a DM.
    A verified, allowed DM pair is accepted automatically; no manual accept step
-   is required from the bot operator.
+   is required from the bot operator. This first pairing is also required
+   before a public bot will accept that person's workspace invitation, so the
+   invite has a verified signing key rather than relying on unauthenticated
+   first contact.
 2. Invite the bot to a workspace using the existing T3ams workspace invitation
    flow. For a private bot, the inviter's outer request must verify against
    that account's configured signing-key pin; this is not TOFU. The bot accepts
@@ -123,7 +126,28 @@ senders. Public bots do **not** auto-accept workspace invitations by default;
 use `--t3ams-auto-accept-workspaces` only when enrollment by arbitrary public
 senders is intended. Use `--t3ams-no-auto-accept-workspaces` to disable
 automatic enrollment even for an allowlisted bot. Deliberately public bots use
-first-contact TOFU only after that explicit enrollment opt-in.
+first-contact TOFU only after that explicit enrollment opt-in. Their public
+admission state is bounded by default: 128 remembered DM peers, eight
+workspaces, 32 new DM pairings/hour, and four new workspace enrollments/hour.
+Fresh public entries are not evicted; inactive entries become eligible after
+the one-hour admission window. Operators may tune these limits with
+`BOT_T3AMS_PUBLIC_PEER_CAP`, `BOT_T3AMS_PUBLIC_WORKSPACE_CAP`,
+`BOT_T3AMS_PUBLIC_PEER_ADMISSIONS_PER_HOUR`, and
+`BOT_T3AMS_PUBLIC_WORKSPACE_ADMISSIONS_PER_HOUR`. Keep the defaults unless a
+capacity review supports changing them.
+
+The live subscription set and outbound Statement Store queue are bounded as
+well. `BOT_T3AMS_SUBSCRIPTION_CAP` (default 256),
+`BOT_T3AMS_INGRESS_CALLBACK_CAP` (default 128), and
+`BOT_T3AMS_SUBMIT_QUEUE_CAP` (default 128) are defensive limits, not traffic
+targets. `BOT_T3AMS_KNOWN_CHAT_CAP` (default 128 for a public bot, 500 for a
+private bot) also bounds persisted native-agent session state; active durable
+ingress items are protected until they finish. A full submit queue or exhausted
+allowance leaves the prompt in the durable journal and retries with backoff,
+so restore publishing allowance to resume those replies. The transport refreshes
+retained subscriptions every two minutes by default; tune
+`BOT_T3AMS_SUBSCRIPTION_REFRESH_MS` only when the Statement Store and VPS have
+been sized for the resulting replay traffic.
 
 ## Current scope
 

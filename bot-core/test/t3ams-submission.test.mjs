@@ -59,3 +59,19 @@ test("serialized submitter never overlaps sends and recovers after a failure", a
   assert.equal(await submit("after"), "after");
   assert.deepEqual(events.slice(-3), ["start:broken", "start:after", "finish:after"]);
 });
+
+test("serialized submitter rejects bounded queue overflow before retaining more work", async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const submit = createSerializedSubmitter(async (value) => {
+    if (value === "first") await gate;
+    return value;
+  }, { maxPending: 1 });
+
+  const first = submit("first");
+  await assert.rejects(submit("overflow"), (error) => error?.code === "T3AMS_SUBMIT_QUEUE_FULL");
+  assert.deepEqual(submit.stats(), { pending: 1, cap: 1 });
+  release();
+  assert.equal(await first, "first");
+  assert.deepEqual(submit.stats(), { pending: 0, cap: 1 });
+});

@@ -23,6 +23,7 @@ import {
   toT3amsBridgeInbound,
 } from "./lib/t3ams-routing.mjs";
 import { createSerializedSubmitter, createT3amsPriorityClock } from "./lib/t3ams-submission.mjs";
+import { createT3amsKnownChats } from "./lib/t3ams-known-chats.mjs";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
 import { submitAppStatement, scaleEncodeBytes } from "./vendor/app-chat-codec.mjs";
 import { createLazyClient } from "@novasamatech/statement-store";
@@ -156,6 +157,14 @@ if (!["", "0", "1"].includes(workspaceAutoAcceptSetting)) {
 // quota-spending brain into an arbitrary workspace.
 const autoAcceptWorkspaces = workspaceAutoAcceptSetting === "1"
   || (workspaceAutoAcceptSetting !== "0" && allowedXids.size > 0);
+const publicTofuEnrollment = allowedXids.size === 0;
+// Public pairing/enrollment is intentionally much smaller than the private
+// protocol maxima. These caps bound memory, RPC subscriptions, and allowance
+// spend even when an operator deliberately opens a bot to strangers.
+const publicPeerCap = numberEnv("BOT_T3AMS_PUBLIC_PEER_CAP", 128, { min: 1, max: 1_000 });
+const publicWorkspaceCap = numberEnv("BOT_T3AMS_PUBLIC_WORKSPACE_CAP", 8, { min: 1, max: 100 });
+const publicPeerAdmissions = numberEnv("BOT_T3AMS_PUBLIC_PEER_ADMISSIONS_PER_HOUR", 32, { min: 1, max: 256 });
+const publicWorkspaceAdmissions = numberEnv("BOT_T3AMS_PUBLIC_WORKSPACE_ADMISSIONS_PER_HOUR", 4, { min: 1, max: 256 });
 
 const wsProvider = getWsProvider(endpoint);
 const lazyClient = createLazyClient(wsProvider);
@@ -169,6 +178,7 @@ const priorityClock = createT3amsPriorityClock({
   initialPriority: restored?.submissionPriority,
   onAdvance: () => persist(),
 });
+const submitQueueCap = numberEnv("BOT_T3AMS_SUBMIT_QUEUE_CAP", 128, { min: 1, max: 4_096 });
 const submit = createSerializedSubmitter(async ({ channel, topics, data }) => {
   try {
     const result = await submitAppStatement(requestRpc, {
@@ -187,18 +197,31 @@ const submit = createSerializedSubmitter(async ({ channel, topics, data }) => {
     }
     throw error;
   }
-});
+}, { maxPending: submitQueueCap });
 
 let protocol;
 let agentRuntime = null;
-const knownChats = new Set();
 // Every authenticated message is first placed in this bounded, disk-backed
 // journal. This is deliberately shared by direct brains and HTTP harnesses:
 // a full dispatcher, a bridge restart, or an unflushed lease must cause a
 // retry, never silently consume the protocol-level deduplication slot.
 const ingressCap = numberEnv("BOT_INBOUND_CAP", 1000, { min: 1, max: 100_000 });
 const leaseMs = numberEnv("BOT_BRIDGE_LEASE_MS", 300_000, { min: 1000, max: 86_400_000 });
+const deadLetterCap = numberEnv("BOT_T3AMS_DEAD_LETTER_CAP", 100, { min: 1, max: 10_000 });
 const ingress = [];
+const knownChatCap = numberEnv(
+  "BOT_T3AMS_KNOWN_CHAT_CAP",
+  publicTofuEnrollment ? publicPeerCap : 500,
+  { min: 1, max: 10_000 },
+);
+const isT3amsConversationKey = (chatId) => /^t3ams:dm:[0-9a-f]{64}$/i.test(chatId)
+  || /^t3ams:channel:[0-9a-f]{64}:[0-9a-f]{64}$/i.test(chatId);
+const knownChats = createT3amsKnownChats({
+  cap: knownChatCap,
+  isProtected: (chatId) => ingress.some((entry) => entry.routed.conversationKey === chatId),
+  isValid: isT3amsConversationKey,
+});
+const deadLetters = [];
 const bridgeWaiters = new Set();
 const wakeBridge = () => {
   for (const resolve of [...bridgeWaiters]) {
@@ -215,7 +238,6 @@ for (const raw of Array.isArray(restored?.ingress) ? restored.ingress.slice(-ing
   const kind = raw?.kind === "bridge" || raw?.kind === "turn" ? raw.kind : null;
   if (routed == null || id == null || kind == null) continue;
   restoredIngressIds.add(id);
-  knownChats.add(routed.conversationKey);
   ingress.push({
     id,
     kind,
@@ -223,10 +245,22 @@ for (const raw of Array.isArray(restored?.ingress) ? restored.ingress.slice(-ing
     createdAt: Number.isSafeInteger(raw.createdAt) ? raw.createdAt : Date.now(),
     attempts: Number.isSafeInteger(raw.attempts) && raw.attempts >= 0 ? raw.attempts : 0,
     retryAt: Number.isSafeInteger(raw.retryAt) && raw.retryAt > Date.now() ? raw.retryAt : 0,
+    completedAt: Number.isSafeInteger(raw.completedAt) && raw.completedAt > 0 ? raw.completedAt : 0,
     // A process restart intentionally releases all harness leases. The next
     // adapter poll receives the durable delivery again rather than losing it.
     leaseId: null,
     leaseUntil: 0,
+  });
+  knownChats.note(routed.conversationKey);
+}
+for (const raw of Array.isArray(restored?.deadLetters) ? restored.deadLetters.slice(-deadLetterCap) : []) {
+  if (typeof raw?.id !== "string" || !/^[A-Za-z0-9-]{1,128}$/.test(raw.id)) continue;
+  if (typeof raw?.conversationKey !== "string" || typeof raw?.code !== "string") continue;
+  deadLetters.push({
+    id: raw.id,
+    conversationKey: raw.conversationKey,
+    code: raw.code.slice(0, 128),
+    droppedAt: Number.isSafeInteger(raw.droppedAt) ? raw.droppedAt : Date.now(),
   });
 }
 const stateSnapshot = () => ({
@@ -234,7 +268,10 @@ const stateSnapshot = () => ({
   submissionPriority: priorityClock.priority().toString(),
   t3ams: protocol?.snapshot?.() ?? restored?.t3ams ?? null,
   agent: agentRuntime?.snapshotAgent?.() ?? restored?.agent ?? null,
-  agentPeers: [...knownChats].map((chatId) => ({ chatId, ...agentRuntime?.peerSnapshot?.(chatId) })),
+  agentPeers: agentRuntime == null ? [] : knownChats.keys().flatMap((chatId) => {
+    const peer = agentRuntime.peerSnapshot(chatId);
+    return Object.keys(peer).length > 0 ? [{ chatId, ...peer }] : [];
+  }),
   ingress: ingress.map((entry) => ({
     id: entry.id,
     kind: entry.kind,
@@ -242,9 +279,11 @@ const stateSnapshot = () => ({
     createdAt: entry.createdAt,
     attempts: entry.attempts ?? 0,
     retryAt: entry.retryAt ?? 0,
+    completedAt: entry.completedAt ?? 0,
     leaseId: entry.leaseId ?? null,
     leaseUntil: entry.leaseUntil ?? 0,
   })),
+  deadLetters: deadLetters.map((entry) => ({ ...entry })),
 });
 const persist = () => stateStore.save(stateSnapshot());
 const persistCritical = async () => {
@@ -294,6 +333,35 @@ const scheduleIngressDurabilityRetry = () => {
 const subscriptions = new Map();
 const subscriptionRetryTimers = new Map();
 const subscriptionRetryAttempts = new Map();
+const subscriptionCap = numberEnv("BOT_T3AMS_SUBSCRIPTION_CAP", 256, { min: 4, max: 4_096 });
+const inboundCallbackCap = numberEnv("BOT_T3AMS_INGRESS_CALLBACK_CAP", 128, { min: 1, max: 1_024 });
+const inboundCallbackConcurrency = numberEnv("BOT_T3AMS_INGRESS_CALLBACK_CONCURRENCY", 1, { min: 1, max: 16 });
+const inboundCallbacks = [];
+let activeInboundCallbacks = 0;
+let drainInboundCallbacks = () => {};
+const enqueueInboundCallback = (id, callback) => {
+  if (inboundCallbacks.length + activeInboundCallbacks >= inboundCallbackCap) {
+    log("T3AMS_INGRESS_CALLBACK_CAP_REACHED", { id, cap: inboundCallbackCap, queued: inboundCallbacks.length, active: activeInboundCallbacks });
+    requestIngressReplay();
+    return false;
+  }
+  inboundCallbacks.push({ id, callback });
+  drainInboundCallbacks();
+  return true;
+};
+drainInboundCallbacks = () => {
+  while (activeInboundCallbacks < inboundCallbackConcurrency && inboundCallbacks.length > 0) {
+    const next = inboundCallbacks.shift();
+    activeInboundCallbacks += 1;
+    Promise.resolve()
+      .then(next.callback)
+      .catch((error) => log("T3AMS_INGRESS_FAILED", { id: next.id, error: String(error?.message ?? error) }))
+      .finally(() => {
+        activeInboundCallbacks -= 1;
+        drainInboundCallbacks();
+      });
+  }
+};
 const rawSubscriberModule = await import("./vendor/lib/statement-ingress-supervisor.mjs");
 const subscribePages = rawSubscriberModule.createRawStatementPageSubscriber({ getClient: () => lazyClient.getClient() });
 const asBytes = (data) => {
@@ -323,9 +391,9 @@ const scheduleSubscriptionRetry = (id, token) => {
   subscriptionRetryTimers.set(id, timer);
   log("T3AMS_SUBSCRIPTION_RETRY_SCHEDULED", { id, attempt, delayMs: delay });
 };
-const subscription = (id, topic, callback, accepts = () => true) => {
+const subscription = (id, topic, callback, accepts = () => true, { force = false } = {}) => {
   const existing = subscriptions.get(id);
-  if (existing?.topicHex === Buffer.from(topic).toString("hex")) return;
+  if (!force && existing?.topicHex === Buffer.from(topic).toString("hex")) return;
   clearSubscriptionRetry(id);
   existing?.unsubscribe?.();
   const token = Symbol(id);
@@ -335,7 +403,7 @@ const subscription = (id, topic, callback, accepts = () => true) => {
       const data = asBytes(statement.data);
       if (!(data instanceof Uint8Array)) continue;
       if (!accepts(statement)) continue;
-      Promise.resolve(callback(data, statement)).catch((error) => log("T3AMS_INGRESS_FAILED", { id, error: String(error?.message ?? error) }));
+      enqueueInboundCallback(id, () => callback(data, statement));
     }
   }, (error) => {
     log("T3AMS_SUBSCRIPTION_FAILED", { id, error: String(error?.message ?? error) });
@@ -362,8 +430,12 @@ const inboundRetryAttempts = new Map();
 const scheduleInboundRetry = (event, historyOnly) => {
   const key = typeof event?.ingressKey === "string" ? event.ingressKey : null;
   if (key == null || inboundRetryTimers.has(key)) return;
-  if (inboundRetryTimers.size >= ingressCap) {
-    log("T3AMS_INGRESS_RETRY_CAP_REACHED", { cap: ingressCap });
+  const retryCap = Math.min(ingressCap, inboundCallbackCap);
+  if (inboundRetryTimers.size >= retryCap) {
+    log("T3AMS_INGRESS_RETRY_CAP_REACHED", { cap: retryCap });
+    // A retained replay will restart this source once a timer slot frees.
+    // Do not retain an orphaned exponential-backoff counter meanwhile.
+    inboundRetryAttempts.delete(key);
     requestIngressReplay();
     return;
   }
@@ -371,11 +443,14 @@ const scheduleInboundRetry = (event, historyOnly) => {
   const delay = Math.min(30_000, 500 * (2 ** Math.min(attempt - 1, 6)));
   const timer = setTimeout(() => {
     inboundRetryTimers.delete(key);
-    const claimed = protocol.claimInbound(event);
-    if (claimed == null) return;
-    void routeOneInbound(claimed, { historyOnly }).catch((error) => {
-      log("T3AMS_INGRESS_RETRY_FAILED", { error: String(error?.message ?? error) });
+    const queued = enqueueInboundCallback(`retry:${key}`, async () => {
+      const claimed = protocol.claimInbound(event);
+      if (claimed == null) return;
+      await routeOneInbound(claimed, { historyOnly });
     });
+    // The retained subscription replay is the retry when the bounded callback
+    // queue is full. Do not retain an orphaned per-message counter forever.
+    if (!queued) inboundRetryAttempts.delete(key);
   }, delay);
   timer.unref?.();
   inboundRetryTimers.set(key, timer);
@@ -383,7 +458,9 @@ const scheduleInboundRetry = (event, historyOnly) => {
   log("T3AMS_INGRESS_RETRY_SCHEDULED", { attempt, delayMs: delay });
 };
 const commitHistoryOnly = async (event) => mutateIngress(async () => {
-  if (!protocol.commitInbound(event)) return false;
+  // Unaddressed channel traffic and carrier priors are only deduplicated.
+  // They must not consume reply-route or relay-history state on a public bot.
+  if (!protocol.commitInbound(event, { retainBackfill: false, retainConversation: false })) return false;
   const saved = await persistCritical();
   if (!saved) {
     ingressDurable = false;
@@ -404,15 +481,17 @@ const admitIngress = async (event, routed) => mutateIngress(async () => {
     createdAt: Date.now(),
     attempts: 0,
     retryAt: 0,
+    completedAt: 0,
     leaseId: null,
     leaseUntil: 0,
   };
   ingress.push(entry);
-  knownChats.add(routed.conversationKey);
   if (!protocol.commitInbound(event)) {
     ingress.pop();
     return { admitted: false, reason: "deduplicated" };
   }
+  protocol.pinConversation(routed.conversationKey);
+  knownChats.note(routed.conversationKey);
   const saved = await persistCritical();
   if (!saved) {
     // Keep the journal and the claimed/seen message in memory. The state
@@ -476,31 +555,31 @@ const routeInbound = async (event) => {
   await routeOneInbound(primary);
 };
 
-const syncSubscriptions = () => {
+const syncSubscriptions = ({ forceIds = new Set() } = {}) => {
   if (protocol == null) return;
   const desired = new Set();
+  let omitted = 0;
+  const subscribe = (id, topic, callback, accepts = () => true) => {
+    if (!desired.has(id) && desired.size >= subscriptionCap) {
+      omitted += 1;
+      return false;
+    }
+    desired.add(id);
+    subscription(id, topic, callback, accepts, { force: forceIds.has(id) });
+    return true;
+  };
   const inbox = bcts.derivePersonalInboxChannel(identity.xid);
-  desired.add("inbox");
-  subscription("inbox", inbox, async (data) => {
+  subscribe("inbox", inbox, async (data) => {
     const change = await protocol.receiveInbox(data);
     if (change != null) syncSubscriptions();
   }, (statement) => bytesEqual(asBytes(statement.channel), inbox));
-  for (const peerXidHex of protocol.peerIds()) {
-    const peer = hexToBytes(peerXidHex);
-    const dmChannel = bcts.derivePersonalDMChannel(identity.xid, peer);
-    // The pairwise topic is keyed by the remote peer. Using our own XID here
-    // would subscribe to the wrong half of the DM channel and miss replies.
-    const topic = bcts.createDMTopics(dmChannel, peer, true)[0];
-    const id = `dm:${peerXidHex}`;
-    desired.add(id);
-    subscription(id, topic, (data) => routeInbound(protocol.receiveDm(peerXidHex, data)), (statement) => bytesEqual(asBytes(statement.channel), dmChannel));
-  }
+  // Workspace control routes have priority over opportunistic public DMs: a
+  // full DM roster must never orphan channel membership/key reconciliation.
   for (const wsId of protocol.workspaces()) {
     const planeTopic = bcts.deriveWorkspaceDiscoveryTopic(wsId);
     const notificationTopic = bcts.deriveUserNotificationTopic(identity.xid, wsId);
     const planeId = `ws-plane:${wsId}`;
     const notificationId = `ws-notify:${wsId}`;
-    desired.add(planeId); desired.add(notificationId);
     const planeChannelMatches = (statement) => {
       const actual = asBytes(statement.channel);
       if (!(actual instanceof Uint8Array)) return false;
@@ -513,12 +592,16 @@ const syncSubscriptions = () => {
       }
       return expected.some((channel) => bytesEqual(actual, channel));
     };
-    subscription(planeId, planeTopic, (data) => {
+    subscribe(planeId, planeTopic, (data) => {
       if (protocol.receiveWorkspacePlane(wsId, data)) syncSubscriptions();
     }, planeChannelMatches);
-    subscription(notificationId, notificationTopic, (data) => {
+    subscribe(notificationId, notificationTopic, (data) => {
       if (protocol.receiveWorkspaceNotification(wsId, data)) syncSubscriptions();
     }, (statement) => bytesEqual(asBytes(statement.channel), notificationTopic));
+  }
+  // Control-plane subscriptions come first. A channel-heavy early workspace
+  // must not crowd out key/membership reconciliation for later workspaces.
+  for (const wsId of protocol.workspaces()) {
     // The invite's initial state document need not yet include the bot. Keep
     // watching the workspace plane for the membership update, but do not
     // subscribe to or decrypt channel traffic until that update is verified.
@@ -539,10 +622,18 @@ const syncSubscriptions = () => {
         ? bcts.createPrivateChannelTopics(channelId, identity.xid, "message", true)[0]
         : bcts.createPublicChannelTopics(channelId, identity.xid, true)[0];
       const id = `channel:${wsId}:${bareHex(channel.idHex)}`;
-      desired.add(id);
       const messageChannel = channel.isPrivate ? bcts.derivePrivateChannel(channelId) : bcts.derivePublicChannel(channelId);
-      subscription(id, topic, (data) => routeInbound(protocol.receiveChannel(wsId, channel.idHex, data)), (statement) => bytesEqual(asBytes(statement.channel), messageChannel));
+      subscribe(id, topic, (data) => routeInbound(protocol.receiveChannel(wsId, channel.idHex, data)), (statement) => bytesEqual(asBytes(statement.channel), messageChannel));
     }
+  }
+  for (const peerXidHex of protocol.peerIds()) {
+    const peer = hexToBytes(peerXidHex);
+    const dmChannel = bcts.derivePersonalDMChannel(identity.xid, peer);
+    // The pairwise topic is keyed by the remote peer. Using our own XID here
+    // would subscribe to the wrong half of the DM channel and miss replies.
+    const topic = bcts.createDMTopics(dmChannel, peer, true)[0];
+    const id = `dm:${peerXidHex}`;
+    subscribe(id, topic, (data) => routeInbound(protocol.receiveDm(peerXidHex, data)), (statement) => bytesEqual(asBytes(statement.channel), dmChannel));
   }
   for (const [id, active] of subscriptions) {
     if (desired.has(id)) continue;
@@ -550,7 +641,48 @@ const syncSubscriptions = () => {
     active.unsubscribe();
     subscriptions.delete(id);
   }
+  if (omitted > 0) {
+    log("T3AMS_SUBSCRIPTION_CAP_REACHED", { cap: subscriptionCap, omitted, active: desired.size });
+  }
 };
+const pendingTopologyRefreshes = new Set();
+let topologySyncQueued = false;
+const syncTopology = (change = null) => {
+  const wsId = typeof change?.wsId === "string" ? change.wsId : null;
+  if (wsId != null) {
+    // A retained key notification may precede the registry/membership update,
+    // and retained ciphertext may precede the key. Reopen the small affected
+    // set after each verified topology change so neither is lost forever.
+    pendingTopologyRefreshes.add(`ws-plane:${wsId}`);
+    pendingTopologyRefreshes.add(`ws-notify:${wsId}`);
+    if (change?.kind === "key" && typeof change.channelIdHex === "string") {
+      pendingTopologyRefreshes.add(`channel:${wsId}:${bareHex(change.channelIdHex)}`);
+    } else {
+      for (const id of subscriptions.keys()) {
+        if (id.startsWith(`channel:${wsId}:`)) pendingTopologyRefreshes.add(id);
+      }
+    }
+  }
+  if (topologySyncQueued) return;
+  topologySyncQueued = true;
+  queueMicrotask(() => {
+    topologySyncQueued = false;
+    const forceIds = new Set(pendingTopologyRefreshes);
+    pendingTopologyRefreshes.clear();
+    syncSubscriptions({ forceIds });
+  });
+};
+// Statement Store streams can remain connected yet stop delivering retained
+// updates. Reopen the bounded route set on a conservative cadence; all
+// message handlers are idempotent/durable, so a replay is safer than a bot
+// that silently stops hearing DMs or mentions.
+const subscriptionRefreshMs = numberEnv("BOT_T3AMS_SUBSCRIPTION_REFRESH_MS", 120_000, { min: 10_000, max: 3_600_000 });
+const subscriptionRefreshTimer = setInterval(() => {
+  if (subscriptions.size === 0) return;
+  log("T3AMS_SUBSCRIPTION_REFRESH", { count: subscriptions.size, intervalMs: subscriptionRefreshMs });
+  syncSubscriptions({ forceIds: new Set(subscriptions.keys()) });
+}, subscriptionRefreshMs);
+subscriptionRefreshTimer.unref?.();
 // Statement subscriptions are retained views, not destructive queues. When
 // the bounded journal is full, reconnect once it drains so an uncommitted
 // carrier is reconciled from its retained source instead of being forgotten.
@@ -577,14 +709,22 @@ protocol = createT3amsProtocol({
   isPeerAllowed: isAllowed,
   trustedPeerSigningKeys,
   requireTrustedPeers: allowedXids.size > 0,
+  publicTofuEnrollment,
+  maxPeers: publicTofuEnrollment ? publicPeerCap : undefined,
+  maxWorkspaces: publicTofuEnrollment ? publicWorkspaceCap : undefined,
+  maxConversations: Math.min(10_000, ingressCap + 128),
+  publicPeerAdmissionLimit: publicPeerAdmissions,
+  publicWorkspaceAdmissionLimit: publicWorkspaceAdmissions,
   acceptWorkspaceInvite: () => autoAcceptWorkspaces,
   onStateChange: () => persist(),
-  onTopologyChange: () => queueMicrotask(syncSubscriptions),
+  onTopologyChange: syncTopology,
   log,
 });
 for (const entry of ingress) {
   if (!protocol.restoreInboundConversation(entry.routed)) {
     log("T3AMS_INGRESS_RESTORE_SKIPPED", { id: entry.id });
+  } else {
+    protocol.pinConversation(entry.routed.conversationKey);
   }
 }
 const presenceIntervalMs = numberEnv("BOT_T3AMS_PRESENCE_INTERVAL_MS", 60_000, { min: 10_000, max: 3_600_000 });
@@ -689,6 +829,7 @@ if (engine != null) {
     maxConcurrentTurns: numberEnv("BOT_AI_MAX_CONCURRENT_TURNS", 4, { min: 1, max: 128 }),
     maxQueuedTurns: numberEnv("BOT_AI_MAX_QUEUED_TURNS", 100, { min: 0, max: 10_000 }),
     maxOutputBytes: numberEnv("BOT_AI_MAX_OUTPUT_BYTES", 1_000_000, { min: 1024, max: 64 * 1024 * 1024 }),
+    peerCap: knownChatCap,
     agentUid: aiAgentUid,
     agentGid: aiAgentGid,
     renderMessage: renderT3amsForBrain,
@@ -708,9 +849,14 @@ if (engine != null) {
     persist,
   });
   agentRuntime.noteRestoredAgent(restored?.agent ?? null);
-  for (const entry of restored?.agentPeers ?? []) {
+  // A current snapshot contains at most the bounded known-chat index plus
+  // its bounded durable ingress overflow. Cap legacy/corrupt state too.
+  const restoredAgentPeers = Array.isArray(restored?.agentPeers)
+    ? restored.agentPeers.slice(-(knownChatCap + ingressCap))
+    : [];
+  for (const entry of restoredAgentPeers) {
     if (typeof entry?.chatId !== "string") continue;
-    knownChats.add(entry.chatId);
+    if (!knownChats.note(entry.chatId)) continue;
     agentRuntime.restorePeer(entry.chatId, entry);
   }
 }
@@ -722,15 +868,73 @@ const runningIngress = new Set();
 const completeIngressTurn = async (entry) => mutateIngress(async () => {
   const index = ingress.findIndex((candidate) => candidate.id === entry.id);
   if (index < 0) return true;
+  const current = ingress[index];
+  // First durably mark that the external side effect has completed. If the
+  // later removal write fails, retries only finish the journal cleanup rather
+  // than invoking a model (or echo) a second time.
+  if (!Number.isSafeInteger(current.completedAt) || current.completedAt <= 0) {
+    current.completedAt = Date.now();
+    const marked = await persistCritical();
+    if (!marked) {
+      ingressDurable = false;
+      scheduleIngressDurabilityRetry();
+      return false;
+    }
+    ingressDurable = true;
+  }
   const [removed] = ingress.splice(index, 1);
   const saved = await persistCritical();
   if (saved) {
+    protocol.unpinConversation(removed.routed.conversationKey);
+    // A completed turn is the most recently useful native session. Refresh
+    // it after releasing its journal pin, then contract any temporary
+    // protected-only known-chat overflow.
+    knownChats.note(removed.routed.conversationKey);
+    knownChats.trim();
     ingressDurable = true;
     return true;
   }
   // Do not forget a successfully answered prompt until the removal itself is
   // durable. A retry can duplicate an answer after a disk outage, but never
   // loses the customer's message.
+  ingress.splice(index, 0, removed);
+  ingressDurable = false;
+  persist();
+  scheduleIngressDurabilityRetry();
+  return false;
+});
+const isTerminalIngressError = (error) => error?.t3amsTerminal === true
+  || new Set([
+    "T3AMS_UNKNOWN_CONVERSATION",
+    "T3AMS_INVALID_TEXT",
+    "T3AMS_INVALID_THREAD",
+    "T3AMS_CHANNEL_UNAVAILABLE",
+    "T3AMS_CHANNEL_FORBIDDEN",
+    "T3AMS_CHANNEL_KEY_MISSING",
+    "T3AMS_INVALID_INGRESS",
+  ]).has(error?.code);
+const deadLetterIngressTurn = async (entry, error) => mutateIngress(async () => {
+  const index = ingress.findIndex((candidate) => candidate.id === entry.id);
+  if (index < 0) return true;
+  const [removed] = ingress.splice(index, 1);
+  const priorDeadLetters = deadLetters.map((candidate) => ({ ...candidate }));
+  const record = {
+    id: removed.id,
+    conversationKey: removed.routed.conversationKey,
+    code: String(error?.code ?? "T3AMS_TERMINAL_DELIVERY_ERROR").slice(0, 128),
+    droppedAt: Date.now(),
+  };
+  deadLetters.push(record);
+  while (deadLetters.length > deadLetterCap) deadLetters.shift();
+  const saved = await persistCritical();
+  if (saved) {
+    protocol.unpinConversation(removed.routed.conversationKey);
+    knownChats.trim();
+    ingressDurable = true;
+    log("T3AMS_DISPATCH_DEAD_LETTER", { id: removed.id, chatId: record.conversationKey, code: record.code });
+    return true;
+  }
+  deadLetters.splice(0, deadLetters.length, ...priorDeadLetters);
   ingress.splice(index, 0, removed);
   ingressDurable = false;
   persist();
@@ -758,6 +962,12 @@ const deferIngressTurn = async (entry, error) => {
 };
 const executeIngressTurn = async (entry) => {
   const routed = entry.routed;
+  if (!protocol.restoreInboundConversation(routed)) {
+    const error = new Error("invalid durable T3ams ingress route");
+    error.code = "T3AMS_INVALID_INGRESS";
+    error.t3amsTerminal = true;
+    throw error;
+  }
   const message = {
     text: routed.message.text,
     ...(typeof routed.message.commandText === "string" ? { commandText: routed.message.commandText } : {}),
@@ -806,9 +1016,12 @@ pumpIngress = () => {
     }
     const task = dispatcher.run(chatId, async () => {
       try {
-        await executeIngressTurn(entry);
+        if (!Number.isSafeInteger(entry.completedAt) || entry.completedAt <= 0) {
+          await executeIngressTurn(entry);
+        }
         if (!await completeIngressTurn(entry)) throw new Error("ingress completion is not durable yet");
       } catch (error) {
+        if (isTerminalIngressError(error) && await deadLetterIngressTurn(entry, error)) return;
         await deferIngressTurn(entry, error);
         throw error;
       }
@@ -866,18 +1079,21 @@ const leaseBridgeIngress = async (limit) => mutateIngress(async () => {
 });
 const updateBridgeLeases = async (claims, acknowledge) => mutateIngress(async () => {
   const before = ingress.map((entry) => ({ ...entry }));
+  const acknowledged = [];
   let changed = 0;
   for (const claim of claims) {
     if (claim == null || typeof claim.delivery_id !== "string" || typeof claim.lease_id !== "string") continue;
     const index = ingress.findIndex((entry) => entry.id === claim.delivery_id && entry.leaseId === claim.lease_id);
     if (index < 0) continue;
-    if (acknowledge) ingress.splice(index, 1);
+    if (acknowledge) acknowledged.push(...ingress.splice(index, 1));
     else ingress[index].leaseUntil = Date.now() + leaseMs;
     changed += 1;
   }
   if (changed === 0) return { changed: 0, durable: true };
   const saved = await persistCritical();
   if (saved) {
+    for (const entry of acknowledged) protocol.unpinConversation(entry.routed.conversationKey);
+    knownChats.trim();
     ingressDurable = true;
     pumpIngress();
     return { changed, durable: true };
@@ -1113,6 +1329,7 @@ const shutdown = async (code = 0) => {
   if (ingressDurabilityRetryTimer != null) clearTimeout(ingressDurabilityRetryTimer);
   if (ingressPumpTimer != null) clearTimeout(ingressPumpTimer);
   if (ingressReplayTimer != null) clearTimeout(ingressReplayTimer);
+  clearInterval(subscriptionRefreshTimer);
   for (const timer of inboundRetryTimers.values()) clearTimeout(timer);
   clearInterval(presenceTimer);
   wakeBridge();

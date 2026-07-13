@@ -12,13 +12,32 @@ export const T3AMS_STATE_VERSION = 1;
 export const T3AMS_BACKFILL_CAP = 8;
 export const T3AMS_BACKFILL_BUDGET_BYTES = 8 * 1024;
 export const T3AMS_BACKFILL_ENTRY_OVERHEAD_BYTES = 96;
+// Retained carrier history is an optimization for replies, never a message
+// archive. Keep both the per-chat carrier budget and the aggregate state file
+// bounded so a public bot cannot be turned into a disk-backed relay cache.
+export const T3AMS_BACKFILL_CONVERSATION_CAP = 128;
+export const T3AMS_BACKFILL_TOTAL_BUDGET_BYTES = 512 * 1024;
 export const T3AMS_MAX_ENVELOPE_BYTES = 256 * 1024;
 export const T3AMS_PEER_CAP = 1_000;
 export const T3AMS_WORKSPACE_CAP = 100;
 export const T3AMS_CHANNEL_CAP = 1_000;
+export const T3AMS_KEY_CAP_PER_WORKSPACE = 256;
+export const T3AMS_KEY_CAP = 2_048;
 const T3AMS_TAGGED_KEY_HEX_RE = /^[0-9a-f]{2,4096}$/;
 const T3AMS_XID_HEX_RE = /^[0-9a-f]{64}$/;
 const T3AMS_ROLES = new Set(["owner", "admin", "mod", "member", "guest"]);
+const T3AMS_BACKFILL_ENTRY_MAX_BYTES = T3AMS_BACKFILL_BUDGET_BYTES - T3AMS_BACKFILL_ENTRY_OVERHEAD_BYTES;
+const T3AMS_BACKFILL_RESTORE_SCAN_CAP = T3AMS_BACKFILL_CONVERSATION_CAP * 4;
+const T3AMS_BACKFILL_LIST_RESTORE_SCAN_CAP = T3AMS_BACKFILL_CAP * 4;
+const T3AMS_ADMISSION_HISTORY_CAP = 256;
+
+function terminalDeliveryError(code, message, cause = null) {
+  const error = new Error(message);
+  error.code = code;
+  error.t3amsTerminal = true;
+  if (cause != null) error.cause = cause;
+  return error;
+}
 
 export const bareHex = (value) => String(value ?? "").trim().replace(/^0x/i, "").toLowerCase();
 export const bytesToHex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -46,22 +65,35 @@ export function t3amsConversationKey(conversation) {
   return key;
 }
 
+const emptyT3amsState = () => ({
+  v: T3AMS_STATE_VERSION,
+  peers: {},
+  workspaces: {},
+  keys: {},
+  backfill: {},
+  seen: [],
+  admissions: { publicPeers: [], publicWorkspaces: [] },
+});
+
 export function normalizeT3amsState(raw) {
   if (raw == null || typeof raw !== "object" || Array.isArray(raw) || raw.v !== T3AMS_STATE_VERSION) {
-    return { v: T3AMS_STATE_VERSION, peers: {}, workspaces: {}, keys: {}, backfill: {}, seen: [] };
+    return emptyT3amsState();
   }
   const object = (value) => value != null && typeof value === "object" && !Array.isArray(value) ? value : {};
   const peers = object(raw.peers);
   const workspaces = object(raw.workspaces);
-  const keys = object(raw.keys);
-  const backfill = object(raw.backfill);
+  const admissions = object(raw.admissions);
   return {
     v: T3AMS_STATE_VERSION,
     peers,
     workspaces,
-    keys,
-    backfill,
+    keys: normalizeT3amsKeys(object(raw.keys), workspaces),
+    backfill: normalizeBackfill(object(raw.backfill)),
     seen: Array.isArray(raw.seen) ? raw.seen.filter((item) => typeof item === "string").slice(-20_000) : [],
+    admissions: {
+      publicPeers: normalizeAdmissionHistory(admissions.publicPeers),
+      publicWorkspaces: normalizeAdmissionHistory(admissions.publicWorkspaces),
+    },
   };
 }
 
@@ -197,6 +229,152 @@ function validXidHex(value) {
 function validWireBlobHex(value) {
   const hex = bareHex(value);
   return /^[0-9a-f]+$/.test(hex) && hex.length % 2 === 0 && hex.length <= T3AMS_MAX_ENVELOPE_BYTES * 2;
+}
+
+function validConversationKey(value) {
+  return typeof value === "string" && (
+    /^t3ams:dm:[0-9a-f]{64}$/i.test(value)
+    || /^t3ams:channel:[0-9a-f]{64}:[0-9a-f]{64}$/i.test(value)
+  );
+}
+
+function normalizedBackfillEntry(raw) {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const id = bareHex(raw.id);
+  const senderXid = bareHex(raw.senderXid);
+  const blob = bareHex(raw.blob);
+  const timestamp = Number(raw.timestamp);
+  if (!validXidHex(id) || !validXidHex(senderXid) || !validWireBlobHex(blob)
+      || !Number.isSafeInteger(timestamp) || timestamp < 0) return null;
+  const cost = blob.length / 2 + T3AMS_BACKFILL_ENTRY_OVERHEAD_BYTES;
+  // Entries larger than a carrier can never be relayed, so retaining them
+  // only amplifies attacker-controlled local state.
+  if (cost > T3AMS_BACKFILL_BUDGET_BYTES || blob.length / 2 > T3AMS_BACKFILL_ENTRY_MAX_BYTES) return null;
+  return { id, senderXid, timestamp, blob };
+}
+
+function backfillEntryCost(entry) {
+  return typeof entry?.blob === "string"
+    ? entry.blob.length / 2 + T3AMS_BACKFILL_ENTRY_OVERHEAD_BYTES
+    : 0;
+}
+
+function normalizeBackfillList(raw) {
+  if (!Array.isArray(raw)) return [];
+  const newestFirst = [];
+  const ids = new Set();
+  let total = 0;
+  // Do not let a malformed on-disk list turn startup into an O(n) replay. The
+  // newest tail is what can be useful to the next outbound carrier anyway.
+  for (let index = raw.length - 1, scanned = 0;
+    index >= 0 && scanned < T3AMS_BACKFILL_LIST_RESTORE_SCAN_CAP && newestFirst.length < T3AMS_BACKFILL_CAP;
+    index -= 1, scanned += 1) {
+    const entry = normalizedBackfillEntry(raw[index]);
+    if (entry == null || ids.has(entry.id)) continue;
+    const cost = backfillEntryCost(entry);
+    if (total + cost > T3AMS_BACKFILL_BUDGET_BYTES) continue;
+    ids.add(entry.id);
+    newestFirst.push(entry);
+    total += cost;
+  }
+  return newestFirst.reverse();
+}
+
+function backfillListCost(entries) {
+  return entries.reduce((total, entry) => total + backfillEntryCost(entry), 0);
+}
+
+function normalizeBackfill(raw) {
+  const source = raw != null && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  const normalized = {};
+  let conversations = 0;
+  let scanned = 0;
+  let total = 0;
+  // Live state is maintained newest-first below. Bound the defensive restore
+  // scan as well, so a legacy/corrupt snapshot cannot monopolize startup.
+  for (const conversationKey in source) {
+    if (scanned >= T3AMS_BACKFILL_RESTORE_SCAN_CAP || conversations >= T3AMS_BACKFILL_CONVERSATION_CAP) break;
+    scanned += 1;
+    if (!validConversationKey(conversationKey)) continue;
+    const entries = normalizeBackfillList(source[conversationKey]);
+    const cost = backfillListCost(entries);
+    if (entries.length === 0) continue;
+    // Preserve recency over breadth: once the global relay budget is full,
+    // older conversations are discarded rather than retaining a sparse,
+    // unbounded map of empty or oversized entries.
+    if (total + cost > T3AMS_BACKFILL_TOTAL_BUDGET_BYTES) break;
+    normalized[conversationKey] = entries;
+    total += cost;
+    conversations += 1;
+  }
+  return normalized;
+}
+
+function activePrivateKeyIds(workspaces) {
+  const allowed = new Set();
+  let workspaceCount = 0;
+  for (const wsId in workspaces ?? {}) {
+    if (workspaceCount >= T3AMS_WORKSPACE_CAP || !validWorkspaceId(wsId)) break;
+    workspaceCount += 1;
+    const channels = Array.isArray(workspaces[wsId]?.channels) ? workspaces[wsId].channels : [];
+    let channelCount = 0;
+    for (const channel of channels) {
+      if (channelCount >= T3AMS_CHANNEL_CAP) break;
+      channelCount += 1;
+      if (!isSafeChannelEntry(channel) || channel.isPrivate !== true || channel.archived === true || channel.deleted === true) continue;
+      allowed.add(`${wsId}:${bareHex(channel.idHex)}`);
+      if (allowed.size >= T3AMS_KEY_CAP) return allowed;
+    }
+  }
+  return allowed;
+}
+
+function normalizeKeyMaterial(value) {
+  const hex = bareHex(value);
+  return /^[0-9a-f]{2,1024}$/.test(hex) && hex.length % 2 === 0 ? hex : null;
+}
+
+function normalizeKeySlot(raw) {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const version = Number(raw.current?.version);
+  const keyHex = normalizeKeyMaterial(raw.current?.keyHex);
+  if (!Number.isSafeInteger(version) || version < 1 || keyHex == null) return null;
+  const previous = [];
+  for (const item of Array.isArray(raw.previous) ? raw.previous.slice(-4) : []) {
+    const previousVersion = Number(item?.version);
+    const previousKey = normalizeKeyMaterial(item?.keyHex);
+    if (!Number.isSafeInteger(previousVersion) || previousVersion < 1 || previousKey == null) continue;
+    previous.push({ keyHex: previousKey, version: previousVersion });
+  }
+  return { current: { keyHex, version }, previous };
+}
+
+function normalizeT3amsKeys(raw, workspaces) {
+  const allowed = activePrivateKeyIds(workspaces);
+  const normalized = {};
+  const perWorkspace = new Map();
+  let scanned = 0;
+  for (const keyId in raw ?? {}) {
+    if (scanned >= T3AMS_KEY_CAP * 4 || Object.keys(normalized).length >= T3AMS_KEY_CAP) break;
+    scanned += 1;
+    if (!allowed.has(keyId)) continue;
+    const separator = keyId.indexOf(":");
+    const wsId = separator < 0 ? "" : keyId.slice(0, separator);
+    const count = perWorkspace.get(wsId) ?? 0;
+    if (count >= T3AMS_KEY_CAP_PER_WORKSPACE) continue;
+    const slot = normalizeKeySlot(raw[keyId]);
+    if (slot == null) continue;
+    normalized[keyId] = slot;
+    perWorkspace.set(wsId, count + 1);
+  }
+  return normalized;
+}
+
+function normalizeAdmissionHistory(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((value) => Number.isSafeInteger(value) && value > 0)
+    .slice(-T3AMS_ADMISSION_HISTORY_CAP);
 }
 
 function validWorkspaceId(value) {
@@ -351,14 +529,23 @@ function channelPriorEntries(bcts, state, conversationKey) {
 }
 
 function appendBackfill(state, conversationKey, entry) {
-  const list = Array.isArray(state.backfill[conversationKey]) ? state.backfill[conversationKey] : [];
+  if (!validConversationKey(conversationKey)) return false;
+  const candidate = normalizedBackfillEntry(entry);
+  if (candidate == null) return false;
+  const list = normalizeBackfillList(state.backfill[conversationKey]);
   // A carrier may be replayed after reconnect. The durable inbound ledger is
   // normally enough to prevent this, but keep the relay history idempotent as
   // well so a recovered snapshot never amplifies the same wire message.
-  const id = typeof entry?.id === "string" ? bareHex(entry.id) : "";
-  if (id && list.some((candidate) => bareHex(candidate?.id) === id)) return;
-  list.push(entry);
-  state.backfill[conversationKey] = list.slice(-T3AMS_BACKFILL_CAP);
+  if (list.some((existing) => existing.id === candidate.id)) return false;
+  const next = normalizeBackfillList([...list, candidate]);
+  if (next.length === 0) return false;
+  // Reinsert the active chat first. `normalizeBackfill` keeps this LRU order
+  // when evicting old conversations under the aggregate budget.
+  const prior = state.backfill;
+  const rest = { ...prior };
+  delete rest[conversationKey];
+  state.backfill = normalizeBackfill({ [conversationKey]: next, ...rest });
+  return Object.hasOwn(state.backfill, conversationKey);
 }
 
 /**
@@ -380,6 +567,14 @@ export function createT3amsProtocol({
   maxPeers = T3AMS_PEER_CAP,
   maxWorkspaces = T3AMS_WORKSPACE_CAP,
   maxChannelsPerWorkspace = T3AMS_CHANNEL_CAP,
+  maxConversations = T3AMS_PEER_CAP,
+  // Public TOFU enrollment is an explicit runtime choice. It gets stricter
+  // admission limits than an operator-pinned bot, while pinned identities
+  // remain non-evictable.
+  publicTofuEnrollment = false,
+  publicPeerAdmissionLimit = 32,
+  publicWorkspaceAdmissionLimit = 4,
+  publicAdmissionWindowMs = 60 * 60 * 1000,
   acceptWorkspaceInvite = () => true,
   onStateChange = () => {},
   onTopologyChange = () => {},
@@ -394,6 +589,10 @@ export function createT3amsProtocol({
   const peerLimit = boundedInteger(maxPeers, T3AMS_PEER_CAP, { max: T3AMS_PEER_CAP });
   const workspaceLimit = boundedInteger(maxWorkspaces, T3AMS_WORKSPACE_CAP, { max: T3AMS_WORKSPACE_CAP });
   const channelLimit = boundedInteger(maxChannelsPerWorkspace, T3AMS_CHANNEL_CAP, { max: T3AMS_CHANNEL_CAP });
+  const conversationLimit = boundedInteger(maxConversations, T3AMS_PEER_CAP, { max: 10_000 });
+  const publicPeerAdmissionCap = boundedInteger(publicPeerAdmissionLimit, 32, { min: 1, max: T3AMS_ADMISSION_HISTORY_CAP });
+  const publicWorkspaceAdmissionCap = boundedInteger(publicWorkspaceAdmissionLimit, 4, { min: 1, max: T3AMS_ADMISSION_HISTORY_CAP });
+  const publicAdmissionWindow = boundedInteger(publicAdmissionWindowMs, 60 * 60 * 1000, { min: 60_000, max: 7 * 86_400_000 });
   // A T3ams XID is account-derived, while the GSTP signing key is an
   // independent device key.  A self-presented key therefore proves only that
   // the sender controls that key, not that it controls a claimed account XID.
@@ -437,6 +636,7 @@ export function createT3amsProtocol({
     return true;
   };
   const conversations = new Map();
+  const pinnedConversations = new Map();
   const replyTargets = new Map();
   // Decoding a carrier happens before the runtime has durably admitted its
   // message to the local ingress journal. Keep a short-lived claim separate
@@ -446,6 +646,50 @@ export function createT3amsProtocol({
   const workspaceJoinInFlight = new Set();
   const persist = () => onStateChange(jsonClone(state));
   const submitStatement = async (statement) => submit(statement);
+  const publicAdmission = (kind) => {
+    if (!publicTofuEnrollment) return true;
+    const field = kind === "peer" ? "publicPeers" : "publicWorkspaces";
+    const cap = kind === "peer" ? publicPeerAdmissionCap : publicWorkspaceAdmissionCap;
+    const cutoff = now() - publicAdmissionWindow;
+    const recent = normalizeAdmissionHistory(state.admissions?.[field]).filter((timestamp) => timestamp >= cutoff);
+    if (recent.length >= cap) {
+      state.admissions[field] = recent;
+      return false;
+    }
+    recent.push(now());
+    state.admissions[field] = recent.slice(-T3AMS_ADMISSION_HISTORY_CAP);
+    return true;
+  };
+  const trimConversations = () => {
+    while (conversations.size > conversationLimit) {
+      const candidate = [...conversations.keys()].find((chatId) => !pinnedConversations.has(chatId));
+      // Every remaining entry belongs to a durable ingress item. Temporary
+      // overflow is safer than evicting a reply route and retrying a paid turn.
+      if (candidate == null) break;
+      conversations.delete(candidate);
+    }
+  };
+  const rememberConversation = (message) => {
+    const chatId = typeof message?.chatId === "string" ? message.chatId : "";
+    const conversation = message?.conversation;
+    if (!validConversationKey(chatId) || conversation == null || typeof conversation !== "object") return false;
+    conversations.delete(chatId);
+    conversations.set(chatId, { ...conversation, threadRootId: message.threadRootId ?? null });
+    trimConversations();
+    return true;
+  };
+  const pinConversation = (chatId) => {
+    if (!validConversationKey(chatId)) return false;
+    pinnedConversations.set(chatId, (pinnedConversations.get(chatId) ?? 0) + 1);
+    return true;
+  };
+  const unpinConversation = (chatId) => {
+    const current = pinnedConversations.get(chatId) ?? 0;
+    if (current <= 1) pinnedConversations.delete(chatId);
+    else pinnedConversations.set(chatId, current - 1);
+    trimConversations();
+    return current > 0;
+  };
   const replyTargetKey = (chatId, messageId) => `${chatId}\u0000${messageId}`;
   const recordReplyTarget = (chatId, messageId, threadRootId) => {
     const key = replyTargetKey(chatId, messageId);
@@ -461,18 +705,16 @@ export function createT3amsProtocol({
     const key = inboundKeyFor(message);
     if (key == null || state.seen.includes(key) || inboundClaims.has(key)) return null;
     inboundClaims.add(key);
-    conversations.set(message.chatId, { ...message.conversation, threadRootId: message.threadRootId });
-    recordReplyTarget(message.chatId, message.messageId, message.threadRootId);
     return { ...message, ingressKey: key };
   };
-  const commitInbound = (message) => {
+  const commitInbound = (message, { retainBackfill = true, retainConversation = true } = {}) => {
     const key = message?.ingressKey ?? inboundKeyFor(message);
     if (typeof key !== "string" || !inboundClaims.has(key)) return false;
     inboundClaims.delete(key);
     if (!recordSeen(state, key)) return false;
     const wireBlobHex = typeof message?.wireBlobHex === "string" ? bareHex(message.wireBlobHex) : "";
     const timestamp = Number(message?.timestamp);
-    if (validWireBlobHex(wireBlobHex) && validXidHex(message?.senderXid)
+    if (retainBackfill && validWireBlobHex(wireBlobHex) && validXidHex(message?.senderXid)
         && Number.isSafeInteger(timestamp) && timestamp >= 0 && message?.conversation != null) {
       appendBackfill(state, message.chatId, {
         id: bareHex(message.messageId),
@@ -481,6 +723,9 @@ export function createT3amsProtocol({
         blob: wireBlobHex,
       });
     }
+    if (retainConversation && rememberConversation(message)) {
+      recordReplyTarget(message.chatId, message.messageId, message.threadRootId);
+    }
     return true;
   };
   const releaseInbound = (message) => {
@@ -488,14 +733,33 @@ export function createT3amsProtocol({
     return typeof key === "string" && inboundClaims.delete(key);
   };
 
+  const oldestEvictablePeerId = () => {
+    let candidate = null;
+    let candidateActivity = Number.POSITIVE_INFINITY;
+    const staleBefore = now() - publicAdmissionWindow;
+    for (const [xid, peer] of Object.entries(state.peers)) {
+      if (trustedPeers.has(xid)) continue;
+      const activity = Number(peer?.lastActivityAt ?? peer?.updatedAt ?? 0);
+      const safeActivity = Number.isSafeInteger(activity) && activity >= 0 ? activity : 0;
+      if (safeActivity > staleBefore) continue;
+      if (candidate == null || safeActivity < candidateActivity || (safeActivity === candidateActivity && xid < candidate)) {
+        candidate = xid;
+        candidateActivity = safeActivity;
+      }
+    }
+    return candidate;
+  };
+  const touchPeer = (peerXidHex) => {
+    const key = bareHex(peerXidHex);
+    const peer = state.peers[key];
+    if (peer == null) return false;
+    state.peers[key] = { ...peer, lastActivityAt: now() };
+    return true;
+  };
   const addPeer = (peerXidHex, details = {}) => {
     const key = bareHex(peerXidHex);
     if (!/^[0-9a-f]{64}$/.test(key) || key === selfXidHex) return null;
     const existing = state.peers[key] ?? {};
-    if (state.peers[key] == null && Object.keys(state.peers).length >= peerLimit) {
-      log("T3AMS_PEER_CAP_REACHED", { cap: peerLimit });
-      return null;
-    }
     const trustedKey = trustedPeers.get(key) ?? null;
     const suppliedKey = typeof details.signingPubKeyHex === "string" ? bareHex(details.signingPubKeyHex) : null;
     const pinnedKey = typeof existing.signingPubKeyHex === "string" ? bareHex(existing.signingPubKeyHex) : null;
@@ -511,6 +775,23 @@ export function createT3amsProtocol({
       log("T3AMS_PEER_PIN_REQUIRED", { sender: key });
       return null;
     }
+    const isNew = state.peers[key] == null;
+    const isPublicTofuPeer = publicTofuEnrollment && trustedKey == null;
+    const evictPeer = isNew && Object.keys(state.peers).length >= peerLimit
+      ? (publicTofuEnrollment ? oldestEvictablePeerId() : null)
+      : null;
+    if (isNew && Object.keys(state.peers).length >= peerLimit && evictPeer == null) {
+      log("T3AMS_PEER_CAP_REACHED", { cap: peerLimit });
+      return null;
+    }
+    if (isNew && isPublicTofuPeer && !publicAdmission("peer")) {
+      log("T3AMS_PUBLIC_PEER_ADMISSION_LIMIT", { cap: publicPeerAdmissionCap, windowMs: publicAdmissionWindow });
+      return null;
+    }
+    if (evictPeer != null) {
+      delete state.peers[evictPeer];
+      log("T3AMS_PUBLIC_PEER_EVICTED", { evicted: evictPeer });
+    }
     state.peers[key] = {
       ...existing,
       ...details,
@@ -521,10 +802,72 @@ export function createT3amsProtocol({
           ? { signingPubKeyHex: suppliedKey }
           : {}),
       updatedAt: now(),
+      lastActivityAt: now(),
     };
     persist();
     onTopologyChange();
     return state.peers[key];
+  };
+
+  const privateKeyIdsForWorkspace = (wsId, workspace) => activePrivateKeyIds({ [wsId]: workspace });
+  const pruneWorkspaceKeys = (wsId, workspace) => {
+    const allowed = privateKeyIdsForWorkspace(wsId, workspace);
+    let removed = 0;
+    for (const keyId of Object.keys(state.keys)) {
+      if (!keyId.startsWith(`${wsId}:`) || allowed.has(keyId)) continue;
+      delete state.keys[keyId];
+      removed += 1;
+    }
+    return removed;
+  };
+  const workspaceKeyCount = (wsId) => Object.keys(state.keys).filter((keyId) => keyId.startsWith(`${wsId}:`)).length;
+  const touchWorkspace = (wsId) => {
+    const workspace = stateWorkspace(state, wsId);
+    if (workspace == null) return false;
+    workspace.lastActivityAt = now();
+    return true;
+  };
+  const removeWorkspaceState = (wsId) => {
+    if (state.workspaces[wsId] == null) return false;
+    delete state.workspaces[wsId];
+    for (const keyId of Object.keys(state.keys)) {
+      if (keyId.startsWith(`${wsId}:`)) delete state.keys[keyId];
+    }
+    const channelPrefix = `t3ams:channel:${wsId}:`;
+    for (const chatId of Object.keys(state.backfill)) {
+      if (chatId.startsWith(channelPrefix)) delete state.backfill[chatId];
+    }
+    for (const chatId of conversations.keys()) {
+      if (chatId.startsWith(channelPrefix)) conversations.delete(chatId);
+    }
+    for (const chatId of pinnedConversations.keys()) {
+      if (chatId.startsWith(channelPrefix)) pinnedConversations.delete(chatId);
+    }
+    for (const key of replyTargets.keys()) {
+      if (key.startsWith(`${channelPrefix}`)) replyTargets.delete(key);
+    }
+    return true;
+  };
+  const oldestEvictableWorkspaceId = () => {
+    let candidate = null;
+    let candidateActivity = Number.POSITIVE_INFINITY;
+    const staleBefore = now() - publicAdmissionWindow;
+    for (const [wsId, workspace] of Object.entries(state.workspaces)) {
+      const inviter = bareHex(workspace?.inviterXidHex);
+      const isPublicEnrollment = workspace?.publicEnrollment === true
+        || (publicTofuEnrollment && workspace?.publicEnrollment !== false && !trustedPeers.has(inviter));
+      if (!isPublicEnrollment || trustedPeers.has(inviter)) continue;
+      const channelPrefix = `t3ams:channel:${wsId}:`;
+      if ([...pinnedConversations.keys()].some((chatId) => chatId.startsWith(channelPrefix))) continue;
+      const activity = Number(workspace?.lastActivityAt ?? workspace?.acceptedAt ?? 0);
+      const safeActivity = Number.isSafeInteger(activity) && activity >= 0 ? activity : 0;
+      if (safeActivity > staleBefore) continue;
+      if (candidate == null || safeActivity < candidateActivity || (safeActivity === candidateActivity && wsId < candidate)) {
+        candidate = wsId;
+        candidateActivity = safeActivity;
+      }
+    }
+    return candidate;
   };
 
   // The runtime can restore a disk-backed ingress item before the next live
@@ -553,7 +896,12 @@ export function createT3amsProtocol({
     if (chatId !== routed.conversationKey || !validXidHex(message.messageId)) return false;
     const threadRootId = message.threadRootId == null ? null : bareHex(message.threadRootId);
     if (threadRootId != null && !validXidHex(threadRootId)) return false;
-    conversations.set(chatId, { ...conversation, threadRootId });
+    if (!rememberConversation({
+      chatId,
+      conversation,
+      messageId: message.messageId,
+      threadRootId,
+    })) return false;
     recordReplyTarget(chatId, message.messageId, threadRootId);
     return true;
   };
@@ -603,6 +951,7 @@ export function createT3amsProtocol({
         const root = extractBytes(bcts, expression, "threadRootId");
         const threadRootId = root == null ? null : bareHex(bcts.formatXID(root));
         if (threadRootId != null && !validXidHex(threadRootId)) return null;
+        touchPeer(peerHex);
         return {
           conversation,
           chatId,
@@ -674,6 +1023,7 @@ export function createT3amsProtocol({
         const mentions = mentionsEnvelope == null
           ? []
           : bcts.parseMentionsEnvelope(mentionsEnvelope).map((xid) => bareHex(bcts.formatXID(xid)));
+        touchWorkspace(wsId);
         return {
           conversation,
           chatId,
@@ -724,13 +1074,11 @@ export function createT3amsProtocol({
         signingPubKeyHex: decoded.signingPubKeyHex,
       });
       if (peer == null) return null;
-      // Inbox subscriptions replay the latest retained request. Persist the
-      // same small dismissal key used by the T3ams client so a resubscribe
-      // cannot keep spending statement allowance on duplicate dmAccepts.
-      const shouldAcknowledge = decoded.kind === "request" && recordSeen(
-        state,
-        `inbox:${senderXidHex}:${decoded.timestamp}`,
-      );
+      // A request needs one acknowledgement per retained peer pairing. Mark
+      // it only after the RPC write succeeds: a full submit queue or a lost
+      // allowance must leave the retained request eligible for replay.
+      const shouldAcknowledge = decoded.kind === "request"
+        && !Number.isSafeInteger(Number(peer.handshakeAcceptedAt));
       if (shouldAcknowledge) {
         const inbox = bcts.derivePersonalInboxChannel(hexToBytes(senderXidHex));
         const expression = bcts.dmAcceptExpression(
@@ -744,6 +1092,8 @@ export function createT3amsProtocol({
         const { envelope } = bcts.createGSTPRequest(expression);
         const signed = bcts.signGSTPRequest(envelope, identity.signingPrivateKey);
         await submitStatement({ channel: inbox, topics: [inbox], data: bcts.envelopeToBytes(signed) });
+        peer.handshakeAcceptedAt = now();
+        persist();
       }
       // dmMessageRequest carries the first sealed message in the inbox.  The
       // normal pairwise subscription also replays it, so it is intentionally
@@ -755,11 +1105,9 @@ export function createT3amsProtocol({
       log("T3AMS_WORKSPACE_INVITE_IGNORED", { sender: senderXidHex, reason: "workspace-auto-accept-disabled" });
       return null;
     }
-    // Workspace invites do not carry a signing public key. A deliberately
-    // public bot may choose first-contact TOFU, but a private bot already has
-    // an operator-pinned device key and must verify the outer GSTP request on
-    // *its first* invite as well. The sealed payload alone is not account
-    // authentication because its pairwise encryption inputs are public XIDs.
+    // Workspace invites do not carry a signing public key. A public bot first
+    // establishes a verified TOFU DM pairing, then verifies the invite with
+    // that key. The sealed payload alone is not account authentication.
     const knownInviter = state.peers[senderXidHex];
     const trustedInviterKey = trustedPeers.get(senderXidHex) ?? null;
     if (requireTrustedPeers && trustedInviterKey == null) {
@@ -767,6 +1115,10 @@ export function createT3amsProtocol({
       return null;
     }
     const inviterKey = trustedInviterKey ?? knownInviter?.signingPubKeyHex ?? null;
+    if (publicTofuEnrollment && inviterKey == null) {
+      log("T3AMS_WORKSPACE_INVITE_PAIRING_REQUIRED", { sender: senderXidHex });
+      return null;
+    }
     if (inviterKey != null && !verifyKnownSigned(bcts, decoded.signed, peerSigningKey(bcts, { signingPubKeyHex: inviterKey }))) {
       log("T3AMS_WORKSPACE_INVITE_FORGED", { sender: senderXidHex });
       return null;
@@ -785,11 +1137,22 @@ export function createT3amsProtocol({
       ? []
       : safeChannelEntries(payload.channels, { max: channelLimit });
     if (inviteChannels == null) return null;
+    if (!payload.stateDoc.members?.some((member) => bareHex(member?.xid) === senderXidHex)) return null;
     let workspace = stateWorkspace(state, payload.wsId);
     if (workspace == null) {
-      if (Object.keys(state.workspaces).length >= workspaceLimit) {
+      const atCapacity = Object.keys(state.workspaces).length >= workspaceLimit;
+      const evictWorkspace = atCapacity && publicTofuEnrollment ? oldestEvictableWorkspaceId() : null;
+      if (atCapacity && evictWorkspace == null) {
         log("T3AMS_WORKSPACE_CAP_REACHED", { cap: workspaceLimit });
         return null;
+      }
+      if (publicTofuEnrollment && !publicAdmission("workspace")) {
+        log("T3AMS_PUBLIC_WORKSPACE_ADMISSION_LIMIT", { cap: publicWorkspaceAdmissionCap, windowMs: publicAdmissionWindow });
+        return null;
+      }
+      if (evictWorkspace != null) {
+        removeWorkspaceState(evictWorkspace);
+        log("T3AMS_PUBLIC_WORKSPACE_EVICTED", { evicted: evictWorkspace });
       }
       workspace = {
         doc: payload.stateDoc,
@@ -803,12 +1166,13 @@ export function createT3amsProtocol({
         },
         inviterXidHex: senderXidHex,
         acceptedAt: now(),
+        lastActivityAt: now(),
+        publicEnrollment: publicTofuEnrollment && trustedInviterKey == null,
         joinSent: false,
       };
-      if (!workspace.doc.members?.some((member) => bareHex(member?.xid) === senderXidHex)) return null;
       state.workspaces[payload.wsId] = workspace;
       persist();
-      onTopologyChange();
+      onTopologyChange({ wsId: payload.wsId, kind: "workspace" });
     }
     if (workspace.joinSent === true) return { kind: "workspace", wsId: payload.wsId };
     if (workspaceJoinInFlight.has(payload.wsId)) return null;
@@ -878,8 +1242,16 @@ export function createT3amsProtocol({
             if (!isWorkspaceMember(workspace, xid)) delete workspace.memberKeys[xid];
           }
         }
+        if (!isWorkspaceMember(workspace, selfXidHex)) {
+          for (const keyId of Object.keys(state.keys)) {
+            if (keyId.startsWith(`${wsId}:`)) delete state.keys[keyId];
+          }
+        } else {
+          pruneWorkspaceKeys(wsId, workspace);
+        }
+        touchWorkspace(wsId);
         persist();
-        onTopologyChange();
+        onTopologyChange({ wsId, kind: "workspace" });
         return true;
       }
       if (functionName === "memberAnnounce") {
@@ -953,8 +1325,10 @@ export function createT3amsProtocol({
         if (merged.length > channelLimit) return false;
         workspace.channels = merged;
         workspace.registryMeta[creator] = { updatedAt };
+        pruneWorkspaceKeys(wsId, workspace);
+        touchWorkspace(wsId);
         persist();
-        onTopologyChange();
+        onTopologyChange({ wsId, kind: "registry" });
         return true;
       }
     } catch {
@@ -980,11 +1354,17 @@ export function createT3amsProtocol({
       const channelIdHex = bareHex(bcts.formatXID(channelId));
       const adminHex = bareHex(bcts.formatXID(admin));
       const channel = stateChannel(workspace, channelIdHex);
-      if (channel != null && bareHex(channel.creatorXid) !== adminHex) return false;
+      // Key material is meaningful only for a currently registered, active
+      // private channel owned by the authenticated grantor. Never allow a
+      // notification to create an arbitrary state.keys slot.
+      if (channel == null || channel.isPrivate !== true || channel.archived === true || channel.deleted === true
+          || bareHex(channel.creatorXid) !== adminHex || !isWorkspaceMember(workspace, adminHex)) return false;
       if (!verifyKnownSigned(bcts, signed, memberSigningKey(bcts, workspace, adminHex))) return false;
       const adminAgreement = extractBytes(bcts, expression, "adminAgreementPubKey") ?? senderAgreement;
       const functionName = bcts.extractFunctionName(expression);
       const keyId = `${wsId}:${channelIdHex}`;
+      pruneWorkspaceKeys(wsId, workspace);
+      if (!privateKeyIdsForWorkspace(wsId, workspace).has(keyId)) return false;
       if (functionName === "grantChannelAccess") {
         const grantee = extractBytes(bcts, expression, "granteeXid");
         const encrypted = extractBytes(bcts, expression, "encryptedKey");
@@ -992,10 +1372,16 @@ export function createT3amsProtocol({
         if (grantee == null || encrypted == null || !Number.isSafeInteger(version) || version < 1 || bareHex(bcts.formatXID(grantee)) !== selfXidHex) return false;
         const current = state.keys[keyId]?.current;
         if (current != null && (!Number.isSafeInteger(Number(current.version)) || Number(current.version) >= version)) return false;
+        if (current == null && (workspaceKeyCount(wsId) >= T3AMS_KEY_CAP_PER_WORKSPACE || Object.keys(state.keys).length >= T3AMS_KEY_CAP)) {
+          log("T3AMS_KEY_CAP_REACHED", { wsId, perWorkspaceCap: T3AMS_KEY_CAP_PER_WORKSPACE, cap: T3AMS_KEY_CAP });
+          return false;
+        }
         const key = bcts.decryptChannelKeyFromAdmin(encrypted, identity.agreementPrivateKey, adminAgreement);
-        state.keys[keyId] = { current: { keyHex: bytesToHex(key), version }, previous: [] };
+        const keyHex = normalizeKeyMaterial(bytesToHex(key));
+        if (keyHex == null) return false;
+        state.keys[keyId] = { current: { keyHex, version }, previous: [] };
         persist();
-        onTopologyChange();
+        onTopologyChange({ wsId, channelIdHex, kind: "key" });
         return true;
       }
       if (functionName === "rotateChannelKey") {
@@ -1018,16 +1404,18 @@ export function createT3amsProtocol({
           if (state.keys[keyId] == null) return false;
           delete state.keys[keyId];
           persist();
-          onTopologyChange();
+          onTopologyChange({ wsId, channelIdHex, kind: "key" });
           return true;
         }
         const key = bcts.decryptChannelKeyFromAdmin(encrypted, identity.agreementPrivateKey, adminAgreement);
+        const keyHex = normalizeKeyMaterial(bytesToHex(key));
+        if (keyHex == null) return false;
         state.keys[keyId] = {
-          current: { keyHex: bytesToHex(key), version },
+          current: { keyHex, version },
           previous: current == null ? [] : [current, ...(state.keys[keyId]?.previous ?? [])].slice(0, 4),
         };
         persist();
-        onTopologyChange();
+        onTopologyChange({ wsId, channelIdHex, kind: "key" });
         return true;
       }
     } catch {
@@ -1058,13 +1446,13 @@ export function createT3amsProtocol({
 
   const sendText = async (chatId, text, options = {}) => {
     const conversation = conversations.get(chatId);
-    if (conversation == null) throw new Error("unknown T3ams conversation");
-    if (typeof text !== "string" || text.trim() === "") throw new Error("text is required");
+    if (conversation == null) throw terminalDeliveryError("T3AMS_UNKNOWN_CONVERSATION", "unknown T3ams conversation");
+    if (typeof text !== "string" || text.trim() === "") throw terminalDeliveryError("T3AMS_INVALID_TEXT", "text is required");
     const rootId = Object.hasOwn(options, "threadRootId")
       ? options.threadRootId
       : conversation.threadRootId ?? null;
     if (rootId != null && (!/^[0-9a-f]{64}$/i.test(String(rootId)))) {
-      throw new Error("threadRootId must be a 32-byte hexadecimal message ID");
+      throw terminalDeliveryError("T3AMS_INVALID_THREAD", "threadRootId must be a 32-byte hexadecimal message ID");
     }
     const prior = channelPriorEntries(bcts, state, chatId);
     const sentAt = now();
@@ -1094,10 +1482,13 @@ export function createT3amsProtocol({
       const workspace = stateWorkspace(state, conversation.wsId);
       const channelEntry = stateChannel(workspace, conversation.channelIdHex);
       if (workspace == null || channelEntry == null || !isWorkspaceMember(workspace, selfXidHex)) {
-        throw new Error("bot is not an active member of this workspace channel");
+        throw terminalDeliveryError("T3AMS_CHANNEL_UNAVAILABLE", "bot is not an active member of this workspace channel");
+      }
+      if (channelEntry.archived === true || channelEntry.deleted === true) {
+        throw terminalDeliveryError("T3AMS_CHANNEL_UNAVAILABLE", "workspace channel is archived or deleted");
       }
       if (!canPostWorkspaceChannel(workspace, channelEntry, selfXidHex)) {
-        throw new Error("bot is not permitted to post in this workspace channel");
+        throw terminalDeliveryError("T3AMS_CHANNEL_FORBIDDEN", "bot is not permitted to post in this workspace channel");
       }
       const channelId = hexToBytes(channelEntry.idHex);
       const expression = bcts.sendChannelMessageExpression(
@@ -1113,7 +1504,7 @@ export function createT3amsProtocol({
       const key = channelEntry.isPrivate
         ? stateKey(state, conversation.wsId, channelEntry.idHex)?.current?.keyHex
         : bytesToHex(bcts.deriveWorkspaceKey(conversation.wsId));
-      if (typeof key !== "string") throw new Error("no private-channel key has been granted to this bot");
+      if (typeof key !== "string") throw terminalDeliveryError("T3AMS_CHANNEL_KEY_MISSING", "no private-channel key has been granted to this bot");
       const encrypted = bcts.encryptWorkspaceChannelEnvelope(signed, hexToBytes(key));
       blob = bcts.envelopeToBytes(encrypted);
       statement = {
@@ -1125,7 +1516,29 @@ export function createT3amsProtocol({
       };
       messageId = bareHex(bcts.formatXID(bcts.extractParameter(expression, "id").extractBytes()));
     }
-    await submitStatement(statement);
+    try {
+      await submitStatement(statement);
+    } catch (error) {
+      if (error?.code === "T3AMS_SUBMIT_QUEUE_FULL") {
+        // The in-process submit queue drains on its own. Preserve the durable
+        // ingress item so the transport retries rather than permanently
+        // dropping a user's prompt during a short burst.
+        const retryable = new Error("T3ams statement submit queue is full");
+        retryable.code = "T3AMS_SUBMIT_QUEUE_FULL";
+        retryable.cause = error;
+        throw retryable;
+      }
+      if (error?.statementSubmitReason === "noAllowance" || String(error?.message ?? error).includes("noAllowance")) {
+        // Allowance can be restored by an operator without restarting the
+        // bot, so this is a delivery retry rather than a terminal route
+        // failure. The durable journal applies bounded backoff.
+        const retryable = new Error("T3ams statement allowance is exhausted");
+        retryable.code = "T3AMS_NO_ALLOWANCE";
+        retryable.cause = error;
+        throw retryable;
+      }
+      throw error;
+    }
     appendBackfill(state, chatId, { id: messageId, senderXid: selfXidHex, timestamp: messageTimestamp, blob: bytesToHex(blob) });
     persist();
     log("T3AMS_SENT_TEXT", { chatId, chars: text.length });
@@ -1135,7 +1548,13 @@ export function createT3amsProtocol({
   return {
     selfXidHex,
     snapshot: () => jsonClone(state),
-    peerIds: () => Object.keys(state.peers).slice(0, peerLimit),
+    peerIds: () => Object.entries(state.peers)
+      .sort(([leftId, left], [rightId, right]) => (
+        Number(right?.lastActivityAt ?? right?.updatedAt ?? 0) - Number(left?.lastActivityAt ?? left?.updatedAt ?? 0)
+        || leftId.localeCompare(rightId)
+      ))
+      .map(([xid]) => xid)
+      .slice(0, peerLimit),
     workspaces: () => Object.keys(state.workspaces).slice(0, workspaceLimit),
     memberIds: (wsId) => {
       const members = stateWorkspace(state, wsId)?.doc?.members;
@@ -1155,6 +1574,8 @@ export function createT3amsProtocol({
     },
     addPeer,
     claimInbound,
+    pinConversation,
+    unpinConversation,
     restoreInboundConversation,
     receiveInbox,
     receiveDm: directMessage,

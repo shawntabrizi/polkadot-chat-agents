@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  T3AMS_BACKFILL_CONVERSATION_CAP,
+  T3AMS_BACKFILL_BUDGET_BYTES,
   T3AMS_STATE_VERSION,
   bareHex,
   bytesToHex,
@@ -105,6 +107,8 @@ test("DM reply targets retain an explicit thread but never invent one for a top-
   const topChat = t3amsConversationKey({ kind: "dm", peerXidHex: topLevel.peer });
   assert.equal(topEvent.chatId, topChat);
   assert.equal(topEvent.threadRootId, null);
+  assert.equal(topLevel.protocol.conversation(topChat), null, "a claimed carrier must not allocate a durable reply route yet");
+  assert.equal(topLevel.protocol.commitInbound(topEvent), true);
   assert.equal(topLevel.protocol.conversation(topChat).threadRootId, null);
   assert.equal(topLevel.protocol.replyThreadFor(topChat, topLevel.messageId), null);
 
@@ -112,6 +116,7 @@ test("DM reply targets retain an explicit thread but never invent one for a top-
   const threadEvent = threaded.protocol.receiveDm(threaded.peer, threaded.input);
   const threadChat = t3amsConversationKey({ kind: "dm", peerXidHex: threaded.peer });
   assert.equal(threadEvent.threadRootId, threaded.root);
+  assert.equal(threaded.protocol.commitInbound(threadEvent), true);
   assert.equal(threaded.protocol.conversation(threadChat).threadRootId, threaded.root);
   assert.equal(threaded.protocol.replyThreadFor(threadChat, threaded.messageId), threaded.root);
 });
@@ -208,7 +213,15 @@ test("a private first workspace invite verifies the configured signing-key pin",
 });
 
 test("state normalization returns a fresh empty current-version state for invalid snapshots", () => {
-  const expected = { v: T3AMS_STATE_VERSION, peers: {}, workspaces: {}, keys: {}, backfill: {}, seen: [] };
+  const expected = {
+    v: T3AMS_STATE_VERSION,
+    peers: {},
+    workspaces: {},
+    keys: {},
+    backfill: {},
+    seen: [],
+    admissions: { publicPeers: [], publicWorkspaces: [] },
+  };
   for (const raw of [null, [], "not-json", { v: T3AMS_STATE_VERSION - 1 }, { v: T3AMS_STATE_VERSION + 1 }]) {
     assert.deepEqual(normalizeT3amsState(raw), expected);
   }
@@ -244,4 +257,82 @@ test("state normalization bounds deduplication history to the newest 20,000 stri
   assert.equal(state.seen.length, 20_000);
   assert.equal(state.seen[0], "message-5");
   assert.equal(state.seen.at(-1), "message-20004");
+});
+
+test("state normalization bounds retained backfill globally and drops blobs that cannot fit a carrier", () => {
+  const hex64 = (value) => value.toString(16).padStart(64, "0");
+  const backfill = {};
+  for (let index = 0; index < T3AMS_BACKFILL_CONVERSATION_CAP + 12; index += 1) {
+    const id = hex64(index + 1);
+    backfill[`t3ams:dm:${id}`] = [{
+      id,
+      senderXid: hex64(index + 10_000),
+      timestamp: index,
+      blob: "02",
+    }];
+  }
+  const oversizedId = hex64(99_999);
+  backfill[`t3ams:dm:${oversizedId}`] = [{
+    id: oversizedId,
+    senderXid: hex64(88_888),
+    timestamp: 1,
+    blob: "aa".repeat(T3AMS_BACKFILL_BUDGET_BYTES),
+  }];
+
+  const state = normalizeT3amsState({ v: T3AMS_STATE_VERSION, backfill });
+  assert.equal(Object.keys(state.backfill).length, T3AMS_BACKFILL_CONVERSATION_CAP);
+  assert.equal(state.backfill[`t3ams:dm:${oversizedId}`], undefined);
+  assert.ok(Object.values(state.backfill).every((entries) => entries.every((entry) => entry.blob.length / 2 < T3AMS_BACKFILL_BUDGET_BYTES)));
+});
+
+test("state normalization keeps key slots only for active registered private channels", () => {
+  const wsId = "11".repeat(32);
+  const channelId = "22".repeat(32);
+  const owner = "33".repeat(32);
+  const validKeyId = `${wsId}:${channelId}`;
+  const state = normalizeT3amsState({
+    v: T3AMS_STATE_VERSION,
+    workspaces: {
+      [wsId]: {
+        channels: [{ idHex: channelId, creatorXid: owner, isPrivate: true }],
+      },
+    },
+    keys: {
+      [validKeyId]: { current: { keyHex: "aa".repeat(32), version: 1 }, previous: [] },
+      [`${wsId}:${"44".repeat(32)}`]: { current: { keyHex: "bb".repeat(32), version: 1 }, previous: [] },
+    },
+  });
+
+  assert.deepEqual(Object.keys(state.keys), [validKeyId]);
+  assert.equal(state.keys[validKeyId].current.keyHex, "aa".repeat(32));
+});
+
+test("public TOFU peer admission reclaims a stale unpinned peer but preserves configured pins", () => {
+  const self = bytes(0xa1);
+  const oldPeer = "b2".repeat(32);
+  const newPeer = "c3".repeat(32);
+  const bcts = { formatXID: xid };
+  const protocol = createT3amsProtocol({
+    bcts,
+    identity: { xid: self, signingPrivateKey: bytes(0xd4) },
+    displayName: "Atlas",
+    state: { v: T3AMS_STATE_VERSION, peers: { [oldPeer]: { xidHex: oldPeer, signingPubKeyHex: "11", lastActivityAt: 0 } } },
+    submit: async () => {},
+    publicTofuEnrollment: true,
+    maxPeers: 1,
+  });
+  assert.ok(protocol.addPeer(newPeer, { signingPubKeyHex: "22" }));
+  assert.deepEqual(protocol.peerIds(), [newPeer]);
+
+  const pinned = createT3amsProtocol({
+    bcts,
+    identity: { xid: self, signingPrivateKey: bytes(0xd4) },
+    displayName: "Atlas",
+    submit: async () => {},
+    publicTofuEnrollment: true,
+    maxPeers: 1,
+    trustedPeerSigningKeys: { [oldPeer]: "11" },
+  });
+  assert.equal(pinned.addPeer(newPeer, { signingPubKeyHex: "22" }), null);
+  assert.deepEqual(pinned.peerIds(), [oldPeer]);
 });

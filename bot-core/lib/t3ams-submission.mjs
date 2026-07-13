@@ -50,14 +50,26 @@ export function createT3amsPriorityClock({
   };
 }
 
-export function createSerializedSubmitter(send) {
+export function createSerializedSubmitter(send, { maxPending = 128 } = {}) {
   if (typeof send !== "function") throw new Error("send is required");
+  const cap = Number.isSafeInteger(Number(maxPending)) && Number(maxPending) >= 1
+    ? Number(maxPending)
+    : 128;
   let tail = Promise.resolve();
-  return (statement) => {
+  let pending = 0;
+  const submit = (statement) => {
+    if (pending >= cap) {
+      const error = new Error("T3ams statement submit queue is full");
+      error.code = "T3AMS_SUBMIT_QUEUE_FULL";
+      return Promise.reject(error);
+    }
+    pending += 1;
     const next = tail.then(() => send(statement), () => send(statement));
     // Keep the queue live after a rejected RPC submission. The caller still
     // receives that rejection through `next`.
     tail = next.catch(() => {});
-    return next;
+    return next.finally(() => { pending -= 1; });
   };
+  submit.stats = () => ({ pending, cap });
+  return submit;
 }
