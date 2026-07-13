@@ -1,7 +1,7 @@
 # polkadot-chat-agents
 
 Run an AI chat bot that people can message from the Polkadot app. Replies come
-from a model CLI (Claude, Codex, Gemini, Grok) or an agent framework (Hermes,
+from a model CLI (Claude, Codex, or opencode) or an agent framework (Hermes,
 OpenClaw). There is no chat server: messages travel over the Statement Store and
 conversations are end-to-end encrypted, so a bot is just a process with an
 outbound connection to a public RPC node.
@@ -17,7 +17,7 @@ pca run mycoolbot --greet
 (currently the Paseo testnet), and locks the bot to your account. With
 `--greet`, the bot messages you first — watch your phone.
 
-Requirements: Node 20+, and for an AI brain the model's CLI installed and
+Requirements: Node 22+, and for an AI brain the model's CLI installed and
 logged in (for example [Claude Code](https://claude.com/claude-code)). Use
 `--brain echo` for a zero-dependency smoke test.
 

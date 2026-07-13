@@ -21,13 +21,12 @@ production: one on Hermes with Codex, one on OpenClaw with Claude.
 
 ## Requirements
 
-- Node.js 20 or newer. The registration proof ships precompiled (wasm), so no
+- Node.js 22 or newer. The registration proof ships precompiled (wasm), so no
   other toolchain is needed.
 - The Polkadot app on a phone, with an account.
 - For an AI brain: the model's CLI installed and logged in on the machine the bot
-  runs on. bot-core invokes the CLI and never sees your model credentials — with
-  one exception: `pca deploy --anthropic-key` writes the key you pass into the
-  container's env so a headless `claude` bot can authenticate there.
+  runs on. bot-core invokes the CLI without forwarding its own secret
+  environment. A deployed CLI is authenticated through its persistent OAuth home.
 
 ## Create and run a bot
 
@@ -64,7 +63,7 @@ persisted per bot, so conversations continue across restarts.
 `deploy` targets any machine reachable over SSH that has Docker installed:
 
 ```bash
-pca deploy mycoolbot --host root@your-server --anthropic-key sk-ant-...
+pca deploy mycoolbot --host root@your-server
 
 pca status mycoolbot
 pca logs mycoolbot -f
@@ -76,11 +75,12 @@ container with a persistent state volume, and waits for the bot to come online.
 Add `--dry-run` to preview the generated files without deploying.
 
 Direct engines (`echo`, `claude`, `codex`, `opencode`) deploy as a single
-non-root container with the agent CLI baked in and a persistent workspace it
-works in. Bridge bots deploy together with their agent framework as a
-two-container stack: `--harness openclaw` requires no interactive steps if the
-server has Claude CLI credentials, and `--harness hermes` prints the one login
-command it cannot automate. See [docs/HARNESSES.md](docs/HARNESSES.md).
+container with the transport state isolated from the non-root agent CLI and a
+persistent workspace it works in. After a direct deployment, use the printed
+one-time CLI login command. Bridge bots deploy together with their agent
+framework as a two-container stack: `--harness openclaw` requires no interactive
+steps if the server has Claude CLI credentials, and `--harness hermes` prints
+the one login command it cannot automate. See [docs/HARNESSES.md](docs/HARNESSES.md).
 
 ## Brains
 
@@ -90,9 +90,9 @@ write) in a container that is their sandbox.
 
 | `--brain` | Replies come from | Reaches | Authentication |
 |---|---|---|---|
-| `claude` | the `claude` CLI | Claude models | Claude Code login or `ANTHROPIC_API_KEY` |
-| `codex` | the `codex` CLI | OpenAI models | ChatGPT/Codex login or `OPENAI_API_KEY` |
-| `opencode` | the `opencode` CLI | many providers via `--model provider/model` | that provider's key or `opencode auth login` |
+| `claude` | the `claude` CLI | Claude models | Claude Code login |
+| `codex` | the `codex` CLI | OpenAI models | ChatGPT/Codex login |
+| `opencode` | the `opencode` CLI | many providers via `--model provider/model` | `opencode auth login` |
 | `echo` | bot-core itself (repeats the message) | — | none |
 | `hermes` / `bridge` | an agent framework over the HTTP bridge | — | the framework's |
 
@@ -110,14 +110,15 @@ arbitrary senders unless `--public` is passed.
 In chat, direct-brain bots answer `/help`, `/reset`, `/model <name>`,
 `/reasoning <level>`, `/project`, `/usage`, and `/ping` instantly themselves;
 bridge bots leave slash-commands to their framework. Files you send are
-downloaded and staged into the agent's workspace (`.attachments/`), so "here's
-the spec, implement it" works with a photo or document attached.
+downloaded into a private per-turn workspace directory and removed after the
+turn, so "here's the spec, implement it" works with a photo or document
+attached.
 
 **Projects.** `pca project <bot> add <alias> <path>` registers a directory the
 agent can work in (repeat for more). In chat, `/project <alias>` points your
 conversation at that repo, `/project <alias>@<branch>` gives it an isolated
-`git worktree` for that branch (created on first use under the bot's state
-dir), and `/project default` returns to the shared workspace. Each switch
+`git worktree` for that branch (created on first use under the bot's workspace),
+and `/project default` returns to the shared workspace. Each switch
 starts a fresh engine session — a resumed session is only valid in the
 directory it started in. Projects are per-peer: two people can work in
 different repos with the same bot. (Local `pca run` only: a Docker-deployed
@@ -132,15 +133,16 @@ with `BOT_GREET_TEXT`.
 ## Agent frameworks
 
 For a bot with memory, tools, and a persona, run `--brain hermes` and let a
-framework drive the conversation through bot-core's HTTP bridge (a long-poll
-`GET /inbound` and a `POST /send`). Two integrations are included and validated:
+framework drive the conversation through bot-core's authenticated HTTP bridge
+(a bounded long-poll `GET /inbound`, lease renewal/ACK endpoints, and `POST /send`). Two
+integrations are included and validated:
 
 - Hermes: `hermes-plugin/polkadot/`, a platform adapter that drops into
   `~/.hermes/plugins/`.
 - OpenClaw: `openclaw-plugin/polkadot/`, a channel plugin.
 
-The bridge contract is four HTTP routes, so writing an adapter for another
-framework is small. Setup recipes and deployment notes are in
+The bridge contract is a small authenticated API, so writing an adapter for
+another framework is small. Setup recipes and deployment notes are in
 [docs/HARNESSES.md](docs/HARNESSES.md).
 
 ## Testing without a phone
@@ -158,9 +160,9 @@ is how the mobile app actually sends. See [docs/TESTING.md](docs/TESTING.md).
 
 `~/.pca/bots/<name>/secret.json` holds the bot's root seed; whoever has it
 controls the bot. `~/.pca/bots/<name>/session-state.json` and the server-side
-`state/` volume hold session keys for open conversations. A deployed bot's
-`bot.env` holds the seed and any `--anthropic-key`. All are created with mode
-0600. Back them up; do not commit them.
+`state/` volume hold session keys for open conversations. `config.json` also
+holds the bridge token; a deployed bot's `bot.env` holds the seed and token.
+All are created with mode 0600. Back them up; do not commit them.
 
 ## Repository layout
 

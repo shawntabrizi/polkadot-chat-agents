@@ -17,25 +17,32 @@ pca create mybot --brain hermes --owner yourname.42
 pca run mybot
 ```
 
-The bridge listens on `http://127.0.0.1:8799` by default.
+The bridge listens on `http://127.0.0.1:8799` by default. Every route requires
+`Authorization: Bearer <BOT_BRIDGE_TOKEN>` (or `X-Bridge-Token`). `pca create`
+generates and stores this random token in the bot's mode-0600 `config.json`; the
+generated harness deployments pass it through `POLKADOT_BRIDGE_TOKEN`.
 
 ## The bridge contract
 
-A framework plugin needs four HTTP routes:
+A framework plugin needs this small authenticated API:
 
 | Route | Purpose |
 |---|---|
 | `GET /health` | returns `{ ok, account, identifierKey, username }` |
-| `GET /inbound?wait=<secs>` | long-poll; returns `[{ chat_id, text, message_id }, ...]`, an empty array on timeout. `chat_id` is the peer's account-id hex. `text` is always non-empty (a placeholder like `[photo, image/jpeg, 245 KB]` is synthesized for caption-less attachments). Items may carry `kind` (`richText`/`reply`/`edited`), `reply_to`, `edit_of`, and `attachments: [{ id, kind, mime, size, width?, height?, duration?, downloaded, url?, error? }]`. Add `&events=1` to also receive non-message signals (`kind`: `reaction`, `coinageSend`, `leftChat`, `contactAdded`) — opt-in, so a harness that ignores them never chat-replies to a reaction. |
+| `GET /inbound?wait=<secs>&limit=<n>` | long-poll; returns at most the requested bounded batch of leased `[{ delivery_id, lease_id, lease_ms, chat_id, text, message_id }, ...]`, or an empty array on timeout. `chat_id` is the peer's account-id hex. `text` is always non-empty (a placeholder like `[photo, image/jpeg, 245 KB]` is synthesized for caption-less attachments). Items may carry `kind` (`richText`/`reply`/`edited`), `reply_to`, `edit_of`, and `attachments: [{ id, kind, mime, size, width?, height?, duration?, downloaded, url?, error? }]`. Add `&events=1` to also receive non-message signals (`kind`: `reaction`, `coinageSend`, `leftChat`, `contactAdded`) — opt-in, so a harness that ignores them never chat-replies to a reaction. |
+| `POST /inbound/ack { delivery_id, lease_id }` | permanently acknowledges a leased inbound row after the framework has successfully handed it to its own runtime. Accepts `deliveries: [{ delivery_id, lease_id }, ...]` for a batch. Unacknowledged rows are retried after their lease expires; a stale claim acknowledges zero rows. |
+| `POST /inbound/renew { delivery_id, lease_id }` | extends an active lease for a long-running turn. Renew before `lease_ms` elapses, then ACK only the current lease. |
 | `GET /media/<id>` | bytes of a downloaded attachment (`id`/`url` from the inbound item), served with its content type |
 | `POST /send { chat_id, text, reply_to?, edit_of? }` | publishes a reply to that peer; returns `{ success, message_id }`. `message_id` is the outgoing message's id — hold on to it to edit that message later. `reply_to: <message_id>` renders as a quote of that peer message in the app; `edit_of: <message_id>` rewrites a message the bot sent earlier (the app updates the bubble in place). The two are mutually exclusive. **Live replies:** when a turn runs long, bot-core posts a "thinking…" placeholder; the first plain send for that peer is auto-upgraded into the placeholder's final edit (the returned `message_id` is the placeholder's), so the user sees one evolving bubble instead of thinking + answer. `edit_of` sends are throttled and coalesced server-side (latest-wins) to a statement-store-safe cadence — a harness may stream edits as fast as it likes. `GET /health` advertises this under `live: { supportsEdit, minEditMs, placeholderAfterMs }`. |
 | `POST /react { chat_id, message_id, emoji, remove? }` | reacts to a peer message with an emoji (shown as a chip under the bubble in the app); `remove: true` retracts a previous reaction. Returns `{ success }`. |
 | `POST /typing { chat_id }` | best-effort, currently a no-op |
 
-An adapter is a loop: poll `/inbound`, feed each message to the agent, `POST
-/send` the reply. Point it at the bridge with `POLKADOT_BRIDGE_URL`. bot-core
-enforces the allowlist before a message reaches the bridge, so unlisted senders
-never reach the agent or spend model quota.
+An adapter is a loop: poll a bounded `/inbound` batch, renew each active lease
+while its agent turn runs, ACK only after that handoff succeeds, then use
+`POST /send` for replies. Point
+it at the bridge with `POLKADOT_BRIDGE_URL` and `POLKADOT_BRIDGE_TOKEN`.
+bot-core enforces the allowlist before a message reaches the bridge, so unlisted
+senders never reach the agent or spend model quota.
 
 ## Hermes
 
@@ -51,8 +58,9 @@ pca deploy mybot --host root@server --harness hermes
 ```
 
 This starts a two-container stack (bot-core plus `nousresearch/hermes-agent` with
-the plugin bind-mounted at `/opt/data/plugins/polkadot` and
-`POLKADOT_BRIDGE_URL=http://bot:8799`). Hermes then needs its one-time model
+the plugin bind-mounted at `/opt/data/plugins/polkadot`,
+`POLKADOT_BRIDGE_URL=http://bot:8799`, and a bridge token in its secret env
+file). Hermes then needs its one-time model
 login, which cannot be automated; the deploy prints the command:
 
 ```bash
@@ -72,7 +80,8 @@ agent:
 ```
 
 For a local (non-Docker) setup, copy `hermes-plugin/polkadot` into
-`~/.hermes/plugins/`, export `POLKADOT_BRIDGE_URL`, and run `hermes gateway run`.
+`~/.hermes/plugins/`, export both `POLKADOT_BRIDGE_URL` and
+`POLKADOT_BRIDGE_TOKEN`, and run `hermes gateway run`.
 
 ## OpenClaw
 
@@ -101,6 +110,7 @@ Manual channel configuration, if you run OpenClaw yourself
 {
   "enabled": true,
   "bridgeUrl": "http://127.0.0.1:8799",
+  "bridgeToken": "<BOT_BRIDGE_TOKEN>",
   "dmPolicy": "allowlist",
   "allowFrom": ["<peer account-id hex>"]
 }
@@ -110,7 +120,8 @@ Two operational notes learned in deployment:
 
 - The gateway requires `gateway.mode: "local"` in its config and an
   `OPENCLAW_GATEWAY_TOKEN` in its environment when it detects it is running in a
-  container.
+  container. It also requires `POLKADOT_BRIDGE_TOKEN` (or the channel's
+  `bridgeToken`) to call bot-core.
 - Claude OAuth refresh tokens rotate. Once a container's claude CLI refreshes,
   any older copy of `.credentials.json` (for example the host original) is
   stale. If a redeploy reports "Not logged in", re-seed the container home from
@@ -135,9 +146,9 @@ the CLI's JSONL event stream; bot-core owns the shared spawn/stream loop.
 
 | Engine | Invokes | Reaches | Authentication |
 |---|---|---|---|
-| `claude` | `claude -p --output-format stream-json …` | Claude models | Claude Code login or `ANTHROPIC_API_KEY` |
-| `codex` | `codex exec --json …` | OpenAI models | `codex login` or `OPENAI_API_KEY` |
-| `opencode` | `opencode run --format json …` | **many providers** via `--model provider/model` (anthropic/…, openai/…, google/…, xai/…, openrouter/…, ollama/…) | that provider's key or `opencode auth login` |
+| `claude` | `claude -p --output-format stream-json …` | Claude models | Claude Code login |
+| `codex` | `codex exec --json …` | OpenAI models | `codex login` |
+| `opencode` | `opencode run --format json …` | **many providers** via `--model provider/model` (anthropic/…, openai/…, google/…, xai/…, openrouter/…, ollama/…) | `opencode auth login` |
 
 opencode is the many-models path: one engine reaches ~any provider, so there is
 no need for per-vendor brains (`gemini`/`grok` were removed — use
@@ -156,8 +167,8 @@ Related settings:
 - Tools are on by default (`BOT_AI_ALLOWED_TOOLS`, default `Bash,Read,Edit,Write`).
   `BOT_AI_SKIP_PERMISSIONS=1` grants full autonomy (all tools) — safe because a
   deployed engine runs inside its own container (see the safety model below).
-- The agent works in a persistent workspace (`BOT_AI_WORKSPACE`, default
-  `BOT_STATE_DIR/workspace`) that survives restarts.
+- The agent works in a persistent non-secret workspace (`BOT_AI_WORKSPACE`,
+  defaulting to a sibling of `BOT_STATE_DIR`) that survives restarts.
 - `BOT_AI_CMD`/`BOT_AI_ARGS` wire in a custom CLI that speaks claude-shaped
   stream-json (`__PROMPT__` is replaced with the prompt).
 - In-chat commands (direct engines only): /help, /reset (start a fresh session),
@@ -180,14 +191,16 @@ Related settings:
 ### Safety model for containerized agents
 
 A deployed engine runs its tools autonomously, so the boundary is the
-**container**, not a permission prompt. `pca deploy` builds a non-root image
-(`USER node` — Claude Code refuses `--dangerously-skip-permissions` as root)
-with the CLI baked in, mounts a persistent `/workspace` (the agent's cwd) and
-`/state`, and passes provider keys via `bot.env` and/or OAuth creds mounted at
-`./home`. The container has its own filesystem and open network egress but
-nothing from the host; the allowlist (`--owner`/`--allow`) gates who can drive
-it. `--safe-tools` restricts to the read/write/edit/bash allowlist instead of
-full autonomy. Sessions and the workspace persist across redeploys.
+**container**, not a permission prompt. `pca deploy` runs the transport as root
+only to own `/state` (the signing seed, session keys, and bridge token), then
+spawns the agent as the non-root `node` user with only persistent `/workspace`
+and `/home/node` access plus private per-turn attachment directories. The source
+mount is read-only; the container uses an init reaper, no-new-privileges, and
+process/memory/CPU ceilings. Provider API keys are not injected into the agent
+process; authenticate the CLI once through its native OAuth login in `/home/node`.
+An agent with tool access can still use its own provider credentials, so restrict
+senders with `--owner`/`--allow` and use `--safe-tools` when full autonomy is not
+appropriate. Sessions and the workspace persist across redeploys.
 
 An AI brain spends quota, so `create` requires an allowlist or an explicit
 `--public`.

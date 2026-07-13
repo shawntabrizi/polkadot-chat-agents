@@ -115,16 +115,17 @@ bytes live on a "HOP" store-and-forward node (JSON-RPC over WebSocket,
 32-byte `claimTicket` in the message (AES-256-GCM key and the sr25519 claim
 keypair, both via keyed blake2b), so receiving needs no on-chain state.
 `lib/hop-client.mjs` downloads in the per-peer work queue strictly *after* the
-ACK; blobs land in `BOT_STATE_DIR/media/<identifierHex>.<ext>` (0600, TTL +
-size-capped sweep) and are served to harnesses at `GET /media/:id`. A download
+ACK; blobs land in `BOT_STATE_DIR/media/<identifierHex>.<ext>` (0600, TTL + a
+hard cache budget enforced before every write) and are served to harnesses at
+`GET /media/:id`. A download
 failure becomes a note to the brain, never a dropped message.
 
 The peer chooses the `wssUrl`, so it is hostile input: wss-only, no credentials
 or IP-literal hosts, size caps enforced against the metadata *and* the actual
-bytes, per-chunk blake2b integrity checks. The app trusts only HOP nodes from
-its remote config; the bot has no equivalent list, so the default is
-allow-with-caps — set `BOT_HOP_ALLOWED_NODES` (comma-separated host suffixes)
-to pin trusted nodes. The `claimTicket` is key material: it is journaled with
+bytes, capped JSON-RPC frames, and per-chunk blake2b integrity checks. The app
+trusts only HOP nodes from its remote config; the bot has no equivalent list,
+so production attachment downloads require `BOT_HOP_ALLOWED_NODES`
+(comma-separated trusted host suffixes). The `claimTicket` is key material: it is journaled with
 the owed message (the state file already holds session keys) but never logged
 and never crosses the bridge.
 
@@ -200,14 +201,15 @@ Per-peer engine knobs: `/model` (any string, passed to the CLI's model flag),
 `--effort low|medium|high|xhigh|max`, codex `-c model_reasoning_effort=…`;
 opencode has none), `/project` (see workspaces below). Each turn's token/cost
 usage from the CLI's result event is logged as `BOT_AI_USAGE` and tallied
-in-memory for `/usage`. Downloaded attachments are staged into the turn cwd's
-`.attachments/` before the engine runs, so the agent acts on files inside its
-own workspace.
+in-memory for `/usage`. Downloaded attachments are staged in a private
+per-turn directory before the engine runs and removed after the turn, so the
+agent acts on files inside its own workspace.
 
 Multi-project workspaces (`BOT_AI_PROJECTS`, managed by `pca project`): a peer
 picks a registered project with `/project <alias>` — or `/project
 <alias>@<branch>`, which resolves to a lazily-created `git worktree` under
-`BOT_STATE_DIR/worktrees` (`lib/workspaces.mjs`; conservative alias/branch
+`BOT_AI_WORKSPACE/.worktrees` (or `BOT_AI_WORKTREES_DIR`)
+(`lib/workspaces.mjs`; conservative alias/branch
 charsets, path-escape guards). The active project persists per peer in the
 session snapshot; switching clears the resume token, because a resumed engine
 session is only valid in the cwd it started in. Bridge mode instead hands messages to an external
@@ -227,15 +229,24 @@ ignored them).
 
 ## Bridge contract
 
-Any framework that can run a poll loop can drive a bot:
+Any framework that can run a poll loop can drive a bot. Every route requires
+`Authorization: Bearer <BOT_BRIDGE_TOKEN>` (or `X-Bridge-Token`):
 
 - `GET /health` → `{ ok, account, identifierKey, username }`
-- `GET /inbound?wait=<secs>` → long-poll, returns `[{ chat_id, text, message_id }, ...]`
-  (empty array on timeout; `chat_id` is the peer's account-id hex). Items may
-  carry `kind`, `reply_to`, `edit_of`, and `attachments` (metadata + a
-  `/media/:id` URL). `&events=1` additionally delivers non-message signals
-  (reactions, coinage, leftChat, contactAdded) — opt-in, because an unaware
-  harness would chat-reply to a reaction.
+- `GET /inbound?wait=<secs>&limit=<n>` → long-poll, returns at most the requested
+  bounded batch of leased `[{ delivery_id, lease_id, lease_ms, chat_id, text,
+  message_id }, ...]` (empty array on timeout; `chat_id` is the peer's account-id
+  hex). Items may carry `kind`,
+  `reply_to`, `edit_of`, and `attachments` (metadata + a `/media/:id` URL). `&events=1`
+  additionally delivers non-message signals (reactions, coinage, leftChat,
+  contactAdded) — opt-in, because an unaware harness would chat-reply to a
+  reaction.
+- `POST /inbound/ack { delivery_id, lease_id }` (or
+  `deliveries: [{ delivery_id, lease_id }, ...]`) → commits a lease only after
+  the framework's handoff succeeded; unacknowledged rows are retried.
+- `POST /inbound/renew { delivery_id, lease_id }` → extends a lease while a
+  long-running agent turn is still active. Renew before `lease_ms` elapses;
+  stale claims are rejected and must not be ACKed.
 - `GET /media/:id` → bytes of a downloaded attachment
 - `POST /send { chat_id, text, reply_to?, edit_of? }` → `{ success, message_id }`
   (`reply_to` renders a quote; `edit_of` rewrites one of the bot's own messages)
@@ -255,14 +266,18 @@ app username) or an explicit `--public` for any brain that costs money.
 
 - `secret.json` (the bot's root seed) and `session-state.json` (session keys) are
   written mode 0600 and gitignored. Whoever holds the seed is the bot.
-- The bot-core transport never handles model credentials: direct engines call
-  the CLI (which owns its own auth), and frameworks hold their own. The
-  exception is the deploy CLI — `pca deploy --anthropic-key` (and
-  `--openai-key`/`--openrouter-key`/…) writes the key into the container's
-  `bot.env`; OAuth creds can instead be mounted at `./home`. Treat `bot.env` as
-  a secret (it also holds the seed; mode 0600, gitignored).
-- Deployed engines and harness stacks run the CLI as a non-root container user
-  (`USER node`), which is what lets a direct engine use
-  `--dangerously-skip-permissions` safely — the container is the sandbox for its
-  tools (own filesystem, open egress, nothing from the host; the allowlist gates
-  who can drive it). `--safe-tools` restricts to a read/write/edit/bash allowlist.
+- The bridge has an independent random `BOT_BRIDGE_TOKEN`; every bridge route
+  requires it. `pca create` persists the token in mode-0600 `config.json`, and
+  deployment keeps it in the bot's secret environment and, for bridge mode, the
+  framework's secret environment. A direct agent never receives it.
+- The bot-core transport never forwards provider API-key environment variables
+  to direct agents. Deployed CLIs authenticate through their native OAuth store
+  in `/home/node`; that credential is intentionally available to the agent, but
+  the signing seed and session state are not.
+- A direct deployment runs the transport as root only to own `/state`, then
+  spawns the CLI as uid/gid 1000 with a read-only source mount and access only to
+  `/workspace`, `/home/node`, and private per-turn attachment directories. The
+  container has an init reaper, no-new-privileges, and process/memory/CPU limits.
+  The container remains the tool boundary (open egress, nothing from the host);
+  the allowlist gates who can drive it.
+  `--safe-tools` restricts to a read/write/edit/bash allowlist.

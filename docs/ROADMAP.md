@@ -59,10 +59,10 @@ takopi has these; we have equivalents, often better-suited to our transport:
 ### MEDIUM
 
 3. **`/file`-style workspace I/O.**
-   - *In:* ✅ DONE — downloaded attachments are staged into the turn cwd's
-     `.attachments/` before the engine runs, so the agent acts on a file
-     inside its own workspace (falls back to the media-store path on copy
-     failure).
+   - *In:* ✅ DONE — downloaded attachments are staged in a private per-turn
+     directory before the engine runs and removed after the turn, so the agent
+     acts on a file inside its own workspace (falls back to the media-store
+     path on copy failure).
    - *Out (blocked):* pulling a file/artifact from the workspace back to chat
      needs outbound HOP upload, which is the existing backlog item (see
      docs/DESIGN.md "sending files"). Gated on that.
