@@ -13,10 +13,13 @@ configured Hermes install. See ../../docs/DESIGN.md (section 6b).
 """
 
 import asyncio
+from collections import deque
 import logging
 import os
+import re
+import shutil
 import tempfile
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Set, Tuple
 
 import aiohttp
 
@@ -36,6 +39,83 @@ _DEFAULT_BRIDGE_URL = "http://127.0.0.1:8799"
 # Statement-store chat messages are small; keep well under any cap.
 _MAX_MESSAGE_LENGTH = 4000
 _INBOUND_WAIT_SECS = 25
+_MAX_CONCURRENT_DISPATCHES = 4
+_MAX_PENDING_DISPATCHES = 100
+_MAX_ATTACHMENTS_PER_MESSAGE = 8
+_MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+_MAX_TOTAL_ATTACHMENT_BYTES = 32 * 1024 * 1024
+
+
+class _BoundedKeyedDispatcher:
+    """Bounded, ordered-per-chat worker pool for inbound bridge leases."""
+
+    def __init__(self, max_concurrent: int, max_pending: int):
+        self._max_pending = max_pending
+        self._queues: Dict[str, Deque[Callable[[], Awaitable[None]]]] = {}
+        self._ready: asyncio.Queue[str] = asyncio.Queue()
+        self._scheduled_keys: Set[str] = set()
+        self._running_keys: Set[str] = set()
+        self._pending = 0
+        self._closed = False
+        self._capacity = asyncio.Condition()
+        self._workers = [asyncio.create_task(self._worker()) for _ in range(max_concurrent)]
+
+    async def submit(self, key: str, work: Callable[[], Awaitable[None]]) -> None:
+        async with self._capacity:
+            while not self._closed and self._pending >= self._max_pending:
+                await self._capacity.wait()
+            if self._closed:
+                raise RuntimeError("Polkadot dispatcher is closed")
+            queue = self._queues.setdefault(key, deque())
+            queue.append(work)
+            self._pending += 1
+            self._schedule(key)
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        queued = sum(len(queue) for queue in self._queues.values())
+        self._pending -= queued
+        self._queues.clear()
+        self._scheduled_keys.clear()
+        async with self._capacity:
+            self._capacity.notify_all()
+        for worker in self._workers:
+            worker.cancel()
+        await asyncio.gather(*self._workers, return_exceptions=True)
+
+    def _schedule(self, key: str) -> None:
+        if key in self._running_keys or key in self._scheduled_keys or not self._queues.get(key):
+            return
+        self._scheduled_keys.add(key)
+        self._ready.put_nowait(key)
+
+    async def _worker(self) -> None:
+        while True:
+            key = await self._ready.get()
+            self._scheduled_keys.discard(key)
+            if self._closed:
+                return
+            queue = self._queues.get(key)
+            if not queue:
+                continue
+            work = queue.popleft()
+            if not queue:
+                self._queues.pop(key, None)
+            self._running_keys.add(key)
+            try:
+                await work()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 -- work records context before failing
+                logger.exception("Unhandled Polkadot inbound dispatch task")
+            finally:
+                self._running_keys.discard(key)
+                self._pending -= 1
+                self._schedule(key)
+                async with self._capacity:
+                    self._capacity.notify_all()
 
 
 class PolkadotAdapter(BasePlatformAdapter):
@@ -47,9 +127,14 @@ class PolkadotAdapter(BasePlatformAdapter):
         self.bridge_url = (
             os.getenv("POLKADOT_BRIDGE_URL") or extra.get("bridge_url") or _DEFAULT_BRIDGE_URL
         ).rstrip("/")
+        self.bridge_token = str(
+            os.getenv("POLKADOT_BRIDGE_TOKEN") or extra.get("bridge_token") or ""
+        ).strip()
         self.max_message_length = _MAX_MESSAGE_LENGTH
         self._session: Optional[aiohttp.ClientSession] = None
         self._recv_task: Optional[asyncio.Task] = None
+        self._dispatcher: Optional[_BoundedKeyedDispatcher] = None
+        self._attachment_dirs: Set[str] = set()
         self._running = False
         self._bot_account: Optional[str] = None
 
@@ -58,7 +143,10 @@ class PolkadotAdapter(BasePlatformAdapter):
         return "Polkadot"
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
-        self._session = aiohttp.ClientSession()
+        if not self.bridge_token:
+            logger.error("POLKADOT_BRIDGE_TOKEN (or platform extra.bridge_token) is required")
+            return False
+        self._session = self._new_session()
         try:
             async with self._session.get(f"{self.bridge_url}/health", timeout=10) as resp:
                 # 503 means the bridge is up but its chain socket is down (an
@@ -84,6 +172,9 @@ class PolkadotAdapter(BasePlatformAdapter):
             return False
 
         self._running = True
+        self._dispatcher = _BoundedKeyedDispatcher(
+            _MAX_CONCURRENT_DISPATCHES, _MAX_PENDING_DISPATCHES
+        )
         self._recv_task = asyncio.create_task(self._inbound_loop())
         return True
 
@@ -96,7 +187,17 @@ class PolkadotAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 pass
             self._recv_task = None
+        if self._dispatcher:
+            await self._dispatcher.close()
+            self._dispatcher = None
+        await self._cleanup_all_attachments()
         await self._close_session()
+
+    def _new_session(self) -> aiohttp.ClientSession:
+        """All bridge endpoints, including media, require the same bearer token."""
+        return aiohttp.ClientSession(
+            headers={"Authorization": f"Bearer {self.bridge_token}"}
+        )
 
     async def _close_session(self) -> None:
         if self._session:
@@ -104,35 +205,64 @@ class PolkadotAdapter(BasePlatformAdapter):
             self._session = None
 
     async def _inbound_loop(self) -> None:
-        """Long-poll the bridge for inbound chat messages and dispatch them."""
+        """Long-poll bridge leases and schedule bounded, ordered chat work."""
         backoff = 1.0
-        while self._running:
-            try:
-                url = f"{self.bridge_url}/inbound?wait={_INBOUND_WAIT_SECS}"
-                async with self._session.get(url, timeout=_INBOUND_WAIT_SECS + 10) as resp:
-                    if resp.status != 200:
-                        raise RuntimeError(f"inbound poll HTTP {resp.status}")
-                    messages = await resp.json()
-                backoff = 1.0
-                for msg in messages or []:
-                    await self._dispatch_inbound(msg)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001 — reconnect with backoff
-                logger.warning("Polkadot inbound poll error: %s (retry in %.0fs)", exc, backoff)
-                # Recreate the aiohttp session: a broken connector never self-heals
-                # otherwise (e.g. after the bridge container restarts), which would
-                # wedge the loop retrying against a dead connection forever.
+        try:
+            while self._running:
                 try:
-                    if self._session and not self._session.closed:
-                        await self._session.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                self._session = aiohttp.ClientSession()
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30.0)
+                    session = self._session
+                    dispatcher = self._dispatcher
+                    if not session or not dispatcher:
+                        return
+                    # Lease only a small multiple of worker capacity. Leasing a
+                    # whole bridge backlog would let queued turns outlive their
+                    # lease and be redelivered while still in this adapter.
+                    url = f"{self.bridge_url}/inbound?wait={_INBOUND_WAIT_SECS}&limit={_MAX_CONCURRENT_DISPATCHES * 2}"
+                    async with session.get(url, timeout=_INBOUND_WAIT_SECS + 10) as resp:
+                        if resp.status != 200:
+                            raise RuntimeError(f"inbound poll HTTP {resp.status}")
+                        messages = await resp.json()
+                    if not isinstance(messages, list):
+                        raise RuntimeError("inbound poll returned a non-array payload")
+                    backoff = 1.0
+                    for msg in messages:
+                        if not self._running:
+                            break
+                        if not isinstance(msg, dict):
+                            logger.warning("Ignoring malformed Polkadot bridge delivery")
+                            continue
+                        chat_key = str(msg.get("chat_id") or "invalid")
+                        await dispatcher.submit(
+                            chat_key, lambda msg=msg: self._process_delivery(msg)
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 -- reconnect with backoff
+                    if not self._running:
+                        break
+                    logger.warning("Polkadot inbound poll error: %s (retry in %.0fs)", exc, backoff)
+                    # Recreate the aiohttp session: a broken connector never
+                    # self-heals after a bridge restart. Failed active jobs are
+                    # left unacknowledged and will be redelivered by bot-core.
+                    try:
+                        if self._session and not self._session.closed:
+                            await self._session.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._session = self._new_session()
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 30.0)
+        finally:
+            # Stop queued jobs without acknowledging their leases. Active jobs
+            # are cancelled too, so shutdown leaves bot-core to redeliver safely.
+            if self._dispatcher:
+                await self._dispatcher.close()
+                self._dispatcher = None
+            await self._cleanup_all_attachments()
 
-    async def _fetch_attachments(self, attachments: List[Dict[str, Any]]) -> Tuple[List[str], List[str]]:
+    async def _fetch_attachments(
+        self, attachments: List[Dict[str, Any]]
+    ) -> Tuple[List[str], List[str], Optional[str]]:
         """Download bridge-served attachments to local files for vision access.
 
         bot-core has already pulled the encrypted blobs off the HOP node; the
@@ -142,51 +272,214 @@ class PolkadotAdapter(BasePlatformAdapter):
         """
         paths: List[str] = []
         types: List[str] = []
-        for a in attachments:
-            url = a.get("url")
-            if not (a.get("downloaded") and url):
-                logger.warning("Polkadot attachment %s not downloaded by bridge: %s", a.get("id"), a.get("error"))
+        temp_dir: Optional[str] = None
+        total_bytes = 0
+        session = self._session
+        if not session:
+            raise RuntimeError("Polkadot bridge not connected")
+        for index, a in enumerate(attachments[:_MAX_ATTACHMENTS_PER_MESSAGE]):
+            if not isinstance(a, dict):
+                logger.warning("Polkadot bridge attachment metadata is invalid")
                 continue
+            url = a.get("url")
+            if not (a.get("downloaded") and isinstance(url, str) and url.startswith("/media/")):
+                logger.warning("Polkadot attachment %s is unavailable from the bridge", a.get("id"))
+                continue
+            advertised_bytes = a.get("size")
+            remaining = _MAX_TOTAL_ATTACHMENT_BYTES - total_bytes
+            if remaining <= 0 or (
+                isinstance(advertised_bytes, int)
+                and advertised_bytes > min(_MAX_ATTACHMENT_BYTES, remaining)
+            ):
+                logger.warning("Polkadot attachment %s exceeds the local download limit", a.get("id"))
+                continue
+            file_path: Optional[str] = None
             try:
-                async with self._session.get(f"{self.bridge_url}{url}", timeout=60) as resp:
+                async with session.get(f"{self.bridge_url}{url}", timeout=60) as resp:
                     if resp.status != 200:
                         raise RuntimeError(f"HTTP {resp.status}")
-                    data = await resp.read()
-                mime = a.get("mime") or "application/octet-stream"
-                ext = (mime.split("/", 1) + [""])[1].replace("+", "-") or "bin"
-                path = os.path.join(tempfile.gettempdir(), f"polkadot-media-{str(a.get('id', 'x'))[:16]}.{ext}")
-                with open(path, "wb") as f:
-                    f.write(data)
-                paths.append(path)
+                    if resp.content_length is not None and resp.content_length > min(
+                        _MAX_ATTACHMENT_BYTES, remaining
+                    ):
+                        raise RuntimeError("attachment exceeds download limit")
+                    if temp_dir is None:
+                        temp_dir = await asyncio.to_thread(
+                            tempfile.mkdtemp, prefix="polkadot-media-"
+                        )
+                        await asyncio.to_thread(os.chmod, temp_dir, 0o700)
+                        self._attachment_dirs.add(temp_dir)
+                    mime = str(a.get("mime") or "application/octet-stream")
+                    suffix = mime.split("/", 1)[-1]
+                    ext = re.sub(r"[^A-Za-z0-9]", "", suffix)[:16] or "bin"
+                    file_path = os.path.join(temp_dir, f"attachment-{index}.{ext}")
+                    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                    if hasattr(os, "O_NOFOLLOW"):
+                        flags |= os.O_NOFOLLOW
+                    received = 0
+                    with os.fdopen(os.open(file_path, flags, 0o600), "wb") as output:
+                        while True:
+                            chunk = await resp.content.read(64 * 1024)
+                            if not chunk:
+                                break
+                            received += len(chunk)
+                            if received > min(_MAX_ATTACHMENT_BYTES, remaining):
+                                raise RuntimeError("attachment exceeds download limit")
+                            output.write(chunk)
+                total_bytes += received
+                paths.append(file_path)
                 types.append(mime)
             except Exception as exc:  # noqa: BLE001 — a failed fetch must not drop the message
+                if file_path:
+                    try:
+                        os.unlink(file_path)
+                    except FileNotFoundError:
+                        pass
                 logger.warning("Polkadot attachment fetch failed for %s: %s", a.get("id"), exc)
-        return paths, types
+        if len(attachments) > _MAX_ATTACHMENTS_PER_MESSAGE:
+            logger.warning(
+                "Skipped %s excess Polkadot attachments",
+                len(attachments) - _MAX_ATTACHMENTS_PER_MESSAGE,
+            )
+        return paths, types, temp_dir
 
-    async def _dispatch_inbound(self, msg: Dict[str, Any]) -> None:
+    async def _cleanup_attachments(self, temp_dir: Optional[str]) -> None:
+        if temp_dir:
+            try:
+                await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
+            finally:
+                self._attachment_dirs.discard(temp_dir)
+
+    async def _cleanup_all_attachments(self) -> None:
+        for temp_dir in tuple(self._attachment_dirs):
+            await self._cleanup_attachments(temp_dir)
+
+    async def _process_delivery(self, msg: Dict[str, Any]) -> None:
+        """Run a leased message and acknowledge only a completed handoff."""
+        delivery_id = msg.get("delivery_id")
+        lease_id = msg.get("lease_id")
+        if not isinstance(delivery_id, str) or not isinstance(lease_id, str):
+            logger.warning("Polkadot bridge delivery is missing delivery_id or lease_id")
+            return
+        renewal_stop = asyncio.Event()
+        renewal_task = asyncio.create_task(
+            self._renew_lease_loop(
+                delivery_id,
+                lease_id,
+                msg.get("lease_ms"),
+                renewal_stop,
+            )
+        )
+        try:
+            handed_off = await self._dispatch_inbound(msg)
+            if not handed_off:
+                return
+            # Prove lease ownership again immediately before the durable ACK.
+            await self._renew_lease(delivery_id, lease_id)
+            await self._acknowledge_with_retry(delivery_id, lease_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- leave the lease for redelivery
+            logger.warning("Polkadot dispatch failed; bridge delivery left unacknowledged: %s", exc)
+        finally:
+            renewal_stop.set()
+            renewal_task.cancel()
+            await asyncio.gather(renewal_task, return_exceptions=True)
+
+    async def _renew_lease_loop(
+        self,
+        delivery_id: str,
+        lease_id: str,
+        lease_ms: Any,
+        stop: asyncio.Event,
+    ) -> None:
+        """Keep an active turn leased without holding a whole backlog forever."""
+        if isinstance(lease_ms, int) and lease_ms >= 1000:
+            interval = max(0.25, min(60.0, lease_ms / 3000.0))
+        else:
+            interval = 60.0
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval)
+                return
+            except asyncio.TimeoutError:
+                pass
+            try:
+                await self._renew_lease(delivery_id, lease_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 -- final renewal before ACK retries it
+                logger.warning("Polkadot lease renewal failed: %s", exc)
+
+    async def _renew_lease(self, delivery_id: str, lease_id: str) -> None:
+        session = self._session
+        if not session:
+            raise RuntimeError("Polkadot bridge not connected")
+        async with session.post(
+            f"{self.bridge_url}/inbound/renew",
+            json={"delivery_id": delivery_id, "lease_id": lease_id},
+            timeout=10,
+        ) as resp:
+            data = await resp.json(content_type=None)
+            if not (200 <= resp.status < 300 and data.get("success") is True and data.get("renewed") == 1):
+                raise RuntimeError(data.get("error") or f"HTTP {resp.status}")
+
+    async def _acknowledge_with_retry(self, delivery_id: str, lease_id: str) -> None:
+        session = self._session
+        if not session:
+            raise RuntimeError("Polkadot bridge not connected")
+        last_error: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                async with session.post(
+                    f"{self.bridge_url}/inbound/ack",
+                    json={"delivery_id": delivery_id, "lease_id": lease_id},
+                    timeout=10,
+                ) as resp:
+                    data = await resp.json(content_type=None)
+                    if (
+                        200 <= resp.status < 300
+                        and data.get("success") is True
+                        and data.get("acknowledged") == 1
+                    ):
+                        return
+                    raise RuntimeError(data.get("error") or f"HTTP {resp.status}")
+            except Exception as exc:  # noqa: BLE001 -- retry transient bridge failures
+                last_error = exc
+                await asyncio.sleep(0.25 * (attempt + 1))
+        raise last_error or RuntimeError("inbound acknowledgement failed")
+
+    async def _dispatch_inbound(self, msg: Dict[str, Any]) -> bool:
         chat_id = msg.get("chat_id")
         text = msg.get("text") or ""
         if not chat_id or not text:
-            return
-        media_paths, media_types = await self._fetch_attachments(msg.get("attachments") or [])
-        source = self.build_source(
-            chat_id=chat_id,
-            chat_type="dm",
-            user_id=chat_id,
-            user_name=msg.get("user_name") or chat_id[:8],
-            message_id=msg.get("message_id"),
-        )
-        is_photo = any(t.startswith("image/") for t in media_types)
-        event = MessageEvent(
-            text=text,
-            message_type=MessageType.PHOTO if is_photo else MessageType.TEXT,
-            source=source,
-            message_id=msg.get("message_id"),
-            media_urls=media_paths,
-            media_types=media_types,
-            reply_to_message_id=msg.get("reply_to"),
-        )
-        await self.handle_message(event)
+            logger.warning("Polkadot bridge delivery is missing chat_id or text")
+            return False
+        attachments = msg.get("attachments") or []
+        if not isinstance(attachments, list):
+            raise RuntimeError("bridge delivery attachments must be an array")
+        media_paths, media_types, temp_dir = await self._fetch_attachments(attachments)
+        try:
+            source = self.build_source(
+                chat_id=chat_id,
+                chat_type="dm",
+                user_id=chat_id,
+                user_name=msg.get("user_name") or chat_id[:8],
+                message_id=msg.get("message_id"),
+            )
+            is_photo = any(t.startswith("image/") for t in media_types)
+            event = MessageEvent(
+                text=text,
+                message_type=MessageType.PHOTO if is_photo else MessageType.TEXT,
+                source=source,
+                message_id=msg.get("message_id"),
+                media_urls=media_paths,
+                media_types=media_types,
+                reply_to_message_id=msg.get("reply_to"),
+            )
+            await self.handle_message(event)
+            return True
+        finally:
+            await self._cleanup_attachments(temp_dir)
 
     async def send(self, chat_id: str, content: str, reply_to=None, metadata=None) -> SendResult:
         if not self._session:
@@ -266,7 +559,7 @@ def register(ctx):
         label="Polkadot",
         adapter_factory=lambda cfg: PolkadotAdapter(cfg),
         check_fn=check_requirements,
-        required_env=["POLKADOT_BRIDGE_URL"],
+        required_env=["POLKADOT_BRIDGE_URL", "POLKADOT_BRIDGE_TOKEN"],
         install_hint="Runs the Node bot-core bridge; no extra Python packages needed",
         allowed_users_env="POLKADOT_ALLOWED_USERS",
         allow_all_env="POLKADOT_ALLOW_ALL_USERS",

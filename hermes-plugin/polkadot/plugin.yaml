@@ -15,6 +15,10 @@ requires_env:
     description: "Base URL of the local bot-core bridge (e.g. http://127.0.0.1:8799)"
     prompt: "bot-core bridge URL"
     password: false
+  - name: POLKADOT_BRIDGE_TOKEN
+    description: "Bearer token for the local bot-core bridge"
+    prompt: "bot-core bridge token"
+    password: true
 optional_env:
   - name: POLKADOT_ALLOWED_USERS
     description: "Comma-separated peer account-id hexes allowed to chat (empty = use POLKADOT_ALLOW_ALL_USERS)"
