@@ -64,13 +64,14 @@ A direct engine runs its agent with real tools and, by default, full autonomy
 (`--dangerously-skip-permissions`). That is safe because of how the deployment
 is built, not because the agent is trusted:
 
-- **The container is the sandbox.** A deployed engine runs in a non-root
+- **The deployment is the boundary.** A deployed engine runs in a non-root
   container with its own filesystem and no access to the host. The agent can do
-  what it likes *inside* that box.
-- **The agent never sees the seed.** The signing seed and every secret live in
-  the transport process only; the agent CLI is spawned with a scrubbed
-  environment (no seed, no API keys) and dropped to a non-root user that can't
-  read the bot's state.
+  what it likes *inside* that box. `pca run` uses the local machine, so do not
+  give a locally run full-tool bot untrusted senders.
+- **The agent never sees the chat identity.** The signing seed and session
+  state stay with the transport process; the agent CLI is dropped to a non-root
+  user that cannot read them. The agent does retain its own provider login and
+  normal network access, which is why the sender allowlist remains essential.
 - **The bridge is authenticated.** The local HTTP control surface requires a
   32+ character `BOT_BRIDGE_TOKEN`, so nothing on the box can drive the bot
   just by reaching the port.

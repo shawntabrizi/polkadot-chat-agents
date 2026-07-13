@@ -3,11 +3,10 @@ layout: home
 
 hero:
   name: "Polkadot Chat Agents"
-  text: "Your agents. Encrypted and uncensorable."
+  text: "Your agents, on your terms."
   tagline: >
-    Run your own AI agents and talk to them from your phone — end-to-end
-    encrypted, with no central server to seize and no account to ban. They go
-    where you go, and answer only to you.
+    Run your own AI agents and talk to them from your phone. Conversations are
+    end-to-end encrypted and travel without a central chat service.
   actions:
     - theme: brand
       text: Get started
@@ -23,28 +22,25 @@ features:
   - title: Private by default
     details: >
       Only you — or the people you allow — can reach your agents. Every message
-      is end-to-end encrypted, so no one in the middle can read what you send or
-      what comes back.
-  - title: Nothing to shut down
+      is end-to-end encrypted, so conversation content is readable only by its
+      endpoints.
+  - title: No central chat service
     details: >
-      There is no central chat server and no company account behind your bot.
-      Nothing to seize, deplatform, or ban. Conversations live only on a
-      decentralized network and on your own devices.
+      Your bot runs on a computer you control. Its messages use a decentralized
+      store-and-forward layer instead of a platform's chat server.
   - title: Reachable from anywhere
     details: >
-      Message your agents from your phone, wherever you are. Ask a question,
-      lock your screen, and come back to the answer — the conversation waits for
-      you.
+      Message your agents from the Polkadot app wherever you are. If your phone
+      or bot reconnects later, the conversation catches up.
   - title: Real work, not just chat
     details: >
-      These are real agents with real tools. Give one a task and it acts — reads
-      and edits files, runs commands, works across your projects — instead of
-      only talking about it.
+      Choose an agent with the tools you need. A direct agent can read, edit,
+      and work in its own workspace instead of only talking about a task.
   - title: Your AI, your keys
     details: >
-      Bring the AI you already use — Claude, Codex, OpenCode, and more. Each bot
-      holds its own keys and runs in its own sandbox; your secrets stay with it
-      and never reach the agent or the network.
+      Bring the AI you already use — Claude, Codex, OpenCode, and more. In a
+      deployed bot, the agent runs separately from the signing keys and session
+      state that control the chat identity.
   - title: Yours to run
     details: >
       Free and open source. Stand one up on a laptop in minutes, or deploy it to

@@ -6,17 +6,17 @@ prev:
 
 # How it works
 
-The home page makes four promises: your agents are **private**, there's
-**nothing to shut down**, they're **reachable from anywhere**, and they're
-**yours**. This page explains the architecture that makes each of those true —
-and where Polkadot comes in.
+The home page promises private conversations, a chat layer without a central
+service, access from the Polkadot app, and a bot you operate yourself. This page
+explains the architecture behind those properties — and where its boundaries
+are.
 
 ## Why a normal chat bot can't make these promises
 
-An ordinary chat bot runs behind a company's server. That server sees every
-message, can be subpoenaed or breached, can ban your account, and can be shut
-down or blocked. "Private" and "uncensorable" aren't properties it can offer,
-because a single operator sits in the middle of every conversation.
+An ordinary chat bot runs behind a company's server. That operator is normally
+responsible for carrying the conversation and operating the account. This
+project moves the chat transport to a decentralized message layer instead. Your
+bot still needs a machine and network access that you operate.
 
 Polkadot Chat Agents removes the middle. There is no chat server at all.
 
@@ -32,9 +32,9 @@ lives on the chain rather than on anyone's server:
 - Statements persist until they expire, and reading them doesn't consume them,
   so a device that was offline simply catches up when it returns. This is why a
   conversation "waits for you."
-- No single party owns the mailbox. There's no operator to read your messages,
-  ban your account, or take the service down. That's what **nothing to shut
-  down** and **uncensorable** actually mean here.
+- No central chat company operates the mailbox. That removes the usual hosted
+  chat-service dependency, although ordinary network services and the machine
+  running your bot can still have outages.
 
 ## End-to-end encryption: private means private
 
@@ -63,20 +63,22 @@ message carries only a small encrypted reference; the bytes are fetched and
 decrypted from keys derived entirely from that reference, so receiving a file
 needs no central storage and no account anywhere.
 
-## Your AI, in its own sandbox
+## Your agent and its keys
 
 The bot itself is just a process you run. It holds its own signing key — the
-key *is* the identity — and when it runs an AI agent with real tools, that agent
-is spawned in a locked-down sandbox with the secrets stripped out. The agent can
-do its work; it cannot read the bot's identity or reach the network on its own.
-That's why **your keys stay yours**.
+key *is* the identity. In a deployed direct bot, the transport keeps that key
+and the session state while the AI-agent CLI runs as a non-root user in its own
+container. The agent can use its provider login and normal network access, so
+the allowlist still matters; it does not receive the signing key or chat session
+state. A local `pca run` uses your local environment, so reserve it for trusted
+senders.
 
 ## How the promises map to the mechanism
 
 | The promise | What makes it true |
 |---|---|
 | Private | Per-conversation end-to-end encryption; keys only at the endpoints. |
-| Nothing to shut down | Store-and-forward on a decentralized network — no server, no operator, no account. |
+| No central chat service | Store-and-forward on a decentralized network rather than a hosted chat platform. |
 | Reachable from anywhere | Messages persist on the network and are re-read on reconnect; the bot only needs outbound access. |
 | Yours to run | Open source; the bot is a process you own, holding its own keys. |
 | Spam-resistant, still open | On-chain proof of personhood gates who can be messaged, with no company as gatekeeper. |

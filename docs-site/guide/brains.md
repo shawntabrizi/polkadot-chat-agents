@@ -3,9 +3,10 @@
 A bot's **brain** is what produces its replies. Pick it with `--brain` at
 `create`, or change it later.
 
-Direct engines run a headless AI-agent CLI as an autonomous agent —
-verbatim prompts, native session memory (`--resume`), and real tools
-(bash / read / edit / write) in a container that is their sandbox.
+Direct engines run a headless AI-agent CLI as an autonomous agent — verbatim
+prompts, native session memory (`--resume`), and real tools (bash, read, edit,
+and write). A deployed bot runs those tools in a container; `pca run` uses the
+local machine, so do not use it with untrusted senders.
 
 | `--brain` | Replies come from | Reaches | Authentication |
 |---|---|---|---|

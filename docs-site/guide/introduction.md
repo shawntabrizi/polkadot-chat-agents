@@ -19,12 +19,13 @@ agent framework connected through a small HTTP bridge.
 
 ## Why it's shaped this way
 
-- **Serverless by construction.** Statements persist in the store until they
+- **No inbound chat service.** Statements persist in the store until they
   expire, and reads are non-destructive — a bot that was offline catches up by
-  re-reading its topics. There is nothing to host and no central operator.
-- **The container is the sandbox.** A direct engine runs its agent CLI with
-  real tools inside a non-root container; the transport process holds the
-  signing seed and never hands it to the agent.
+  re-reading its topics. The bot needs only outbound connections to the chat
+  network.
+- **Deployed separation.** A deployed direct engine runs its agent CLI in a
+  non-root container while the transport process holds the signing seed. A
+  local `pca run` uses your machine directly, so keep its senders trusted.
 - **One transport, many brains.** The same transport drives a direct engine or
   bridges to any framework that can speak a small HTTP contract.
 
