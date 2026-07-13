@@ -124,7 +124,7 @@ const verifiedPrivilegedStagingParent = () => {
 };
 
 export const createAgentRuntime = ({
-  engine,        // runner config from lib/runners.mjs (parseEvent, stripApiKeyEnv, effortLevels)
+  engine,        // runner config from lib/runners.mjs (parseEvent, effortLevels)
   engineName,    // "claude" | "codex" | "opencode" | "custom" — resume tokens are scoped to it
   engineCommand, // binary to spawn
   buildArgs,     // ({ prompt, model, resume, effort }) -> argv
@@ -133,9 +133,6 @@ export const createAgentRuntime = ({
   model = "",
   allowedModels = null,
   reasoning = "",
-  // Kept for callers using the old API. Provider keys never cross this
-  // process boundary, including when API billing was previously requested.
-  apiBilling: _apiBilling = false,
   idleMs = 600_000,
   maxMs = 0,
   peerCap = 500, // bound the per-peer maps (idle peers age out)
