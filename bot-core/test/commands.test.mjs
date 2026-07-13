@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createCommandHandler } from "../lib/commands.mjs";
+import { createCommandHandler, resolveModelPolicy } from "../lib/commands.mjs";
 
 const make = (over = {}) => {
   const resumeTokens = new Map();
@@ -10,6 +10,7 @@ const make = (over = {}) => {
     clearResume: (peerKey) => resumeTokens.delete(peerKey),
     peerModelOverrides,
     defaultModel: over.defaultModel ?? "",
+    allowedModels: over.allowedModels ?? null,
     username: over.username ?? "testbot.01",
     chainConnected: over.chainConnected ?? (() => true),
     workspaces: over.workspaces ?? null,
@@ -80,6 +81,44 @@ test("/model shows, sets per-peer, and reverts with default", () => {
 test("/model with no configured default says so", () => {
   const { handler } = make({ defaultModel: "" });
   assert.ok(handler("p", "/model").includes("(CLI default)"));
+});
+
+test("resolveModelPolicy: explicit config wins, else public locks and allowlisted opens", () => {
+  // Explicit config always wins, whether public or not.
+  assert.deepEqual(resolveModelPolicy({ configured: "a, b", isPublic: true }), ["a", "b"]);
+  assert.deepEqual(resolveModelPolicy({ configured: "", isPublic: false }), []); // empty string = deliberate lock
+  // No config: derive from reachability.
+  assert.deepEqual(resolveModelPolicy({ configured: null, isPublic: true }), []); // public -> locked
+  assert.equal(resolveModelPolicy({ configured: null, isPublic: false }), null);  // allowlisted -> open
+});
+
+test("/model open (allowlisted default): switching works", () => {
+  const { handler, peerModelOverrides } = make({ defaultModel: "sonnet", allowedModels: null });
+  assert.match(handler("p", "/model"), /Switch with \/model/);
+  assert.match(handler("p", "/model opus"), /answering you with opus/);
+  assert.equal(peerModelOverrides.get("p"), "opus");
+});
+
+test("/model locked (public default): switching disabled, default still works", () => {
+  const { handler, peerModelOverrides } = make({ defaultModel: "sonnet", allowedModels: [] });
+  assert.match(handler("p", "/model"), /disabled on this bot/);
+  assert.match(handler("p", "/model opus"), /disabled on this bot/);
+  assert.equal(peerModelOverrides.has("p"), false, "a locked bot must not record an override");
+  // Reverting to the default is always allowed.
+  peerModelOverrides.set("p", "leftover");
+  assert.match(handler("p", "/model default"), /Back to sonnet/);
+  assert.equal(peerModelOverrides.has("p"), false);
+});
+
+test("/model restricted (explicit list): only listed models switch", () => {
+  const { handler, peerModelOverrides } = make({ defaultModel: "sonnet", allowedModels: ["haiku", "opus"] });
+  assert.match(handler("p", "/model"), /Available: haiku, opus/);
+  assert.match(handler("p", "/model haiku"), /answering you with haiku/);
+  assert.equal(peerModelOverrides.get("p"), "haiku");
+  const reject = handler("p", "/model gpt-5");
+  assert.match(reject, /isn't available/);
+  assert.match(reject, /Available models: haiku, opus/);
+  assert.equal(peerModelOverrides.get("p"), "haiku", "a rejected switch must not change the override");
 });
 
 test("commands are case-insensitive and tolerate trailing space", () => {

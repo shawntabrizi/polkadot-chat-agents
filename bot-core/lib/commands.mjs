@@ -10,6 +10,18 @@ import { parseProjectSpec } from "./workspaces.mjs";
 
 const COMMAND_RE = /^\/([a-z][a-z0-9_-]*)(?:\s+(\S+))?\s*$/i;
 
+// Resolve the /model switching policy into the `allowedModels` shape the
+// handler expects: null = open (no restriction), [] = locked (no switching),
+// [".."] = restricted to a set. Explicit operator config always wins — an
+// empty string is a deliberate lock. Otherwise a public bot (no allowlist)
+// locks switching so an anonymous sender cannot select an expensive model on
+// the owner's quota, while an allowlisted bot leaves it open because only
+// trusted peers can reach it at all.
+export const resolveModelPolicy = ({ configured = null, isPublic = false } = {}) => {
+  if (configured != null) return String(configured).split(",").map((s) => s.trim()).filter(Boolean);
+  return isPublic ? [] : null;
+};
+
 export function createCommandHandler({
   clearResume,
   peerModelOverrides,
@@ -73,17 +85,24 @@ export function createCommandHandler({
       case "ping":
         return `🏓 pong — ${username || "bot"} is alive (chain: ${chainConnected() ? "connected" : "reconnecting"}).`;
       case "model": {
+        // allowedModels: null = open, [] = locked, [".."] = restricted set.
+        const locked = Array.isArray(allowedModels) && allowedModels.length === 0;
+        const restricted = Array.isArray(allowedModels) && allowedModels.length > 0;
         if (!argument) {
           const current = peerModelOverrides.get(peerKey) ?? (defaultModel || "(CLI default)");
+          if (locked) return `Model: ${current}. Switching is disabled on this bot.`;
+          if (restricted) return `Model: ${current}. Available: ${allowedModels.join(", ")} — /model <name>, or /model default.`;
           return `Model: ${current}. Switch with /model <name>, or /model default.`;
         }
         if (argument === "default") {
           peerModelOverrides.delete(peerKey);
           return `Back to ${defaultModel || "the CLI's default model"}.`;
         }
-        if (Array.isArray(allowedModels) && !allowedModels.includes(argument)) {
-          const choices = allowedModels.length ? allowedModels.join(", ") : "none";
-          return `"${argument}" isn't available on this bot. Allowed models: ${choices}.`;
+        // Public bots lock switching so a stranger can't run up the owner's
+        // bill; the operator opens it with BOT_AI_ALLOWED_MODELS.
+        if (locked) return "Model switching is disabled on this bot (only its operator can change the model).";
+        if (restricted && !allowedModels.includes(argument)) {
+          return `"${argument}" isn't available on this bot. Available models: ${allowedModels.join(", ")}.`;
         }
         peerModelOverrides.set(peerKey, argument);
         trimOverrides();

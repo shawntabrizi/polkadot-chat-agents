@@ -40,7 +40,9 @@
 //   final only), BOT_LIVE_TTL_MS (600000) + BOT_LIVE_TIMEOUT_TEXT — placeholder
 //   resolves to a timeout note if no answer finalized it in time.
 //   Direct engines (BOT_BRAIN=claude|codex|opencode): BOT_AI_MODEL (opencode
-//   takes a provider/model slug), BOT_AI_ALLOWED_TOOLS (Bash,Read,Edit,Write),
+//   takes a provider/model slug), BOT_AI_ALLOWED_MODELS (comma-sep /model
+//   allowlist; unset = open on an allowlisted bot, locked on a public one;
+//   empty string = locked), BOT_AI_ALLOWED_TOOLS (Bash,Read,Edit,Write),
 //   BOT_AI_SKIP_PERMISSIONS (1 = full autonomy), BOT_AI_IDLE_TIMEOUT_MS
 //   (600000, kills a silent/wedged turn), BOT_AI_MAX_MS (3600000 default hard
 //   cap), BOT_AI_MAX_CONCURRENT_TURNS / BOT_AI_MAX_QUEUED_TURNS, BOT_AI_WORKSPACE
@@ -60,6 +62,7 @@ import { timingSafeEqual } from "node:crypto";
 import { blake2b } from "@noble/hashes/blake2.js";
 import { createStateStore } from "./lib/session-store.mjs";
 import { createAgentRuntime } from "./lib/agent-runtime.mjs";
+import { resolveModelPolicy } from "./lib/commands.mjs";
 import { splitMessageText } from "./lib/chunk.mjs";
 import { createOutboundLanes } from "./lib/outbound-lanes.mjs";
 import { createWorkspaces } from "./lib/workspaces.mjs";
@@ -165,7 +168,9 @@ const greetText = env.BOT_GREET_TEXT ?? `👋 ${env.BOT_USERNAME || env.FAUCET_C
 // defined below. See docs/DESIGN.md. BOT_AI_MODEL pins a model (for opencode
 // this is a provider/model slug); per-peer /model overrides it.
 const aiModel = (env.BOT_AI_MODEL ?? "").trim();
-const aiAllowedModels = String(env.BOT_AI_ALLOWED_MODELS ?? aiModel).split(",").map((s) => s.trim()).filter(Boolean);
+// aiAllowedModels (the /model switching policy) is derived below, once the
+// peer allowlist is known — a public bot locks switching, an allowlisted one
+// leaves it open. See resolveModelPolicy.
 // Tools are on by default (the container is the sandbox). The allowlist is the
 // safe default; BOT_AI_SKIP_PERMISSIONS=1 grants full autonomy (all tools).
 const allowedTools = (env.BOT_AI_ALLOWED_TOOLS ?? "Bash,Read,Edit,Write").split(",").map((s) => s.trim()).filter(Boolean);
@@ -255,6 +260,11 @@ const SEEN_CAP = 5000; // bound the persisted dedup set
 const allowedPeers = new Set(
   String(env.BOT_ALLOWED_PEERS ?? "").split(",").map((s) => s.trim().replace(/^0x/i, "").toLowerCase()).filter(Boolean),
 );
+// /model switching policy: explicit BOT_AI_ALLOWED_MODELS always wins (empty
+// string = a deliberate lock); otherwise a public bot (empty allowlist) locks
+// switching so a stranger can't select an expensive model on the owner's
+// quota, and an allowlisted bot leaves it open. null=open, []=locked.
+const aiAllowedModels = resolveModelPolicy({ configured: env.BOT_AI_ALLOWED_MODELS ?? null, isPublic: allowedPeers.size === 0 });
 if (!seedHex) { console.error("BOT_SEED_HEX (or FAUCET_CHAT_SERVICE_SECRET) is required"); process.exit(2); }
 
 const hexToBytes = (hex) => {
@@ -892,6 +902,10 @@ const workspaces = engine ? createWorkspaces({
   log,
 }) : null;
 if (workspaces?.size) log("BOT_PROJECTS", { aliases: workspaces.aliases() });
+if (engine) log("BOT_MODEL_POLICY", {
+  switching: aiAllowedModels == null ? "open" : aiAllowedModels.length ? "restricted" : "locked",
+  ...(Array.isArray(aiAllowedModels) && aiAllowedModels.length ? { allowed: aiAllowedModels } : {}),
+});
 
 const agentRuntime = engine ? createAgentRuntime({
   engine,
