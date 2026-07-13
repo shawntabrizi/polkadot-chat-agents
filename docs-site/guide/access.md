@@ -34,6 +34,12 @@ whoever messages it, at whatever rate they message it. Treat `--public` as
 "I am funding this for the world."
 :::
 
+Public bots can still accept ordinary attachments, but their automatic Paseo
+file-delivery allowance is intentionally disabled. Keep outbound file delivery
+off unless you deliberately fund it and have set tight storage, queue, and
+model limits. The [public deployment profile](/reference/configuration#public-bot-deliberately-bounded)
+has a conservative starting point.
+
 ## What changes between the two
 
 The private/public choice isn't just who gets in — it changes what the bot
@@ -44,6 +50,7 @@ allows in chat:
 | Who can message | Only listed accounts | Anyone |
 | Who pays | You, for trusted people | You, for everyone |
 | `/model` switching | Can be opened (`pca model <bot> open`) — trusted peers only | Never unrestricted; at most an approved set (`pca model <bot> allow a,b`) |
+| Returning saved files | Ready automatically on the default Paseo testnet profile | No automatic finite-allowance profile |
 | Sensible model | Your call | Pin a cheaper model |
 
 The model-switching rule exists because switching to an expensive model spends

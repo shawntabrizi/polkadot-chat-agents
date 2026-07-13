@@ -1,8 +1,9 @@
 # CLI commands
 
-The `pca` command manages a bot's whole lifecycle. From the repo root without
-`npm link`, every command is `npm run <cmd> -- <args>` (or `npm start -- …` for
-`run`); with `npm link` in `bot-core/`, it's just `pca <cmd>`.
+The `pca` command manages a bot's whole lifecycle. Install it with
+`npm install -g polkadot-chat-agents` to use `pca <command>`. From a source
+checkout, use the universal form `npm run pca -- <command> <args>`; it works for
+every command, including `project`, `model`, and `storage`.
 
 | Command | Purpose |
 |---|---|
@@ -18,6 +19,7 @@ The `pca` command manages a bot's whole lifecycle. From the repo root without
 | `pca info <name>` | Show the address and how to message it. |
 | `pca project <name> …` | Manage the project registry (`add`, `rm`). |
 | `pca model <name> …` | Manage the `/model` switching policy (`allow`, `open`). |
+| `pca storage <name> [status, grant, or recover]` | Inspect, provision, or recover the private Paseo testnet file allowance. |
 
 ## Common flags
 
@@ -30,11 +32,28 @@ The `pca` command manages a bot's whole lifecycle. From the repo root without
 | `--username <u>` / `--digits NN` | create | Network username base / requested discriminator. |
 | `--model <m>` | create, run, deploy | Pin the model (saved at create; overrides per run/deploy). |
 | `--greet` | run, deploy | Message allowlisted owners once on startup. |
+| `--network paseo` | create | Use the named default network. Private bots on this profile receive automatic testnet file-delivery setup. |
+| `--no-register` | create | Create the identity locally; complete registration later with `pca register`. |
+| `--wait <seconds>` | create, register | How long to wait for on-chain registration confirmation. |
 | `--host <ssh>` | deploy, logs, status, stop | Target server (saved after first deploy). |
-| `--harness openclaw\|hermes` | deploy | Agent framework for a bridge bot. |
+| `--harness openclaw or hermes` | deploy | Agent framework for a bridge bot. |
 | `--safe-tools` | deploy | Restrict a direct engine to a read/write/edit/bash allowlist. |
 | `--dry-run` | deploy | Print the generated files without deploying. |
 
 Bots live in `~/.pca/bots/<name>/` (override with `PCA_BOTS_DIR`).
+
+## Private Paseo file allowance
+
+For a private bot on the default Paseo profile, `create`, `register`, and a
+non-dry-run `deploy` automatically check the separate account that returns
+saved files and request a testnet allowance when it is needed. Normal users do
+not need the Bulletin Console.
+
+`pca storage <name> status` is read-only. Run `grant` only when the status says
+capacity is missing, low, or expired. After an interrupted or uncertain
+submission, wait for any pending transaction, run `status`, then run `recover`.
+`recover --yes` only clears the local guard after you have established that the
+old transaction cannot finalize; it never submits another grant. See
+[Files & storage](/guide/files) for the user workflow and boundaries.
 
 For every runtime environment variable, see [Configuration](/reference/configuration).

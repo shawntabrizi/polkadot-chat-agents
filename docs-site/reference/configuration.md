@@ -43,7 +43,7 @@ BOT_ALLOWED_PEERS=40d4fd…,7015… # peer account hexes allowed to message it. 
 BOT_BRAIN=claude                # claude|codex|opencode (direct CLI) · bridge/hermes (external) · echo (test)
 
 # state & workspace (paths inside the container)
-BOT_STATE_DIR=/state            # session keys, dedup set, owed-reply journal, bot.pid. Root-owned; survives restarts
+BOT_STATE_DIR=/state            # session keys, dedup set, owed-reply journal, bot.pid, and saved peer files. Root-owned; survives restarts
 BOT_AI_WORKSPACE=/workspace     # where the agent's tools run; persists across restarts (worktrees under .worktrees/)
 
 # bridge (local HTTP control surface)
@@ -82,6 +82,90 @@ BOT_BRIDGE_HOST=0.0.0.0         # bind beyond loopback so the harness container 
 ```
 
 No `BOT_AI_*`: a bridge bot's model, tools, and commands live in the harness.
+
+---
+
+## Deployment profiles
+
+Choose the access model deliberately. Most personal and coding bots should be
+private: anyone who can message a bot can spend model quota and direct its
+tools. `pca create <name> --owner <address-or-username>` starts with that safer
+model.
+
+### Private bot: one or two trusted owners
+
+Use an explicit allowlist and treat the bot like a remote development machine
+shared only with those people. This is the practical profile when responsive
+agents, workspace edits, model switching, and durable files matter more than
+hostile-input resistance.
+
+```sh
+# One or two exact Polkadot account ids. Do not leave this empty.
+BOT_ALLOWED_PEERS=<peer-hex-1>,<peer-hex-2>
+
+# Trusted owners may select a model in chat. Do not also set
+# BOT_AI_ALLOWED_MODELS: an empty value deliberately locks switching.
+BOT_AI_MODEL_SWITCHING=open
+BOT_AI_SKIP_PERMISSIONS=1
+BOT_AI_MAX_CONCURRENT_TURNS=2
+BOT_AI_MAX_QUEUED_TURNS=20
+
+# Size durable files to the actual persistent /state volume.
+BOT_FILE_MAX_BYTES=104857600
+BOT_FILE_MAX_TOTAL_MB=2048
+BOT_FILE_MAX_PEER_MB=1024
+BOT_FILE_MAX_ENTRIES=4000
+BOT_FILE_MAX_PEER_ENTRIES=2000
+```
+
+`BOT_AI_SKIP_PERMISSIONS=1` gives a direct agent full tool autonomy inside its
+container. Use it only when every allowlisted sender is trusted with the bot's
+workspace and services it can reach. For a production HOP configuration, pin
+the download and upload nodes you trust, and provision its allowance through
+the appropriate operator flow. The generated framework deployment exposes its
+bridge only to the private Compose network; do not publish that port.
+
+### Public bot: deliberately bounded
+
+A public bot has `BOT_ALLOWED_PEERS` unset or empty. It must assume arbitrary
+prompts, attachment floods, repeated requests, and attempts to spend model or
+storage capacity. Give it one narrow task, a pinned low-cost model, and a
+read-only or disposable workspace.
+
+```sh
+BOT_ALLOWED_PEERS=
+
+# Public bots may expose only a small approved model set.
+BOT_AI_MODEL=<pinned-low-cost-model>
+BOT_AI_ALLOWED_MODELS=<pinned-low-cost-model>,<second-low-cost-model>
+BOT_AI_SKIP_PERMISSIONS=0
+BOT_AI_ALLOWED_TOOLS=Read
+BOT_AI_MAX_CONCURRENT_TURNS=2
+BOT_AI_MAX_QUEUED_TURNS=20
+BOT_AI_MAX_OUTPUT_BYTES=262144
+
+# Bound durable and temporary attachment storage per sender and globally.
+BOT_FILE_MAX_BYTES=10485760
+BOT_FILE_MAX_TOTAL_MB=256
+BOT_FILE_MAX_PEER_MB=25
+BOT_FILE_MAX_ENTRIES=200
+BOT_FILE_MAX_PEER_ENTRIES=20
+BOT_MEDIA_MAX_BYTES=10485760
+BOT_MEDIA_MAX_TOTAL_MB=128
+BOT_MEDIA_MAX_CONCURRENT_DOWNLOADS=1
+BOT_MEDIA_DOWNLOAD_QUEUE_CAP=20
+
+# Keep outbound HOP file delivery disabled. Private Paseo's automatic grant
+# intentionally does not apply to public bots.
+# BOT_HOP_UPLOAD_NODE=
+```
+
+Never mount a valuable host repository, credentials, a Docker socket, or a home
+directory into a public bot. Use a dedicated VM or volume with disk quotas, a
+low-privilege model account with spending limits, and firewall management ports.
+Do not publish the authenticated bridge port. The deploy container and resource
+limits help, but they cannot make a sensitive host mount or exposed bridge token
+safe.
 
 ---
 
@@ -134,6 +218,7 @@ variables `pca deploy` writes into `bot.env` automatically.
 | `BOT_BRIDGE_HOST` | `127.0.0.1` | Bind address. Deploy sets `0.0.0.0` for harness stacks (compose network only). **gen for bridge** |
 | `BOT_BRIDGE_BODY_MAX_BYTES` | 1000000 | Max request body. |
 | `BOT_BRIDGE_TEXT_MAX_BYTES` | 128000 | Max `/send` text length. |
+| `BOT_BRIDGE_FILE_MAX_BYTES` | `BOT_FILE_MAX_BYTES` | Max raw body accepted by `PUT /files/<chat>/<path>`. |
 | `BOT_BRIDGE_LEASE_MS` | 300000 | Inbound-delivery lease duration (at-least-once handoff). |
 | `BOT_BRIDGE_WAITER_CAP` | 100 | Max concurrent long-poll waiters. |
 | `BOT_BRIDGE_DELIVERY_BATCH_CAP` | 32 | Max messages leased per `/inbound`. |
@@ -199,6 +284,61 @@ variables `pca deploy` writes into `bot.env` automatically.
 | `BOT_HOP_TIMEOUT_MS` | 120000 | Per-download deadline. |
 | `BOT_HOP_RPC_FRAME_MAX_BYTES` | 4.5 MB | Max HOP RPC frame. |
 | `BOT_HOP_ALLOW_INSECURE` | `0` | Tests only: permit `ws://` and IP-literal hosts. |
+| `BOT_HOP_UPLOAD_NODE` | `""` | Operator-pinned HOP endpoint for returning files. It must match `BOT_HOP_ALLOWED_NODES` in production and needs an active Bulletin allowance. |
+| `BOT_HOP_UPLOAD_TIMEOUT_MS` | 120000 | Whole-upload deadline. |
+
+### Durable files
+
+`/file put <path>` saves exactly one same-message attachment in the sender's
+private vault. `/file ls`, `/file info`, `/file rm`, and `/file get` use that
+same peer namespace. The authenticated bridge can manage the same vault with
+`GET/PUT/DELETE /files/<chat_id>[/<path>]`; `POST /send` accepts only its
+`file_path`, never an arbitrary host path.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BOT_FILE_MAX_BYTES` | 50 MB | Largest individual durable file. |
+| `BOT_FILE_MAX_TOTAL_MB` | 1024 | Global durable-vault capacity. |
+| `BOT_FILE_MAX_ENTRIES` | 2000 | Global durable-vault entry cap. |
+| `BOT_FILE_MAX_PEER_MB` | min(256 MB, global cap), raised to the file cap if needed | Capacity available to one chat peer. |
+| `BOT_FILE_MAX_PEER_ENTRIES` | min(500, global cap) | Entry cap for one chat peer. |
+
+Outbound `/file get` and bridge `file_path` delivery use HOP with the derived
+`//allowance//bulletin//chat` signer. The deployed `BOT_SEED_HEX` can derive and
+use that account, but it cannot safely mint a production allowance: the
+People-chain claim requires the original mnemonic-derived Bandersnatch person
+proof. Keep that proof off the VPS. `/health` reports the allowance account and
+whether an upload node is configured.
+
+### Paseo testnet file delivery
+
+For a private bot created with the named `--network paseo` profile (the default),
+`pca` automatically writes the matching HOP settings:
+
+```sh
+BOT_HOP_UPLOAD_NODE=wss://paseo-hop-next-0.polkadot.io
+BOT_HOP_ALLOWED_NODES=paseo-hop-next-0.polkadot.io,paseo-hop-next-1.polkadot.io
+```
+
+On a successful normal `pca create`, `pca register`, or non-dry-run `pca deploy`,
+the local CLI asks the public Bulletin Paseo Next v2 testnet faucet to provision
+the derived account. It leaves sufficient capacity alone, refreshes an allowance
+near expiry, and requests a bounded allocation only when capacity is missing or
+low. No Console visit is needed for normal onboarding, and the action never
+sends the bot mnemonic or a production person proof to the faucet.
+
+Use `pca storage <bot> status` to inspect the result. Run `grant` only if the
+status says capacity is missing, low, or expired. Each attempt leaves a local
+recovery guard if its transaction or follow-up status is uncertain. Wait for any
+pending transaction, then run `status` and `pca storage <bot> recover`.
+`recover --yes` clears only that guard after you know the old transaction cannot
+finalize; it does not submit a faucet transaction, so run `grant` separately if
+needed.
+
+The [Bulletin Console Faucet](https://paritytech.github.io/polkadot-bulletin-chain/authorizations?tab=faucet)
+is an operational fallback, not a normal onboarding step. Public bots and
+arbitrary `wss://` endpoints are intentionally excluded from automatic
+provisioning. Production allocation remains an explicit local operator flow.
 
 ### Ingress (poll / subscribe)
 

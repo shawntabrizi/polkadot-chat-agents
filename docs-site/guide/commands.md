@@ -1,8 +1,10 @@
 # In-chat commands
 
 Direct-engine bots (claude / codex / opencode) answer a small set of slash
-commands themselves, instantly, without invoking the model. Bridge bots leave
-slash commands to their framework.
+commands themselves, instantly, without invoking the model. `/file` is a
+transport command handled before either a direct engine or a framework sees the
+message, so it also works with bridge and echo bots. Other slash commands are
+left to the framework in bridge mode.
 
 | Command | What it does |
 |---|---|
@@ -12,6 +14,7 @@ slash commands to their framework.
 | `/model` | Show the active model. `/model <name>` switches (if allowed); `/model default` reverts. See [model policy](/guide/brains#model-switching-in-chat). |
 | `/reasoning` | Show reasoning effort. `/reasoning <level>` sets it (claude / codex); `/reasoning default` reverts. |
 | `/project` | Show or switch the working project. `/project <name>[@branch]`, `/project default`. See [Projects](/guide/projects). |
+| `/file` | Save, list, inspect, remove, or return a file kept for this chat. See [Files & storage](/guide/files). |
 | `/usage` | Tokens and cost spent on this chat since the bot's last restart. |
 | `/ping` | Check the bot is alive and see chain-connection state. |
 

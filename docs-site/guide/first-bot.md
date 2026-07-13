@@ -6,16 +6,26 @@ Code, Codex, or OpenCode — so there's nothing new to authenticate: the bot jus
 drives the tool you're already using. It's the fastest way to see the whole
 thing work end to end, and you get live logs and Ctrl-C to stop.
 
+## Install
+
+Install the `pca` command with Node.js 22 or newer:
+
 ```bash
-npm install
-npm run create -- mycoolbot --brain claude --owner yourname.42
-npm start -- mycoolbot --greet
+npm install -g polkadot-chat-agents
 ```
 
-Every subcommand works this way from the repo root (`npm run list`, `npm run
-info -- mycoolbot`, …) — the `--` separates npm's arguments from the bot's. For
-the short `pca` form without the npm ceremony, run `npm link` once inside
-`bot-core/`; the rest of these docs use `pca`.
+Install and sign in to the AI-agent CLI you want the bot to use before creating
+it. For a no-model transport check, use `--brain echo` instead.
+
+If you are working from a source checkout, run `npm install` at the repository
+root and use `npm run pca -- <command> ...` in place of `pca <command> ...`.
+
+## Create and run
+
+```bash
+pca create mycoolbot --brain claude --owner yourname.42
+pca run mycoolbot --greet
+```
 
 ::: info Keeping it running
 A local bot is only alive while the `pca run` process is — close the terminal
@@ -38,6 +48,12 @@ usually confirmed within a few minutes; `pca info mycoolbot` re-checks.
 The number suffix is a network-assigned discriminator, since base names are not
 unique. Pass `--digits NN` to request a specific one; if it is taken, `create`
 says so before registering anything.
+
+For a private bot on the default Paseo network, `create` also prepares a
+separate testnet account used only to return saved files. The local CLI checks
+and provisions its allowance automatically; no portal visit is part of the
+normal setup. See [Files & storage](/guide/files) for the file workflow and
+what to do only if that automatic check is interrupted.
 
 ## Access and cost
 
