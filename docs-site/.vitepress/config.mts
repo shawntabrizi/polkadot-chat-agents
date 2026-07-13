@@ -65,10 +65,7 @@ export default defineConfig({
           text: "Explanation",
           items: [
             { text: "How it works", link: "/explanation/how-it-works" },
-            { text: "Architecture", link: "/explanation/architecture" },
-            { text: "Live replies", link: "/explanation/live-replies" },
-            { text: "Roadmap", link: "/explanation/roadmap" },
-            { text: "Chat protocol feedback", link: "/explanation/app-feedback" },
+            { text: "Architecture & security", link: "/explanation/architecture" },
           ],
         },
       ],

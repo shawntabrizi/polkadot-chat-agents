@@ -6,23 +6,21 @@ prev:
 
 # Configuration reference
 
-Every bot is configured entirely through environment variables read by
-`bot-core/index.mjs`. `pca create/run/deploy` generate the common ones for you;
-this document is the full reference, plus annotated `bot.env` examples.
+Every bot is configured through environment variables. `pca create`, `pca run`,
+and `pca deploy` generate the common ones for you; this document is the full
+operator reference, plus annotated `bot.env` examples.
 
 - **Local runs** (`pca run`): the CLI builds the environment from the bot's
   `~/.pca/bots/<name>/config.json` + `secret.json` and passes it to the process.
 - **Deployments** (`pca deploy`): the CLI writes a `bot.env` file (mode 0600) next
   to the compose stack on the server; the container reads it via `env_file`.
 
-`bot.env` holds `BOT_SEED_HEX` — the root seed from which every key derives.
+`bot.env` holds `BOT_SEED_HEX` - the root seed from which every key derives.
 **Whoever has that file is the bot.** It is mode 0600 and gitignored; never
 commit or log it. The agent CLI a direct-engine bot spawns is deliberately
-*not* given this file (see [DESIGN.md](/explanation/architecture) security model): its child
-environment is a scrubbed allowlist with the seed and all secrets removed.
-
-The authoritative, always-current list lives in the header comment at the top
-of `bot-core/index.mjs`. This doc mirrors it; if they disagree, the code wins.
+*not* given this file. Its child environment is a scrubbed allowlist with the
+seed and all secrets removed; see [Private & public bots](/guide/access) for
+the security model.
 
 ---
 
@@ -373,8 +371,7 @@ provisioning. Production allocation remains an explicit local operator flow.
 
 ## Model-switching policy, resolved
 
-The `/model` command's behavior comes from two variables, resolved in
-`resolveModelPolicy` (`lib/commands.mjs`):
+The `/model` command's behavior comes from two variables:
 
 1. `BOT_AI_ALLOWED_MODELS` set (non-empty) → **restricted** to that list, regardless of anything else.
 2. `BOT_AI_ALLOWED_MODELS=""` (explicitly empty) → **locked**.

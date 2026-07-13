@@ -2,8 +2,7 @@
 // turn's lifecycle (thinking -> progress -> final answer) instead of a
 // throwaway "thinking…" bubble plus a separate answer.
 //
-// The protocol constraints this module exists to enforce (see
-// docs/LIVE-REPLIES.md for the research behind them):
+// The protocol constraints this module exists to enforce:
 //  - The placeholder must be ACKed by the peer before any edit goes out: the
 //    statement store keeps ONE statement per channel, so an edit submitted
 //    before the peer fetched the placeholder REPLACES it and the original
@@ -177,8 +176,8 @@ export const createLiveReplies = ({
   };
 };
 
-// Takopi-style progress rendering: a header with a live elapsed clock and a
-// step counter, plus a rolling window of the most recent action lines.
+// Progress rendering: a header with a live elapsed clock and a step counter,
+// plus a rolling window of the most recent action lines.
 export const createProgressTracker = ({ label = "working", maxActions = 3, now = () => Date.now() } = {}) => {
   const startedAt = now();
   const actions = [];

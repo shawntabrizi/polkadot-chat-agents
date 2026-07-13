@@ -83,8 +83,8 @@ senders.
 | Yours to run | Open source; the bot is a process you own, holding its own keys. |
 | Spam-resistant, still open | On-chain proof of personhood gates who can be messaged, with no company as gatekeeper. |
 
-## Going deeper
+## Next steps
 
-This is the conceptual tour. For the protocol-level detail — session channels,
-acknowledgements, the outbound-statement model, live-reply editing, and the
-security model in full — see [Architecture](/explanation/architecture).
+Use the [Guide](/guide/introduction) to create and deploy a bot. The
+[Configuration reference](/reference/configuration) covers runtime settings,
+and the [Bridge HTTP API](/reference/bridge) is for framework integrations.

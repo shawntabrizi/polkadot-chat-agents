@@ -188,7 +188,7 @@ Related settings:
   backstop (`BOT_AI_IDLE_TIMEOUT_MS`, default 10 min of zero output) kills a
   wedged turn and unblocks the peer; `/stop` is the user's cancel lever.
 - `BOT_THINKING_AFTER_MS` (default 5000) and `BOT_THINKING_TEXT` control the
-  live placeholder posted when a reply is slow (see docs/LIVE-REPLIES.md);
+  live placeholder posted when a reply is slow;
   setting the text empty disables it.
 - `--greet` on `run`/`deploy` (env `BOT_GREET=1`, text via `BOT_GREET_TEXT`): the
   bot messages each allowlisted owner it has never talked to on startup — once

@@ -145,8 +145,7 @@ const thinkingText = env.BOT_THINKING_TEXT ?? "🤔 One moment — thinking…";
 const thinkingAfterMs = numberEnv("BOT_THINKING_AFTER_MS", 5000, { min: 0, max: 86_400_000 });
 // Live replies: the thinking placeholder becomes ONE evolving message (edited
 // through progress into the final answer) instead of a throwaway bubble.
-// Edit cadence/budget guardrails live in lib/live-reply.mjs; see
-// docs/LIVE-REPLIES.md for the protocol constraints behind them.
+// Edit cadence guardrails live in lib/live-reply.mjs.
 const liveMinEditMs = numberEnv("BOT_LIVE_EDIT_MIN_MS", 3000, { min: 100, max: 86_400_000 });
 const liveMaxEditMs = numberEnv("BOT_LIVE_EDIT_MAX_MS", 15_000, { min: liveMinEditMs, max: 86_400_000 });
 const liveHeartbeatMs = numberEnv("BOT_LIVE_HEARTBEAT_MS", 15_000, { min: 100, max: 86_400_000 });
@@ -805,7 +804,7 @@ const armThinking = (peerHex) => {
     thinkingTimers.delete(k);
     if (livePlaceholders.has(k)) return; // a previous turn's placeholder is still open
     // The placeholder is a LIVE message: it will be edited through progress
-    // frames and finally become the answer itself (docs/LIVE-REPLIES.md).
+    // frames and finally become the answer itself.
     livePlaceholders.set(k, (async () => {
       const handle = await liveReplies.begin(k, thinkingText);
       const tracker = createProgressTracker({ label: "working" });

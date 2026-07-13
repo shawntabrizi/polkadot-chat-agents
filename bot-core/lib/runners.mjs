@@ -2,10 +2,8 @@
 // headless coding-agent CLI and normalize its JSONL event stream to one
 // vocabulary; bot-core owns the generic spawn/stream/idle-backstop loop.
 //
-// Modeled on takopi's JsonlSubprocessRunner contract, adapted for an
-// unattended containerized chat bot. The design choices (verbatim prompt, no
-// injected persona, native --resume session continuity, tools on by default)
-// are takopi's; see docs/DESIGN.md.
+// The runners preserve verbatim prompts, native --resume session continuity,
+// and engine tools without injecting a persona.
 //
 // A normalized event is one of:
 //   { kind: "started", sessionId }  — capture for --resume next turn
@@ -20,9 +18,9 @@
 //
 // effortLevels lists the values an engine's reasoning-effort flag accepts
 // (null = the engine has no such flag); buildArgs takes `effort` accordingly.
-// Levels verified against takopi's engine_overrides + runner argv builders.
+// Each list matches the supported CLI values.
 
-// Shared one-line titles for tool events across engines (Takopi-style).
+// Shared one-line titles for tool events across engines.
 export const toolActionTitle = (name, input = {}) => {
   const n = String(name || "").toLowerCase();
   const base = (p) => String(p ?? "").split("/").filter(Boolean).pop() || String(p ?? "");
@@ -135,13 +133,13 @@ const codex = {
 // model may be an unconfigured local one).
 const opencode = {
   command: "opencode",
-  effortLevels: null, // no reasoning-effort flag (verified against takopi)
+  effortLevels: null, // OpenCode exposes no reasoning-effort flag.
   buildArgs({ prompt, model, resume, skipPermissions }) {
     const args = ["run", "--format", "json"];
     if (resume) args.push("--session", resume);
     if (model) args.push("--model", model);
     if (skipPermissions) args.push("--dangerously-skip-permissions");
-    // A purely numeric message is mishandled by opencode — takopi's workaround.
+    // Append a period so OpenCode does not misparse a purely numeric prompt.
     args.push(/^\d+$/.test(prompt) ? `${prompt}.` : prompt);
     return args;
   },
