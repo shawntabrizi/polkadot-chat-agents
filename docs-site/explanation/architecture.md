@@ -113,7 +113,7 @@ with each inbound kind:
 | anything else | logged (`BOT_UNSUPPORTED_CONTENT` / `BOT_UNDECODABLE_MESSAGE`) and skipped |
 
 Outbound, the bot can send plain text, replies (quotes), edits of its own
-messages, and reactions.
+messages, reactions, and HOP-backed file attachments.
 
 **Attachments (photos/videos/files).** The chat message carries only a
 reference — `{ identifier, claimTicket, wssUrl, meta }` — and the encrypted
@@ -136,10 +136,32 @@ so production attachment downloads require `BOT_HOP_ALLOWED_NODES`
 the owed message (the state file already holds session keys) but never logged
 and never crosses the bridge.
 
-**Sending files is not implemented.** The upload path needs `hop_submit` with a
-wallet-signed sender proof *plus* an on-chain bulletin-chain allowance for the
-bot account, and a trusted node to upload to — backlog, pending live
-investigation of whether a bot account can obtain that allowance.
+**Durable files.** Downloaded media is an evictable cache. A user opts into
+long-lived storage by captioning exactly one attachment `/file put <path>`.
+bot-core copies it into a private, peer-scoped vault with an atomic manifest,
+path and symlink checks, global limits, and independent per-peer byte and entry
+limits. `/file ls`, `/file info`, `/file rm`, and `/file get` can only operate
+inside that sender's namespace. The bridge exposes the same vault at
+authenticated `GET/PUT/DELETE /files/<chat_id>[/<path>]`, never as an arbitrary
+host path.
+
+**Sending files.** `hop_submit` creates a fresh claim ticket, encrypts the file
+chunks and metadata, signs each submission from a derived
+`//allowance//bulletin//chat` account, and wraps the reference in an encrypted
+rich-text message. Uploads use the operator-pinned `BOT_HOP_UPLOAD_NODE`; a
+peer-supplied HOP endpoint is never used for upload. That derived signer needs
+a Bulletin storage allowance.
+
+Private bots on the named Paseo testnet profile are the narrow exception:
+local `pca` can request the fixed public testnet faucet allowance for the
+derived account. `pca storage <bot> status|grant|recover` keeps that action
+outside the bot runtime: it checks remaining capacity and expiry, refreshes a
+near-expiry authorization, and retains a local guard after an interrupted or
+ambiguous submission. Recovery reads the chain before another grant is allowed.
+This does not provision production. A deployed `BOT_SEED_HEX` can derive and
+use the signer, but it cannot safely create a production allowance because that
+requires the original mnemonic-derived Bandersnatch person proof. Keep that
+proof in a confirmed local operator flow, not on the VPS or in chat.
 
 ## Identity: being messageable requires personhood
 
@@ -256,8 +278,12 @@ Any framework that can run a poll loop can drive a bot. Every route requires
   long-running agent turn is still active. Renew before `lease_ms` elapses;
   stale claims are rejected and must not be ACKed.
 - `GET /media/:id` → bytes of a downloaded attachment
-- `POST /send { chat_id, text, reply_to?, edit_of? }` → `{ success, message_id }`
-  (`reply_to` renders a quote; `edit_of` rewrites one of the bot's own messages)
+- `GET /files/:chat_id` and `GET /files/:chat_id/:path` → list or stream that
+  peer's durable files; `PUT` saves raw bytes and `DELETE` removes one
+- `POST /send { chat_id, text?, file_path?, reply_to?, edit_of? }` →
+  `{ success, message_id }`; `file_path` must name a file already in that same
+  peer vault and cannot be combined with a reply or edit (`reply_to` renders a
+  quote; `edit_of` rewrites one of the bot's own messages)
 - `POST /react { chat_id, message_id, emoji, remove? }` → `{ success }`
 - `POST /typing { chat_id }` → best-effort no-op
 
@@ -277,7 +303,9 @@ app username) or an explicit `--public` for any brain that costs money.
 - The bridge has an independent random `BOT_BRIDGE_TOKEN`; every bridge route
   requires it. `pca create` persists the token in mode-0600 `config.json`, and
   deployment keeps it in the bot's secret environment and, for bridge mode, the
-  framework's secret environment. A direct agent never receives it.
+  framework's secret environment. It can manage every peer vault, so the
+  framework is part of the trusted computing base. A direct agent never
+  receives it.
 - The bot-core transport never forwards provider API-key environment variables
   to direct agents. Deployed CLIs authenticate through their native OAuth store
   in `/home/node`; that credential is intentionally available to the agent, but
