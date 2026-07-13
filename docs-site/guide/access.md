@@ -62,9 +62,9 @@ for the full policy.
 
 ## The security model behind "open tools"
 
-A `pca deploy` direct engine runs its agent with real tools and full autonomy by
-default (`--dangerously-skip-permissions`). That relies on how the deployment is
-built, not on trust in the agent:
+A `pca deploy` AI direct engine runs its agent with real tools and full autonomy
+by default through its engine-specific bypass flag. That relies on how the
+deployment is built, not on trust in the agent:
 
 - **The deployment is the boundary.** A deployed engine runs in a non-root
   container with its own filesystem and no access to the host. The agent can do

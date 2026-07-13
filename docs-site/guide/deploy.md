@@ -23,9 +23,9 @@ state volume includes the saved-file vault, so keep it when moving or backing
 up a bot. [Files & storage](/guide/files) covers the workflow and recovery
 steps.
 
-## Direct engines
+## AI direct engines
 
-`echo`, `claude`, `codex`, and `opencode` deploy as a **single container**: the
+`claude`, `codex`, and `opencode` deploy as a **single container**: the
 transport process holds the seed and writes `/state`, while the agent CLI it
 spawns is dropped to a non-root user that can only touch its `/workspace` and
 OAuth home — it can't read the seed or the session state. The container is
@@ -35,6 +35,9 @@ After a direct deployment, run the printed one-time CLI login command (for a
 Claude bot, `claude login` through the printed `docker exec` command) so the
 agent can authenticate through its mounted OAuth home. Those credentials survive
 restarts and redeploys.
+
+`echo` also deploys as a single container, but it does not spawn an AI CLI and
+needs no provider login.
 
 ## Bridge bots
 

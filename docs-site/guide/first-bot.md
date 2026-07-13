@@ -52,9 +52,9 @@ says so before registering anything.
 
 The local bot name can include lowercase letters, digits, and hyphens, but a
 registered network username base must be at least six lowercase letters. When a
-bot name contains digits or hyphens, provide a separate valid base such as
-`--username mycoolbot`; use `--no-register` only when you intend to register
-later.
+bot name contains digits or hyphens other than the optional `.NN` discriminator,
+provide a separate valid base such as `--username mycoolbot`; use `--no-register`
+only when you intend to register later.
 
 For a private bot on the default Paseo network, `create` also prepares a
 separate testnet account used only to return saved files. The local CLI checks

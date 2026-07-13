@@ -29,7 +29,7 @@ every command, including `project`, `model`, and `storage`.
 | `--owner <who>` | create | Lock to one account (username, SS58, or hex). |
 | `--allow a,b` | create | Allowlist several accounts. |
 | `--public` | create | Allow anyone to message it (required for a paid brain left open). |
-| `--username <u>` / `--digits NN` | create | Network username base (six or more lowercase letters) / requested discriminator. A separate `--username` is required when the bot name contains digits or hyphens. |
+| `--username <u>` / `--digits NN` | create | Network username base (six or more lowercase letters) / requested discriminator. Use a separate `--username` when the bot name has digits or hyphens other than its optional `.NN` suffix. |
 | `--model <m>` | create, run, deploy | Pin the model (saved at create; overrides per run/deploy). |
 | `--greet` | run, deploy | Message allowlisted owners once on startup. |
 | `--network paseo` | create | Use the named default network. Private bots on this profile receive automatic testnet file-delivery setup. |
