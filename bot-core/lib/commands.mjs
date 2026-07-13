@@ -13,22 +13,20 @@ const COMMAND_RE = /^\/([a-z][a-z0-9_-]*)(?:\s+(\S+))?\s*$/i;
 // Resolve the /model switching policy into the `allowedModels` shape the
 // handler expects: null = open (no restriction), [] = locked (no switching),
 // [".."] = restricted to a set. Explicit operator config always wins — an
-// empty string is a deliberate lock. Otherwise a public bot (no allowlist)
-// locks switching so an anonymous sender cannot select an expensive model on
-// the owner's quota, while an allowlisted bot leaves it open because only
-// trusted peers can reach it at all.
-export const resolveModelPolicy = ({ configured = null, isPublic = false } = {}) => {
+// empty string is a deliberate lock. Unconfigured bots lock switching by
+// default; an operator must explicitly opt a non-public bot into open
+// switching.
+export const resolveModelPolicy = ({ configured = null, isPublic = false, allowOpen = false } = {}) => {
   if (configured != null) return String(configured).split(",").map((s) => s.trim()).filter(Boolean);
-  return isPublic ? [] : null;
+  return allowOpen === true && !isPublic ? null : [];
 };
 
 export function createCommandHandler({
   clearResume,
   peerModelOverrides,
   defaultModel,
-  // Null preserves the historical unrestricted behavior for embedders. Direct
-  // bot runtimes pass an explicit allowlist so chat users cannot select an
-  // arbitrary expensive/provider-backed model.
+  // null = open, [] = locked, [".."] = a restricted set. Direct bot runtimes
+  // resolve this from their explicit operator-owned configuration.
   allowedModels = null,
   username,
   chainConnected,
@@ -45,6 +43,14 @@ export function createCommandHandler({
   getUsage = () => null,
 }) {
   const hasProjects = () => (workspaces?.size ?? 0) > 0;
+  // allowedModels: null = open, [] = locked, [".."] = restricted set.
+  const modelSwitchingLocked = Array.isArray(allowedModels) && allowedModels.length === 0;
+  const modelSwitchingRestricted = Array.isArray(allowedModels) && allowedModels.length > 0;
+  const modelHelp = modelSwitchingLocked
+    ? "/model — show the active model"
+    : modelSwitchingRestricted
+      ? "/model — show or select an approved model"
+      : "/model — show or switch model";
   const projectLabel = (p) => (p ? `${p.alias}${p.branch ? `@${p.branch}` : ""}` : null);
   // Shared by "/project <spec>" and the bare "/<alias> [@branch]" shortcut.
   // Switching changes the turn cwd, and a resume token is scoped to its cwd —
@@ -71,7 +77,7 @@ export function createCommandHandler({
           "Commands:",
           "/reset — start a fresh session (forget our conversation so far)",
           "/stop — stop what I'm currently working on",
-          "/model — show the model answering you (/model <name> to switch, /model default to go back)",
+          modelHelp,
           ...(effortLevels ? ["/reasoning — dial my thinking depth (/reasoning <level>, /reasoning default)"] : []),
           ...(hasProjects() ? ["/project — pick the project I work in (/project <name>[@branch], /project default)"] : []),
           "/usage — tokens and cost spent on this chat since my last restart",
@@ -85,28 +91,32 @@ export function createCommandHandler({
       case "ping":
         return `🏓 pong — ${username || "bot"} is alive (chain: ${chainConnected() ? "connected" : "reconnecting"}).`;
       case "model": {
-        // allowedModels: null = open, [] = locked, [".."] = restricted set.
-        const locked = Array.isArray(allowedModels) && allowedModels.length === 0;
-        const restricted = Array.isArray(allowedModels) && allowedModels.length > 0;
         if (!argument) {
           const current = peerModelOverrides.get(peerKey) ?? (defaultModel || "(CLI default)");
-          if (locked) return `Model: ${current}. Switching is disabled on this bot.`;
-          if (restricted) return `Model: ${current}. Available: ${allowedModels.join(", ")} — /model <name>, or /model default.`;
+          if (modelSwitchingLocked) return `Model: ${current}. Switching is managed by this bot's operator.`;
+          if (modelSwitchingRestricted) return `Model: ${current}. Available: ${allowedModels.join(", ")} — /model <name>, or /model default.`;
           return `Model: ${current}. Switch with /model <name>, or /model default.`;
         }
         if (argument === "default") {
-          peerModelOverrides.delete(peerKey);
-          return `Back to ${defaultModel || "the CLI's default model"}.`;
+          if (!peerModelOverrides.delete(peerKey)) {
+            return `Already using ${defaultModel || "the CLI's default model"}.`;
+          }
+          clearResume(peerKey);
+          trimOverrides();
+          return `Back to ${defaultModel || "the CLI's default model"} — fresh session.`;
         }
-        // Public bots lock switching so a stranger can't run up the owner's
-        // bill; the operator opens it with BOT_AI_ALLOWED_MODELS.
-        if (locked) return "Model switching is disabled on this bot (only its operator can change the model).";
-        if (restricted && !allowedModels.includes(argument)) {
+        if (modelSwitchingLocked) return "Model switching is managed by this bot's operator.";
+        if (modelSwitchingRestricted && !allowedModels.includes(argument)) {
           return `"${argument}" isn't available on this bot. Available models: ${allowedModels.join(", ")}.`;
         }
+        // Model names become a positional value for the native CLI's model
+        // flag. Do not allow a chat sender to turn it into another CLI option.
+        if (argument.startsWith("-") || argument.includes("\0")) return "That isn't a valid model name.";
+        if (peerModelOverrides.get(peerKey) === argument) return `Already answering you with ${argument}.`;
+        clearResume(peerKey);
         peerModelOverrides.set(peerKey, argument);
         trimOverrides();
-        return `OK — answering you with ${argument} from now on (this chat only; /model default to undo).`;
+        return `OK — answering you with ${argument} from now on in a fresh session (this chat only; /model default to undo).`;
       }
       case "reasoning": {
         if (!effortLevels) return "This engine has no reasoning control — /model is the lever it offers.";

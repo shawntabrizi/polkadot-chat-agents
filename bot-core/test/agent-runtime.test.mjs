@@ -95,6 +95,16 @@ test("commands answer via sendText without spawning the engine", async () => {
   assert.match(h.sent[1], /No usage recorded/);
 });
 
+test("model overrides are persisted and removed with /model default", async () => {
+  const h = makeRuntime({ model: "sonnet", allowedModels: ["sonnet", "opus"] });
+  await h.runtime.handleMessage("peer", { text: "/model opus", messageId: "M1", kind: "text" });
+  assert.deepEqual(h.runtime.peerSnapshot("peer"), { mo: "opus" });
+  assert.ok(h.persists() >= 1, "model override must survive a restart");
+  await h.runtime.handleMessage("peer", { text: "/model default", messageId: "M2", kind: "text" });
+  assert.deepEqual(h.runtime.peerSnapshot("peer"), {});
+  assert.ok(h.persists() >= 2, "reverting the model must remove the persisted override");
+});
+
 test("an engine failure delivers the apology, not silence", async () => {
   const h = makeRuntime({ script: "echo nope >&2; exit 1" });
   await h.runtime.handleMessage("peer", { text: "hi", messageId: "M1", kind: "text" });
@@ -193,24 +203,43 @@ test("agent output is bounded before a malformed stream can consume unbounded me
   assert.match(h.delivered[0], /couldn't reach my agent/);
 });
 
-test("restore honors the engine+workspace scoping of resume tokens", () => {
-  const h = makeRuntime();
-  // Same engine + workspace: token restores.
-  h.runtime.noteRestoredAgent({ engine: "claude", workspace: h.workspace });
+test("restore honors engine, workspace, and model scoping of resume tokens", () => {
+  const h = makeRuntime({ model: "sonnet" });
+  // Same engine, workspace, and model: token restores.
+  h.runtime.noteRestoredAgent({ engine: "claude", workspace: h.workspace, model: "sonnet" });
   h.runtime.restorePeer("p1", { rs: "TOK" });
   assert.deepEqual(h.runtime.peerSnapshot("p1"), { rs: "TOK" });
   // Different workspace: token dropped for shared-workspace peers.
-  const h2 = makeRuntime();
-  h2.runtime.noteRestoredAgent({ engine: "claude", workspace: "/somewhere/else" });
+  const h2 = makeRuntime({ model: "sonnet" });
+  h2.runtime.noteRestoredAgent({ engine: "claude", workspace: "/somewhere/else", model: "sonnet" });
   h2.runtime.restorePeer("p1", { rs: "TOK" });
   assert.deepEqual(h2.runtime.peerSnapshot("p1"), {});
   assert.ok(h2.events.some((e) => e.event === "BOT_RESUME_INVALIDATED"));
+  // Changing the operator-selected default model also starts a new session.
+  const hModel = makeRuntime({ model: "opus" });
+  hModel.runtime.noteRestoredAgent({ engine: "claude", workspace: hModel.workspace, model: "sonnet" });
+  hModel.runtime.restorePeer("p1", { rs: "TOK" });
+  assert.deepEqual(hModel.runtime.peerSnapshot("p1"), {});
+  assert.ok(hModel.events.some((e) => e.event === "BOT_RESUME_INVALIDATED"));
   // A project peer whose project vanished loses both project and token.
-  const h3 = makeRuntime();
-  h3.runtime.noteRestoredAgent({ engine: "claude", workspace: h3.workspace });
+  const h3 = makeRuntime({ model: "sonnet" });
+  h3.runtime.noteRestoredAgent({ engine: "claude", workspace: h3.workspace, model: "sonnet" });
   h3.runtime.restorePeer("p1", { rs: "TOK", pj: "ghost" });
   assert.deepEqual(h3.runtime.peerSnapshot("p1"), {});
   assert.ok(h3.events.some((e) => e.event === "BOT_PROJECT_DROPPED"));
+});
+
+test("restore preserves an approved model override and drops a revoked one with its token", () => {
+  const h = makeRuntime({ model: "sonnet", allowedModels: ["sonnet", "opus"] });
+  h.runtime.noteRestoredAgent({ engine: "claude", workspace: h.workspace, model: "sonnet" });
+  h.runtime.restorePeer("p1", { rs: "TOK", mo: "opus" });
+  assert.deepEqual(h.runtime.peerSnapshot("p1"), { rs: "TOK", mo: "opus" });
+
+  const locked = makeRuntime({ model: "sonnet", allowedModels: ["sonnet"] });
+  locked.runtime.noteRestoredAgent({ engine: "claude", workspace: locked.workspace, model: "sonnet" });
+  locked.runtime.restorePeer("p1", { rs: "TOK", mo: "opus" });
+  assert.deepEqual(locked.runtime.peerSnapshot("p1"), {});
+  assert.ok(locked.events.some((e) => e.event === "BOT_MODEL_OVERRIDE_DROPPED"));
 });
 
 test("downloaded attachments are privately staged for a turn then cleaned up", async () => {

@@ -40,8 +40,6 @@ export const toolActionTitle = (name, input = {}) => {
 // Invocation & event schema verified live against the claude CLI.
 const claude = {
   command: "claude",
-  // The runtime provides a secret-free environment to every child CLI.
-  stripApiKeyEnv: true,
   effortLevels: ["low", "medium", "high", "xhigh", "max"],
   buildArgs({ prompt, model, resume, allowedTools, skipPermissions, effort }) {
     const args = ["-p", "--output-format", "stream-json", "--verbose"];
@@ -86,7 +84,6 @@ const claude = {
 // otherwise blocks "Reading additional input from stdin".
 const codex = {
   command: "codex",
-  stripApiKeyEnv: false,
   effortLevels: ["minimal", "low", "medium", "high", "xhigh"],
   buildArgs({ prompt, model, resume, skipPermissions, effort }) {
     const args = ["exec", "--json", "--skip-git-repo-check", "--color=never"];
@@ -138,7 +135,6 @@ const codex = {
 // model may be an unconfigured local one).
 const opencode = {
   command: "opencode",
-  stripApiKeyEnv: false,
   effortLevels: null, // no reasoning-effort flag (verified against takopi)
   buildArgs({ prompt, model, resume, skipPermissions }) {
     const args = ["run", "--format", "json"];

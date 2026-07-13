@@ -67,15 +67,19 @@ test("/ping reflects chain state and username", () => {
   assert.ok(down.includes("reconnecting"));
 });
 
-test("/model shows, sets per-peer, and reverts with default", () => {
-  const { handler, peerModelOverrides } = make({ defaultModel: "claude-sonnet" });
+test("/model shows, sets per-peer, and reverts with a fresh native session", () => {
+  const { handler, resumeTokens, peerModelOverrides } = make({ defaultModel: "claude-sonnet" });
   assert.ok(handler("alice", "/model").includes("claude-sonnet"));
+  resumeTokens.set("alice", "SID-A");
   handler("alice", "/model haiku");
   assert.equal(peerModelOverrides.get("alice"), "haiku");
+  assert.equal(resumeTokens.has("alice"), false, "changing models must not reuse a token from another model");
   assert.ok(handler("alice", "/model").includes("haiku"));
   assert.equal(peerModelOverrides.has("bob"), false); // per-peer, not global
+  resumeTokens.set("alice", "SID-B");
   handler("alice", "/model default");
   assert.equal(peerModelOverrides.has("alice"), false);
+  assert.equal(resumeTokens.has("alice"), false, "returning to the default model must start a fresh session");
 });
 
 test("/model with no configured default says so", () => {
@@ -83,26 +87,37 @@ test("/model with no configured default says so", () => {
   assert.ok(handler("p", "/model").includes("(CLI default)"));
 });
 
-test("resolveModelPolicy: explicit config wins, else public locks and allowlisted opens", () => {
+test("resolveModelPolicy: explicit config restricts, and switching locks by default", () => {
   // Explicit config always wins, whether public or not.
   assert.deepEqual(resolveModelPolicy({ configured: "a, b", isPublic: true }), ["a", "b"]);
   assert.deepEqual(resolveModelPolicy({ configured: "", isPublic: false }), []); // empty string = deliberate lock
-  // No config: derive from reachability.
-  assert.deepEqual(resolveModelPolicy({ configured: null, isPublic: true }), []); // public -> locked
-  assert.equal(resolveModelPolicy({ configured: null, isPublic: false }), null);  // allowlisted -> open
+  // No config locks regardless of reachability.
+  assert.deepEqual(resolveModelPolicy({ configured: null, isPublic: true }), []);
+  assert.deepEqual(resolveModelPolicy({ configured: null, isPublic: false }), []);
+  // Open switching requires an explicit opt-in and is never allowed publicly.
+  assert.equal(resolveModelPolicy({ configured: null, isPublic: false, allowOpen: true }), null);
+  assert.deepEqual(resolveModelPolicy({ configured: null, isPublic: true, allowOpen: true }), []);
 });
 
-test("/model open (allowlisted default): switching works", () => {
+test("/model open: help and switching describe the available control", () => {
   const { handler, peerModelOverrides } = make({ defaultModel: "sonnet", allowedModels: null });
+  assert.match(handler("p", "/help"), /\/model — show or switch model/);
   assert.match(handler("p", "/model"), /Switch with \/model/);
   assert.match(handler("p", "/model opus"), /answering you with opus/);
   assert.equal(peerModelOverrides.get("p"), "opus");
 });
 
-test("/model locked (public default): switching disabled, default still works", () => {
+test("/model open rejects option-shaped model names", () => {
+  const { handler, peerModelOverrides } = make({ defaultModel: "sonnet", allowedModels: null });
+  assert.match(handler("p", "/model --dangerously-bypass-approvals-and-sandbox"), /isn't a valid model name/);
+  assert.equal(peerModelOverrides.has("p"), false);
+});
+
+test("/model locked: help shows status and the operator manages switching", () => {
   const { handler, peerModelOverrides } = make({ defaultModel: "sonnet", allowedModels: [] });
-  assert.match(handler("p", "/model"), /disabled on this bot/);
-  assert.match(handler("p", "/model opus"), /disabled on this bot/);
+  assert.match(handler("p", "/help"), /\/model — show the active model/);
+  assert.match(handler("p", "/model"), /managed by this bot's operator/);
+  assert.match(handler("p", "/model opus"), /managed by this bot's operator/);
   assert.equal(peerModelOverrides.has("p"), false, "a locked bot must not record an override");
   // Reverting to the default is always allowed.
   peerModelOverrides.set("p", "leftover");
@@ -112,6 +127,7 @@ test("/model locked (public default): switching disabled, default still works", 
 
 test("/model restricted (explicit list): only listed models switch", () => {
   const { handler, peerModelOverrides } = make({ defaultModel: "sonnet", allowedModels: ["haiku", "opus"] });
+  assert.match(handler("p", "/help"), /\/model — show or select an approved model/);
   assert.match(handler("p", "/model"), /Available: haiku, opus/);
   assert.match(handler("p", "/model haiku"), /answering you with haiku/);
   assert.equal(peerModelOverrides.get("p"), "haiku");

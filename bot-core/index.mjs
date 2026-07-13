@@ -41,8 +41,8 @@
 //   resolves to a timeout note if no answer finalized it in time.
 //   Direct engines (BOT_BRAIN=claude|codex|opencode): BOT_AI_MODEL (opencode
 //   takes a provider/model slug), BOT_AI_ALLOWED_MODELS (comma-sep /model
-//   allowlist; unset = open on an allowlisted bot, locked on a public one;
-//   empty string = locked), BOT_AI_ALLOWED_TOOLS (Bash,Read,Edit,Write),
+//   allowlist; unset/empty = locked), BOT_AI_MODEL_SWITCHING (locked|open;
+//   open requires a non-public bot), BOT_AI_ALLOWED_TOOLS (Bash,Read,Edit,Write),
 //   BOT_AI_SKIP_PERMISSIONS (1 = full autonomy), BOT_AI_IDLE_TIMEOUT_MS
 //   (600000, kills a silent/wedged turn), BOT_AI_MAX_MS (3600000 default hard
 //   cap), BOT_AI_MAX_CONCURRENT_TURNS / BOT_AI_MAX_QUEUED_TURNS, BOT_AI_WORKSPACE
@@ -169,8 +169,8 @@ const greetText = env.BOT_GREET_TEXT ?? `👋 ${env.BOT_USERNAME || env.FAUCET_C
 // this is a provider/model slug); per-peer /model overrides it.
 const aiModel = (env.BOT_AI_MODEL ?? "").trim();
 // aiAllowedModels (the /model switching policy) is derived below, once the
-// peer allowlist is known — a public bot locks switching, an allowlisted one
-// leaves it open. See resolveModelPolicy.
+// peer allowlist is known. It is locked by default; open switching requires an
+// explicit non-public operator opt-in. See resolveModelPolicy.
 // Tools are on by default (the container is the sandbox). The allowlist is the
 // safe default; BOT_AI_SKIP_PERMISSIONS=1 grants full autonomy (all tools).
 const allowedTools = (env.BOT_AI_ALLOWED_TOOLS ?? "Bash,Read,Edit,Write").split(",").map((s) => s.trim()).filter(Boolean);
@@ -261,10 +261,23 @@ const allowedPeers = new Set(
   String(env.BOT_ALLOWED_PEERS ?? "").split(",").map((s) => s.trim().replace(/^0x/i, "").toLowerCase()).filter(Boolean),
 );
 // /model switching policy: explicit BOT_AI_ALLOWED_MODELS always wins (empty
-// string = a deliberate lock); otherwise a public bot (empty allowlist) locks
-// switching so a stranger can't select an expensive model on the owner's
-// quota, and an allowlisted bot leaves it open. null=open, []=locked.
-const aiAllowedModels = resolveModelPolicy({ configured: env.BOT_AI_ALLOWED_MODELS ?? null, isPublic: allowedPeers.size === 0 });
+// string = a deliberate lock). Unconfigured bots are locked. An operator may
+// set BOT_AI_MODEL_SWITCHING=open only for a bot with an explicit peer
+// allowlist. null=open, []=locked.
+const modelSwitching = String(env.BOT_AI_MODEL_SWITCHING ?? "locked").trim().toLowerCase();
+if (!new Set(["locked", "open"]).has(modelSwitching)) {
+  console.error("BOT_AI_MODEL_SWITCHING must be locked or open");
+  process.exit(2);
+}
+if (modelSwitching === "open" && allowedPeers.size === 0 && env.BOT_AI_ALLOWED_MODELS == null) {
+  console.error("BOT_AI_MODEL_SWITCHING=open requires BOT_ALLOWED_PEERS; public bots must use BOT_AI_ALLOWED_MODELS");
+  process.exit(2);
+}
+const aiAllowedModels = resolveModelPolicy({
+  configured: env.BOT_AI_ALLOWED_MODELS ?? null,
+  isPublic: allowedPeers.size === 0,
+  allowOpen: modelSwitching === "open",
+});
 if (!seedHex) { console.error("BOT_SEED_HEX (or FAUCET_CHAT_SERVICE_SECRET) is required"); process.exit(2); }
 
 const hexToBytes = (hex) => {
@@ -1079,9 +1092,9 @@ const settleOwed = (owedId) => {
 // decode work; seenRequests is the semantic "already replied" guard.)
 const snapshotState = () => ({
   v: 2,
-  // Which engine + workspace these resume tokens belong to. A token resumes a
-  // session tied to a specific cwd and CLI, so a change to either invalidates
-  // them on restart (takopi's rule — resuming against the wrong tree corrupts).
+  // Which engine, base model, and workspace these resume tokens belong to. A
+  // token resumes a session tied to those settings, so a change invalidates it
+  // on restart (resuming against the wrong tree or model corrupts context).
   agent: agentRuntime?.snapshotAgent(),
   peers: [...sessions.entries()].map(([peerHex, { session, identifierKeyHex, lastActiveAt }]) => ({
     peerHex,
@@ -1090,8 +1103,9 @@ const snapshotState = () => ({
       s: norm(bytesToHex(d.statementAccountId)),
       e: norm(bytesToHex(d.encryptionPublicKey)),
     })),
-    // Engine per-peer state (resume token rs + active project pj/br) — the
-    // runtime owns what these fields mean; see lib/agent-runtime.mjs.
+    // Engine per-peer state (resume token rs, model override mo, and active
+    // project pj/br) — the runtime owns what these fields mean; see
+    // lib/agent-runtime.mjs.
     ...(agentRuntime ? agentRuntime.peerSnapshot(norm(peerHex)) : {}),
     ...(lastActiveAt ? { la: lastActiveAt } : {}),
   })),
@@ -1315,6 +1329,13 @@ pumpOwed = () => {
 };
 
 const handleSessionStatement = async (data, peerHex, session, senderAccountId = hexToBytes(peerHex)) => {
+  // A session may survive a restart after the operator removes its peer from
+  // BOT_ALLOWED_PEERS. Enforce the current policy before decrypting or doing
+  // any acknowledgement work for that old channel.
+  if (!isAllowed(peerHex)) {
+    log("BOT_REJECTED_UNLISTED_SESSION", { from: norm(peerHex) });
+    return "handled";
+  }
   let decoded;
   // A follow-up we can't decrypt used to vanish silently here — log it so a
   // broken/stale session is diagnosable instead of looking like "no message".
@@ -1999,30 +2020,41 @@ const restored = normalizeRestoredState(stateStore.load());
 // scoped to the engine + the cwd they were captured in; see agent-runtime).
 agentRuntime?.noteRestoredAgent(restored?.agent ?? null);
 let restoredPeers = 0;
+let restoredUnauthorized = 0;
 for (const p of restored?.peers ?? []) {
   // Per-peer guard: one malformed persisted entry must not crash startup and
   // trip a Docker restart loop — skip it and keep the rest of the sessions.
   try {
     if (!p || typeof p !== "object" || typeof p.peerHex !== "string" || typeof p.identifierKeyHex !== "string") continue;
+    if (!isAllowed(p.peerHex)) {
+      restoredUnauthorized += 1;
+      log("BOT_STATE_PEER_UNAUTHORIZED", { peer: norm(p.peerHex) });
+      continue;
+    }
     const devices = (p.devices ?? []).map((d) => ({ statementAccountId: hexToBytes(d.s), encryptionPublicKey: hexToBytes(d.e) }));
     buildSession(p.peerHex, p.identifierKeyHex, devices);
     const entry = touchSession(p.peerHex);
     if (entry && Number.isSafeInteger(p.la) && p.la > 0) entry.lastActiveAt = p.la;
     addSessionWatch(p.peerHex);
-    agentRuntime?.restorePeer(norm(p.peerHex), { rs: p.rs, pj: p.pj, br: p.br });
+    agentRuntime?.restorePeer(norm(p.peerHex), { rs: p.rs, mo: p.mo, pj: p.pj, br: p.br });
     restoredPeers += 1;
   } catch (e) { log("BOT_STATE_PEER_SKIPPED", { peer: p?.peerHex, error: String(e?.message ?? e) }); }
 }
 for (const id of restored?.seen ?? []) if (typeof id === "string") seenRequests.add(id);
 for (const id of restored?.pendingOpenerAcks ?? []) if (typeof id === "string") pendingOpenerAcks.add(id);
 for (const id of restored?.greeted ?? []) if (typeof id === "string") greetedPeers.add(id);
-agentRuntime?.restoreIntroduced(restored?.intro);
+agentRuntime?.restoreIntroduced((restored?.intro ?? []).filter((peerHex) => typeof peerHex === "string" && isAllowed(peerHex)));
 // Re-run anything that was ACKed but not yet answered when the last process
 // died — the app will never resend these, the journal is their only way back.
 let restoredOwed = 0;
 for (const o of restored?.owed ?? []) {
   try {
     if (!o?.id || !o?.p || typeof o?.t !== "string") continue;
+    if (!isAllowed(o.p)) {
+      restoredUnauthorized += 1;
+      log("BOT_STATE_OWED_UNAUTHORIZED", { peer: norm(o.p) });
+      continue;
+    }
     const msg = {
       text: typeof o.c === "string" ? o.c : o.t,
       messageId: o.id,
@@ -2041,7 +2073,13 @@ for (const o of restored?.owed ?? []) {
   } catch (e) { log("BOT_STATE_OWED_SKIPPED", { error: String(e?.message ?? e) }); }
 }
 pumpOwed();
-if (restored) log("BOT_STATE_RESTORED", { peers: restoredPeers, seen: restored.seen?.length ?? 0, owed: restoredOwed });
+if (restoredUnauthorized > 0) persist();
+if (restored) log("BOT_STATE_RESTORED", {
+  peers: restoredPeers,
+  seen: restored.seen?.length ?? 0,
+  owed: restoredOwed,
+  ...(restoredUnauthorized ? { unauthorized: restoredUnauthorized } : {}),
+});
 for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { void gracefulShutdown(0); });
 
 // ---------- subscription ingress (push) ----------

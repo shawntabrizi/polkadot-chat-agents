@@ -282,6 +282,35 @@ describe("transport e2e", { concurrency: 8 }, () => {
     });
   }
 
+  test("removing an allowlisted peer drops its restored session", async () => {
+    const node = await startMockStatementNode();
+    const stateDir = tmpState();
+    let bot = await startBot({
+      endpoint: node.url,
+      stateDir,
+      extraEnv: { BOT_SUBSCRIBE: "0", BOT_ALLOWED_PEERS: CLIENT_ACCOUNT },
+    });
+    try {
+      const first = await runClient(node.url, [], ["allowlisted opener", "before removal"]);
+      assert.equal(first.code, 0, `client failed:\n${first.out}`);
+      await bot.stop();
+
+      bot = await startBot({
+        endpoint: node.url,
+        stateDir,
+        extraEnv: { BOT_SUBSCRIBE: "0", BOT_ALLOWED_PEERS: "ff".repeat(32) },
+      });
+      const restored = await bot.waitFor((e) => e.event === "BOT_STATE_RESTORED", { label: "BOT_STATE_RESTORED" });
+      assert.equal(restored.peers, 0);
+      assert.equal(restored.unauthorized, 1);
+      assert.ok(bot.events.some((e) => e.event === "BOT_STATE_PEER_UNAUTHORIZED"));
+    } finally {
+      await bot.stop();
+      await node.close();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
   test("graceful shutdown preserves an in-flight direct-agent turn", async () => {
     const node = await startMockStatementNode();
     const stateDir = tmpState();
