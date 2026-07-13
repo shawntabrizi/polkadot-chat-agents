@@ -33,7 +33,8 @@ A framework plugin needs this small authenticated API:
 | `POST /inbound/ack { delivery_id, lease_id }` | permanently acknowledges a leased inbound row after the framework has successfully handed it to its own runtime. Accepts `deliveries: [{ delivery_id, lease_id }, ...]` for a batch. Unacknowledged rows are retried after their lease expires; a stale claim acknowledges zero rows. |
 | `POST /inbound/renew { delivery_id, lease_id }` | extends an active lease for a long-running turn. Renew before `lease_ms` elapses, then ACK only the current lease. |
 | `GET /media/<id>` | bytes of a downloaded attachment (`id`/`url` from the inbound item), served with its content type |
-| `POST /send { chat_id, text, reply_to?, edit_of? }` | publishes a reply to that peer; returns `{ success, message_id }`. `message_id` is the outgoing message's id — hold on to it to edit that message later. `reply_to: <message_id>` renders as a quote of that peer message in the app; `edit_of: <message_id>` rewrites a message the bot sent earlier (the app updates the bubble in place). The two are mutually exclusive. **Live replies:** when a turn runs long, bot-core posts a "thinking…" placeholder; the first plain send for that peer is auto-upgraded into the placeholder's final edit (the returned `message_id` is the placeholder's), so the user sees one evolving bubble instead of thinking + answer. `edit_of` sends are throttled and coalesced server-side (latest-wins) to a statement-store-safe cadence — a harness may stream edits as fast as it likes. `GET /health` advertises this under `live: { supportsEdit, minEditMs, placeholderAfterMs }`. |
+| `GET /files/<chat_id>`; `GET/PUT/DELETE /files/<chat_id>/<path>` | list, read, write raw bytes, or remove a durable file in that peer's vault. `PUT` uses the request content type and obeys the bot's per-file, per-peer, and global caps. |
+| `POST /send { chat_id, text?, file_path?, reply_to?, edit_of? }` | publishes a reply to that peer; returns `{ success, message_id }`. `message_id` is the outgoing message's id — hold on to it to edit that message later. `reply_to: <message_id>` renders as a quote of that peer message in the app; `edit_of: <message_id>` rewrites a message the bot sent earlier (the app updates the bubble in place). The two are mutually exclusive. `file_path` names a file already saved in that exact peer's vault; it cannot be combined with a reply or edit and is delivered only when the bot has an operator-pinned HOP endpoint and provisioned Bulletin allowance. **Live replies:** when a turn runs long, bot-core posts a "thinking…" placeholder; the first plain send for that peer is auto-upgraded into the placeholder's final edit (the returned `message_id` is the placeholder's), so the user sees one evolving bubble instead of thinking + answer. `edit_of` sends are throttled and coalesced server-side (latest-wins) to a statement-store-safe cadence — a harness may stream edits as fast as it likes. `GET /health` advertises this under `live: { supportsEdit, minEditMs, placeholderAfterMs }`. |
 | `POST /react { chat_id, message_id, emoji, remove? }` | reacts to a peer message with an emoji (shown as a chip under the bubble in the app); `remove: true` retracts a previous reaction. Returns `{ success }`. |
 | `POST /typing { chat_id }` | best-effort, currently a no-op |
 
@@ -43,6 +44,11 @@ while its agent turn runs, ACK only after that handoff succeeds, then use
 it at the bridge with `POLKADOT_BRIDGE_URL` and `POLKADOT_BRIDGE_TOKEN`.
 bot-core enforces the allowlist before a message reaches the bridge, so unlisted
 senders never reach the agent or spend model quota.
+
+The bridge token authorizes all bridge routes, including every peer vault. Keep
+it in the framework's secret environment only, never expose the bridge through
+a host port, and make a framework use the `chat_id` from its own inbound work
+when calling `/files` or `file_path` delivery.
 
 ## Hermes
 

@@ -79,6 +79,97 @@ No `BOT_AI_*`: a bridge bot's model, tools, and commands live in the harness.
 
 ---
 
+## Deployment profiles
+
+Choose the access model deliberately. Most coding and personal-assistant bots
+should be private: the person who can message the bot can cause model spend and
+direct an agent's tools. `pca create <name> --owner <address-or-username>`
+creates that safer starting point.
+
+### Private bot: one or two trusted owners
+
+Use an explicit allowlist and treat the bot like a remote development machine
+shared only with those people. This is the recommended profile when responsive
+agent behavior, workspace edits, model switching, and durable files matter more
+than hostile-input resistance.
+
+```sh
+# One or two exact Polkadot account ids. Never leave this empty for this profile.
+BOT_ALLOWED_PEERS=40d4fd...,7015aa...
+
+# Let trusted owners select the model in chat. Do not set BOT_AI_ALLOWED_MODELS
+# at the same time: an empty value is an intentional lock.
+BOT_AI_MODEL_SWITCHING=open
+BOT_AI_SKIP_PERMISSIONS=1
+BOT_AI_MAX_CONCURRENT_TURNS=2
+BOT_AI_MAX_QUEUED_TURNS=20
+
+# Durable files for a small, trusted group. Size these to the actual /state volume.
+BOT_FILE_MAX_BYTES=104857600
+BOT_FILE_MAX_TOTAL_MB=2048
+BOT_FILE_MAX_PEER_MB=1024
+BOT_FILE_MAX_ENTRIES=4000
+BOT_FILE_MAX_PEER_ENTRIES=2000
+
+# Required for production attachment download. File delivery additionally needs
+# a provisioned Bulletin allowance for the derived account shown by /health.
+BOT_HOP_ALLOWED_NODES=hop.example.org
+BOT_HOP_UPLOAD_NODE=wss://hop.example.org
+```
+
+`BOT_AI_SKIP_PERMISSIONS=1` gives the direct agent full tool autonomy inside its
+container. Use it only when every allowlisted sender is trusted with the bot's
+workspace and its reachable services. Keep the bridge on loopback for a local
+run; in a generated framework deployment, `BOT_BRIDGE_HOST=0.0.0.0` is only
+reachable on the private Compose network and no bridge port is published.
+
+### Public bot: deliberately bounded
+
+A public bot has `BOT_ALLOWED_PEERS` unset or empty. It must assume arbitrary
+prompts, attachment floods, repeated requests, and attempts to spend model or
+storage allowance. Prefer a narrow task, a fixed model allowlist, and a
+read-only or disposable workspace. The following is a usable conservative
+baseline for a directly hosted public bot:
+
+```sh
+BOT_ALLOWED_PEERS=
+
+# Public bots cannot use unrestricted /model switching. Pin one model and,
+# if switching is needed, expose only a small approved list.
+BOT_AI_MODEL=provider/model
+BOT_AI_ALLOWED_MODELS=provider/model,provider/low-cost-model
+BOT_AI_SKIP_PERMISSIONS=0
+BOT_AI_ALLOWED_TOOLS=Read
+BOT_AI_MAX_CONCURRENT_TURNS=2
+BOT_AI_MAX_QUEUED_TURNS=20
+BOT_AI_MAX_OUTPUT_BYTES=262144
+
+# Bound durable and transient attachment storage per sender as well as globally.
+BOT_FILE_MAX_BYTES=10485760
+BOT_FILE_MAX_TOTAL_MB=256
+BOT_FILE_MAX_PEER_MB=25
+BOT_FILE_MAX_ENTRIES=200
+BOT_FILE_MAX_PEER_ENTRIES=20
+BOT_MEDIA_MAX_BYTES=10485760
+BOT_MEDIA_MAX_TOTAL_MB=128
+BOT_MEDIA_MAX_CONCURRENT_DOWNLOADS=1
+BOT_MEDIA_DOWNLOAD_QUEUE_CAP=20
+
+# Keep outbound HOP file delivery disabled until its finite allowance has an
+# operator-defined spend policy. Inbound /file put remains quota-bounded.
+# BOT_HOP_UPLOAD_NODE=
+```
+
+For a public bot, do not mount a valuable host repository, credentials, Docker
+socket, or home directory into the agent container. Run it under a separate
+bot identity on a dedicated VM or volume with disk quotas; do not publish the
+authenticated bridge port; firewall management ports; and use a separate
+low-privilege model account with spending limits. `pca deploy` provides a
+container boundary and CPU/memory/process limits, but it cannot make an
+unbounded host-mounted workspace or a public bridge token safe.
+
+---
+
 ## Reference
 
 Defaults are what the code uses when the variable is unset. "gen" marks the
@@ -128,6 +219,7 @@ variables `pca deploy` writes into `bot.env` automatically.
 | `BOT_BRIDGE_HOST` | `127.0.0.1` | Bind address. Deploy sets `0.0.0.0` for harness stacks (compose network only). **gen for bridge** |
 | `BOT_BRIDGE_BODY_MAX_BYTES` | 1000000 | Max request body. |
 | `BOT_BRIDGE_TEXT_MAX_BYTES` | 128000 | Max `/send` text length. |
+| `BOT_BRIDGE_FILE_MAX_BYTES` | `BOT_FILE_MAX_BYTES` | Max raw body accepted by `PUT /files/<chat>/<path>`. |
 | `BOT_BRIDGE_LEASE_MS` | 300000 | Inbound-delivery lease duration (at-least-once handoff). |
 | `BOT_BRIDGE_WAITER_CAP` | 100 | Max concurrent long-poll waiters. |
 | `BOT_BRIDGE_DELIVERY_BATCH_CAP` | 32 | Max messages leased per `/inbound`. |
@@ -193,6 +285,33 @@ variables `pca deploy` writes into `bot.env` automatically.
 | `BOT_HOP_TIMEOUT_MS` | 120000 | Per-download deadline. |
 | `BOT_HOP_RPC_FRAME_MAX_BYTES` | 4.5 MB | Max HOP RPC frame. |
 | `BOT_HOP_ALLOW_INSECURE` | `0` | Tests only: permit `ws://` and IP-literal hosts. |
+| `BOT_HOP_UPLOAD_NODE` | `""` | Operator-pinned HOP endpoint for outbound files. It must satisfy `BOT_HOP_ALLOWED_NODES` in production and needs a separately provisioned Bulletin storage allowance. |
+| `BOT_HOP_UPLOAD_TIMEOUT_MS` | 120000 | Whole-upload deadline. |
+
+### Durable files
+
+`/file put <path>` saves exactly one same-message attachment in the sender's
+private vault. `/file ls`, `/file info`, `/file rm`, and `/file get` use that
+same peer namespace. The authenticated bridge can manage the same vault with
+`GET/PUT/DELETE /files/<chat_id>[/<path>]`; `POST /send` accepts only its
+`file_path`, never an arbitrary host path.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BOT_FILE_MAX_BYTES` | 50 MB | Largest individual durable file. |
+| `BOT_FILE_MAX_TOTAL_MB` | 1024 | Global durable-vault capacity. |
+| `BOT_FILE_MAX_ENTRIES` | 2000 | Global durable-vault entry cap. |
+| `BOT_FILE_MAX_PEER_MB` | min(256 MB, global cap), raised to the file cap if needed | Capacity available to one chat peer. |
+| `BOT_FILE_MAX_PEER_ENTRIES` | min(500, global cap) | Entry cap for one chat peer. |
+
+Outbound `/file get` and bridge `file_path` delivery use HOP `hop_submit` with
+the derived `//allowance//bulletin//chat` signer. The deployed `BOT_SEED_HEX`
+can derive and use that account, but cannot safely mint its allowance: the
+People-chain claim requires the original mnemonic-derived Bandersnatch person
+proof and a live `AsResources` transaction extension. Keep that proof material
+off the VPS. `/health` reports the exact allowance account and whether a HOP
+upload node is configured; a future local-only `pca storage status` should query
+the Bulletin authorization before an operator enables delivery.
 
 ### Ingress (poll / subscribe)
 

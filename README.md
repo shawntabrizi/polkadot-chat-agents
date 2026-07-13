@@ -114,10 +114,13 @@ allowed for them.
 
 In chat, direct-brain bots answer `/help`, `/reset`, `/model <name>`,
 `/reasoning <level>`, `/project`, `/usage`, and `/ping` instantly themselves;
-bridge bots leave slash-commands to their framework. Files you send are
-downloaded into a private per-turn workspace directory and removed after the
-turn, so "here's the spec, implement it" works with a photo or document
-attached.
+bridge bots leave their other slash-commands to the framework. Ordinary files
+you send are downloaded into a private per-turn workspace directory and removed
+after the turn, so "here's the spec, implement it" works with a photo or
+document attached. Caption one attachment `/file put <path>` to retain it in a
+private per-chat vault; `/file ls`, `/file info`, `/file rm`, and `/file get`
+manage it. File return needs an operator-pinned HOP node and its separately
+provisioned Bulletin allowance.
 
 **Projects.** `pca project <bot> add <alias> <path>` registers a directory the
 agent can work in (repeat for more). In chat, `/project <alias>` points your
@@ -165,9 +168,10 @@ is how the mobile app actually sends. See [docs/TESTING.md](docs/TESTING.md).
 
 `~/.pca/bots/<name>/secret.json` holds the bot's root seed; whoever has it
 controls the bot. `~/.pca/bots/<name>/session-state.json` and the server-side
-`state/` volume hold session keys for open conversations. `config.json` also
-holds the bridge token; a deployed bot's `bot.env` holds the seed and token.
-All are created with mode 0600. Back them up; do not commit them.
+`state/` volume hold session keys for open conversations; `state/files/` holds
+the durable peer file vault. `config.json` also holds the bridge token; a
+deployed bot's `bot.env` holds the seed and token. All are created with mode
+0600. Back them up; do not commit them.
 
 ## Repository layout
 

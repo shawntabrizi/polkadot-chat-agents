@@ -107,7 +107,7 @@ with each inbound kind:
 | anything else | logged (`BOT_UNSUPPORTED_CONTENT` / `BOT_UNDECODABLE_MESSAGE`) and skipped |
 
 Outbound, the bot can send plain text, replies (quotes), edits of its own
-messages, and reactions.
+messages, reactions, and HOP-backed file attachments.
 
 **Attachments (photos/videos/files).** The chat message carries only a
 reference — `{ identifier, claimTicket, wssUrl, meta }` — and the encrypted
@@ -130,10 +130,27 @@ so production attachment downloads require `BOT_HOP_ALLOWED_NODES`
 the owed message (the state file already holds session keys) but never logged
 and never crosses the bridge.
 
-**Sending files is not implemented.** The upload path needs `hop_submit` with a
-wallet-signed sender proof *plus* an on-chain bulletin-chain allowance for the
-bot account, and a trusted node to upload to — backlog, pending live
-investigation of whether a bot account can obtain that allowance.
+**Durable files.** Media is intentionally an evictable cache. A user opts into
+long-lived storage by captioning exactly one attachment `/file put <path>`.
+`lib/file-store.mjs` copies it into a private, peer-scoped vault with a manifest,
+path/symlink checks, atomic updates, global limits, and independent per-peer
+byte and entry limits. `/file ls`, `/file info`, `/file rm`, and `/file get`
+operate only within that sender's namespace. The bridge exposes the same vault
+under authenticated `GET/PUT/DELETE /files/<chat_id>[/<path>]`, never an
+arbitrary host path.
+
+**Sending files.** `lib/hop-client.mjs` implements `hop_submit`: it generates a
+fresh claim ticket, encrypts the chunks and metadata with AES-GCM, signs every
+submission from `//allowance//bulletin//chat`, and wraps the resulting reference
+in an encrypted rich-text message. The upload endpoint is operator-pinned with
+`BOT_HOP_UPLOAD_NODE`; peer-supplied HOP endpoints are never used for uploads.
+That signer needs a Bulletin storage allowance. A deployed `BOT_SEED_HEX` can
+derive and use the signer, but it cannot safely create an allowance: the
+People-chain claim requires the original mnemonic-derived Bandersnatch person
+proof plus the live `AsResources(ClaimLongTermStorage)` extension. Keep that
+proof material off the VPS. A read-only future `pca storage status` should query
+the Bulletin authorization; allocation belongs in a confirmed local operator
+flow, not a chat command or the transport daemon.
 
 ## Identity: being messageable requires personhood
 
@@ -203,9 +220,11 @@ approved set or explicit non-public open policy permits switching), `/reasoning`
 `--effort low|medium|high|xhigh|max`, codex `-c model_reasoning_effort=…`;
 opencode has none), `/project` (see workspaces below). Each turn's token/cost
 usage from the CLI's result event is logged as `BOT_AI_USAGE` and tallied
-in-memory for `/usage`. Downloaded attachments are staged in a private
+in-memory for `/usage`. Ordinary downloaded attachments are staged in a private
 per-turn directory before the engine runs and removed after the turn, so the
-agent acts on files inside its own workspace.
+agent acts on files inside its own workspace. `/file put` is deliberately the
+separate explicit path for long-lived files; it copies the attachment into the
+peer vault before the message reaches any brain.
 
 Multi-project workspaces (`BOT_AI_PROJECTS`, managed by `pca project`): a peer
 picks a registered project with `/project <alias>` — or `/project
@@ -250,8 +269,12 @@ Any framework that can run a poll loop can drive a bot. Every route requires
   long-running agent turn is still active. Renew before `lease_ms` elapses;
   stale claims are rejected and must not be ACKed.
 - `GET /media/:id` → bytes of a downloaded attachment
-- `POST /send { chat_id, text, reply_to?, edit_of? }` → `{ success, message_id }`
+- `GET /files/:chat_id` and `GET /files/:chat_id/:path` → lists or streams that
+  peer's durable files; `PUT` saves raw bytes and `DELETE` removes one.
+- `POST /send { chat_id, text?, file_path?, reply_to?, edit_of? }` → `{ success, message_id }`
   (`reply_to` renders a quote; `edit_of` rewrites one of the bot's own messages)
+  `file_path` must name a file already in that same peer vault and cannot be
+  combined with a reply or edit.
 - `POST /react { chat_id, message_id, emoji, remove? }` → `{ success }`
 - `POST /typing { chat_id }` → best-effort no-op
 
@@ -271,7 +294,9 @@ app username) or an explicit `--public` for any brain that costs money.
 - The bridge has an independent random `BOT_BRIDGE_TOKEN`; every bridge route
   requires it. `pca create` persists the token in mode-0600 `config.json`, and
   deployment keeps it in the bot's secret environment and, for bridge mode, the
-  framework's secret environment. A direct agent never receives it.
+  framework's secret environment. That token can manage every peer vault, so a
+  bridge framework is part of the trusted computing base. A direct agent never
+  receives it.
 - The bot-core transport never forwards provider API-key environment variables
   to direct agents. Deployed CLIs authenticate through their native OAuth store
   in `/home/node`; that credential is intentionally available to the agent, but
