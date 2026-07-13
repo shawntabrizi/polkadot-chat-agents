@@ -500,7 +500,13 @@ export const createAgentRuntime = ({
     allowedModels,
     username,
     chainConnected,
-    trimOverrides: () => { trimMap(peerModelOverrides, peerCap); trimMap(peerEffortOverrides, peerCap); },
+    trimOverrides: () => {
+      trimMap(peerModelOverrides, peerCap);
+      trimMap(peerEffortOverrides, peerCap);
+      // Overrides affect future native CLI argv and must survive a restart in
+      // the same state snapshot as their resume token.
+      persist();
+    },
     workspaces,
     getPeerProject: (peerKey) => peerProjects.get(peerKey) ?? null,
     setPeerProject,
@@ -613,32 +619,51 @@ export const createAgentRuntime = ({
 
     // ---- persistence (the transport owns the snapshot file; the runtime
     // owns what its fields mean) ----
-    // Which engine + workspace the resume tokens belong to: a change to
-    // either invalidates them (resuming against the wrong cwd/CLI corrupts).
-    snapshotAgent: () => ({ engine: engineName, workspace }),
+    // Resume tokens are scoped to the engine, base model, and cwd. A change to
+    // any of those starts fresh rather than asking a native CLI to resume a
+    // conversation under incompatible settings.
+    snapshotAgent: () => ({ engine: engineName, workspace, model }),
     peerSnapshot(peerKey) {
       const proj = peerProjects.get(peerKey);
       return {
         ...(peerResume.has(peerKey) ? { rs: peerResume.get(peerKey) } : {}),
+        // Model overrides are part of a native session's identity. Persist
+        // them so a valid token never resumes later under the default model.
+        ...(peerModelOverrides.has(peerKey) ? { mo: peerModelOverrides.get(peerKey) } : {}),
         // Active project/branch — the resume token above is only valid in
         // this cwd, so both restore together or not at all.
         ...(proj ? { pj: proj.alias, ...(proj.branch ? { br: proj.branch } : {}) } : {}),
       };
     },
     // Call once with the persisted agent meta before restorePeer calls.
-    // An engine change invalidates every token; a workspace change
+    // An engine or base-model change invalidates every token; a workspace change
     // invalidates tokens of peers in the shared workspace — a project peer's
     // cwd is the project itself, validated per peer in restorePeer.
     noteRestoredAgent(agentMeta) {
       this._engineMatches = Boolean(agentMeta) && agentMeta.engine === engineName;
       this._workspaceMatches = this._engineMatches && agentMeta.workspace === workspace;
-      if (agentMeta && !this._workspaceMatches) log("BOT_RESUME_INVALIDATED", { was: agentMeta, now: { engine: engineName, workspace } });
+      this._modelMatches = this._engineMatches && agentMeta.model === model;
+      if (agentMeta && (!this._workspaceMatches || !this._modelMatches)) {
+        log("BOT_RESUME_INVALIDATED", { was: agentMeta, now: { engine: engineName, workspace, model } });
+      }
     },
-    restorePeer(peerKey, { rs, pj, br } = {}) {
+    restorePeer(peerKey, { rs, mo, pj, br } = {}) {
       const proj = pj && workspaces?.has(pj) ? { alias: pj, branch: br ?? null } : null;
       if (proj) { peerProjects.set(peerKey, proj); trimMap(peerProjects, peerCap); }
       else if (pj) log("BOT_PROJECT_DROPPED", { peer: peerKey, alias: pj, reason: "no longer registered" });
-      if (rs && this._engineMatches && (pj ? proj != null : this._workspaceMatches)) {
+      const hasStoredOverride = mo != null;
+      const validStoredOverride = typeof mo === "string" && mo.length > 0 && !mo.startsWith("-") && !mo.includes("\0");
+      const modelAllowed = !hasStoredOverride || (validStoredOverride
+        && (allowedModels == null || (Array.isArray(allowedModels) && allowedModels.includes(mo))));
+      if (validStoredOverride && modelAllowed) {
+        peerModelOverrides.set(peerKey, mo);
+        trimMap(peerModelOverrides, peerCap);
+      } else if (hasStoredOverride) {
+        log("BOT_MODEL_OVERRIDE_DROPPED", { peer: peerKey, model: mo, reason: "no longer allowed" });
+      }
+      // If a persisted override is no longer allowed, its token is necessarily
+      // for a different effective model and must not be reused.
+      if (rs && modelAllowed && this._engineMatches && this._modelMatches && (pj ? proj != null : this._workspaceMatches)) {
         peerResume.set(peerKey, rs);
         trimMap(peerResume, peerCap);
       }
