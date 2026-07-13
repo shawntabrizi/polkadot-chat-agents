@@ -42,7 +42,7 @@ const encodeUploadedFile = (totalSize, chunkHashes) => {
 export const startMockHopNode = async () => {
   const store = new Map(); // hashHex -> { blob, recipientPub }
   const acked = new Set(); // hashHex
-  const failures = { claim: 0, ack: false, dropConnections: 0 };
+  const failures = { claim: 0, ack: false, dropConnections: 0, oversizedFrameBytes: 0 };
 
   const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await new Promise((resolve) => wss.once("listening", resolve));
@@ -69,6 +69,11 @@ export const startMockHopNode = async () => {
       const err = (message) => reply({ error: { code: -32000, message } });
       try {
         if (req.method === "hop_claim") {
+          if (failures.oversizedFrameBytes > 0) {
+            const bytes = failures.oversizedFrameBytes;
+            failures.oversizedFrameBytes = 0;
+            return reply({ result: "x".repeat(bytes) });
+          }
           if (failures.claim > 0) { failures.claim -= 1; return err("simulated failure"); }
           const rawHash = fromHex(req.params.raw_hash);
           const entry = store.get(toHex(rawHash));
@@ -95,7 +100,13 @@ export const startMockHopNode = async () => {
   // Upload a file the way the app does: encrypt 2MB chunks with the ticket's
   // AES key, store each under blake2b(encrypted), then encrypt+store the
   // UploadedFile metadata whose hash becomes the message identifier.
-  const putFile = (bytes, { chunkSize = 2_000_000, tamperChunk = false, rehashTamper = false, totalSizeOverride = null } = {}) => {
+  const putFile = (bytes, {
+    chunkSize = 2_000_000,
+    tamperChunk = false,
+    rehashTamper = false,
+    totalSizeOverride = null,
+    metadataOverride = null,
+  } = {}) => {
     const claimTicket = new Uint8Array(crypto.randomBytes(32));
     const aesKey = blake2b32(textEncoder.encode("encryption"), claimTicket);
     const recipientPub = getPublicKey(secretFromSeed(blake2b32(textEncoder.encode("signer"), claimTicket)));
@@ -111,7 +122,7 @@ export const startMockHopNode = async () => {
       store.set(toHex(hash), { blob, recipientPub });
       chunkHashes.push(hash);
     }
-    const metadata = encodeUploadedFile(totalSizeOverride ?? bytes.length, chunkHashes);
+    const metadata = metadataOverride ?? encodeUploadedFile(totalSizeOverride ?? bytes.length, chunkHashes);
     const metaBlob = aesGcmEncrypt(aesKey, metadata);
     const identifier = blake2b32(metaBlob);
     store.set(toHex(identifier), { blob: metaBlob, recipientPub });

@@ -228,6 +228,28 @@ export const createOutboundLanes = ({
       void pump(peerHex);
     },
 
+    // A session lifecycle policy may retire a peer that has been inactive for
+    // days. Do not leave its un-ACKed transport slot permanently retaining the
+    // lane and its message closures. Callers only use this after deciding that
+    // the peer is stale; queued/current delivery promises resolve false.
+    expire(peerHex, reason = "session expired") {
+      const lane = lanes.get(peerHex);
+      if (!lane || lane.pumping) return false;
+      clearGrace(lane);
+      if (lane.current) resolveEntries(lane.current.entries, false);
+      for (const entry of lane.queue) {
+        entry.submitted.reject(new Error(reason));
+        entry.delivered.resolve(false);
+      }
+      lanes.delete(peerHex);
+      return true;
+    },
+
+    hasPending(peerHex) {
+      const lane = lanes.get(peerHex);
+      return Boolean(lane?.pumping || lane?.current || lane?.queue.length);
+    },
+
     // Introspection for tests / health.
     depth(peerHex) {
       const lane = lanes.get(peerHex);

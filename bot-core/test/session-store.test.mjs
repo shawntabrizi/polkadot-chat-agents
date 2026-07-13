@@ -7,6 +7,7 @@ import { createStateStore } from "../lib/session-store.mjs";
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "pca-store-test-"));
 const settle = () => new Promise((r) => setTimeout(r, 30)); // let the debounce fire
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 test("save then load round-trips the data", async () => {
   const dir = tmp();
@@ -35,13 +36,24 @@ test("the state file is written 0600", async () => {
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
 });
 
-test("flush writes synchronously and clears the pending write", async () => {
+test("flush waits for a durable write and clears the pending snapshot", async () => {
   const dir = tmp();
   const file = path.join(dir, "state.json");
   const store = createStateStore(file, { debounceMs: 10_000 }); // long debounce
   store.save({ v: 7 });
-  store.flush();
+  assert.equal(await store.flush(), true);
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { v: 7 }); // present before debounce would fire
+});
+
+test("flush persists a newer save made during an in-flight write", async () => {
+  const dir = tmp();
+  const file = path.join(dir, "state.json");
+  const store = createStateStore(file, { debounceMs: 10_000 });
+  store.save({ v: 1, big: "a".repeat(1_000_000) });
+  const flushing = store.flush();
+  store.save({ v: 2 });
+  assert.equal(await flushing, true);
+  assert.deepEqual(store.load(), { v: 2 });
 });
 
 test("write is atomic — a reader never sees a partial file", async () => {
@@ -53,5 +65,21 @@ test("write is atomic — a reader never sees a partial file", async () => {
   // If writes went straight to `file` a crash mid-write would truncate it; the
   // store writes a .tmp then renames, so the live file is always complete JSON.
   assert.doesNotThrow(() => JSON.parse(fs.readFileSync(file, "utf8")));
-  assert.equal(fs.existsSync(`${file}.tmp`), false);
+  assert.equal(fs.readdirSync(dir).some((name) => name.endsWith(".tmp")), false);
+});
+
+test("a failed background write retries after the filesystem recovers", async () => {
+  const dir = tmp();
+  const blockedParent = path.join(dir, "blocked");
+  fs.writeFileSync(blockedParent, "not a directory");
+  const file = path.join(blockedParent, "state.json");
+  const store = createStateStore(file, { debounceMs: 1, retryMs: 10 });
+  store.save({ v: 9 });
+  await settle();
+  assert.equal(store.load(), null, "the initial write must fail while the parent is a file");
+
+  fs.rmSync(blockedParent);
+  fs.mkdirSync(blockedParent);
+  for (let attempt = 0; attempt < 20 && store.load() == null; attempt += 1) await delay(10);
+  assert.deepEqual(store.load(), { v: 9 }, "the retained snapshot should flush without another save call");
 });

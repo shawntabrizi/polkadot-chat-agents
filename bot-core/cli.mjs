@@ -45,6 +45,10 @@ async function withPeopleApi(endpoint, fn) {
 // the working directory. Override with PCA_BOTS_DIR.
 const BOTS_DIR = process.env.PCA_BOTS_DIR ?? path.join(os.homedir(), ".pca", "bots");
 const DEFAULT_ENDPOINT = "wss://paseo-people-next-system-rpc.polkadot.io";
+// Immutable multi-architecture manifests prevent a later deploy from silently
+// receiving a republished mutable image.
+const NODE_IMAGE = "node:22.22.0-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94";
+const HERMES_IMAGE = "nousresearch/hermes-agent@sha256:9c841866021c54c4596849f6135717e8a4d52ba510b7f52c50aef1de1a283973";
 // Cap container log growth on a VPS (json-file grows unbounded by default).
 const LOG_OPTS = `    logging:\n      driver: json-file\n      options: { max-size: "10m", max-file: "3" }\n`;
 const BRAINS = ["echo", "claude", "codex", "opencode", "bridge", "hermes"];
@@ -123,16 +127,97 @@ function parseFlags(argv) {
   return { flags, positional };
 }
 
+const BOT_NAME_RE = /^[a-z][a-z0-9-]{1,30}(?:\.\d{2})?$/;
 const botDir = (name) => path.join(BOTS_DIR, name);
 const configPath = (name) => path.join(botDir(name), "config.json");
 const secretPath = (name) => path.join(botDir(name), "secret.json");
-const saveConfig = (name, cfg) => fs.writeFileSync(configPath(name), `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 });
+const saveConfig = (name, cfg) => {
+  fs.writeFileSync(configPath(name), `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 });
+  fs.chmodSync(configPath(name), 0o600);
+};
 const readConfig = (name) => {
   if (!name) fail("Which bot? Usage: pca <command> <botname>   (list yours with: pca list)");
+  if (!BOT_NAME_RE.test(name)) fail(`Invalid bot name "${String(name)}".`);
   if (!fs.existsSync(configPath(name))) fail(`No bot named "${name}". Create it: pca create ${name}`);
   return JSON.parse(fs.readFileSync(configPath(name), "utf8"));
 };
 const listBots = () => (fs.existsSync(BOTS_DIR) ? fs.readdirSync(BOTS_DIR).filter((n) => fs.existsSync(configPath(n))) : []);
+
+const newBridgeToken = () => randomBytes(32).toString("base64url");
+function ensureBridgeToken(name, cfg) {
+  const token = typeof cfg.bridgeToken === "string" ? cfg.bridgeToken.trim() : "";
+  if (token.length >= 32) return token;
+  // Existing bots predate bridge authentication. Rotate only their bridge
+  // credential; their chain identity and active sessions stay untouched.
+  cfg.bridgeToken = newBridgeToken();
+  saveConfig(name, cfg);
+  return cfg.bridgeToken;
+}
+
+function bridgePortFor(cfg) {
+  const raw = cfg.bridgePort ?? 8799;
+  if (typeof raw === "boolean" || String(raw).trim() === "") {
+    fail(`Invalid bridgePort in config.json: ${String(cfg.bridgePort)}`);
+  }
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    fail(`Invalid bridgePort in config.json: ${String(cfg.bridgePort)}`);
+  }
+  return port;
+}
+
+function portFlag(value) {
+  if (typeof value === "boolean" || String(value).trim() === "") {
+    fail("--port requires an integer from 1 to 65535.");
+  }
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    fail(`--port must be an integer from 1 to 65535 (got ${String(value)})`);
+  }
+  return port;
+}
+
+function flagValue(value, name) {
+  if (value == null || typeof value === "boolean" || String(value).trim() === "") {
+    fail(`--${name} requires a value.`);
+  }
+  return String(value);
+}
+
+function envLine(key, value) {
+  const text = String(value ?? "");
+  if (/[\0\r\n]/.test(text)) fail(`${key} cannot contain a newline or NUL byte.`);
+  return `${key}=${text}`;
+}
+
+function remoteDir(value) {
+  const dir = flagValue(value, "remote-dir").trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(dir)
+      || dir.startsWith("/")
+      || dir.split("/").some((part) => part === "..")) {
+    fail(`--remote-dir must be a relative path made of letters, digits, ., _, -, and / (got ${String(value)})`);
+  }
+  return dir;
+}
+
+function containerName(value) {
+  const name = String(value).trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(name)) {
+    fail(`Invalid Docker container name in config: ${String(value)}`);
+  }
+  return name;
+}
+
+function sshTarget(value) {
+  const target = flagValue(value, "host").trim();
+  if (!/^[A-Za-z0-9_.:@\[\]-]+$/.test(target) || target.startsWith("-")) {
+    fail(`Invalid SSH target: ${String(value)}`);
+  }
+  return target;
+}
+
+const shellQuote = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
+const redactEnv = (content) => content.replace(/^([A-Z0-9_]*(?:SEED_HEX|TOKEN|API_KEY))=.*/gm, "$1=<hidden>");
 
 // Older versions kept bots in ./bots relative to the working directory. A user
 // upgrading with bots there would see "No bots yet" — and following the
@@ -223,8 +308,9 @@ async function cmdCreate(name, flags) {
   fs.writeFileSync(secretPath(name), `${JSON.stringify({ mnemonic, seedHex: bytesToHex(seed) }, null, 2)}\n`, { mode: 0o600 });
   const config = {
     name, endpoint, backendUrl, brain, allow, allowLabels,
-    ...(flags.model ? { model: String(flags.model) } : {}),   // pin the AI model (per-brain CLI flag)
-    bridgePort: Number(flags.port ?? 8799),
+    ...(flags.model != null ? { model: flagValue(flags.model, "model") } : {}), // pin per-brain model
+    bridgePort: portFlag(flags.port ?? 8799),
+    bridgeToken: newBridgeToken(),
     account: accountIdHex, address, identifierKey: bytesToHex(p256),
     username: null, registered: false, createdAt: new Date().toISOString(),
   };
@@ -450,6 +536,12 @@ function cmdRun(name, flags = {}) {
   const cfg = readConfig(name);
   if (!fs.existsSync(secretPath(name))) fail(`"${name}" has no secret.json — its identity is missing. Recreate it: pca create ${name}`);
   const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
+  const bridgeToken = ensureBridgeToken(name, cfg);
+  const bridgePort = bridgePortFor(cfg);
+  // Keep agent work away from the bot state directory. Local runs still share
+  // the invoking user's permissions, so run them only on trusted machines.
+  const workspace = path.join(BOTS_DIR, `${name}-workspace`);
+  fs.mkdirSync(workspace, { recursive: true, mode: 0o700 });
   if (!cfg.registered) note("Warning: this bot isn't registered on the network yet, so people can't message it.");
   warnMissingBrainCli(cfg.brain);
   if (cfg.deploy?.host) warn(`Heads up: "${name}" is also deployed on ${cfg.deploy.host}. Running it here too = two processes on one identity (they will double-reply). Stop one first.`);
@@ -459,15 +551,17 @@ function cmdRun(name, flags = {}) {
     ...process.env,
     BOT_SEED_HEX: secret.seedHex,
     BOT_ENDPOINT: cfg.endpoint,
-    BOT_BRIDGE_PORT: String(cfg.bridgePort),
+    BOT_BRIDGE_PORT: String(bridgePort),
+    BOT_BRIDGE_TOKEN: bridgeToken,
     BOT_ALLOWED_PEERS: (cfg.allow ?? []).join(","),
     BOT_BRAIN: cfg.brain,
     BOT_USERNAME: cfg.username ?? "",
     BOT_STATE_DIR: botDir(name),   // persist sessions so a restart keeps open threads
+    BOT_AI_WORKSPACE: workspace,
   };
   // Model: --model overrides the one saved by create (both land in BOT_AI_MODEL,
   // which each direct brain passes to its CLI's own model flag).
-  const model = flags.model ? String(flags.model) : cfg.model;
+  const model = flags.model != null ? flagValue(flags.model, "model") : cfg.model;
   if (model) env.BOT_AI_MODEL = model;
   if (cfg.projects && Object.keys(cfg.projects).length) {
     env.BOT_AI_PROJECTS = JSON.stringify(cfg.projects);
@@ -486,28 +580,30 @@ function runLocal(cmd, args, { capture = false } = {}) {
   return spawnSync(cmd, args, { encoding: "utf8", stdio: capture ? ["ignore", "pipe", "inherit"] : "inherit" });
 }
 
-// Direct engines deploy as a single self-contained container: a non-root image
-// with the agent CLI baked in (fast restarts; --dangerously-skip-permissions is
-// refused as root, so USER node is load-bearing), a persistent workspace the
-// agent works in, and provider auth via API keys and/or mounted OAuth creds.
-// `keyEnvs` are the provider API-key env vars this engine can use (opencode
-// reaches many providers, so it accepts several).
+// Direct engines deploy as a single self-contained container. The transport
+// runs as root solely to hold the signing seed and state; its spawned agent is
+// dropped to the image's `node` user and can only write its workspace/home.
+// Keep each global CLI exact, rather than resolving the moving npm `latest`
+// tag during every deploy.
 const DEPLOY_ENGINES = {
-  echo:     { pkg: null, keyEnvs: [] },
-  claude:   { pkg: "@anthropic-ai/claude-code", keyEnvs: ["ANTHROPIC_API_KEY"] },
-  codex:    { pkg: "@openai/codex", keyEnvs: ["OPENAI_API_KEY"] },
-  opencode: { pkg: "opencode-ai", keyEnvs: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY"] },
+  echo:     { pkg: null },
+  claude:   { pkg: "@anthropic-ai/claude-code@2.1.207" },
+  codex:    { pkg: "@openai/codex@0.144.1" },
+  opencode: { pkg: "opencode-ai@1.17.18" },
 };
-// --anthropic-key etc. and the same-named process env are both accepted.
 const KEY_FLAGS = { ANTHROPIC_API_KEY: "anthropic-key", OPENAI_API_KEY: "openai-key", OPENROUTER_API_KEY: "openrouter-key", GEMINI_API_KEY: "gemini-key", GROQ_API_KEY: "groq-key" };
 
 async function cmdDeploy(name, flags) {
-  if (!name) fail("Usage: pca deploy <name> --host <ssh-target> [--harness openclaw|hermes] [--anthropic-key <key>] [--model <m>] [--safe-tools] [--dry-run]");
-  const host = flags.host ? String(flags.host) : null;
+  if (!name) fail("Usage: pca deploy <name> --host <ssh-target> [--harness openclaw|hermes] [--model <m>] [--safe-tools] [--dry-run]");
+  const host = flags.host ? sshTarget(flags.host) : null;
   if (!host) fail(`--host <ssh-target> is required, e.g.  pca deploy ${name} --host root@1.2.3.4`);
   const cfg = readConfig(name);
   if (!fs.existsSync(secretPath(name))) fail(`No secret found for "${name}".`);
   const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
+  const suppliedKeyFlag = Object.values(KEY_FLAGS).find((key) => flags[key] != null);
+  if (suppliedKeyFlag) {
+    fail(`--${suppliedKeyFlag} is no longer accepted: API keys are not injected into autonomous agents. Authenticate the selected CLI or framework through its own persistent credential store instead.`);
+  }
   if (cfg.brain === "hermes" || cfg.brain === "bridge") {
     const harness = flags.harness ? String(flags.harness).toLowerCase() : null;
     if (harness !== "openclaw" && harness !== "hermes") {
@@ -520,19 +616,13 @@ async function cmdDeploy(name, flags) {
   if (!fs.existsSync(path.join(HERE, "node_modules")) || !fs.existsSync(path.join(HERE, ".papi"))) {
     fail(`bot-core dependencies missing. Run:  (cd ${HERE} && npm ci)  then retry.`);
   }
-  // Collect provider API keys this engine can use, from --*-key flags or env.
-  const keys = {};
-  for (const envVar of spec.keyEnvs) {
-    const v = flags[KEY_FLAGS[envVar]] ? String(flags[KEY_FLAGS[envVar]]) : process.env[envVar];
-    if (v) keys[envVar] = v;
-  }
-  if (spec.pkg && Object.keys(keys).length === 0) {
-    warn(`No provider API key for "${cfg.brain}" (e.g. --anthropic-key, or mount OAuth creds) — the bot starts but can't answer until it has auth.`);
+  if (spec.pkg && Object.keys(KEY_FLAGS).some((key) => process.env[key])) {
+    warn("Provider API keys from this shell are intentionally not copied into the container. Use the deployed CLI's OAuth login instead.");
   }
   if (!cfg.registered) warn(`"${name}" isn't confirmed on the network yet — people can't message it until it is (pca info ${name}).`);
 
-  const cn = `pca-${name.replace(/\./g, "-")}`;
-  const base = flags["remote-dir"] ? String(flags["remote-dir"]) : `pca-bots/${name}`;
+  const cn = containerName(`pca-${name.replace(/\./g, "-")}`);
+  const base = remoteDir(flags["remote-dir"] ?? `pca-bots/${name}`);
   const sshOpts = ["-o", "ConnectTimeout=10", "-o", "BatchMode=yes"];
   // Full autonomy by default: the container IS the sandbox, and the point of a
   // dockerized coding agent is to run tools without prompting. --safe-tools
@@ -540,36 +630,44 @@ async function cmdDeploy(name, flags) {
   const skipPerms = spec.pkg && flags["safe-tools"] !== true;
 
   // Generate env + compose + Dockerfile locally, then (unless dry-run) ship & launch.
+  const bridgeToken = ensureBridgeToken(name, cfg);
+  const bridgePort = bridgePortFor(cfg);
   const envLines = [
-    `BOT_SEED_HEX=${secret.seedHex}`,
-    `BOT_ENDPOINT=${cfg.endpoint}`,
-    `BOT_BRAIN=${cfg.brain}`,
-    `BOT_ALLOWED_PEERS=${(cfg.allow ?? []).join(",")}`,
-    `BOT_USERNAME=${cfg.username ?? ""}`,
-    `BOT_STATE_DIR=/state`,          // node-owned volume, survives redeploys
-    `BOT_AI_WORKSPACE=/workspace`,   // where the agent works; persistent
-    `BOT_BRIDGE_PORT=${cfg.bridgePort ?? 8799}`,
+    envLine("BOT_SEED_HEX", secret.seedHex),
+    envLine("BOT_ENDPOINT", cfg.endpoint),
+    envLine("BOT_BRAIN", cfg.brain),
+    envLine("BOT_ALLOWED_PEERS", (cfg.allow ?? []).join(",")),
+    envLine("BOT_USERNAME", cfg.username ?? ""),
+    envLine("BOT_STATE_DIR", "/state"),
+    envLine("BOT_AI_WORKSPACE", "/workspace"),
+    envLine("BOT_BRIDGE_PORT", bridgePort),
+    envLine("BOT_BRIDGE_TOKEN", bridgeToken),
   ];
-  const deployModel = flags.model ? String(flags.model) : cfg.model;
-  if (deployModel) envLines.push(`BOT_AI_MODEL=${deployModel}`);
+  const deployModel = flags.model != null ? flagValue(flags.model, "model") : cfg.model;
+  if (deployModel) envLines.push(envLine("BOT_AI_MODEL", deployModel));
   if (skipPerms) envLines.push("BOT_AI_SKIP_PERMISSIONS=1");
   if (flags.greet === true) envLines.push("BOT_GREET=1");
-  for (const [k, v] of Object.entries(keys)) envLines.push(`${k}=${v}`);
+  if (spec.pkg) {
+    envLines.push(
+      "BOT_AI_AGENT_UID=1000",
+      "BOT_AI_AGENT_GID=1000",
+    );
+  }
 
-  // echo needs no CLI (plain node image); engines get a non-root baked image.
+  // echo needs no CLI; direct engines get a fixed CLI image. Keep the bot as
+  // root so it can read `/state`, then let agent-runtime setuid to node.
   const dockerfile = spec.pkg
-    ? `FROM node:22-slim\nRUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates ripgrep && rm -rf /var/lib/apt/lists/*\nRUN npm i -g ${spec.pkg} && npm cache clean --force\nENV HOME=/home/node\nUSER node\nWORKDIR /app\nCMD ["node", "index.mjs"]\n`
+    ? `FROM ${NODE_IMAGE}\nRUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates ripgrep && rm -rf /var/lib/apt/lists/*\nRUN npm install --global --no-audit --no-fund ${spec.pkg} && npm cache clean --force\nRUN mkdir -p /home/node /workspace /state && chown -R 1000:1000 /home/node /workspace && chmod 700 /home/node /workspace /state\nENV HOME=/home/node\nWORKDIR /app\nCMD ["node", "index.mjs"]\n`
     : null;
   const engineService = spec.pkg
-    ? `  bot:\n    build: ./image\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n      - ./workspace:/workspace\n      - ./home:/home/node\n    command: ["node", "index.mjs"]\n`
-    : `  bot:\n    image: node:22-slim\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app\n      - ./state:/state\n    command: ["node", "index.mjs"]\n`;
+    ? `  bot:\n    build: ./image\n    user: "0:0"\n    init: true\n    read_only: true\n    pids_limit: 256\n    mem_limit: 2g\n    cpus: "2.0"\n    security_opt:\n      - no-new-privileges:true\n    tmpfs:\n      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n      - ./workspace:/workspace\n      - ./home:/home/node\n    command: ["node", "index.mjs"]\n`
+    : `  bot:\n    image: ${NODE_IMAGE}\n    user: "1000:1000"\n    init: true\n    read_only: true\n    pids_limit: 128\n    mem_limit: 512m\n    cpus: "1.0"\n    security_opt:\n      - no-new-privileges:true\n    tmpfs:\n      - /tmp:rw,noexec,nosuid,nodev,size=128m,mode=1777\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n    command: ["node", "index.mjs"]\n`;
   const compose = `services:\n${engineService}`;
-  const redact = (l) => l.replace(/((?:SEED_HEX|_API_KEY)=).*/, "$1<hidden>");
 
   if (flags["dry-run"] === true) {
     console.log(`\n--- ${base}/docker-compose.yml ---\n${compose}`);
     if (dockerfile) console.log(`--- ${base}/image/Dockerfile ---\n${dockerfile}`);
-    console.log(`--- ${base}/bot.env (secrets hidden) ---\n${envLines.map(redact).join("\n")}`);
+    console.log(`--- ${base}/bot.env (secrets hidden) ---\n${redactEnv(envLines.join("\n"))}`);
     note(`\nDry run — nothing deployed.`);
     return;
   }
@@ -579,9 +677,14 @@ async function cmdDeploy(name, flags) {
   if (pf.status !== 0) fail(`Can't reach ${host} or Docker isn't available there.\n${(pf.stderr || "").trim()}`);
   ok(`Connected — Docker ${(pf.stdout || "").trim().replace(/\n/g, " / ")}`);
 
-  // node in node:22-slim is uid 1000; the bind-mounted volumes must be writable
-  // by it (the container runs as USER node). App code stays read-only.
-  runLocal("ssh", [...sshOpts, host, `mkdir -p ${base}/app ${base}/state ${base}/workspace ${base}/home ${base}/image && chown -R 1000:1000 ${base}/state ${base}/workspace ${base}/home 2>/dev/null || true`]);
+  // The transport owns /state and runs as root. Only the spawned agent gets
+  // the node-owned workspace and OAuth home; it cannot read the signing seed.
+  const remoteBase = shellQuote(base);
+  const prepareVolumes = spec.pkg
+    ? `mkdir -p ${remoteBase}/app ${remoteBase}/state ${remoteBase}/workspace ${remoteBase}/home ${remoteBase}/image && chown -R root:root ${remoteBase}/state && chmod 700 ${remoteBase}/state && chown -R 1000:1000 ${remoteBase}/workspace ${remoteBase}/home && chmod 700 ${remoteBase}/workspace ${remoteBase}/home`
+    : `mkdir -p ${remoteBase}/app ${remoteBase}/state ${remoteBase}/image && chown -R 1000:1000 ${remoteBase}/state && chmod 700 ${remoteBase}/state`;
+  const prep = runLocal("ssh", [...sshOpts, host, prepareVolumes]);
+  if (prep.status !== 0) fail("Could not prepare the remote bot directories.");
   step("Uploading bot-core (code + dependencies)…");
   const rs = runLocal("rsync", ["-az", "--delete",
     "--exclude", "bots/", "--exclude", "*.log", "--exclude", "*.bak*", "--exclude", ".git",
@@ -595,9 +698,11 @@ async function cmdDeploy(name, flags) {
   if (dockerfile) fs.writeFileSync(path.join(tmp, "Dockerfile"), dockerfile);
   const scpFiles = [path.join(tmp, "bot.env"), path.join(tmp, "docker-compose.yml")];
   const cp = runLocal("scp", [...sshOpts, ...scpFiles, `${host}:${base}/`]);
-  if (dockerfile) runLocal("scp", [...sshOpts, path.join(tmp, "Dockerfile"), `${host}:${base}/image/`]);
+  const dockerCp = dockerfile
+    ? runLocal("scp", [...sshOpts, path.join(tmp, "Dockerfile"), `${host}:${base}/image/`])
+    : null;
   fs.rmSync(tmp, { recursive: true, force: true });
-  if (cp.status !== 0) fail("Copying config (scp) failed.");
+  if (cp.status !== 0 || dockerCp?.status !== 0) fail("Copying config (scp) failed.");
   // scp applies the remote umask, so restore 0600 on the env (it holds the seed).
   runLocal("ssh", [...sshOpts, host, `chmod 600 ${base}/bot.env`]);
 
@@ -627,6 +732,10 @@ async function cmdDeploy(name, flags) {
     console.log();
     note(`Logs:  ssh ${host} 'docker logs -f ${cn}'`);
     note(`Stop:  ssh ${host} 'docker rm -f ${cn}'`);
+    if (spec.pkg) {
+      const login = cfg.brain === "opencode" ? "opencode auth login" : `${cfg.brain} login`;
+      note(`Model login (once): ssh ${host} 'docker exec -it --user 1000:1000 ${cn} ${login}'`);
+    }
   } else {
     warn("Container started, but I didn't see BOT_LISTENING. Recent logs:");
     console.log(logs.split("\n").slice(-15).join("\n"));
@@ -646,36 +755,39 @@ async function deployHarnessStack(name, cfg, secret, flags, host, harness) {
     fail(`bot-core dependencies missing. Run:  (cd ${HERE} && npm ci)  then retry.`);
   }
   if (!cfg.registered) warn(`"${name}" isn't confirmed on the network yet — people can't message it until it is (pca info ${name}).`);
-  const cn = `pca-${name.replace(/\./g, "-")}`;
-  const hn = `pca-${name}-${harness}`;
-  const base = flags["remote-dir"] ? String(flags["remote-dir"]) : `pca-bots/${name}`;
+  const cn = containerName(`pca-${name.replace(/\./g, "-")}`);
+  const hn = containerName(`pca-${name}-${harness}`);
+  const base = remoteDir(flags["remote-dir"] ?? `pca-bots/${name}`);
   const sshOpts = ["-o", "ConnectTimeout=10", "-o", "BatchMode=yes"];
   const allow = cfg.allow ?? [];
-  const model = flags.model ? String(flags.model) : "claude-cli/claude-sonnet-4-6";
-  const bridgePort = cfg.bridgePort ?? 8799;
+  const model = flags.model != null ? flagValue(flags.model, "model") : "claude-cli/claude-sonnet-4-6";
+  if (/[\0\r\n]/.test(model)) fail("--model cannot contain a newline or NUL byte.");
+  const bridgePort = bridgePortFor(cfg);
+  const bridgeToken = ensureBridgeToken(name, cfg);
   const bridgeUrl = `http://bot:${bridgePort}`;
 
   const botEnv = [
-    `BOT_SEED_HEX=${secret.seedHex}`,
-    `BOT_ENDPOINT=${cfg.endpoint}`,
-    `BOT_BRAIN=bridge`,
-    `BOT_ALLOWED_PEERS=${allow.join(",")}`,
-    `BOT_USERNAME=${cfg.username ?? ""}`,
-    `BOT_STATE_DIR=/app/state`,
-    `BOT_BRIDGE_PORT=${bridgePort}`,   // keep in sync with the harness bridgeUrl and pca status
+    envLine("BOT_SEED_HEX", secret.seedHex),
+    envLine("BOT_ENDPOINT", cfg.endpoint),
+    envLine("BOT_BRAIN", "bridge"),
+    envLine("BOT_ALLOWED_PEERS", allow.join(",")),
+    envLine("BOT_USERNAME", cfg.username ?? ""),
+    envLine("BOT_STATE_DIR", "/app/state"),
+    envLine("BOT_BRIDGE_PORT", bridgePort), // keep in sync with bridgeUrl/status
+    envLine("BOT_BRIDGE_TOKEN", bridgeToken),
     // The harness container reaches the bridge over the compose network, so the
     // bridge must bind beyond loopback here (no ports are published to the host).
     `BOT_BRIDGE_HOST=0.0.0.0`,
     ...(flags.greet === true ? ["BOT_GREET=1"] : []),
   ].join("\n");
-  const botService = `  bot:\n    image: node:22-slim\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    volumes:\n      - ./app:/app\n      - ./state:/app/state\n    env_file:\n      - ./bot.env\n    command: ["node", "index.mjs"]\n`;
+  const botService = `  bot:\n    image: ${NODE_IMAGE}\n    user: "1000:1000"\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    volumes:\n      - ./app:/app:ro\n      - ./state:/app/state\n    env_file:\n      - ./bot.env\n    command: ["node", "index.mjs"]\n`;
 
   const files = { "bot.env": `${botEnv}\n` };  // path (relative to base) -> content
   let compose, setup, afterUp;
   if (harness === "openclaw") {
     compose = `services:\n${botService}\n  openclaw:\n    build: ./image\n    container_name: ${hn}\n    restart: unless-stopped\n${LOG_OPTS}    env_file:\n      - ./gateway.env\n    volumes:\n      - ./openclaw-home:/home/node\n      - ./plugin:/plugin:ro\n    depends_on: [bot]\n    command: ["openclaw", "gateway"]\n`;
-    files["image/Dockerfile"] = `FROM node:22-slim\nRUN npm i -g openclaw @anthropic-ai/claude-code && npm cache clean --force\nENV HOME=/home/node\nWORKDIR /home/node\nUSER node\nCMD ["openclaw", "gateway"]\n`;
-    files["gateway.env"] = `OPENCLAW_GATEWAY_TOKEN=${randomBytes(24).toString("hex")}\n`;
+    files["image/Dockerfile"] = `FROM ${NODE_IMAGE}\nRUN npm install --global --no-audit --no-fund openclaw@2026.6.11 @anthropic-ai/claude-code@2.1.207 && npm cache clean --force\nENV HOME=/home/node\nWORKDIR /home/node\nUSER node\nCMD ["openclaw", "gateway"]\n`;
+    files["gateway.env"] = `${envLine("OPENCLAW_GATEWAY_TOKEN", randomBytes(32).toString("base64url"))}\n${envLine("POLKADOT_BRIDGE_TOKEN", bridgeToken)}\n`;
     // Runs inside the one-off setup container (home volume mounted) after `models set`
     // has created the config; merges in gateway mode + our channel.
     const channel = allow.length
@@ -687,6 +799,7 @@ const j = JSON.parse(fs.readFileSync(p, "utf8"));
 j.gateway = { ...(j.gateway ?? {}), mode: "local" };
 j.channels = { ...(j.channels ?? {}), polkadot: ${JSON.stringify(channel)} };
 fs.writeFileSync(p, JSON.stringify(j, null, 2));
+fs.chmodSync(p, 0o600);
 console.log("openclaw config ok");
 `;
     setup = `set -e
@@ -707,7 +820,7 @@ else
 fi
 chown -R 1000:1000 openclaw-home 2>/dev/null || true
 docker compose -p ${cn} build openclaw >/dev/null 2>&1 && echo IMAGE_BUILT
-docker compose -p ${cn} run --rm openclaw sh -lc 'openclaw plugins install --link /plugin >/dev/null; openclaw models set ${model} >/dev/null; node /home/node/setup-config.cjs' 2>&1 | tail -2
+docker compose -p ${cn} run --rm openclaw sh -lc ${shellQuote(`openclaw plugins install --link /plugin >/dev/null; openclaw models set ${shellQuote(model)} >/dev/null; node /home/node/setup-config.cjs; rm -f /home/node/setup-config.cjs`)} 2>&1 | tail -2
 `;
     afterUp = (creds) => {
       if (!creds) {
@@ -716,7 +829,8 @@ docker compose -p ${cn} run --rm openclaw sh -lc 'openclaw plugins install --lin
       }
     };
   } else {
-    compose = `services:\n${botService}\n  hermes:\n    image: nousresearch/hermes-agent:latest\n    container_name: ${hn}\n    restart: unless-stopped\n${LOG_OPTS}    command: ["gateway", "run"]\n    environment:\n      - HERMES_UID=0\n      - HERMES_GID=0\n      - POLKADOT_BRIDGE_URL=${bridgeUrl}\n      - POLKADOT_ALLOWED_USERS=${allow.join(",")}\n    volumes:\n      - hermes-data:/opt/data\n      - ./plugin:/opt/data/plugins/polkadot:ro\n    depends_on: [bot]\n\nvolumes:\n  hermes-data:\n`;
+    compose = `services:\n${botService}\n  hermes:\n    image: ${HERMES_IMAGE}\n    container_name: ${hn}\n    restart: unless-stopped\n${LOG_OPTS}    command: ["gateway", "run"]\n    env_file:\n      - ./hermes.env\n    environment:\n      - HERMES_UID=0\n      - HERMES_GID=0\n      - POLKADOT_BRIDGE_URL=${bridgeUrl}\n      - POLKADOT_ALLOWED_USERS=${allow.join(",")}\n    volumes:\n      - hermes-data:/opt/data\n      - ./plugin:/opt/data/plugins/polkadot:ro\n    depends_on: [bot]\n\nvolumes:\n  hermes-data:\n`;
+    files["hermes.env"] = `${envLine("POLKADOT_BRIDGE_TOKEN", bridgeToken)}\n`;
     setup = `cd ${base}\nchown -R root:root plugin 2>/dev/null || true\necho SETUP_OK`;
     afterUp = () => {
       console.log();
@@ -729,7 +843,7 @@ docker compose -p ${cn} run --rm openclaw sh -lc 'openclaw plugins install --lin
 
   if (flags["dry-run"] === true) {
     for (const [rel, content] of Object.entries(files)) {
-      console.log(`\n--- ${base}/${rel} ---\n${content.replace(/((?:SEED_HEX|TOKEN)=).*/g, "$1<hidden>")}`);
+      console.log(`\n--- ${base}/${rel} ---\n${redactEnv(content)}`);
     }
     console.log(`\n--- remote setup ---\n${setup}`);
     note("Dry run — nothing deployed.");
@@ -741,7 +855,10 @@ docker compose -p ${cn} run --rm openclaw sh -lc 'openclaw plugins install --lin
   if (pf.status !== 0) fail(`Can't reach ${host} or Docker isn't available there.\n${(pf.stderr || "").trim()}`);
   ok("Connected");
 
-  runLocal("ssh", [...sshOpts, host, `mkdir -p ${base}/app ${base}/state ${base}/plugin ${base}/image ${base}/openclaw-home`]);
+  const remoteBase = shellQuote(base);
+  const prep = runLocal("ssh", [...sshOpts, host,
+    `mkdir -p ${remoteBase}/app ${remoteBase}/state ${remoteBase}/plugin ${remoteBase}/image ${remoteBase}/openclaw-home && chown -R 1000:1000 ${remoteBase}/state && chmod 700 ${remoteBase}/state`]);
+  if (prep.status !== 0) fail("Could not prepare the remote harness directories.");
   step("Uploading bot-core + plugin…");
   const rs1 = runLocal("rsync", ["-az", "--delete", "--exclude", "bots/", "--exclude", "*.log", "--exclude", "*.bak*", "--exclude", ".git",
     "-e", `ssh ${sshOpts.join(" ")}`, `${HERE}/`, `${host}:${base}/app/`]);
@@ -796,9 +913,10 @@ docker compose -p ${cn} run --rm openclaw sh -lc 'openclaw plugins install --lin
 // deploy metadata saved by `pca deploy`.
 function deployTarget(name, flags) {
   const cfg = readConfig(name);
-  const host = flags.host ? String(flags.host) : cfg.deploy?.host;
-  const cn = cfg.deploy?.container ?? `pca-${name.replace(/\./g, "-")}`;
-  const dir = cfg.deploy?.dir;
+  const hostValue = flags.host ? flags.host : cfg.deploy?.host;
+  const host = hostValue ? sshTarget(hostValue) : null;
+  const cn = containerName(cfg.deploy?.container ?? `pca-${name.replace(/\./g, "-")}`);
+  const dir = cfg.deploy?.dir ? remoteDir(cfg.deploy.dir) : null;
   if (!host) fail(`"${name}" hasn't been deployed (no saved host). Deploy it, or pass --host <ssh>.`);
   return { cfg, host, cn, dir };
 }
@@ -807,7 +925,10 @@ const SSH_OPTS = ["-o", "ConnectTimeout=10", "-o", "BatchMode=yes"];
 function cmdLogs(name, flags) {
   const { host, cn } = deployTarget(name, flags);
   const follow = flags.follow === true || flags.f === true;
-  const tail = String(flags.tail ?? 100);
+  const rawTail = flags.tail ?? 100;
+  if (typeof rawTail === "boolean" || String(rawTail).trim() === "") fail("--tail requires an integer from 1 to 10000.");
+  const tail = Number(rawTail);
+  if (!Number.isInteger(tail) || tail < 1 || tail > 10_000) fail("--tail must be an integer from 1 to 10000.");
   step(`Logs for "${name}" on ${host}${follow ? " (following — Ctrl-C to stop)" : ""}…`);
   // stdio inherit so -f streams live and Ctrl-C ends it.
   spawnSync("ssh", [...SSH_OPTS, ...(follow ? ["-t"] : []), host,
@@ -821,19 +942,27 @@ const healthLine = (h) => {
 
 async function cmdStatus(name, flags) {
   const cfg = readConfig(name);
-  const host = flags.host ? String(flags.host) : cfg.deploy?.host;
-  const port = cfg.bridgePort ?? 8799;
+  const hostValue = flags.host ? flags.host : cfg.deploy?.host;
+  const host = hostValue ? sshTarget(hostValue) : null;
+  const port = bridgePortFor(cfg);
+  const bridgeToken = ensureBridgeToken(name, cfg);
+  const auth = { authorization: `Bearer ${bridgeToken}` };
   if (!host) {
     // Not deployed: a locally running bot's bridge binds loopback, so its
     // /health endpoint is the status source.
     step(`Status of "${name}" (local)…`);
     let h = null;
     try {
-      h = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(4000) }).then((r) => r.json());
+      h = await fetch(`http://127.0.0.1:${port}/health`, { headers: auth, signal: AbortSignal.timeout(4000) }).then((r) => r.json());
     } catch { /* nothing listening */ }
     if (!h) {
       warn(`"${name}" isn't running here (nothing on port ${port}).`);
       note(`Start it:  pca run ${name}   ·  or deploy it: pca deploy ${name} --host <ssh>`);
+      process.exitCode = 1;
+      return;
+    }
+    if (h.error === "unauthorized") {
+      warn(`The local bridge on port ${port} predates bridge authentication. Restart it with: pca run ${name}`);
       process.exitCode = 1;
       return;
     }
@@ -846,19 +975,24 @@ async function cmdStatus(name, flags) {
     note(healthLine(h));
     return;
   }
-  const cn = cfg.deploy?.container ?? `pca-${name.replace(/\./g, "-")}`;
+  const cn = containerName(cfg.deploy?.container ?? `pca-${name.replace(/\./g, "-")}`);
   step(`Status of "${name}" on ${host}…`);
+  const healthProbe = `fetch("http://127.0.0.1:${port}/health",{headers:{authorization:"Bearer "+(process.env.BOT_BRIDGE_TOKEN||"")},signal:AbortSignal.timeout(4000)}).then(r=>r.text()).then(t=>process.stdout.write(t)).catch(()=>process.stdout.write("NO_HEALTH"))`;
   const r = runLocal("ssh", [...SSH_OPTS, host,
     `docker ps --filter name=^/${cn}$ --format '{{.Status}}' | head -1; ` +
-    // Probe /health with node (curl isn't in node:22-slim); the deploy env pins
-    // BOT_BRIDGE_PORT to the same port probed here.
-    `docker exec ${cn} node -e 'fetch("http://127.0.0.1:${port}/health",{signal:AbortSignal.timeout(4000)}).then(r=>r.text()).then(t=>process.stdout.write(t)).catch(()=>process.stdout.write("NO_HEALTH"))' 2>/dev/null; echo; ` +
+    // Probe inside the bot container so neither the port nor bridge secret is
+    // exposed on the remote host. The container already has its own token.
+    `docker exec ${shellQuote(cn)} node -e ${shellQuote(healthProbe)} 2>/dev/null; echo; ` +
     `docker logs --tail 1 ${cn} 2>&1 | grep -oE '"event":"[A-Z_]+"' | tail -1`], { capture: true });
   const [statusLine = "", health = "", lastEvent = ""] = (r.stdout || "").trim().split("\n");
   if (!statusLine) { warn(`Container ${cn} is not running on ${host}.`); return; }
   ok(`${cn}: ${statusLine}`);
   if (health.startsWith("{")) {
-    try { note(healthLine(JSON.parse(health))); } catch { /* ignore */ }
+    try {
+      const parsed = JSON.parse(health);
+      if (parsed.error === "unauthorized") warn("Bridge authentication failed. This deployment predates bridge tokens; rerun pca deploy to rotate it.");
+      else note(healthLine(parsed));
+    } catch { /* ignore */ }
   } else if (health) note(`health: ${health}`);
   if (lastEvent) note(`last event: ${lastEvent}`);
 }
@@ -902,13 +1036,13 @@ create flags:
   --wait <secs>    how long to wait for on-chain confirmation (default 180)
   --network <ep>   target network: paseo (default) or a full wss:// endpoint
 
-deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --anthropic-key/--openai-key/--openrouter-key/--gemini-key <key>  ·  --model <m>  ·  --safe-tools  ·  --dry-run
+deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --model <m>  ·  --safe-tools  ·  --dry-run
   Needs Docker on the server + SSH access. Direct engines (echo/claude/codex/opencode)
-  deploy as one non-root container that bakes in the agent CLI, with a persistent
+  deploy with root-only transport state and a non-root agent CLI, with a persistent
   /workspace the agent works in; bridge bots deploy a two-container stack. The
-  container is the sandbox: agents run tools autonomously by default (--safe-tools
-  restricts to a read/write/edit/bash allowlist). logs/status/stop reuse the deploy
-  host saved in the bot's config (override with --host).
+  agent runs tools autonomously by default (--safe-tools restricts to a
+  read/write/edit/bash allowlist). The deploy output gives the one-time OAuth login
+  command for direct engines; logs/status/stop reuse the saved host (override with --host).
 
 Brains:  echo (test)  ·  claude/codex/opencode (direct agent engines — verbatim prompts,
   native session resume, tools in a container; opencode reaches many providers via

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  decodeStatementData,
   decodeOpaqueMessageAt,
   encodeOpaqueTextMessage,
   encodeOpaqueReactionMessage,
@@ -18,6 +19,15 @@ const concat = (...parts) => {
   return out;
 };
 const str = (s) => scaleEncodeBytes(enc.encode(s));
+const compact = (n) => {
+  if (n < 64) return Uint8Array.of(n << 2);
+  if (n < 16_384) {
+    const encoded = (n << 2) | 1;
+    return Uint8Array.of(encoded & 0xff, encoded >> 8);
+  }
+  const encoded = (n << 2) | 2;
+  return Uint8Array.of(encoded & 0xff, (encoded >> 8) & 0xff, (encoded >> 16) & 0xff, (encoded >> 24) & 0xff);
+};
 const u32 = (n) => Uint8Array.of(n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff);
 const u64 = (n) => {
   const out = new Uint8Array(8);
@@ -152,6 +162,63 @@ test("the legacy poison fixture still fails strict decode, sibling text survives
   const second = decodeOpaqueMessageAt(batch, first.offset);
   assert.equal(second.value.kind, "text");
   assert.equal(second.value.text, "still here");
+});
+
+test("declared vectors are capped before decoding their entries", () => {
+  const oversized = 100_000;
+
+  const request = concat(Uint8Array.of(0), str("REQ-OVERSIZED"), compact(oversized));
+  assert.throws(() => decodeStatementData(request), /message batch exceeds maximum/);
+
+  const envelope = concat(Uint8Array.of(2), scaleEncodeBytes(new Uint8Array(0)), compact(oversized));
+  assert.throws(() => decodeStatementData(envelope), /multi-device entries exceeds maximum/);
+
+  const oversizedAttachments = concat(Uint8Array.of(0), Uint8Array.of(1), compact(oversized));
+  const attachmentMessage = decodeOne(opaqueMessage("MSG-OVERSIZED-ATTACHMENTS", 15, oversizedAttachments));
+  assert.equal(attachmentMessage.kind, "undecodable");
+  assert.match(attachmentMessage.error, /attachments exceeds maximum/);
+
+  const oversizedCoins = decodeOne(opaqueMessage("MSG-OVERSIZED-COINS", 16, concat(Uint8Array.of(0), compact(oversized))));
+  assert.equal(oversizedCoins.kind, "undecodable");
+  assert.match(oversizedCoins.error, /coin keys exceeds maximum/);
+});
+
+test("nested vectors share an aggregate decode budget", () => {
+  const coinKeys = new Uint8Array(256); // 256 SCALE-encoded empty byte strings
+  const coinMessage = opaqueMessage("MSG-COIN-BUDGET", 16, concat(Uint8Array.of(0), compact(256), coinKeys));
+  const request = concat(Uint8Array.of(0), str("REQ-BUDGET"), compact(4), coinMessage, coinMessage, coinMessage, coinMessage);
+  const decoded = decodeStatementData(request);
+
+  assert.equal(decoded.messages[0].kind, "coinageSend");
+  assert.equal(decoded.messages[1].kind, "coinageSend");
+  assert.equal(decoded.messages[2].kind, "coinageSend");
+  assert.equal(decoded.messages[3].kind, "undecodable");
+  assert.match(decoded.messages[3].error, /aggregate maximum/);
+});
+
+test("truncated compact vector lengths are rejected", () => {
+  const request = concat(Uint8Array.of(0), str("REQ-TRUNCATED"), Uint8Array.of(0x01));
+  assert.throws(() => decodeStatementData(request), /Truncated SCALE compact value/);
+});
+
+test("hostile text and identifier fields are byte-capped before persistence", () => {
+  const oversizedId = decodeOne(opaqueMessage("I".repeat(257), 0, str("hello")));
+  assert.equal(oversizedId.kind, "undecodable");
+  assert.match(oversizedId.error, /message id exceeds maximum/);
+
+  const oversizedText = decodeOne(opaqueMessage("MSG-BIG-TEXT", 0, str("x".repeat(64 * 1024 + 1))));
+  assert.equal(oversizedText.kind, "undecodable");
+  assert.match(oversizedText.error, /SCALE string exceeds maximum/);
+
+  const badAttachment = concat(
+    Uint8Array.of(0),
+    scaleEncodeBytes(new Uint8Array(33)),
+    scaleEncodeBytes(new Uint8Array(32)),
+  );
+  const richText = concat(Uint8Array.of(0), Uint8Array.of(1), Uint8Array.of(4), badAttachment);
+  const decoded = decodeOne(opaqueMessage("MSG-BAD-ATTACHMENT", 15, richText));
+  assert.equal(decoded.kind, "undecodable");
+  assert.match(decoded.error, /attachment identifier/);
 });
 
 test("contactAdded and leftChat decode as bare events", () => {

@@ -10,6 +10,26 @@ const CHAT_RESPONSE_CHANNEL_CONTEXT = new TextEncoder().encode("response");
 const CHAT_REQUEST_DAY_UNIX_OFFSET_SECS = 1_763_164_800;
 const CHAT_REQUEST_IDENTITY_PROOF_CONTEXT = "mds-chat-request";
 
+// Every vector below originates from a peer-controlled encrypted payload. Keep
+// the limits close to the decoder so a valid compact length cannot turn into an
+// unbounded loop or array before ingress has a chance to apply backpressure.
+const MAX_MESSAGES_PER_REQUEST = 256;
+const MAX_ATTACHMENTS_PER_MESSAGE = 32;
+const MAX_MULTI_DEVICE_ENTRIES = 64;
+const MAX_COIN_KEYS_PER_MESSAGE = 256;
+const MAX_GENERIC_SCALE_VECTOR_ITEMS = 1_024;
+const MAX_TOTAL_SCALE_VECTOR_ITEMS = 1_024;
+const MAX_SCALE_BYTES = 512 * 1024;
+const MAX_OPAQUE_MESSAGE_BYTES = 128 * 1024;
+const MAX_TEXT_BYTES = 64 * 1024;
+const MAX_ID_BYTES = 256;
+const MAX_URL_BYTES = 2 * 1024;
+const MAX_MIME_BYTES = 256;
+const MAX_PUSH_TOKEN_BYTES = 8 * 1024;
+const MAX_THUMBNAIL_BYTES = 256 * 1024;
+const MAX_ENCRYPTED_KEY_BYTES = 4 * 1024;
+const MAX_SDP_BYTES = 64 * 1024;
+
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
@@ -22,6 +42,10 @@ function concatBytes(...parts) {
     offset += part.length;
   }
   return combined;
+}
+
+function newScaleVectorBudget() {
+  return { remaining: MAX_TOTAL_SCALE_VECTOR_ITEMS };
 }
 
 function bytesToHex(bytes) {
@@ -78,9 +102,15 @@ function scaleCompactDecode(bytes, offset = 0) {
     return { value: first >> 2, offset: offset + 1 };
   }
   if (mode === 1) {
+    if (offset + 2 > bytes.length) {
+      throw new Error(`Truncated SCALE compact value at ${offset}`);
+    }
     return { value: ((first | (bytes[offset + 1] << 8)) >> 2), offset: offset + 2 };
   }
   if (mode === 2) {
+    if (offset + 4 > bytes.length) {
+      throw new Error(`Truncated SCALE compact value at ${offset}`);
+    }
     const raw =
       first |
       (bytes[offset + 1] << 8) |
@@ -90,11 +120,17 @@ function scaleCompactDecode(bytes, offset = 0) {
   }
 
   const byteLength = (first >> 2) + 4;
-  let value = 0;
-  for (let index = 0; index < byteLength; index += 1) {
-    value += bytes[offset + 1 + index] * 2 ** (8 * index);
+  if (offset + 1 + byteLength > bytes.length) {
+    throw new Error(`Truncated SCALE compact value at ${offset}`);
   }
-  return { value, offset: offset + 1 + byteLength };
+  let value = 0n;
+  for (let index = 0; index < byteLength; index += 1) {
+    value |= BigInt(bytes[offset + 1 + index]) << BigInt(8 * index);
+  }
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(`SCALE compact value exceeds safe integer at ${offset}`);
+  }
+  return { value: Number(value), offset: offset + 1 + byteLength };
 }
 
 function scaleEncodeCompactBigInt(value) {
@@ -146,12 +182,18 @@ function scaleDecodeCompactBigIntAt(bytes, offset = 0) {
     return { value: BigInt(first >> 2), offset: offset + 1 };
   }
   if (mode === 1) {
+    if (offset + 2 > bytes.length) {
+      throw new Error(`Truncated SCALE compact integer at ${offset}`);
+    }
     return {
       value: BigInt((first | (bytes[offset + 1] << 8)) >> 2),
       offset: offset + 2,
     };
   }
   if (mode === 2) {
+    if (offset + 4 > bytes.length) {
+      throw new Error(`Truncated SCALE compact integer at ${offset}`);
+    }
     const raw =
       first |
       (bytes[offset + 1] << 8) |
@@ -161,6 +203,9 @@ function scaleDecodeCompactBigIntAt(bytes, offset = 0) {
   }
 
   const byteLength = (first >> 2) + 4;
+  if (offset + 1 + byteLength > bytes.length) {
+    throw new Error(`Truncated SCALE compact integer at ${offset}`);
+  }
   let value = 0n;
   for (let index = 0; index < byteLength; index += 1) {
     value |= BigInt(bytes[offset + 1 + index]) << BigInt(8 * index);
@@ -172,8 +217,11 @@ export function scaleEncodeBytes(bytes) {
   return concatBytes(scaleCompactEncodeLength(bytes.length), bytes);
 }
 
-function scaleDecodeBytesAt(bytes, offset = 0) {
+function scaleDecodeBytesAt(bytes, offset = 0, maxBytes = MAX_SCALE_BYTES, label = "SCALE bytes") {
   const length = scaleCompactDecode(bytes, offset);
+  if (length.value > maxBytes) {
+    throw new Error(`${label} exceeds maximum of ${maxBytes} bytes`);
+  }
   const end = length.offset + length.value;
   if (end > bytes.length) {
     throw new Error(`SCALE bytes exceed buffer at ${offset}`);
@@ -189,10 +237,17 @@ export function encodeChatRequestProofPayload(messageBytes, acceptorAccountId) {
   return concatBytes(messageBytes, scaleEncodeBytes(acceptorAccountId));
 }
 
-function scaleDecodeStringAt(bytes, offset = 0) {
-  const decoded = scaleDecodeBytesAt(bytes, offset);
+function scaleDecodeStringAt(bytes, offset = 0, maxBytes = MAX_TEXT_BYTES, label = "SCALE string") {
+  const decoded = scaleDecodeBytesAt(bytes, offset, maxBytes, label);
   return { value: textDecoder.decode(decoded.value), offset: decoded.offset };
 }
+
+const decodeIdAt = (bytes, offset = 0, label = "message id") =>
+  scaleDecodeStringAt(bytes, offset, MAX_ID_BYTES, label);
+const fixedBytesAt = (bytes, offset, length, label) => {
+  if (offset + length > bytes.length) throw new Error(`${label} exceeds buffer at ${offset}`);
+  return { value: bytes.slice(offset, offset + length), offset: offset + length };
+};
 
 function scaleEncodeOption(encodedValue) {
   return encodedValue == null ? Uint8Array.of(0) : concatBytes(Uint8Array.of(1), encodedValue);
@@ -213,13 +268,29 @@ function scaleEncodeArray(encodedItems) {
   return concatBytes(scaleCompactEncodeLength(encodedItems.length), ...encodedItems);
 }
 
-function scaleDecodeArrayAt(bytes, offset, decodeInner) {
+function scaleDecodeArrayAt(
+  bytes,
+  offset,
+  decodeInner,
+  maxItems = MAX_GENERIC_SCALE_VECTOR_ITEMS,
+  label = "SCALE vector",
+  budget = null,
+) {
   const length = scaleCompactDecode(bytes, offset);
-  const items = [];
+  if (length.value > maxItems) {
+    throw new Error(`${label} exceeds maximum of ${maxItems} items`);
+  }
+  if (budget != null) {
+    if (length.value > budget.remaining) {
+      throw new Error(`${label} exceeds aggregate maximum of ${MAX_TOTAL_SCALE_VECTOR_ITEMS} items`);
+    }
+    budget.remaining -= length.value;
+  }
+  const items = new Array(length.value);
   let itemOffset = length.offset;
   for (let index = 0; index < length.value; index += 1) {
     const decoded = decodeInner(bytes, itemOffset);
-    items.push(decoded.value);
+    items[index] = decoded.value;
     itemOffset = decoded.offset;
   }
   return { value: items, offset: itemOffset };
@@ -247,6 +318,9 @@ function scaleDecodeUInt32At(bytes, offset = 0) {
 }
 
 function scaleDecodeUInt64At(bytes, offset = 0) {
+  if (offset + 8 > bytes.length) {
+    throw new Error(`SCALE u64 exceeds buffer at ${offset}`);
+  }
   let value = 0n;
   for (let index = 0; index < 8; index += 1) {
     value |= BigInt(bytes[offset + index]) << BigInt(8 * index);
@@ -537,7 +611,7 @@ export function encodeNativeChatRequestV2({
 export function decodeEncryptedChatRequestPayload(payload, ownP256PrivateKey, ownAccountId) {
   let remotePayloadBytes = payload;
   try {
-    const wrapped = scaleDecodeBytesAt(payload, 0);
+    const wrapped = scaleDecodeBytesAt(payload, 0, MAX_SCALE_BYTES, "encrypted chat request");
     if (wrapped.offset === payload.length) {
       remotePayloadBytes = wrapped.value;
     }
@@ -546,16 +620,17 @@ export function decodeEncryptedChatRequestPayload(payload, ownP256PrivateKey, ow
   }
 
   let offset = 0;
-  const encryptionPubKey = scaleDecodeBytesAt(remotePayloadBytes, offset);
+  const encryptionPubKey = scaleDecodeBytesAt(remotePayloadBytes, offset, 65, "chat request encryption key");
+  if (encryptionPubKey.value.length !== 65) throw new Error("invalid chat request encryption key length");
   offset = encryptionPubKey.offset;
-  const encryptedData = scaleDecodeBytesAt(remotePayloadBytes, offset);
+  const encryptedData = scaleDecodeBytesAt(remotePayloadBytes, offset, MAX_SCALE_BYTES, "chat request ciphertext");
   if (encryptedData.offset !== remotePayloadBytes.length) {
     throw new Error("Encrypted chat request model has trailing bytes");
   }
 
   const requestSharedSecret = p256SharedSecret(ownP256PrivateKey, encryptionPubKey.value);
   const decrypted = aesGcmDecrypt(requestSharedSecret, encryptedData.value);
-  const remoteModel = decodeChatRequestRemoteModel(decrypted);
+  const remoteModel = decodeChatRequestRemoteModel(decrypted, newScaleVectorBudget());
   const proofPayload = encodeChatRequestProofPayload(remoteModel.messageBytes, ownAccountId);
   const isValid = sr25519Verify(proofPayload, remoteModel.proof.signature, remoteModel.proof.signer);
 
@@ -590,8 +665,8 @@ export function verifyChatRequestIdentityProof(decodedRequest, ownP256PrivateKey
   return Buffer.from(expected).equals(Buffer.from(decodedRequest.identityProof.proof));
 }
 
-function decodeChatRequestRemoteModel(bytes) {
-  const message = decodeChatRequestMessageAt(bytes, 0);
+function decodeChatRequestRemoteModel(bytes, budget) {
+  const message = decodeChatRequestMessageAt(bytes, 0, budget);
   const proof = decodeStatementProofAt(bytes, message.offset);
   return {
     message: message.value,
@@ -601,9 +676,9 @@ function decodeChatRequestRemoteModel(bytes) {
   };
 }
 
-function decodeChatRequestMessageAt(bytes, offset = 0) {
+function decodeChatRequestMessageAt(bytes, offset = 0, budget = newScaleVectorBudget()) {
   const start = offset;
-  const messageId = scaleDecodeStringAt(bytes, offset);
+  const messageId = decodeIdAt(bytes, offset, "chat request id");
   offset = messageId.offset;
   const timestamp = scaleDecodeUInt64At(bytes, offset);
   offset = timestamp.offset;
@@ -616,18 +691,19 @@ function decodeChatRequestMessageAt(bytes, offset = 0) {
   let identityProof = null;
   let deviceEncPubKey = null;
   if (version === 1) {
-    const identityAccountId = bytes.slice(offset, offset + 32);
-    offset += 32;
-    const proof = bytes.slice(offset, offset + 32);
-    offset += 32;
-    deviceEncPubKey = bytes.slice(offset, offset + 65);
-    offset += 65;
-    identityProof = { identityAccountId, proof };
+    const identityAccountId = fixedBytesAt(bytes, offset, 32, "identity account id");
+    offset = identityAccountId.offset;
+    const proof = fixedBytesAt(bytes, offset, 32, "identity proof");
+    offset = proof.offset;
+    const deviceKey = fixedBytesAt(bytes, offset, 65, "device encryption key");
+    offset = deviceKey.offset;
+    deviceEncPubKey = deviceKey.value;
+    identityProof = { identityAccountId: identityAccountId.value, proof: proof.value };
   }
 
   const pushToken = scaleDecodeOptionAt(bytes, offset, decodeRemoteTokenContentAt);
   offset = pushToken.offset;
-  const welcomeMessage = scaleDecodeOptionAt(bytes, offset, decodeRichTextAt);
+  const welcomeMessage = scaleDecodeOptionAt(bytes, offset, (data, itemOffset) => decodeRichTextAt(data, itemOffset, budget));
   offset = welcomeMessage.offset;
 
   return {
@@ -648,7 +724,7 @@ function decodeChatRequestMessageAt(bytes, offset = 0) {
 }
 
 function decodeRemoteTokenContentAt(bytes, offset) {
-  const token = scaleDecodeBytesAt(bytes, offset);
+  const token = scaleDecodeBytesAt(bytes, offset, MAX_PUSH_TOKEN_BYTES, "push token");
   const pushType = bytes[token.offset];
   return {
     value: { token: token.value, pushType },
@@ -656,18 +732,25 @@ function decodeRemoteTokenContentAt(bytes, offset) {
   };
 }
 
-function decodeRichTextAt(bytes, offset) {
+function decodeRichTextAt(bytes, offset, budget = newScaleVectorBudget()) {
   const text = scaleDecodeOptionAt(bytes, offset, scaleDecodeStringAt);
   offset = text.offset;
-  const attachments = scaleDecodeOptionAt(bytes, offset, decodeAttachmentsAt);
+  const attachments = scaleDecodeOptionAt(bytes, offset, (data, itemOffset) => decodeAttachmentsAt(data, itemOffset, budget));
   return {
     value: { text: text.value, attachments: attachments.value },
     offset: attachments.offset,
   };
 }
 
-function decodeAttachmentsAt(bytes, offset) {
-  return scaleDecodeArrayAt(bytes, offset, decodeFileVariantAt);
+function decodeAttachmentsAt(bytes, offset, budget) {
+  return scaleDecodeArrayAt(
+    bytes,
+    offset,
+    decodeFileVariantAt,
+    MAX_ATTACHMENTS_PER_MESSAGE,
+    "attachments",
+    budget,
+  );
 }
 
 // Attachment layout mirrors the mobile app's FileVariant (ChatRichRemoteContent
@@ -678,8 +761,10 @@ function decodeFileVariantAt(bytes, offset) {
   if (variantTag !== 0) {
     throw new Error(`Unsupported FileVariant tag ${variantTag} at ${offset}`);
   }
-  const identifier = scaleDecodeBytesAt(bytes, offset + 1);
-  const claimTicket = scaleDecodeBytesAt(bytes, identifier.offset);
+  const identifier = scaleDecodeBytesAt(bytes, offset + 1, 32, "attachment identifier");
+  if (identifier.value.length !== 32) throw new Error("attachment identifier must be 32 bytes");
+  const claimTicket = scaleDecodeBytesAt(bytes, identifier.offset, 32, "attachment claim ticket");
+  if (claimTicket.value.length !== 32) throw new Error("attachment claim ticket must be 32 bytes");
   const node = decodeNodeEndpointAt(bytes, claimTicket.offset);
   const meta = decodeFileMetaAt(bytes, node.offset);
   return {
@@ -700,7 +785,7 @@ function decodeNodeEndpointAt(bytes, offset) {
   if (tag !== 0) {
     throw new Error(`Unsupported NodeEndpoint tag ${tag} at ${offset}`);
   }
-  return scaleDecodeStringAt(bytes, offset + 1);
+  return scaleDecodeStringAt(bytes, offset + 1, MAX_URL_BYTES, "attachment node URL");
 }
 
 function decodeFileMetaAt(bytes, offset) {
@@ -708,7 +793,7 @@ function decodeFileMetaAt(bytes, offset) {
   if (tag !== 0 && tag !== 1 && tag !== 2) {
     throw new Error(`Unsupported FileMeta tag ${tag} at ${offset}`);
   }
-  const mimeType = scaleDecodeStringAt(bytes, offset + 1);
+  const mimeType = scaleDecodeStringAt(bytes, offset + 1, MAX_MIME_BYTES, "attachment MIME type");
   const fileSize = scaleDecodeUInt32At(bytes, mimeType.offset);
   const general = { mimeType: mimeType.value, fileSize: fileSize.value };
   if (tag === 0) {
@@ -717,14 +802,16 @@ function decodeFileMetaAt(bytes, offset) {
   if (tag === 1) {
     const width = scaleDecodeUInt32At(bytes, fileSize.offset);
     const height = scaleDecodeUInt32At(bytes, width.offset);
-    const thumbnail = scaleDecodeOptionAt(bytes, height.offset, scaleDecodeBytesAt);
+    const thumbnail = scaleDecodeOptionAt(bytes, height.offset, (data, itemOffset) =>
+      scaleDecodeBytesAt(data, itemOffset, MAX_THUMBNAIL_BYTES, "attachment thumbnail"));
     return {
       value: { fileKind: "image", ...general, width: width.value, height: height.value, thumbnail: thumbnail.value },
       offset: thumbnail.offset,
     };
   }
   const duration = scaleDecodeUInt32At(bytes, fileSize.offset);
-  const thumbnail = scaleDecodeOptionAt(bytes, duration.offset, scaleDecodeBytesAt);
+  const thumbnail = scaleDecodeOptionAt(bytes, duration.offset, (data, itemOffset) =>
+    scaleDecodeBytesAt(data, itemOffset, MAX_THUMBNAIL_BYTES, "attachment thumbnail"));
   return {
     value: { fileKind: "video", ...general, duration: duration.value, thumbnail: thumbnail.value },
     offset: thumbnail.offset,
@@ -737,15 +824,15 @@ function decodeStatementProofAt(bytes, offset = 0) {
     throw new Error(`Unsupported statement proof kind: ${proofKind}`);
   }
   const signatureStart = offset + 1;
-  const signatureEnd = signatureStart + 64;
-  const signerEnd = signatureEnd + 32;
+  const signature = fixedBytesAt(bytes, signatureStart, 64, "statement proof signature");
+  const signer = fixedBytesAt(bytes, signature.offset, 32, "statement proof signer");
   return {
     value: {
       kind: "sr25519",
-      signature: bytes.slice(signatureStart, signatureEnd),
-      signer: bytes.slice(signatureEnd, signerEnd),
+      signature: signature.value,
+      signer: signer.value,
     },
-    offset: signerEnd,
+    offset: signer.offset,
   };
 }
 
@@ -989,15 +1076,15 @@ export function decodeSessionStatementPayload(data, session, senderAccountId = n
 }
 
 export function decodeEncryptedStatementPayload(payload, sharedSecret, session = null, senderAccountId = null) {
-  const encrypted = scaleDecodeBytesAt(payload, 0);
+  const encrypted = scaleDecodeBytesAt(payload, 0, MAX_SCALE_BYTES, "encrypted session statement");
   const decrypted = aesGcmDecrypt(sharedSecret, encrypted.value);
   return decodeStatementData(decrypted, session, senderAccountId);
 }
 
-export function decodeStatementData(bytes, session = null, senderAccountId = null) {
+export function decodeStatementData(bytes, session = null, senderAccountId = null, budget = newScaleVectorBudget()) {
   const kind = bytes[0];
   if (kind === 0) {
-    const request = decodeMessageExchangeRequestAt(bytes, 1);
+    const request = decodeMessageExchangeRequestAt(bytes, 1, budget);
     return { kind: "request", ...request.value, offset: request.offset };
   }
   if (kind === 1) {
@@ -1005,16 +1092,16 @@ export function decodeStatementData(bytes, session = null, senderAccountId = nul
     return { kind: "response", ...response.value, offset: response.offset };
   }
   if (kind === 2) {
-    const multiRequest = decodeMultiDeviceEnvelopeAt(bytes, 1);
+    const multiRequest = decodeMultiDeviceEnvelopeAt(bytes, 1, budget);
     if (session == null) {
       return { kind: "multirequest", ...multiRequest.value, offset: multiRequest.offset };
     }
     const requestBytes = decodeMultiDeviceInnerPayload(multiRequest.value, session, senderAccountId);
-    const request = decodeMessageExchangeRequestAt(requestBytes, 0);
+    const request = decodeMessageExchangeRequestAt(requestBytes, 0, budget);
     return { kind: "request", multiDevice: true, ...request.value, offset: multiRequest.offset };
   }
   if (kind === 3) {
-    const multiResponse = decodeMultiDeviceEnvelopeAt(bytes, 1);
+    const multiResponse = decodeMultiDeviceEnvelopeAt(bytes, 1, budget);
     if (session == null) {
       return { kind: "multiresponse", ...multiResponse.value, offset: multiResponse.offset };
     }
@@ -1025,9 +1112,16 @@ export function decodeStatementData(bytes, session = null, senderAccountId = nul
   throw new Error(`Unsupported statement data kind: ${kind}`);
 }
 
-function decodeMultiDeviceEnvelopeAt(bytes, offset) {
-  const encryptedPayload = scaleDecodeBytesAt(bytes, offset);
-  const devicesInfo = scaleDecodeArrayAt(bytes, encryptedPayload.offset, decodeRequestDeviceInfoAt);
+function decodeMultiDeviceEnvelopeAt(bytes, offset, budget) {
+  const encryptedPayload = scaleDecodeBytesAt(bytes, offset, MAX_SCALE_BYTES, "multi-device ciphertext");
+  const devicesInfo = scaleDecodeArrayAt(
+    bytes,
+    encryptedPayload.offset,
+    decodeRequestDeviceInfoAt,
+    MAX_MULTI_DEVICE_ENTRIES,
+    "multi-device entries",
+    budget,
+  );
   return {
     value: {
       encryptedPayload: encryptedPayload.value,
@@ -1038,12 +1132,12 @@ function decodeMultiDeviceEnvelopeAt(bytes, offset) {
 }
 
 function decodeRequestDeviceInfoAt(bytes, offset) {
-  const statementAccountId = bytes.slice(offset, offset + 32);
-  const encryptedKey = scaleDecodeBytesAt(bytes, offset + 32);
+  const statementAccountId = fixedBytesAt(bytes, offset, 32, "device statement account");
+  const encryptedKey = scaleDecodeBytesAt(bytes, statementAccountId.offset, MAX_ENCRYPTED_KEY_BYTES, "device encrypted key");
   return {
     value: {
-      statementAccountId,
-      statementAccountIdHex: normalizeHex(bytesToHex(statementAccountId)),
+      statementAccountId: statementAccountId.value,
+      statementAccountIdHex: normalizeHex(bytesToHex(statementAccountId.value)),
       encryptedKey: encryptedKey.value,
     },
     offset: encryptedKey.offset,
@@ -1077,10 +1171,17 @@ function decodeMultiDeviceInnerPayload(envelope, session, senderAccountId = null
   return aesGcmDecryptRawKey(oneshotKey, envelope.encryptedPayload);
 }
 
-function decodeMessageExchangeRequestAt(bytes, offset) {
-  const requestId = scaleDecodeStringAt(bytes, offset);
+function decodeMessageExchangeRequestAt(bytes, offset, budget) {
+  const requestId = decodeIdAt(bytes, offset, "session request id");
   offset = requestId.offset;
-  const messages = scaleDecodeArrayAt(bytes, offset, decodeOpaqueMessageAt);
+  const messages = scaleDecodeArrayAt(
+    bytes,
+    offset,
+    (data, itemOffset) => decodeOpaqueMessageAt(data, itemOffset, budget),
+    MAX_MESSAGES_PER_REQUEST,
+    "message batch",
+    budget,
+  );
   return {
     value: {
       requestId: requestId.value,
@@ -1091,7 +1192,8 @@ function decodeMessageExchangeRequestAt(bytes, offset) {
 }
 
 function decodeMessageExchangeResponseAt(bytes, offset) {
-  const requestId = scaleDecodeStringAt(bytes, offset);
+  const requestId = decodeIdAt(bytes, offset, "session response id");
+  if (requestId.offset >= bytes.length) throw new Error("session response code exceeds buffer");
   return {
     value: {
       requestId: requestId.value,
@@ -1103,23 +1205,23 @@ function decodeMessageExchangeResponseAt(bytes, offset) {
 
 // Exported for the codec unit tests (round-trip a single opaque message
 // without building a whole encrypted session statement).
-export function decodeOpaqueMessageAt(bytes, offset) {
-  const opaque = scaleDecodeBytesAt(bytes, offset);
+export function decodeOpaqueMessageAt(bytes, offset, budget = newScaleVectorBudget()) {
+  const opaque = scaleDecodeBytesAt(bytes, offset, MAX_OPAQUE_MESSAGE_BYTES, "opaque message");
   // Each opaque message is length-prefixed, so one undecodable message (e.g. a
   // rich-text image attachment) must not abort the rest of the batch — the app
   // resends its whole unacked backlog as a single request.
   let decoded;
   try {
-    decoded = decodeRemoteMessage(opaque.value);
+    decoded = decodeRemoteMessage(opaque.value, budget);
   } catch (error) {
     decoded = { kind: "undecodable", error: error instanceof Error ? error.message : String(error) };
   }
   return { value: decoded, offset: opaque.offset };
 }
 
-function decodeRemoteMessage(bytes) {
+function decodeRemoteMessage(bytes, budget) {
   let offset = 0;
-  const messageId = scaleDecodeStringAt(bytes, offset);
+  const messageId = decodeIdAt(bytes, offset, "message id");
   offset = messageId.offset;
   const timestamp = scaleDecodeUInt64At(bytes, offset);
   offset = timestamp.offset;
@@ -1147,7 +1249,7 @@ function decodeRemoteMessage(bytes) {
     };
   }
   if (contentKind === 14) {
-    const accepted = scaleDecodeStringAt(bytes, offset);
+    const accepted = decodeIdAt(bytes, offset, "accepted request id");
     return {
       messageId: messageId.value,
       timestamp: Number(timestamp.value),
@@ -1157,26 +1259,26 @@ function decodeRemoteMessage(bytes) {
     };
   }
   if (contentKind === 20) {
-    const accepted = scaleDecodeStringAt(bytes, offset);
+    const accepted = decodeIdAt(bytes, offset, "accepted request id");
     offset = accepted.offset;
-    const statementAccountId = bytes.slice(offset, offset + 32);
-    offset += 32;
-    const encryptionPublicKey = bytes.slice(offset, offset + 65);
-    offset += 65;
+    const statementAccountId = fixedBytesAt(bytes, offset, 32, "device statement account");
+    offset = statementAccountId.offset;
+    const encryptionPublicKey = fixedBytesAt(bytes, offset, 65, "device encryption key");
+    offset = encryptionPublicKey.offset;
     return {
       messageId: messageId.value,
       timestamp: Number(timestamp.value),
       kind: "multiChatAccepted",
       acceptedRequestId: accepted.value,
-      statementAccountId,
-      statementAccountIdHex: normalizeHex(bytesToHex(statementAccountId)),
-      encryptionPublicKey,
-      encryptionPublicKeyHex: normalizeHex(bytesToHex(encryptionPublicKey)),
+      statementAccountId: statementAccountId.value,
+      statementAccountIdHex: normalizeHex(bytesToHex(statementAccountId.value)),
+      encryptionPublicKey: encryptionPublicKey.value,
+      encryptionPublicKeyHex: normalizeHex(bytesToHex(encryptionPublicKey.value)),
       offset,
     };
   }
   if (contentKind === 15) {
-    const richText = decodeRichTextAt(bytes, offset);
+    const richText = decodeRichTextAt(bytes, offset, budget);
     return {
       messageId: messageId.value,
       timestamp: Number(timestamp.value),
@@ -1188,7 +1290,14 @@ function decodeRemoteMessage(bytes) {
   }
   if (contentKind === 16) {
     const totalValue = scaleDecodeCompactBigIntAt(bytes, offset);
-    const coinKeys = scaleDecodeArrayAt(bytes, totalValue.offset, scaleDecodeBytesAt);
+    const coinKeys = scaleDecodeArrayAt(
+      bytes,
+      totalValue.offset,
+      scaleDecodeBytesAt,
+      MAX_COIN_KEYS_PER_MESSAGE,
+      "coin keys",
+      budget,
+    );
     return {
       messageId: messageId.value,
       timestamp: Number(timestamp.value),
@@ -1208,8 +1317,8 @@ function decodeRemoteMessage(bytes) {
     };
   }
   if (contentKind === 4 || contentKind === 5) {
-    const targetMessageId = scaleDecodeStringAt(bytes, offset);
-    const emoji = scaleDecodeStringAt(bytes, targetMessageId.offset);
+    const targetMessageId = decodeIdAt(bytes, offset, "reaction target id");
+    const emoji = scaleDecodeStringAt(bytes, targetMessageId.offset, 64, "reaction emoji");
     return {
       messageId: messageId.value,
       timestamp: Number(timestamp.value),
@@ -1221,8 +1330,8 @@ function decodeRemoteMessage(bytes) {
     };
   }
   if (contentKind === 7) {
-    const replyToMessageId = scaleDecodeStringAt(bytes, offset);
-    const richText = decodeRichTextAt(bytes, replyToMessageId.offset);
+    const replyToMessageId = decodeIdAt(bytes, offset, "reply target id");
+    const richText = decodeRichTextAt(bytes, replyToMessageId.offset, budget);
     return {
       messageId: messageId.value,
       timestamp: Number(timestamp.value),
@@ -1237,7 +1346,8 @@ function decodeRemoteMessage(bytes) {
     // WebRTC call offer. The sdp blob is decoded only for framing — surface its
     // length, not its content. The offer's envelope messageId doubles as the
     // offerId a dataChannelClosed decline must reference.
-    const sdp = scaleDecodeBytesAt(bytes, offset);
+    const sdp = scaleDecodeBytesAt(bytes, offset, MAX_SDP_BYTES, "call offer SDP");
+    if (sdp.offset >= bytes.length) throw new Error("call offer purpose exceeds buffer");
     return {
       messageId: messageId.value,
       timestamp: Number(timestamp.value),
@@ -1248,7 +1358,7 @@ function decodeRemoteMessage(bytes) {
     };
   }
   if (contentKind === 11) {
-    const offerId = scaleDecodeStringAt(bytes, offset);
+    const offerId = decodeIdAt(bytes, offset, "call offer id");
     return {
       messageId: messageId.value,
       timestamp: Number(timestamp.value),
@@ -1258,8 +1368,8 @@ function decodeRemoteMessage(bytes) {
     };
   }
   if (contentKind === 12) {
-    const targetMessageId = scaleDecodeStringAt(bytes, offset);
-    const richText = decodeRichTextAt(bytes, targetMessageId.offset);
+    const targetMessageId = decodeIdAt(bytes, offset, "edit target id");
+    const richText = decodeRichTextAt(bytes, targetMessageId.offset, budget);
     return {
       messageId: messageId.value,
       timestamp: Number(timestamp.value),

@@ -30,9 +30,11 @@ const BOT_ACCOUNT = accountOf(BOT_SEED);
 const BOT_ID_KEY = idKeyOf(BOT_SEED);
 const CLIENT_ACCOUNT = accountOf(CLIENT_SEED);
 const CLIENT_ID_KEY = idKeyOf(CLIENT_SEED);
+const TEST_BRIDGE_TOKEN = "transport-e2e-bridge-token-0123456789";
 
 // Spawn the bot and expose its JSON-line events for assertions.
 async function startBot({ endpoint, stateDir, extraEnv = {} }) {
+  const bridgeToken = extraEnv.BOT_BRIDGE_TOKEN ?? TEST_BRIDGE_TOKEN;
   const child = spawn(process.execPath, [path.join(BOT_CORE, "index.mjs")], {
     env: {
       ...process.env,
@@ -41,6 +43,7 @@ async function startBot({ endpoint, stateDir, extraEnv = {} }) {
       // Port 0: the OS assigns a free one (tests run concurrently, so a
       // pick-then-bind helper would race); BOT_BRIDGE_LISTENING reports it.
       BOT_BRIDGE_PORT: "0",
+      BOT_BRIDGE_TOKEN: bridgeToken,
       BOT_STATE_DIR: stateDir,
       BOT_BRAIN: "echo",
       BOT_USERNAME: "e2etest.00",
@@ -71,12 +74,16 @@ async function startBot({ endpoint, stateDir, extraEnv = {} }) {
     child,
     events,
     bridgePort: 0, // set below once BOT_BRIDGE_LISTENING reports the bound port
+    bridgeToken,
     // Resolve when an event matching pred arrives (or already arrived).
     waitFor(pred, { timeoutMs = 15_000, label = "event" } = {}) {
       const hit = events.find(pred);
       if (hit) return Promise.resolve(hit);
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => { listeners.delete(l); reject(new Error(`timed out waiting for ${label}`)); }, timeoutMs);
+        const timer = setTimeout(() => {
+          listeners.delete(l);
+          reject(new Error(`timed out waiting for ${label}; recent events: ${JSON.stringify(events.slice(-12))}`));
+        }, timeoutMs);
         const l = (ev) => { if (pred(ev)) { clearTimeout(timer); listeners.delete(l); resolve(ev); } };
         listeners.add(l);
       });
@@ -187,8 +194,8 @@ describe("transport e2e", { concurrency: 8 }, () => {
         const second = await runClient(node.url, ["--no-opener", "1"], ["after-restart"]);
         assert.equal(second.code, 0, `client failed:\n${second.out}`);
         assert.match(second.out, /Echo: after-restart/);
-        const reanswered = bot.events.filter((e) => e.event === "BOT_RECEIVED_TEXT" && e.text !== "after-restart");
-        assert.deepEqual(reanswered, [], `re-answered old messages: ${JSON.stringify(reanswered)}`);
+        const received = bot.events.filter((e) => e.event === "BOT_RECEIVED_TEXT");
+        assert.deepEqual(received.map((e) => e.chars), ["after-restart".length], `re-answered old messages: ${JSON.stringify(received)}`);
       } finally {
         await bot.stop();
         await node.close();
@@ -253,7 +260,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
         // Send a follow-up, kill the bot the moment it's ACKed but before the
         // 3s brain finishes — the reply now exists only in the owed journal.
         const clientDone = runClient(node.url, ["--no-opener", "1"], ["crash question"]);
-        await bot.waitFor((e) => e.event === "BOT_RECEIVED_TEXT" && e.text === "crash question", { label: "crash question received" });
+        await bot.waitFor((e) => e.event === "BOT_RECEIVED_TEXT" && e.chars === "crash question".length, { label: "crash question received" });
         await bot.stop("SIGKILL");
         await clientDone;
 
@@ -275,6 +282,43 @@ describe("transport e2e", { concurrency: 8 }, () => {
     });
   }
 
+  test("graceful shutdown preserves an in-flight direct-agent turn", async () => {
+    const node = await startMockStatementNode();
+    const stateDir = tmpState();
+    const slowBrain = {
+      BOT_SUBSCRIBE: "0",
+      BOT_BRAIN: "claude",
+      BOT_AI_CMD: "sh",
+      BOT_AI_ARGS: JSON.stringify(["-c", "sleep 3; printf '{\"type\":\"result\",\"result\":\"graceful-recovered\"}\\n'"]),
+      BOT_THINKING_TEXT: "",
+    };
+    let bot = await startBot({ endpoint: node.url, stateDir, extraEnv: slowBrain });
+    try {
+      const opener = await runClient(node.url, [], ["graceful opener", "warmup"]);
+      assert.equal(opener.code, 0, opener.out);
+
+      const clientDone = runClient(node.url, ["--no-opener", "1"], ["graceful question"]);
+      await bot.waitFor(
+        (event) => event.event === "BOT_RECEIVED_TEXT" && event.chars === "graceful question".length,
+        { label: "graceful question received" },
+      );
+      await bot.stop("SIGTERM");
+      await clientDone;
+
+      const state = JSON.parse(fs.readFileSync(path.join(stateDir, "session-state.json"), "utf8"));
+      assert.equal(state.owed?.some((owed) => owed.t === "graceful question"), true, "graceful shutdown lost owed work");
+
+      bot = await startBot({ endpoint: node.url, stateDir, extraEnv: slowBrain });
+      const restored = await bot.waitFor((event) => event.event === "BOT_STATE_RESTORED", { label: "BOT_STATE_RESTORED" });
+      assert.equal(restored.owed >= 1, true, `expected owed >= 1, got ${restored.owed}`);
+      await bot.waitFor((event) => event.event === "BOT_SENT_TEXT", { label: "recovered direct reply", timeoutMs: 20_000 });
+    } finally {
+      await bot.stop();
+      await node.close();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
   test("bridge surface: /inbound shape, /media, reply/edit/react, events", async () => {
     const node = await startMockStatementNode();
     const hop = await startMockHopNode();
@@ -289,27 +333,37 @@ describe("transport e2e", { concurrency: 8 }, () => {
       extraEnv: { BOT_SUBSCRIBE: "0", BOT_BRAIN: "bridge", BOT_HOP_ALLOW_INSECURE: "1", BOT_THINKING_TEXT: "" },
     });
     const base = `http://127.0.0.1:${bot.bridgePort}`;
+    const authHeaders = { authorization: `Bearer ${bot.bridgeToken}` };
     const post = (route, body) => fetch(`${base}${route}`, {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+      method: "POST", headers: { ...authHeaders, "content-type": "application/json" }, body: JSON.stringify(body),
     }).then((r) => r.json());
-    // Drain /inbound into one shared list (a drain discards what it returns, so
-    // per-predicate polling would lose sibling items).
+    // Lease /inbound into one shared list, acknowledging each item after this
+    // test harness has accepted it so sibling predicates never lose work.
     const received = [];
     const pump = async (pred, { events = false, timeoutMs = 30_000, label = "inbound item" } = {}) => {
       const until = Date.now() + timeoutMs;
       while (Date.now() < until) {
         const hit = received.find(pred);
         if (hit) return hit;
-        const items = await fetch(`${base}/inbound?wait=2${events ? "&events=1" : ""}`).then((r) => r.json());
+        const items = await fetch(`${base}/inbound?wait=2${events ? "&events=1" : ""}`, { headers: authHeaders }).then((r) => r.json());
+        for (const item of items) {
+          if (!item.delivery_id) continue;
+          const ack = await post("/inbound/ack", { delivery_id: item.delivery_id, lease_id: item.lease_id });
+          assert.equal(ack.success, true, JSON.stringify(ack));
+        }
         received.push(...items);
       }
       throw new Error(`timed out waiting for ${label}; got ${JSON.stringify(received)}`);
     };
     try {
+      const unauthorized = await fetch(`${base}/health`);
+      assert.equal(unauthorized.status, 401, "bridge must reject unauthenticated local clients");
       const client1 = runClient(node.url, ["--attach", attachSpecOf(file, photo)], ["bridge opener"]);
       // Opener arrives over the bridge; answer it as a quote so the client's
       // exit-0 rule (a reply + an ACK) is satisfied.
       const opener = await pump((i) => i.text === "bridge opener", { label: "opener" });
+      assert.match(opener.delivery_id, /^[0-9A-F-]{36}$/);
+      assert.match(opener.lease_id, /^[0-9A-F-]{36}$/);
       const sent = await post("/send", { chat_id: opener.chat_id, text: "seen it", reply_to: opener.message_id });
       assert.equal(sent.success, true, JSON.stringify(sent));
       assert.match(sent.message_id, /^[0-9A-F-]{36}$/, "expected a real envelope UUID");
@@ -324,7 +378,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
       assert.equal(att.url, `/media/${bytesToHex(file.identifier)}`);
       assert.equal(att.mime, "image/jpeg");
       assert.equal(Object.keys(att).some((k) => /ticket|ct/i.test(k)), false, "claim ticket leaked across the bridge");
-      const served = Buffer.from(await fetch(`${base}${att.url}`).then((r) => r.arrayBuffer()));
+      const served = Buffer.from(await fetch(`${base}${att.url}`, { headers: authHeaders }).then((r) => r.arrayBuffer()));
       assert.equal(Buffer.compare(served, photo), 0, "served media differs from the uploaded photo");
 
       // Edit the earlier reply in place, then check the send path recorded it.
@@ -355,6 +409,65 @@ describe("transport e2e", { concurrency: 8 }, () => {
       await bot.stop();
       await node.close();
       await hop.close();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  test("bridge leases renew long work and reject stale acknowledgements", async () => {
+    const node = await startMockStatementNode();
+    const stateDir = tmpState();
+    const bot = await startBot({
+      endpoint: node.url,
+      stateDir,
+      extraEnv: { BOT_SUBSCRIBE: "0", BOT_BRAIN: "bridge", BOT_THINKING_TEXT: "", BOT_BRIDGE_LEASE_MS: "1000" },
+    });
+    const base = `http://127.0.0.1:${bot.bridgePort}`;
+    const headers = { authorization: `Bearer ${bot.bridgeToken}`, "content-type": "application/json" };
+    const post = async (route, body) => {
+      const response = await fetch(`${base}${route}`, { method: "POST", headers, body: JSON.stringify(body) });
+      return { status: response.status, body: await response.json() };
+    };
+    const inbound = async () => {
+      const response = await fetch(`${base}/inbound?wait=2&limit=1`, { headers: { authorization: `Bearer ${bot.bridgeToken}` } });
+      return response.json();
+    };
+    try {
+      const client = runClient(node.url, [], ["lease question"]);
+      let first = null;
+      for (let attempt = 0; attempt < 10 && !first; attempt += 1) {
+        const items = await inbound();
+        first = items.find((item) => item.text === "lease question") ?? null;
+      }
+      assert.ok(first, "expected bridge delivery");
+      assert.equal(first.lease_ms, 1000);
+      const renewed = await post("/inbound/renew", { delivery_id: first.delivery_id, lease_id: first.lease_id });
+      assert.equal(renewed.status, 200);
+      assert.equal(renewed.body.renewed, 1);
+
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      let second = null;
+      for (let attempt = 0; attempt < 10 && !second; attempt += 1) {
+        const items = await inbound();
+        second = items.find((item) => item.delivery_id === first.delivery_id) ?? null;
+      }
+      assert.ok(second, "expired delivery should be re-leased");
+      assert.notEqual(second.lease_id, first.lease_id);
+
+      const stale = await post("/inbound/ack", { delivery_id: first.delivery_id, lease_id: first.lease_id });
+      assert.equal(stale.status, 200);
+      assert.equal(stale.body.acknowledged, 0, "stale lease must not settle the delivery");
+      const secondRenew = await post("/inbound/renew", { delivery_id: second.delivery_id, lease_id: second.lease_id });
+      assert.equal(secondRenew.status, 200);
+      const sent = await post("/send", { chat_id: second.chat_id, text: "lease answer" });
+      assert.equal(sent.status, 200);
+      const settled = await post("/inbound/ack", { delivery_id: second.delivery_id, lease_id: second.lease_id });
+      assert.equal(settled.status, 200);
+      assert.equal(settled.body.acknowledged, 1);
+      const result = await client;
+      assert.match(result.out, /lease answer/);
+    } finally {
+      await bot.stop();
+      await node.close();
       fs.rmSync(stateDir, { recursive: true, force: true });
     }
   });
@@ -444,8 +557,9 @@ describe("transport e2e", { concurrency: 8 }, () => {
       },
     });
     const base = `http://127.0.0.1:${bot.bridgePort}`;
+    const authHeaders = { authorization: `Bearer ${bot.bridgeToken}` };
     const post = (route, body) => fetch(`${base}${route}`, {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+      method: "POST", headers: { ...authHeaders, "content-type": "application/json" }, body: JSON.stringify(body),
     }).then((r) => r.json());
     try {
       const clientP = runClient(node.url, ["--wait-secs", "14"], ["bridge live question"]);
@@ -453,9 +567,13 @@ describe("transport e2e", { concurrency: 8 }, () => {
         const until = Date.now() + 20_000;
         while (Date.now() < until) {
           try {
-            const items = await fetch(`${base}/inbound?wait=2`).then((r) => r.json());
+            const items = await fetch(`${base}/inbound?wait=2`, { headers: authHeaders }).then((r) => r.json());
             const hit = items.find((i) => i.text === "bridge live question");
-            if (hit) return hit;
+            if (hit) {
+              const ack = await post("/inbound/ack", { delivery_id: hit.delivery_id, lease_id: hit.lease_id });
+              assert.equal(ack.success, true, JSON.stringify(ack));
+              return hit;
+            }
           } catch { await new Promise((r) => setTimeout(r, 250)); }
         }
         throw new Error("inbound item never arrived");
@@ -625,7 +743,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
     }
   });
 
-  test("engine: a sent file is staged into the workspace before the turn", async () => {
+  test("engine: a sent file is privately staged for the turn then cleaned up", async () => {
     const node = await startMockStatementNode();
     const hop = await startMockHopNode();
     const stateDir = tmpState();
@@ -648,12 +766,12 @@ describe("transport e2e", { concurrency: 8 }, () => {
         "--wait-secs", "14",
       ], ["hello first", "follow-up"]);
       assert.equal(r.code, 0, `client failed:\n${r.out}`);
-      // The prompt the engine saw references the staged copy inside the
-      // workspace, not the media store.
+      // The prompt references a private per-turn copy, not the media store;
+      // that copy is removed once the engine has completed.
       const m = /PROMPT .*saved at (\S+)/.exec(r.out);
       assert.ok(m, `no staged path in the engine prompt:\n${r.out}`);
-      assert.ok(m[1].includes(`${path.sep}.attachments${path.sep}`), `not staged into .attachments: ${m[1]}`);
-      assert.equal(fs.readFileSync(m[1]).toString(), "spec-content-123", "staged bytes differ");
+      assert.ok(m[1].includes(`${path.sep}.pca-attachment-`), `not staged into a private turn directory: ${m[1]}`);
+      assert.equal(fs.existsSync(m[1]), false, "staged attachment must be cleaned up after the turn");
     } finally {
       await bot.stop();
       await node.close();
@@ -714,7 +832,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
       // Photo arrives, gets ACKed and downloaded, then the bot dies mid-brain:
       // the owed journal is the only way the message comes back.
       const clientDone = runClient(node.url, ["--no-opener", "1", "--attach", attachSpecOf(file, photo), "--attach-caption", "crash photo"], []);
-      await bot.waitFor((e) => e.event === "BOT_RECEIVED_TEXT" && e.text === "crash photo", { label: "crash photo received" });
+      await bot.waitFor((e) => e.event === "BOT_RECEIVED_TEXT" && e.chars === "crash photo".length, { label: "crash photo received" });
       await bot.waitFor((e) => e.event === "BOT_MEDIA_DOWNLOADED", { label: "BOT_MEDIA_DOWNLOADED" });
       await bot.stop("SIGKILL");
       await clientDone;

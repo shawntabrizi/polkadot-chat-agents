@@ -181,3 +181,14 @@ test("grace does NOT fire when nothing is queued", async () => {
   assert.equal(h.submits.length, 1);
   assert.equal(h.lanes.depth("peer"), 1);
 });
+
+test("an expired session releases an unacknowledged lane", async () => {
+  const h = makeHarness();
+  const message = h.lanes.enqueue("peer", "old", { messageId: "OLD" });
+  await h.settle();
+  assert.equal(h.lanes.hasPending("peer"), true);
+  assert.equal(h.lanes.expire("peer"), true);
+  assert.equal(await message.delivered, false);
+  assert.equal(h.lanes.hasPending("peer"), false);
+  assert.equal(h.lanes.depth("peer"), 0);
+});

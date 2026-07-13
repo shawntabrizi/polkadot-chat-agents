@@ -38,3 +38,17 @@ test("sweep drops expired files and evicts oldest past the size cap", () => {
   assert.equal(fs.existsSync(big1), false, "oldest over-cap file should be evicted");
   assert.equal(fs.existsSync(big2), true, "newest file should survive");
 });
+
+test("save enforces the cache budget before an hourly sweep", () => {
+  const store = makeStore({ maxTotalMb: 1 });
+  const first = store.save("dd".repeat(16), new Uint8Array(700 * 1024), "image/jpeg");
+  store.save("ee".repeat(16), new Uint8Array(700 * 1024), "image/jpeg");
+  assert.equal(fs.existsSync(first), false, "oldest item should be evicted during admission");
+  const total = fs.readdirSync(store.dir)
+    .reduce((sum, name) => sum + fs.statSync(path.join(store.dir, name)).size, 0);
+  assert.ok(total <= 1024 * 1024, `cache exceeded its configured budget: ${total}`);
+  assert.throws(
+    () => store.save("ff".repeat(16), new Uint8Array(2 * 1024 * 1024), "image/jpeg"),
+    /exceeds media cache capacity/,
+  );
+});

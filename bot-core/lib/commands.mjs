@@ -14,6 +14,10 @@ export function createCommandHandler({
   clearResume,
   peerModelOverrides,
   defaultModel,
+  // Null preserves the historical unrestricted behavior for embedders. Direct
+  // bot runtimes pass an explicit allowlist so chat users cannot select an
+  // arbitrary expensive/provider-backed model.
+  allowedModels = null,
   username,
   chainConnected,
   trimOverrides = () => {},
@@ -76,6 +80,10 @@ export function createCommandHandler({
         if (argument === "default") {
           peerModelOverrides.delete(peerKey);
           return `Back to ${defaultModel || "the CLI's default model"}.`;
+        }
+        if (Array.isArray(allowedModels) && !allowedModels.includes(argument)) {
+          const choices = allowedModels.length ? allowedModels.join(", ") : "none";
+          return `"${argument}" isn't available on this bot. Allowed models: ${choices}.`;
         }
         peerModelOverrides.set(peerKey, argument);
         trimOverrides();

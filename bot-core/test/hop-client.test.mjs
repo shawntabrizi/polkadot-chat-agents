@@ -21,6 +21,33 @@ const download = (node, file, extra = {}) =>
     ...extra,
   });
 
+const compactLength = (value) => {
+  if (value < 64) return Uint8Array.of(value << 2);
+  if (value < 16_384) {
+    const encoded = (value << 2) | 1;
+    return Uint8Array.of(encoded & 0xff, encoded >> 8);
+  }
+  const encoded = (value << 2) | 2;
+  return Uint8Array.of(encoded & 0xff, (encoded >> 8) & 0xff, (encoded >> 16) & 0xff, (encoded >> 24) & 0xff);
+};
+
+const u64le = (value) => {
+  const out = new Uint8Array(8);
+  let remaining = BigInt(value);
+  for (let index = 0; index < out.length; index += 1) {
+    out[index] = Number(remaining & 0xffn);
+    remaining >>= 8n;
+  }
+  return out;
+};
+
+const concat = (...parts) => {
+  const out = new Uint8Array(parts.reduce((size, part) => size + part.length, 0));
+  let offset = 0;
+  for (const part of parts) { out.set(part, offset); offset += part.length; }
+  return out;
+};
+
 test("happy path: multi-chunk file round-trips byte-exact and gets acked", async () => {
   const node = await startNode();
   const original = new Uint8Array(crypto.randomBytes(5_000_000)); // 3 chunks
@@ -56,6 +83,16 @@ test("metadata under-declaring the size aborts mid-download", async () => {
   await assert.rejects(() => download(node, file), /exceeds declared size/);
 });
 
+test("oversized metadata chunk lists are rejected before chunk iteration", async () => {
+  const node = await startNode();
+  const metadata = concat(u64le(1), compactLength(100_000));
+  const file = node.putFile(new Uint8Array(0), { metadataOverride: metadata });
+  await assert.rejects(() => download(node, file), /chunk list exceeds limit/);
+  // Metadata is not ACKed until its structure passes validation, and no bogus
+  // chunk hash is ever claimed.
+  assert.equal(node.acked.size, 0);
+});
+
 test("ws:// is rejected unless explicitly allowed", async () => {
   const node = await startNode();
   const file = node.putFile(new Uint8Array(16));
@@ -63,10 +100,18 @@ test("ws:// is rejected unless explicitly allowed", async () => {
 });
 
 test("allowlist rejects hosts outside it", () => {
+  assert.throws(() => validateHopUrl("wss://hop.polkadot.io"), /must name trusted HOP hosts/);
   assert.throws(() => validateHopUrl("wss://evil.example", { allowedNodes: ["hop.polkadot.io"] }), /not in BOT_HOP_ALLOWED_NODES/);
   assert.ok(validateHopUrl("wss://a.hop.polkadot.io", { allowedNodes: ["hop.polkadot.io"] }));
   assert.throws(() => validateHopUrl("wss://user:pw@hop.polkadot.io"), /credentials/);
   assert.throws(() => validateHopUrl("wss://10.0.0.1/x"), /hostname/);
+});
+
+test("hostile RPC frames are rejected before JSON parsing", async () => {
+  const node = await startNode();
+  const file = node.putFile(new Uint8Array(16));
+  node.failures.oversizedFrameBytes = 8 * 1024;
+  await assert.rejects(() => download(node, file, { maxRpcFrameBytes: 1024 }), /frame exceeds 1024 bytes/);
 });
 
 test("ack failures never fail the download", async () => {

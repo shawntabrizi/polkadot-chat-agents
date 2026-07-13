@@ -40,7 +40,8 @@ export const toolActionTitle = (name, input = {}) => {
 // Invocation & event schema verified live against the claude CLI.
 const claude = {
   command: "claude",
-  stripApiKeyEnv: true, // force subscription billing unless BOT_AI_API_BILLING
+  // The runtime provides a secret-free environment to every child CLI.
+  stripApiKeyEnv: true,
   effortLevels: ["low", "medium", "high", "xhigh", "max"],
   buildArgs({ prompt, model, resume, allowedTools, skipPermissions, effort }) {
     const args = ["-p", "--output-format", "stream-json", "--verbose"];
