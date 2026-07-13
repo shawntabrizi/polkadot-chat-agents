@@ -239,8 +239,18 @@ function warnLegacyBotsDir() {
 }
 
 const deeplink = (accountIdHex) => {
-  const id = accountIdHex.replace(/^0x/, "");
+  // cfg.account is absent in a reconstructed config (it is re-derived from the
+  // seed at runtime), so callers must tolerate a null link.
+  if (!accountIdHex) return null;
+  const id = String(accountIdHex).replace(/^0x/, "");
   return `polkadotapp://chat?id=0:0x${id}&force=false&chatId=${id}`;
+};
+// Print the "message it" block, skipping the deeplink when the account isn't in
+// the local config (username search still works).
+const printReachLine = (accountIdHex, username) => {
+  const link = deeplink(accountIdHex);
+  if (link) console.log(`  ${c(link, "36")}`);
+  if (username) note(`${link ? "or search" : "search"}: ${username}`);
 };
 
 async function cmdCreate(name, flags) {
@@ -528,8 +538,7 @@ async function cmdInfo(name) {
   if (cfg.deploy?.host) console.log(`  deployed: ${cfg.deploy.host} (container ${cfg.deploy.container}) — pca status ${name}`);
   console.log();
   console.log(`  Message this bot in the Polkadot app:`);
-  console.log(`    ${c(deeplink(cfg.account), "36")}`);
-  if (cfg.username) note(`or search: ${cfg.username}`);
+  printReachLine(cfg.account, cfg.username);
 }
 
 function cmdRun(name, flags = {}) {
@@ -727,8 +736,7 @@ async function cmdDeploy(name, flags) {
     ok(`"${name}" is live on ${host} (container ${cn}).`);
     console.log();
     console.log("Message it in the Polkadot app:");
-    console.log(`  ${c(deeplink(cfg.account), "36")}`);
-    if (cfg.username) note(`or search: ${cfg.username}`);
+    printReachLine(cfg.account, cfg.username);
     console.log();
     note(`Logs:  ssh ${host} 'docker logs -f ${cn}'`);
     note(`Stop:  ssh ${host} 'docker rm -f ${cn}'`);
@@ -772,7 +780,7 @@ async function deployHarnessStack(name, cfg, secret, flags, host, harness) {
     envLine("BOT_BRAIN", "bridge"),
     envLine("BOT_ALLOWED_PEERS", allow.join(",")),
     envLine("BOT_USERNAME", cfg.username ?? ""),
-    envLine("BOT_STATE_DIR", "/app/state"),
+    envLine("BOT_STATE_DIR", "/state"),
     envLine("BOT_BRIDGE_PORT", bridgePort), // keep in sync with bridgeUrl/status
     envLine("BOT_BRIDGE_TOKEN", bridgeToken),
     // The harness container reaches the bridge over the compose network, so the
@@ -780,7 +788,9 @@ async function deployHarnessStack(name, cfg, secret, flags, host, harness) {
     `BOT_BRIDGE_HOST=0.0.0.0`,
     ...(flags.greet === true ? ["BOT_GREET=1"] : []),
   ].join("\n");
-  const botService = `  bot:\n    image: ${NODE_IMAGE}\n    user: "1000:1000"\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    volumes:\n      - ./app:/app:ro\n      - ./state:/app/state\n    env_file:\n      - ./bot.env\n    command: ["node", "index.mjs"]\n`;
+  // State mounts at top-level /state, NOT nested under the read-only ./app:ro
+  // mount — Docker cannot create a mountpoint inside a read-only bind.
+  const botService = `  bot:\n    image: ${NODE_IMAGE}\n    user: "1000:1000"\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n    env_file:\n      - ./bot.env\n    command: ["node", "index.mjs"]\n`;
 
   const files = { "bot.env": `${botEnv}\n` };  // path (relative to base) -> content
   let compose, setup, afterUp;
@@ -897,8 +907,7 @@ docker compose -p ${cn} run --rm openclaw sh -lc ${shellQuote(`openclaw plugins 
     ok(`"${name}" is live on ${host} (${cn} + ${hn}).`);
     console.log();
     console.log("Message it in the Polkadot app:");
-    console.log(`  ${c(deeplink(cfg.account), "36")}`);
-    if (cfg.username) note(`or search: ${cfg.username}`);
+    printReachLine(cfg.account, cfg.username);
     afterUp(credsSeeded);
     console.log();
     note(`Logs:   pca logs ${name} -f   (bridge)  ·  ssh ${host} 'docker logs -f ${hn}'  (${harness})`);
