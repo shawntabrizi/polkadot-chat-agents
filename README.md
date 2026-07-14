@@ -159,6 +159,14 @@ manage it. File return needs an operator-pinned HOP node and an active Bulletin
 allowance. The named private Paseo profile provisions its testnet allowance
 locally; other networks need separate operator provisioning.
 
+Public T3ams Claude bots start metadata-only, but the deployer may explicitly
+choose `--allowed-tools`, `--safe-tools` (`Bash,Read,Edit,Write` with Claude
+safe mode), or `--full-autonomy` when the bot should do work in its dedicated container. For
+the narrower file-reading case, `pca deploy <bot> --attachment-read` lets the
+logged-in Claude subscription inspect only the temporary staged attachment
+directory—no Anthropic API key, shell, or write tools. See [the configuration guide](docs/CONFIGURATION.md#tool-profiles)
+for the capability and container-boundary tradeoffs.
+
 **Projects.** `pca project <bot> add <alias> <path>` registers a directory the
 agent can work in (repeat for more). In chat, `/project <alias>` points your
 conversation at that repo, `/project <alias>@<branch>` gives it an isolated

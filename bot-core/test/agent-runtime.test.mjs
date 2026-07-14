@@ -625,7 +625,12 @@ test("downloaded attachments are privately staged for a turn then cleaned up", a
   const blob = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pca-media-")), "abc123.jpg");
   fs.writeFileSync(blob, "img-bytes");
   let stagedPath = null;
+  let buildInput = null;
   const h = makeRuntime({
+    buildArgs: (input) => {
+      buildInput = input;
+      return ["-c", `printf '{"type":"result","result":"done"}\\n'`];
+    },
     renderMessage: (message) => {
       stagedPath = message.attachments[0].path;
       assert.equal(fs.readFileSync(stagedPath, "utf8"), "img-bytes");
@@ -635,6 +640,9 @@ test("downloaded attachments are privately staged for a turn then cleaned up", a
   const msg = { text: "look", messageId: "M1", kind: "richText", attachments: [{ id: "abc123", downloaded: true, path: blob, mime: "image/jpeg", size: 9, fileKind: "image" }] };
   await h.runtime.handleMessage("peer", msg);
   assert.match(stagedPath, new RegExp(`^${h.workspace.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/\\.pca-attachment-.+/0-abc123\\.jpg$`));
+  assert.equal(buildInput.attachmentDir, path.dirname(stagedPath), "runners receive only the temporary attachment directory for scoped permissions");
+  assert.equal(buildInput.workingDirectory, h.workspace, "runners also receive the primary cwd to deny its implicit Read access");
   assert.equal(fs.existsSync(stagedPath), false, "per-turn attachment copy must be removed");
+  assert.equal(fs.existsSync(buildInput.attachmentDir), false, "the scoped attachment directory must be removed after the turn");
   assert.equal(msg.attachments[0].path, blob, "message metadata must retain the cache path after cleanup");
 });

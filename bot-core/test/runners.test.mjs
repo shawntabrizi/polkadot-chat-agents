@@ -59,10 +59,32 @@ test("claude buildArgs: explicit no-tools default, allowlist, and bypass", () =>
   assert.ok(!skip.includes("--allowedTools"), "skip-permissions supersedes the allowlist");
   assert.ok(!skip.includes("--tools"), "skip-permissions supersedes the availability boundary");
 
-  const hardened = RUNNERS.claude.buildArgs({ prompt: "hi", safeMode: true });
+  const hardened = RUNNERS.claude.buildArgs({
+    prompt: "hi",
+    safeMode: true,
+    allowedTools: ["Bash", "Read", "Edit", "Write"],
+  });
   assert.ok(hardened.includes("--safe-mode"));
   assert.ok(hardened.includes("--strict-mcp-config"));
   assert.ok(hardened.includes("--disable-slash-commands"));
+  assert.ok(hardened.includes("--no-chrome"));
+  assert.ok(hardened.includes("--setting-sources") && hardened[hardened.indexOf("--setting-sources") + 1] === "");
+  assert.equal(hardened[hardened.indexOf("--tools") + 1], "Bash,Read,Edit,Write");
+});
+
+test("claude buildArgs: a public attachment reader exposes only path-scoped Read", () => {
+  const args = RUNNERS.claude.buildArgs({
+    prompt: "inspect the attachment",
+    allowedTools: ["Read"],
+    allowedToolRules: ["Read(//tmp/pca-agent-stage-123/.pca-attachment-456/**)"],
+    disallowedTools: ["Read(//workspace/**)", "Read(//home/node/**)", "Read(//state/**)"],
+    safeMode: true,
+  });
+  assert.equal(args[args.indexOf("--tools") + 1], "Read");
+  assert.equal(args[args.indexOf("--allowedTools") + 1], "Read(//tmp/pca-agent-stage-123/.pca-attachment-456/**)");
+  assert.equal(args[args.indexOf("--disallowedTools") + 1], "Read(//workspace/**),Read(//home/node/**),Read(//state/**)");
+  assert.equal(args.includes("Bash"), false, "no shell tool is exposed");
+  assert.equal(args.includes("Edit"), false, "no write tool is exposed");
 });
 
 test("claude parseEvent: session, tool action, text, result", () => {

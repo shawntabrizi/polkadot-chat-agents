@@ -332,6 +332,7 @@ test("direct deployment defaults to no tools and makes private tool access expli
     result = runCli(botsDir, ["deploy", "privateclaude", "--host", "root@example.test", "--safe-tools", "--dry-run"]);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /BOT_AI_ALLOWED_TOOLS=Bash,Read,Edit,Write/);
+    assert.match(result.stdout, /BOT_AI_SAFE_MODE=1/);
     assert.doesNotMatch(result.stdout, /BOT_AI_SKIP_PERMISSIONS=/);
 
     result = runCli(botsDir, ["deploy", "privateclaude", "--host", "root@example.test", "--allowed-tools", "Read", "--dry-run"]);
@@ -357,8 +358,17 @@ test("direct deployment defaults to no tools and makes private tool access expli
     assert.doesNotMatch(result.stdout, /BOT_AI_ALLOWED_TOOLS=/);
 
     result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--safe-tools", "--dry-run"]);
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /Public direct bots must use the default no-tools profile/);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /BOT_AI_ALLOWED_TOOLS=Bash,Read,Edit,Write/);
+    assert.match(result.stdout, /BOT_AI_SAFE_MODE=1/);
+
+    result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--allowed-tools", "Read,Edit,Write", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /BOT_AI_ALLOWED_TOOLS=Read,Edit,Write/);
+
+    result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--full-autonomy", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /BOT_AI_SKIP_PERMISSIONS=1/);
 
     writeBot(botsDir, "publiccodex", {
       name: "publiccodex",
@@ -393,6 +403,33 @@ test("direct deployment defaults to no tools and makes private tool access expli
     assert.equal(typeof publicMedia.mediaAnalyzerToken, "string");
     assert.ok(publicMedia.mediaAnalyzerToken.length >= 32);
     assert.notEqual(publicMedia.mediaAnalyzerToken, publicMedia.bridgeToken);
+
+    result = runCli(botsDir, ["deploy", "publicmedia", "--host", "root@example.test", "--attachment-read", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^BOT_T3AMS_PUBLIC_ATTACHMENT_READ=1$/m);
+    assert.match(result.stdout, /^BOT_AI_ALLOWED_TOOLS=Read$/m);
+    assert.doesNotMatch(result.stdout, /media-analyzer:\n/);
+
+    result = runCli(botsDir, ["deploy", "publicmedia", "--host", "root@example.test", "--safe-tools", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^BOT_AI_ALLOWED_TOOLS=Bash,Read,Edit,Write$/m);
+    assert.match(result.stdout, /^BOT_AI_SAFE_MODE=1$/m);
+
+    result = runCli(botsDir, ["deploy", "publicmedia", "--host", "root@example.test", "--full-autonomy", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^BOT_AI_SKIP_PERMISSIONS=1$/m);
+
+    result = runCli(botsDir, ["deploy", "publicmedia", "--host", "root@example.test", "--attachment-read", "--safe-tools", "--dry-run"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /cannot be combined with --safe-tools/i);
+
+    result = runCli(botsDir, ["deploy", "publicmedia", "--host", "root@example.test", "--attachment-read", "--media-analyzer", "--dry-run"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Choose one attachment analysis route/i);
+
+    result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--attachment-read", "--dry-run"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /requires a public T3ams Claude direct-engine deployment/i);
 
     result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--media-analyzer", "--dry-run"]);
     assert.equal(result.status, 1);

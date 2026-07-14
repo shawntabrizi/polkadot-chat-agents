@@ -129,7 +129,7 @@ const fail = (s) => { console.error(`${c("✗", "31")} ${s}`); process.exit(1); 
 
 // Flags that are always boolean — they must never consume the following token,
 // or `pca create --public mybot` would swallow the bot name into --public.
-const BOOLEAN_FLAGS = new Set(["public", "dry-run", "no-register", "follow", "greet", "yes", "help", "version", "safe-tools", "full-autonomy", "media-analyzer", "t3ams-auto-accept-workspaces", "t3ams-no-auto-accept-workspaces"]);
+const BOOLEAN_FLAGS = new Set(["public", "dry-run", "no-register", "follow", "greet", "yes", "help", "version", "safe-tools", "full-autonomy", "media-analyzer", "attachment-read", "t3ams-auto-accept-workspaces", "t3ams-no-auto-accept-workspaces"]);
 const SHORT_FLAGS = { "-f": "follow", "-h": "help", "-V": "version" };
 function parseFlags(argv) {
   const flags = {};
@@ -1299,7 +1299,7 @@ const t3amsHealthWaitCommand = (container, tail = 30) =>
   `status=unknown; for i in $(seq 1 45); do status="$(docker inspect --format '{{.State.Health.Status}}' ${container} 2>/dev/null || true)"; [ "$status" = healthy ] && break; sleep 2; done; echo "T3AMS_BOT_HEALTH=$status"; docker logs --tail ${tail} ${container} 2>&1; [ "$status" = healthy ]`;
 
 async function cmdDeploy(name, flags) {
-  if (!name) fail("Usage: pca deploy <name> --host <ssh-target> [--harness openclaw|hermes] [--model <m>] [--safe-tools|--allowed-tools <list>|--full-autonomy] [--media-analyzer] [--dry-run]");
+  if (!name) fail("Usage: pca deploy <name> --host <ssh-target> [--harness openclaw|hermes] [--model <m>] [--safe-tools|--allowed-tools <list>|--full-autonomy] [--attachment-read|--media-analyzer] [--dry-run]");
   const host = flags.host ? sshTarget(flags.host) : null;
   if (!host) fail(`--host <ssh-target> is required, e.g.  pca deploy ${name} --host root@1.2.3.4`);
   const cfg = readConfig(name);
@@ -1307,6 +1307,7 @@ async function cmdDeploy(name, flags) {
   const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
   const transport = configuredTransport(cfg);
   const mediaAnalyzerEnabled = flags["media-analyzer"] === true;
+  const attachmentReadEnabled = flags["attachment-read"] === true;
   const suppliedKeyFlag = Object.values(KEY_FLAGS).find((key) => flags[key] != null);
   if (suppliedKeyFlag) {
     fail(`--${suppliedKeyFlag} is no longer accepted: API keys are not injected into autonomous agents. Authenticate the selected CLI or framework through its own persistent credential store instead.`);
@@ -1314,6 +1315,9 @@ async function cmdDeploy(name, flags) {
   if (cfg.brain === "hermes" || cfg.brain === "bridge") {
     if (mediaAnalyzerEnabled) {
       fail("--media-analyzer requires a T3ams direct-engine deployment (claude, codex, or opencode); bridge bots own their attachment runtime.");
+    }
+    if (attachmentReadEnabled) {
+      fail("--attachment-read requires a public T3ams Claude direct-engine deployment; bridge bots own their attachment runtime.");
     }
     const harness = flags.harness ? String(flags.harness).toLowerCase() : null;
     if (harness !== "openclaw" && harness !== "hermes") {
@@ -1326,6 +1330,9 @@ async function cmdDeploy(name, flags) {
   if (mediaAnalyzerEnabled && (transport !== "t3ams" || !spec.pkg)) {
     fail("--media-analyzer requires a T3ams direct-engine deployment (claude, codex, or opencode); it has no effect for echo or bridge bots.");
   }
+  if (attachmentReadEnabled && (transport !== "t3ams" || cfg.brain !== "claude" || !spec.pkg)) {
+    fail("--attachment-read requires a public T3ams Claude direct-engine deployment; it has no effect for echo, other engines, or the Polkadot-app transport.");
+  }
   if (!fs.existsSync(path.join(HERE, "node_modules")) || !fs.existsSync(path.join(HERE, ".papi"))) {
     fail(`bot-core dependencies missing. Run:  (cd ${HERE} && npm ci)  then retry.`);
   }
@@ -1337,11 +1344,10 @@ async function cmdDeploy(name, flags) {
   const cn = containerName(`pca-${name.replace(/\./g, "-")}`);
   const base = remoteDir(flags["remote-dir"] ?? `pca-bots/${name}`);
   const sshOpts = ["-o", "ConnectTimeout=10", "-o", "BatchMode=yes"];
-  // A public prompt must never gain filesystem/shell access merely because an
-  // agent CLI is logged in with OAuth. Deploy text-only by default. Private
-  // operators can deliberately choose the conventional reviewed allowlist or
-  // full autonomy; both remain unsuitable for a public bot without a separate
-  // tool/auth isolation boundary.
+  // Public bots remain text-only by default. The deployer can explicitly opt
+  // any Claude bot into a narrower list, the conventional safe-tools list, or
+  // full autonomy. `--attachment-read` is a public-T3ams convenience profile
+  // that scopes Read to a per-turn attachment copy without shell/write tools.
   const publicBot = (cfg.allow ?? []).length === 0;
   const requestedFullAutonomy = flags["full-autonomy"] === true;
   const requestedSafeTools = flags["safe-tools"] === true;
@@ -1351,13 +1357,22 @@ async function cmdDeploy(name, flags) {
   if (requestedFullAutonomy && (requestedSafeTools || configuredToolList != null)) {
     fail("--full-autonomy cannot be combined with --safe-tools or --allowed-tools");
   }
+  if (attachmentReadEnabled && !publicBot) {
+    fail("--attachment-read is for a public T3ams Claude bot. A private bot can use --allowed-tools Read instead.");
+  }
+  if (attachmentReadEnabled && mediaAnalyzerEnabled) {
+    fail("Choose one attachment analysis route: --attachment-read uses the logged-in Claude subscription; --media-analyzer uses an isolated provider-API worker.");
+  }
+  if (attachmentReadEnabled && (requestedFullAutonomy || requestedSafeTools || configuredToolList != null)) {
+    fail("--attachment-read supplies its own scoped Read-only policy and cannot be combined with --safe-tools, --allowed-tools, or --full-autonomy");
+  }
+  const publicAttachmentRead = attachmentReadEnabled && publicBot && transport === "t3ams" && cfg.brain === "claude" && Boolean(spec.pkg);
   if (spec.pkg && publicBot && cfg.brain !== "claude") {
-    fail("Public direct deployment currently supports only Claude's hardened no-tools profile; use an allowlisted bot or an externally isolated bridge runtime for other engines");
+    fail("Public direct deployment currently supports only Claude's direct runtime; use an allowlisted bot or an externally isolated bridge runtime for other engines");
   }
-  if (spec.pkg && publicBot && (requestedFullAutonomy || requestedSafeTools || configuredToolList?.length)) {
-    fail("Public direct bots must use the default no-tools profile; attachment/tool analysis requires an externally isolated runtime");
-  }
-  const configuredTools = configuredToolList ?? (requestedSafeTools ? ["Bash", "Read", "Edit", "Write"] : null);
+  const configuredTools = publicAttachmentRead
+    ? ["Read"]
+    : configuredToolList ?? (requestedSafeTools ? ["Bash", "Read", "Edit", "Write"] : null);
 
   // Generate env + compose + Dockerfile locally, then (unless dry-run) ship & launch.
   const bridgeToken = ensureBridgeToken(name, cfg);
@@ -1385,6 +1400,7 @@ async function cmdDeploy(name, flags) {
       envLine("BOT_T3AMS_MEDIA_ANALYZER_HTTP_HOSTS", "media-analyzer"),
     );
   }
+  if (publicAttachmentRead) envLines.push("BOT_T3AMS_PUBLIC_ATTACHMENT_READ=1");
   for (const [key, value] of Object.entries(fileDeliveryEnvironment(cfg))) {
     envLines.push(envLine(key, value));
   }
@@ -1396,6 +1412,11 @@ async function cmdDeploy(name, flags) {
     }
   }
   if (configuredTools != null) envLines.push(envLine("BOT_AI_ALLOWED_TOOLS", configuredTools.join(",")));
+  // `--safe-tools` keeps Claude's own built-in tools but excludes ambient
+  // project/user customizations, hooks, plugins, and MCP servers. This is
+  // distinct from a deployer-selected `--allowed-tools` list, which may be
+  // intended to run with the operator's normal Claude Code configuration.
+  if (requestedSafeTools && spec.pkg) envLines.push("BOT_AI_SAFE_MODE=1");
   if (requestedFullAutonomy && spec.pkg) envLines.push("BOT_AI_SKIP_PERMISSIONS=1");
   if (flags.greet === true) envLines.push("BOT_GREET=1");
   if (spec.pkg) {
@@ -1904,16 +1925,22 @@ create flags:
 model controls:  show current policy  ·  set <model> pins the default model  ·  allow <a,b>
   restricts chat-side switching  ·  lock disables it  ·  open permits it only for allowlisted bots
 
-deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --model <m>  ·  --safe-tools | --allowed-tools <list> | --full-autonomy  ·  --media-analyzer  ·  --dry-run
+deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --model <m>  ·  --safe-tools | --allowed-tools <list> | --full-autonomy  ·  --attachment-read | --media-analyzer  ·  --dry-run
   Needs Docker on the server + SSH access. Direct engines (echo/claude/codex/opencode)
   deploy with root-only transport state and a non-root agent CLI, with a persistent
   /workspace the agent works in; bridge bots deploy a two-container stack. Direct
-  agents start with no tools. For a private bot, --safe-tools opts into the
-  Bash/Read/Edit/Write allowlist, --allowed-tools selects a narrower list, and
-  --full-autonomy is the explicit unrestricted override. Public direct bots stay
-  no-tools until their tools and OAuth credentials are isolated. For a T3ams
-  direct bot, --media-analyzer adds an isolated API-only photo/document worker;
-  provision its remote media.env with a provider API key and model first. The deploy output
+  agents start with no tools. --safe-tools opts into the Bash/Read/Edit/Write
+  allowlist, --allowed-tools selects an exact list, and --full-autonomy is the
+  explicit unrestricted override. Every direct bot starts no-tools, including
+  a public one; the deployer may deliberately select any of these tool profiles
+  at deploy time. A public T3ams Claude bot may use
+  --attachment-read to let Claude inspect only per-turn staged attachments
+  through its logged-in subscription; it has no shell or write tools, and its
+  Read permission is scoped to the temporary attachment directory. This remains
+  an explicit operator tradeoff: Claude Code session/OAuth state stays in the
+  bot container. Alternatively,
+  --media-analyzer adds an isolated API-only photo/document worker; provision
+  its remote media.env with a provider API key and model first. The deploy output
   gives the one-time OAuth login command for direct engines; logs/status/stop reuse
   the saved host (override with --host).
 
@@ -1931,7 +1958,7 @@ const COMMAND_FLAGS = {
   create: ["brain", "transport", "owner", "allow", "t3ams-peer-key", "t3ams-display-name", "t3ams-auto-accept-workspaces", "t3ams-no-auto-accept-workspaces", "public", "network", "endpoint", "backend", "username", "digits", "model", "port", "wait", "no-register"],
   register: ["username", "digits", "wait"],
   run: ["model", "greet"],
-  deploy: ["host", "harness", "anthropic-key", "openai-key", "openrouter-key", "gemini-key", "groq-key", "safe-tools", "allowed-tools", "full-autonomy", "media-analyzer", "model", "dry-run", "remote-dir", "greet"],
+  deploy: ["host", "harness", "anthropic-key", "openai-key", "openrouter-key", "gemini-key", "groq-key", "safe-tools", "allowed-tools", "full-autonomy", "attachment-read", "media-analyzer", "model", "dry-run", "remote-dir", "greet"],
   logs: ["host", "follow", "tail"],
   status: ["host"],
   stop: ["host"],

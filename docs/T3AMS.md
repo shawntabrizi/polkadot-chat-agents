@@ -246,6 +246,20 @@ turn, not the media-cache path itself. `/file put <path>` can retain one such
 attachment in the conversation vault, and `/file get <path>` publishes a new
 encrypted attachment back into that same DM or channel.
 
+Public Claude bots remain metadata-only by default. The deployer can deliberately
+enable a normal Claude allowlist (`--allowed-tools`), the
+`Bash,Read,Edit,Write` `--safe-tools` profile, or `--full-autonomy` when the
+group bot should take write/edit actions inside its dedicated container.
+`pca deploy <bot> --attachment-read` is the narrower subscription-backed
+alternative: while a verified attachment is staged, PCA gives Claude Code only
+a path-scoped native `Read` permission for that temporary directory. It has no
+shell, edit, write, browser, plugin, MCP, or slash-command capability, and the
+staged directory is removed after the turn. This uses the bot's existing Claude
+Code login; it does not require an Anthropic API key. The bot's OAuth/session
+home remains inside the same dedicated container, so choose the default
+no-tools mode or the separate API-only media analyzer if that residual boundary
+is not appropriate.
+
 Direct Claude, Codex, and OpenCode turns can also return generated files. For a
 turn, the bot creates a private `PCA_OUTPUT_DIR`; only bounded top-level regular
 files written there are uploaded as fresh native attachments, and the directory

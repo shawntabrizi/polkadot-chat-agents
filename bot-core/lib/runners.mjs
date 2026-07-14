@@ -39,7 +39,7 @@ export const toolActionTitle = (name, input = {}) => {
 const claude = {
   command: "claude",
   effortLevels: ["low", "medium", "high", "xhigh", "max"],
-  buildArgs({ prompt, model, resume, allowedTools, skipPermissions, safeMode = false, effort }) {
+  buildArgs({ prompt, model, resume, allowedTools, allowedToolRules = null, disallowedTools = null, skipPermissions, safeMode = false, effort }) {
     // Claude emits final-answer deltas as `stream_event` frames only when
     // this flag is present. They are intentionally kept separate from the
     // terminal assistant message below: transports can safely live-render
@@ -59,10 +59,24 @@ const claude = {
       const tools = Array.isArray(allowedTools)
         ? allowedTools.map((tool) => String(tool).trim()).filter(Boolean)
         : [];
+      // A caller may expose a built-in tool by name while pre-approving a
+      // narrower permission rule for it (for example, Read only inside a
+      // per-turn attachment directory). With `dontAsk`, every other tool
+      // request is denied rather than becoming an interactive prompt.
+      const approvalRules = Array.isArray(allowedToolRules)
+        ? allowedToolRules.map((tool) => String(tool).trim()).filter(Boolean)
+        : tools;
+      const deniedRules = Array.isArray(disallowedTools)
+        ? disallowedTools.map((tool) => String(tool).trim()).filter(Boolean)
+        : [];
       args.push("--permission-mode", "dontAsk");
-      if (safeMode) args.push("--safe-mode", "--strict-mcp-config", "--disable-slash-commands");
+      if (safeMode) args.push("--safe-mode", "--strict-mcp-config", "--disable-slash-commands", "--no-chrome", "--setting-sources", "");
       if (tools.length === 0) args.push("--tools", "");
-      else args.push("--tools", tools.join(","), "--allowedTools", tools.join(","));
+      else {
+        args.push("--tools", tools.join(","));
+        if (approvalRules.length > 0) args.push("--allowedTools", approvalRules.join(","));
+        if (deniedRules.length > 0) args.push("--disallowedTools", deniedRules.join(","));
+      }
     }
     args.push("--", prompt);
     return args;

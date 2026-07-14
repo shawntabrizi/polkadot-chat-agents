@@ -588,7 +588,7 @@ export const createAgentRuntime = ({
 // an idle-silence backstop kills a wedged process (and unblocks the peer
 // queue). Returns { answer }, { stopped: true } (user /stop), or null on
 // failure.
-  const runEngine = (peerHex, userText, onAction = null, onPartial = null, cwd = workspace, job = null, outputDir = null, sessionKey = peerHex) => new Promise((resolve) => {
+  const runEngine = (peerHex, userText, onAction = null, onPartial = null, cwd = workspace, job = null, outputDir = null, sessionKey = peerHex, attachmentDir = null) => new Promise((resolve) => {
     const k = norm(sessionKey);
     if (job?.cancelled) { resolve({ stopped: true }); return; }
     let child;
@@ -596,7 +596,19 @@ export const createAgentRuntime = ({
       const turnModel = peerModelOverrides.get(k) ?? model;
       const resume = peerResume.get(k) ?? null;
       const effort = peerEffortOverrides.get(k) ?? reasoning ?? "";
-      const argv = buildArgs({ prompt: userText, model: turnModel, resume, effort: effort || null });
+      const argv = buildArgs({
+        prompt: userText,
+        model: turnModel,
+        resume,
+        effort: effort || null,
+        // This is a transport-owned, per-turn directory. It is deliberately
+        // not the original media-cache path, and disappears after the CLI
+        // exits. A runner can use it to construct a least-privilege Read rule.
+        attachmentDir,
+        // The primary cwd normally receives Claude Code's convenience Read
+        // access, so a public attachment-only policy must explicitly deny it.
+        workingDirectory: cwd,
+      });
       // Detached: a new process group, so killProcessGroup reaps the CLI's children.
       // stdin ignored: some CLIs (codex) otherwise block on "Reading additional input".
       const env = outputDir ? { ...childEnv, PCA_OUTPUT_DIR: outputDir } : childEnv;
@@ -742,11 +754,14 @@ export const createAgentRuntime = ({
       try { fs.chownSync(stageDir, childUid, childGid ?? childUid); }
       catch (error) { log("BOT_ATTACHMENT_STAGE_FAILED", { error: String(error?.message ?? error) }); }
     }
-    return () => {
-      for (const [attachment, source] of originalPaths) attachment.path = source;
-      if (!stageDir) return;
-      try { fs.rmSync(stageDir, { recursive: true, force: true, maxRetries: 2 }); }
-      catch (error) { log("BOT_ATTACHMENT_CLEANUP_FAILED", { error: String(error?.message ?? error) }); }
+    return {
+      attachmentDir: stageDir,
+      cleanup: () => {
+        for (const [attachment, source] of originalPaths) attachment.path = source;
+        if (!stageDir) return;
+        try { fs.rmSync(stageDir, { recursive: true, force: true, maxRetries: 2 }); }
+        catch (error) { log("BOT_ATTACHMENT_CLEANUP_FAILED", { error: String(error?.message ?? error) }); }
+      },
     };
   };
 
@@ -823,7 +838,7 @@ export const createAgentRuntime = ({
       let artifactHandoff = null;
       try {
         const result = await queueEngineTurn(peerHex, async (job) => {
-          const cleanupAttachments = stageAttachmentsForTurn(turnCwd, msg.attachments);
+          const stagedAttachments = stageAttachmentsForTurn(turnCwd, msg.attachments);
           let outputDir = null;
           try {
             if (supportsArtifactDelivery) {
@@ -835,7 +850,17 @@ export const createAgentRuntime = ({
             // `outputDir` is transport-owned capability context, so surface it
             // to a renderer only for the turn in which it actually exists.
             const promptMessage = outputDir == null ? messageForPrompt : { ...messageForPrompt, outputDir };
-            const engineResult = await runEngine(peerHex, renderMessage(promptMessage), onAction, onPartial, turnCwd, job, outputDir, k);
+            const engineResult = await runEngine(
+              peerHex,
+              renderMessage(promptMessage),
+              onAction,
+              onPartial,
+              turnCwd,
+              job,
+              outputDir,
+              k,
+              stagedAttachments.attachmentDir,
+            );
             if (engineResult && !engineResult.stopped && outputDir) {
               // The callback must never receive a path still writable by the
               // agent. Snapshot it now, while the root transport controls the
@@ -844,7 +869,7 @@ export const createAgentRuntime = ({
             }
             return engineResult;
           } finally {
-            cleanupAttachments();
+            stagedAttachments.cleanup();
             cleanupTurnOutputDirectory(outputDir);
           }
         }, k);
