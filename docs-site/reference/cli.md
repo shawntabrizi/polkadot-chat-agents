@@ -37,19 +37,25 @@ every command, including `project`, `model`, and `storage`.
 | `--wait <seconds>` | create, register | How long to wait for on-chain registration confirmation. |
 | `--host <ssh>` | deploy, logs, status, stop | Target server (saved after first deploy). |
 | `--harness openclaw or hermes` | deploy | Agent framework for a bridge bot. |
-| `--safe-tools` | deploy | For a private, trusted Claude bot, opt in to the conventional `Bash,Read,Edit,Write` tool list. |
-| `--allowed-tools <list>` | deploy | For a private, trusted Claude bot, opt in to this exact comma-separated tool list (for example `Read`). |
-| `--full-autonomy` | deploy | For a private, trusted direct bot, explicitly bypass the engine's permission controls. Cannot be combined with `--safe-tools` or `--allowed-tools`. |
+| `--allowed-tools <read,write,bash>` | deploy | Select exact lowercase portable direct-agent capabilities. `write` includes `read`; `bash` includes both. |
+| `--tool-scope workspace\|container` | deploy | Scope direct-agent tools to the selected workspace (default) or deliberately to all files visible to the non-root agent account in its container. |
+| `--tool-network none\|internet` | deploy | Request no tool-process network egress (default) or internet access. `internet` requires `bash`; engine enforcement is reported at deploy time. |
 | `--dry-run` | deploy | Print the generated files without deploying. |
 
 Bots live in `~/.pca/bots/<name>/` (override with `PCA_BOTS_DIR`).
 
-Direct Claude deployments start with no model tools. A public built-in AI direct
-bot is limited to Claude's hardened no-tools profile: it rejects
-`--safe-tools`, non-empty `--allowed-tools`, and `--full-autonomy`. Use a
-private allowlist before enabling tools, or an externally isolated bridge
-runtime when a public bot must analyze files or use tools. See
-[Private & public bots](/guide/access) for the trust boundary.
+Direct Claude, Codex, and OpenCode deployments start with no tools: empty
+capabilities, workspace scope, and no tool network. The same portable policy
+is available to public and allowlisted bots, so every sender of a public bot
+can direct whatever capabilities its deployer selects. A `read`-capable turn
+can inspect its staged inbound attachment; a `write`-capable turn can produce a
+returnable file. See [Private & public bots](/guide/access) for the trust
+boundary and engine enforcement caveats.
+
+For Bash, OpenCode requires `--tool-network internet` because it has no network
+sandbox. Claude requires internet for container-scoped Bash but can use `none`
+for workspace-scoped Bash; Codex can keep `none` in either scope. Deploy
+validates the combination and prints the effective enforcement.
 
 ## Private Paseo file allowance
 

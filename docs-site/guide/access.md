@@ -46,11 +46,13 @@ tight storage, queue, and model limits. The
 [public deployment profile](/reference/configuration#public-bot-deliberately-bounded)
 has a conservative starting point.
 
-A public built-in AI direct bot is currently **Claude only** and runs Claude's
-hardened no-tools profile. It can answer text, but the model cannot inspect
-staged attachment bytes or write generated files. Use a bridge runtime with an
-independent tool-and-credential boundary when a public bot needs file analysis
-or tools.
+Public direct bots can use Claude, Codex, or OpenCode with the same portable
+tool policy. They start with no tools, but their deployer may deliberately
+enable `read`, `write`, or `bash`, choose workspace or container scope, and
+choose tool-process network access. Every public sender can direct the chosen
+capabilities: `read` can inspect staged attachment bytes and `write` can create
+generated files. Use a bridge runtime when a public bot needs a separately
+designed tool-and-credential boundary.
 
 ## What changes between the two
 
@@ -64,7 +66,7 @@ allows in chat:
 | `/model` switching | Can be opened (`pca model <bot> open`) — trusted peers only | Never unrestricted; at most an approved set (`pca model <bot> allow a,b`) |
 | Returning saved files | Ready automatically on the default Paseo testnet profile | No automatic finite-allowance profile |
 | Sensible model | Your call | Pin a cheaper model |
-| Built-in direct-agent tools | Claude starts with no tools; a trusted operator may opt in deliberately | Claude's hardened no-tools profile only |
+| Built-in direct-agent tools | No tools by default; deployer chooses portable capability/scope/network policy | Same policy; every sender can direct the selected capability |
 
 The model-switching rule exists because switching to an expensive model spends
 *your* quota: a stranger on a public bot must never be able to pick the
@@ -73,22 +75,30 @@ for the full policy.
 
 ## Direct-agent tools and the trust boundary
 
-A direct Claude deployment starts with no model tools. That is the default for
-both `pca run` and `pca deploy`, rather than a permission prompt the model can
-talk its way around. For a **private, trusted** bot, the deploy choices are:
+A direct Claude, Codex, or OpenCode deployment starts with no tools. That is
+the default for both `pca run` and `pca deploy`, rather than a permission prompt
+the model can talk its way around. The deployer chooses one portable policy:
 
 | Choice | Effect |
 |---|---|
-| no tool flag | Claude has no built-in tools |
-| `--safe-tools` | opt in to the conventional `Bash,Read,Edit,Write` list |
-| `--allowed-tools Read,...` | opt in to exactly the named Claude tools |
-| `--full-autonomy` | explicitly bypass engine permission controls; cannot be combined with either tool-list flag |
+| no tool flag | No capabilities; workspace scope and no tool network. |
+| `--allowed-tools read,write,bash` | Exact lowercase outcome capabilities. `write` includes `read`; `bash` includes both. |
+| `--tool-scope workspace` | Default project scope; a read-capable turn can also inspect its current staged attachment. |
+| `--tool-scope container` | Deliberately broad access to files visible to the non-root agent account, including its OAuth home. |
+| `--tool-network none` / `internet` | Default `none` requests no tool-process egress. `internet` requires `bash`. |
 
-`BOT_AI_ALLOWED_TOOLS` is a Claude tool-availability setting, not a general
-sandbox. It does not make a public prompt safe. Public built-in AI direct bots
-must stay on Claude's hardened no-tools profile; built-in Codex and OpenCode
-are rejected for public direct deployment until their tool execution and model
-authentication can be isolated separately.
+For Bash, deploy validates the engine-specific network combination: OpenCode
+requires `--tool-network internet` because it has no network sandbox; Claude
+requires it for container-scoped Bash but can use `none` for workspace-scoped
+Bash; Codex can keep `none` in either scope. The deploy report names the
+effective enforcement level.
+
+The policy is not a general credential sandbox. Workspace is the normal project
+boundary; container scope deliberately exposes the non-root agent account's
+container-visible files. Claude and Codex provide native workspace enforcement
+for their applicable policies. OpenCode's Bash policy remains bounded by the
+container rather than an OS filesystem sandbox. The deploy report states the
+selected engine's enforcement level.
 
 The deployed transport still protects the chat identity: it owns `/state`, the
 signing seed, session keys, and bridge token, while the agent CLI runs as a
@@ -98,12 +108,11 @@ it has filesystem or shell tools, it can read or misuse those credentials and
 use its normal network access. An OAuth home is therefore not a safe boundary
 for a tool-enabled agent.
 
-Keep tool-enabled deployments private and allowlisted, and treat `pca run` as
-even more sensitive because it uses your local machine. For public tool or file
-analysis, use a bridge runtime with a genuinely separate tool-and-credential
-boundary. The local HTTP bridge itself still requires a 32+ character
-`BOT_BRIDGE_TOKEN`, so nothing on the box can drive the transport just by
-reaching its port.
+For a public deployment, treat every sender as able to direct the chosen policy;
+for `pca run`, remember that the local machine is the runtime boundary. Use a
+bridge runtime when you need a genuinely separate tool-and-credential boundary.
+The local HTTP bridge itself still requires a 32+ character `BOT_BRIDGE_TOKEN`,
+so nothing on the box can drive the transport just by reaching its port.
 
 ## Attachments are hostile input
 
@@ -123,9 +132,9 @@ The decisions on this page map to these settings, all detailed in
 - `BOT_ALLOWED_PEERS` — the allowlist (empty = public).
 - `BOT_AI_ALLOWED_MODELS` / `BOT_AI_MODEL_SWITCHING` — the `/model` policy.
 - `BOT_BRIDGE_TOKEN` — bridge authentication.
-- `BOT_AI_ALLOWED_TOOLS` — empty by default; a deliberate Claude-only tool
-  list for a private, trusted bot.
-- `BOT_AI_SKIP_PERMISSIONS` — explicit full autonomy for a private, trusted
-  deployment only.
+- `BOT_AI_TOOL_CAPABILITIES` — empty by default; comma-separated portable
+  `read`, `write`, and `bash` outcomes.
+- `BOT_AI_TOOL_SCOPE` / `BOT_AI_TOOL_NETWORK` — workspace versus container
+  scope and no-network versus internet tool-process egress.
 - `BOT_T3AMS_ATTACHMENT_MIME_TYPES` / `BOT_T3AMS_ATTACHMENT_MAX_*` — T3ams
   attachment admission policy and media bounds.

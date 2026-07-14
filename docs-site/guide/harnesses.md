@@ -194,9 +194,9 @@ Hermes integration is a practical template.
 Without a framework, bot-core runs a headless AI-agent CLI itself — as an
 autonomous agent, not a chat wrapper: the user's message is passed verbatim (no
 injected persona), conversation continuity is the CLI's own native session
-(`--resume`), and bot-core presents its progress and answer in the chat. A
-direct Claude engine starts with no model tools; tools are a deliberate
-private-deployment choice, not the default.
+(`--resume`), and bot-core presents its progress and answer in the chat. Direct
+Claude, Codex, and OpenCode engines start with no tools; the deployer chooses a
+portable capability, scope, and tool-network policy explicitly.
 
 | Engine | Invokes | Reaches | Authentication |
 |---|---|---|---|
@@ -222,16 +222,19 @@ Related settings:
   Switching is locked by default. `allow` persists an approved list;
   `open` is an explicit option for allowlisted bots only. Public bots cannot
   allow unrestricted switching.
-- Claude has no built-in tools unless `BOT_AI_ALLOWED_TOOLS` is deliberately
-  set. For a private, trusted deployment, `--safe-tools` writes the conventional
-  `Bash,Read,Edit,Write` list and `--allowed-tools Read,...` writes an exact
-  Claude list. `--full-autonomy` writes `BOT_AI_SKIP_PERMISSIONS=1`; it cannot
-  be combined with either tool-list flag.
-- Public built-in AI direct deployment supports Claude's hardened no-tools profile
-  only. It rejects `--safe-tools`, non-empty `--allowed-tools`, and
-  `--full-autonomy`; use an externally isolated bridge runtime for public file
-  analysis or tools. Codex and OpenCode do not consume Claude's allowlist and
-  need their own private, isolated runtime controls.
+- Claude, Codex, and OpenCode start with no tools. Deploy a portable policy
+  with `--allowed-tools read,write,bash`, `--tool-scope workspace|container`,
+  and `--tool-network none|internet`. `write` includes `read`; `bash` includes
+  both. The generated environment uses `BOT_AI_TOOL_CAPABILITIES`,
+  `BOT_AI_TOOL_SCOPE`, and `BOT_AI_TOOL_NETWORK`.
+- Public direct bots use the same policy. Every sender can direct the selected
+  capability, so choose the model, scope, and network deliberately. A
+  read-capable turn can inspect its staged attachment, and a write-capable turn
+  can return generated files.
+- For `bash`, OpenCode requires `--tool-network internet` because it has no
+  network sandbox. Claude requires internet for container-scoped Bash but can
+  use `none` for workspace-scoped Bash; Codex can keep `none` in either scope.
+  Deploy validates the combination and reports the enforcement level.
 - The agent works in a persistent non-secret workspace (`BOT_AI_WORKSPACE`,
   defaulting to a sibling of `BOT_STATE_DIR`) that survives restarts.
 - `BOT_AI_CMD`/`BOT_AI_ARGS` wire in a custom CLI that speaks claude-shaped
@@ -266,14 +269,14 @@ no-new-privileges, and process/memory/CPU ceilings. This protects the chat
 identity from the agent process.
 
 It is not a safe provider-credential boundary for a tool-enabled agent. The
-same non-root agent must read its OAuth home in `/home/node` to authenticate, so
-filesystem or shell tools can read or misuse that login and use the network.
-Keep the default no-tools profile for public direct bots. If a public bot needs
-tools or attachment analysis, put its tool worker and model authentication behind
-an independently designed isolation boundary, such as a bridge harness. A
-private, allowlisted operator may opt into Claude tools with `--safe-tools` or
-`--allowed-tools`, or explicitly choose `--full-autonomy`, accepting that trust
-boundary. Sessions and the workspace persist across redeploys.
+same non-root agent must read its OAuth home in `/home/node` to authenticate,
+and container scope deliberately exposes that home to selected tools. Workspace
+scope is the normal project boundary. Claude and Codex provide native workspace
+enforcement for their applicable policies; OpenCode's Bash policy remains
+bounded by the container rather than an OS filesystem sandbox. For a public
+bot, every sender can direct the policy the deployer selected. Use a bridge
+harness when a separately designed tool-and-credential boundary is required.
+Sessions and the workspace persist across redeploys.
 
 An AI brain spends quota, so `create` requires an allowlist or an explicit
 `--public`.

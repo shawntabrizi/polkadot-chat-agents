@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { RUNNERS, toolActionTitle, resolveEngine, ENGINES } from "../lib/runners.mjs";
+import { RUNNERS, toolActionTitle, resolveEngine, ENGINES, toolPolicyEnforcement } from "../lib/runners.mjs";
+
+const policy = (capabilities = [], scope = "workspace", network = "none") => ({ capabilities, scope, network });
 
 // Accumulate a fixture event stream through an engine's parseEvent the way
 // bot-core's loop does, returning the normalized outcome.
@@ -36,55 +38,79 @@ test("resolveEngine / ENGINES", () => {
 });
 
 // ---- claude ----------------------------------------------------------------
-test("claude buildArgs: explicit no-tools default, allowlist, and bypass", () => {
+test("claude compiles portable capabilities to scoped native tools", () => {
   const none = RUNNERS.claude.buildArgs({ prompt: "hi" });
   assert.ok(none.includes("--permission-mode") && none[none.indexOf("--permission-mode") + 1] === "dontAsk");
   assert.ok(none.includes("--tools") && none[none.indexOf("--tools") + 1] === "");
   assert.ok(none.includes("--include-partial-messages"), "Claude live drafts require stream deltas");
   assert.ok(!none.includes("--allowedTools"));
+  assert.ok(none.includes("--setting-sources") && none[none.indexOf("--setting-sources") + 1] === "");
 
-  const fresh = RUNNERS.claude.buildArgs({ prompt: "hi", allowedTools: ["Bash", "Read", "Edit", "Write"] });
-  assert.ok(fresh.includes("--tools") && fresh[fresh.indexOf("--tools") + 1] === "Bash,Read,Edit,Write");
-  assert.ok(fresh.includes("--allowedTools") && fresh[fresh.indexOf("--allowedTools") + 1] === "Bash,Read,Edit,Write");
+  const fresh = RUNNERS.claude.buildArgs({
+    prompt: "hi",
+    policy: policy(["read", "write", "bash"]),
+    workingDirectory: "/workspace/project",
+    attachmentDir: "/tmp/pca-stage/attachment",
+    outputDir: "/tmp/pca-stage/output",
+    protectedPaths: ["/home/node", "/state", "/app"],
+  });
+  assert.equal(fresh[fresh.indexOf("--tools") + 1], "Read,Glob,Grep,Edit,Write,Bash");
+  const allow = fresh[fresh.indexOf("--allowedTools") + 1];
+  assert.match(allow, /Read\(\/\/workspace\/project\/\*\*\)/);
+  assert.match(allow, /Read\(\/\/tmp\/pca-stage\/attachment\/\*\*\)/);
+  assert.match(allow, /Edit\(\/\/workspace\/project\/\*\*\)/);
+  assert.match(allow, /Edit\(\/\/tmp\/pca-stage\/output\/\*\*\)/);
+  assert.match(allow, /Bash\(\*\)/);
+  const deny = fresh[fresh.indexOf("--disallowedTools") + 1];
+  assert.match(deny, /Read\(\/\/home\/node\/\*\*\)/);
+  const settings = JSON.parse(fresh[fresh.indexOf("--settings") + 1]);
+  assert.equal(settings.sandbox.failIfUnavailable, true);
+  assert.equal(settings.sandbox.allowUnsandboxedCommands, false);
+  assert.deepEqual(settings.sandbox.network.allowedDomains, []);
+  assert.ok(settings.sandbox.filesystem.allowWrite.includes("/tmp/pca-stage/output/**"));
   // prompt is always last, after `--` (leading-dash safety)
   assert.equal(fresh.at(-2), "--");
   assert.equal(fresh.at(-1), "hi");
 
-  const resumed = RUNNERS.claude.buildArgs({ prompt: "next", model: "claude-sonnet-4-6", resume: "SID-1", allowedTools: ["Bash"] });
+  const resumed = RUNNERS.claude.buildArgs({ prompt: "next", model: "claude-sonnet-4-6", resume: "SID-1", policy: policy(["read"]) });
   assert.ok(resumed.includes("--resume") && resumed[resumed.indexOf("--resume") + 1] === "SID-1");
   assert.ok(resumed.includes("--model") && resumed[resumed.indexOf("--model") + 1] === "claude-sonnet-4-6");
-
-  const skip = RUNNERS.claude.buildArgs({ prompt: "hi", skipPermissions: true, allowedTools: ["Bash"] });
-  assert.ok(skip.includes("--dangerously-skip-permissions"));
-  assert.ok(!skip.includes("--allowedTools"), "skip-permissions supersedes the allowlist");
-  assert.ok(!skip.includes("--tools"), "skip-permissions supersedes the availability boundary");
-
-  const hardened = RUNNERS.claude.buildArgs({
-    prompt: "hi",
-    safeMode: true,
-    allowedTools: ["Bash", "Read", "Edit", "Write"],
-  });
-  assert.ok(hardened.includes("--safe-mode"));
-  assert.ok(hardened.includes("--strict-mcp-config"));
-  assert.ok(hardened.includes("--disable-slash-commands"));
-  assert.ok(hardened.includes("--no-chrome"));
-  assert.ok(hardened.includes("--setting-sources") && hardened[hardened.indexOf("--setting-sources") + 1] === "");
-  assert.equal(hardened[hardened.indexOf("--tools") + 1], "Bash,Read,Edit,Write");
 });
 
-test("claude buildArgs: a public attachment reader exposes only path-scoped Read", () => {
+test("claude read policy exposes staged attachments without shell or edits", () => {
   const args = RUNNERS.claude.buildArgs({
     prompt: "inspect the attachment",
-    allowedTools: ["Read"],
-    allowedToolRules: ["Read(//tmp/pca-agent-stage-123/.pca-attachment-456/**)"],
-    disallowedTools: ["Read(//workspace/**)", "Read(//home/node/**)", "Read(//state/**)"],
-    safeMode: true,
+    policy: policy(["read"]),
+    workingDirectory: "/workspace",
+    attachmentDir: "/tmp/pca-agent-stage-123/.pca-attachment-456",
+    protectedPaths: ["/home/node", "/state"],
   });
-  assert.equal(args[args.indexOf("--tools") + 1], "Read");
-  assert.equal(args[args.indexOf("--allowedTools") + 1], "Read(//tmp/pca-agent-stage-123/.pca-attachment-456/**)");
-  assert.equal(args[args.indexOf("--disallowedTools") + 1], "Read(//workspace/**),Read(//home/node/**),Read(//state/**)");
+  assert.equal(args[args.indexOf("--tools") + 1], "Read,Glob,Grep");
+  assert.match(args[args.indexOf("--allowedTools") + 1], /Read\(\/\/tmp\/pca-agent-stage-123\/\.pca-attachment-456\/\*\*\)/);
+  assert.equal(args.includes("--settings"), false, "Bash is the only capability that needs Claude's command sandbox");
   assert.equal(args.includes("Bash"), false, "no shell tool is exposed");
   assert.equal(args.includes("Edit"), false, "no write tool is exposed");
+});
+
+test("claude does not deny a local workspace through its protected home ancestor", () => {
+  const args = RUNNERS.claude.buildArgs({
+    prompt: "inspect",
+    policy: policy(["bash"]),
+    workingDirectory: "/home/node/projects/demo",
+    protectedPaths: ["/home/node", "/state"],
+  });
+  const denied = args[args.indexOf("--disallowedTools") + 1];
+  assert.doesNotMatch(denied, /home\/node/);
+  assert.match(denied, /state/);
+  const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
+  assert.deepEqual(settings.sandbox.filesystem.denyRead, ["/state/**"]);
+});
+
+test("claude rejects paths that could alter native permission rules", () => {
+  assert.throws(
+    () => RUNNERS.claude.buildArgs({ prompt: "hi", policy: policy(["read"]), workingDirectory: "/workspace/evil),Bash(*)" }),
+    /unsafe for Claude permission rules/,
+  );
 });
 
 test("claude parseEvent: session, tool action, text, result", () => {
@@ -131,20 +157,42 @@ test("claude parseEvent: stream deltas are presentation-only partial text", () =
 });
 
 // ---- codex -----------------------------------------------------------------
-test("codex buildArgs: fresh vs resume, sandbox vs bypass", () => {
-  const fresh = RUNNERS.codex.buildArgs({ prompt: "hi", model: "gpt-5" });
-  assert.deepEqual(fresh.slice(0, 4), ["exec", "--json", "--skip-git-repo-check", "--color=never"]);
+test("codex compiles a custom workspace permission profile", () => {
+  const fresh = RUNNERS.codex.buildArgs({ prompt: "hi", model: "gpt-5", policy: policy(["read", "write"]), workingDirectory: "/workspace/project", attachmentDir: "/tmp/pca-attachment", outputDir: "/tmp/pca-output" });
+  assert.deepEqual(fresh.slice(0, 7), ["--ask-for-approval", "never", "exec", "--json", "--skip-git-repo-check", "--color=never", "--ignore-user-config"]);
   assert.ok(fresh.includes("-m") && fresh[fresh.indexOf("-m") + 1] === "gpt-5");
-  assert.ok(fresh.includes("-s") && fresh[fresh.indexOf("-s") + 1] === "workspace-write");
+  assert.ok(fresh.includes("--ignore-rules"));
+  assert.ok(fresh.includes("-C") && fresh[fresh.indexOf("-C") + 1] === "/workspace/project");
+  assert.equal(fresh.includes("-s"), false, "the broad workspace-write profile reads :root");
+  assert.ok(fresh.includes("default_permissions=\"pca\""));
+  const profile = fresh.find((value) => String(value).startsWith("permissions="));
+  assert.match(profile, /":minimal"="read"/);
+  assert.match(profile, /":workspace_roots"=\{"\."="write"\}/);
+  assert.match(profile, /"\/tmp\/pca-attachment"="read"/);
+  assert.match(profile, /"\/tmp\/pca-output"="write"/);
+  assert.match(profile, /network=\{enabled=false\}/);
+  assert.ok(fresh.includes("features.shell_tool=false"), "read/write must not quietly enable Bash");
   assert.equal(fresh.at(-1), "hi");
 
-  const resumed = RUNNERS.codex.buildArgs({ prompt: "more", resume: "THREAD-9" });
+  const resumed = RUNNERS.codex.buildArgs({ prompt: "more", resume: "THREAD-9", policy: policy(["read"]) });
   const ri = resumed.indexOf("resume");
-  assert.deepEqual(resumed.slice(ri), ["resume", "THREAD-9", "more"]);
+  assert.deepEqual(resumed.slice(ri), ["resume", "THREAD-9", "--", "more"]);
 
-  const bypass = RUNNERS.codex.buildArgs({ prompt: "hi", skipPermissions: true });
-  assert.ok(bypass.includes("--dangerously-bypass-approvals-and-sandbox"));
-  assert.ok(!bypass.includes("-s"), "bypass supersedes the sandbox flag");
+  const untrustedPrompt = "--dangerously-bypass-approvals-and-sandbox";
+  const guarded = RUNNERS.codex.buildArgs({ prompt: untrustedPrompt, policy: policy(["read"]) });
+  assert.deepEqual(guarded.slice(-2), ["--", untrustedPrompt]);
+
+  const container = RUNNERS.codex.buildArgs({ prompt: "hi", policy: policy(["bash"], "container", "internet") });
+  const containerProfile = container.find((value) => String(value).startsWith("permissions="));
+  assert.equal(container.includes("-s"), false, "container scope still uses Codex's native profile");
+  assert.match(containerProfile, /":root"="write"/);
+  assert.match(containerProfile, /network=\{enabled=true,mode="full"\}/);
+  assert.ok(container.includes("features.shell_tool=true"));
+
+  const noTools = RUNNERS.codex.buildArgs({ prompt: "hi" });
+  const noToolsProfile = noTools.find((value) => String(value).startsWith("permissions="));
+  assert.doesNotMatch(noToolsProfile, /workspace_roots"=\{"\."/);
+  assert.ok(noTools.includes("features.shell_tool=false"));
 });
 
 test("codex parseEvent: thread id is the session, turn.failed is an error", () => {
@@ -171,19 +219,37 @@ test("codex parseEvent: command action + agent_message answer", () => {
 });
 
 // ---- opencode --------------------------------------------------------------
-test("opencode buildArgs: session, model, numeric-prompt workaround", () => {
-  const fresh = RUNNERS.opencode.buildArgs({ prompt: "hi", model: "google/gemini-2.5-pro" });
-  assert.deepEqual(fresh.slice(0, 3), ["run", "--format", "json"]);
+test("opencode compiles deny-first permissions and isolates configuration", () => {
+  const fresh = RUNNERS.opencode.buildArgs({ prompt: "hi", model: "google/gemini-2.5-pro", policy: policy(["read", "write"]), workingDirectory: "/workspace/project" });
+  assert.deepEqual(fresh.slice(0, 6), ["--pure", "run", "--format", "json", "--dir", "/workspace/project"]);
   assert.ok(fresh.includes("--model") && fresh[fresh.indexOf("--model") + 1] === "google/gemini-2.5-pro");
   assert.equal(fresh.at(-1), "hi");
 
-  const resumed = RUNNERS.opencode.buildArgs({ prompt: "more", resume: "ses_abc" });
+  const resumed = RUNNERS.opencode.buildArgs({ prompt: "more", resume: "ses_abc", policy: policy(["read"]) });
   assert.ok(resumed.includes("--session") && resumed[resumed.indexOf("--session") + 1] === "ses_abc");
 
   assert.equal(RUNNERS.opencode.buildArgs({ prompt: "42" }).at(-1), "42.", "numeric prompt gets a trailing dot");
-
-  const skip = RUNNERS.opencode.buildArgs({ prompt: "hi", skipPermissions: true });
-  assert.ok(skip.includes("--dangerously-skip-permissions"));
+  assert.equal(RUNNERS.opencode.buildArgs({ prompt: "42" }).at(-2), "--");
+  const guarded = RUNNERS.opencode.buildArgs({ prompt: "--dangerously-skip-permissions", policy: policy(["read"]) });
+  assert.deepEqual(guarded.slice(-2), ["--", "--dangerously-skip-permissions"]);
+  const env = RUNNERS.opencode.buildEnvironment({ policy: policy(["read", "write"]), workingDirectory: "/workspace/project", attachmentDir: "/tmp/pca-stage", outputDir: "/tmp/pca-output" });
+  const permission = JSON.parse(env.OPENCODE_PERMISSION);
+  assert.equal(Object.keys(permission)[0], "*", "catch-all must be evaluated before explicit allows");
+  assert.equal(permission["*"], "deny");
+  assert.deepEqual(permission.read, { "*": "deny", "/workspace/project/**": "allow", "/tmp/pca-stage/**": "allow", "/tmp/pca-output/**": "allow" });
+  assert.deepEqual(permission.edit, { "*": "deny", "/workspace/project/**": "allow", "/tmp/pca-output/**": "allow" });
+  assert.equal(permission.bash, undefined);
+  assert.deepEqual(permission.external_directory, { "*": "deny", "/tmp/pca-stage/**": "allow", "/tmp/pca-output/**": "allow" });
+  assert.equal(env.OPENCODE_DISABLE_PROJECT_CONFIG, "1");
+  assert.equal(env.OPENCODE_DISABLE_DEFAULT_PLUGINS, "1");
+  assert.throws(
+    () => RUNNERS.opencode.buildArgs({ prompt: "bash", policy: policy(["bash"]) }),
+    /no network sandbox/,
+  );
+  assert.throws(
+    () => RUNNERS.opencode.buildEnvironment({ policy: policy(["read"]), workingDirectory: "/workspace/evil*" }),
+    /unsafe for OpenCode permission rules/,
+  );
 });
 
 test("opencode parseEvent: sessionID capture, tool, text, step_finish", () => {
@@ -217,7 +283,7 @@ test("custom engine reuses claude parsing but has no fixed command", () => {
 });
 
 test("reasoning effort maps to each engine's own flag", () => {
-  const claude = RUNNERS.claude.buildArgs({ prompt: "hi", effort: "high", allowedTools: ["Bash"] });
+  const claude = RUNNERS.claude.buildArgs({ prompt: "hi", effort: "high", policy: policy(["bash"]) });
   assert.ok(claude.includes("--effort") && claude.includes("high"));
   const codex = RUNNERS.codex.buildArgs({ prompt: "hi", effort: "minimal" });
   assert.ok(codex.includes("-c") && codex.includes("model_reasoning_effort=minimal"));
@@ -226,7 +292,15 @@ test("reasoning effort maps to each engine's own flag", () => {
   assert.deepEqual(RUNNERS.claude.effortLevels, ["low", "medium", "high", "xhigh", "max"]);
   assert.deepEqual(RUNNERS.codex.effortLevels, ["minimal", "low", "medium", "high", "xhigh"]);
   // No effort -> no flag.
-  assert.equal(RUNNERS.claude.buildArgs({ prompt: "hi", allowedTools: ["Bash"] }).includes("--effort"), false);
+  assert.equal(RUNNERS.claude.buildArgs({ prompt: "hi", policy: policy(["bash"]) }).includes("--effort"), false);
+});
+
+test("runner reports the scope enforcement it actually provides", () => {
+  assert.equal(toolPolicyEnforcement("claude", policy(["bash"])).kind, "native-sandbox");
+  assert.equal(toolPolicyEnforcement("codex", policy(["read", "write"])).kind, "native-sandbox");
+  const openCode = toolPolicyEnforcement("opencode", policy(["bash"], "workspace", "internet"));
+  assert.equal(openCode.kind, "permission-policy");
+  assert.match(openCode.detail, /container/);
 });
 
 test("claude result events carry token/cost usage", () => {

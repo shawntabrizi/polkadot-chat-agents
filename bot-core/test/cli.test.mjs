@@ -313,74 +313,98 @@ test("pca model persists a safe policy and serializes it for direct deploys", ()
   }
 });
 
-test("direct deployment defaults to no tools and makes private tool access explicit", () => {
+test("direct deployment uses one portable tool policy across every direct engine", () => {
   const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
   try {
-    writeBot(botsDir, "privateclaude", {
-      name: "privateclaude",
-      endpoint: "ws://127.0.0.1:9944",
-      brain: "claude",
-      allow: [ACCOUNT],
-      bridgePort: 8799,
-      bridgeToken: "a-long-enough-bridge-token-for-tests",
-    });
-    let result = runCli(botsDir, ["deploy", "privateclaude", "--host", "root@example.test", "--dry-run"]);
-    assert.equal(result.status, 0, result.stderr);
-    assert.doesNotMatch(result.stdout, /BOT_AI_SKIP_PERMISSIONS=/);
-    assert.doesNotMatch(result.stdout, /BOT_AI_ALLOWED_TOOLS=/);
+    const directBots = [
+      ["privateclaude", "claude", [ACCOUNT]],
+      ["publicclaude", "claude", []],
+      ["publiccodex", "codex", []],
+      ["publicopencode", "opencode", []],
+    ];
+    for (const [name, brain, allow] of directBots) {
+      writeBot(botsDir, name, {
+        name,
+        endpoint: "ws://127.0.0.1:9944",
+        brain,
+        allow,
+        bridgePort: 8799,
+        bridgeToken: "a-long-enough-bridge-token-for-tests",
+      });
+    }
 
-    result = runCli(botsDir, ["deploy", "privateclaude", "--host", "root@example.test", "--safe-tools", "--dry-run"]);
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /BOT_AI_ALLOWED_TOOLS=Bash,Read,Edit,Write/);
-    assert.match(result.stdout, /BOT_AI_SAFE_MODE=1/);
-    assert.doesNotMatch(result.stdout, /BOT_AI_SKIP_PERMISSIONS=/);
+    for (const [name] of directBots) {
+      const result = runCli(botsDir, ["deploy", name, "--host", "root@example.test", "--dry-run"]);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /^BOT_AI_TOOL_CAPABILITIES=$/m);
+      assert.match(result.stdout, /^BOT_AI_TOOL_SCOPE=workspace$/m);
+      assert.match(result.stdout, /^BOT_AI_TOOL_NETWORK=none$/m);
+      assert.match(result.stdout, /Tool policy: none; scope=workspace; tool network=none/);
+      assert.doesNotMatch(result.stdout, /BOT_AI_ALLOWED_TOOLS=|BOT_AI_SAFE_MODE=|BOT_AI_SKIP_PERMISSIONS=|BOT_T3AMS_PUBLIC_ATTACHMENT_READ=/);
+    }
 
-    result = runCli(botsDir, ["deploy", "privateclaude", "--host", "root@example.test", "--allowed-tools", "Read", "--dry-run"]);
+    let result = runCli(botsDir, ["deploy", "privateclaude", "--host", "root@example.test", "--allowed-tools", "write", "--dry-run"]);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /BOT_AI_ALLOWED_TOOLS=Read/);
+    assert.match(result.stdout, /^BOT_AI_TOOL_CAPABILITIES=read,write$/m);
+    assert.match(result.stdout, /^BOT_AI_TOOL_SCOPE=workspace$/m);
+    assert.match(result.stdout, /^BOT_AI_TOOL_NETWORK=none$/m);
+    assert.match(result.stdout, /bubblewrap socat/);
 
-    result = runCli(botsDir, ["deploy", "privateclaude", "--host", "root@example.test", "--full-autonomy", "--dry-run"]);
+    result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--allowed-tools", "bash", "--dry-run"]);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /BOT_AI_SKIP_PERMISSIONS=1/);
-    assert.doesNotMatch(result.stdout, /BOT_AI_ALLOWED_TOOLS=/);
+    assert.match(result.stdout, /^BOT_AI_TOOL_CAPABILITIES=read,write,bash$/m);
+    assert.match(result.stdout, /^BOT_AI_TOOL_NETWORK=none$/m);
 
-    writeBot(botsDir, "publicclaude", {
-      name: "publicclaude",
-      endpoint: "ws://127.0.0.1:9944",
-      brain: "claude",
-      allow: [],
-      bridgePort: 8799,
-      bridgeToken: "a-long-enough-bridge-token-for-tests",
-    });
-    result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--dry-run"]);
-    assert.equal(result.status, 0, result.stderr);
-    assert.doesNotMatch(result.stdout, /BOT_AI_SKIP_PERMISSIONS=/);
-    assert.doesNotMatch(result.stdout, /BOT_AI_ALLOWED_TOOLS=/);
-
-    result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--safe-tools", "--dry-run"]);
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /BOT_AI_ALLOWED_TOOLS=Bash,Read,Edit,Write/);
-    assert.match(result.stdout, /BOT_AI_SAFE_MODE=1/);
-
-    result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--allowed-tools", "Read,Edit,Write", "--dry-run"]);
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /BOT_AI_ALLOWED_TOOLS=Read,Edit,Write/);
-
-    result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--full-autonomy", "--dry-run"]);
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /BOT_AI_SKIP_PERMISSIONS=1/);
-
-    writeBot(botsDir, "publiccodex", {
-      name: "publiccodex",
-      endpoint: "ws://127.0.0.1:9944",
-      brain: "codex",
-      allow: [],
-      bridgePort: 8799,
-      bridgeToken: "a-long-enough-bridge-token-for-tests",
-    });
-    result = runCli(botsDir, ["deploy", "publiccodex", "--host", "root@example.test", "--dry-run"]);
+    result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--allowed-tools", "bash", "--tool-scope", "container", "--dry-run"]);
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /Public direct deployment currently supports only Claude/);
+    assert.match(result.stderr, /Claude container-scoped Bash has no network sandbox/i);
+
+    result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--allowed-tools", "bash", "--tool-scope", "container", "--tool-network", "internet", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^BOT_AI_TOOL_SCOPE=container$/m);
+    assert.match(result.stdout, /^BOT_AI_TOOL_NETWORK=internet$/m);
+
+    result = runCli(botsDir, ["deploy", "publiccodex", "--host", "root@example.test", "--allowed-tools", "bash", "--tool-scope", "container", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^BOT_AI_TOOL_CAPABILITIES=read,write,bash$/m);
+    assert.match(result.stdout, /^BOT_AI_TOOL_SCOPE=container$/m);
+    assert.match(result.stdout, /^BOT_AI_TOOL_NETWORK=none$/m);
+
+    result = runCli(botsDir, ["deploy", "publicopencode", "--host", "root@example.test", "--allowed-tools", "bash", "--dry-run"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /OpenCode Bash has no network sandbox/i);
+
+    result = runCli(botsDir, ["deploy", "publicopencode", "--host", "root@example.test", "--allowed-tools", "bash", "--tool-network", "internet", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^BOT_AI_TOOL_NETWORK=internet$/m);
+    assert.match(result.stdout, /OpenCode Bash follows the container boundary/i);
+
+    for (const [args, pattern] of [
+      [["--allowed-tools", "Read"], /unsupported capability/i],
+      [["--allowed-tools", "read,read"], /duplicate capability/i],
+      [["--allowed-tools", "read,,write"], /empty capability/i],
+      [["--tool-network", "internet"], /requires the bash capability/i],
+      [["--tool-scope", "host"], /must be one of/i],
+      [["--safe-tools"], /Unknown flag.*safe-tools/i],
+      [["--full-autonomy"], /Unknown flag.*full-autonomy/i],
+      [["--attachment-read"], /Unknown flag.*attachment-read/i],
+    ]) {
+      result = runCli(botsDir, ["deploy", "privateclaude", "--host", "root@example.test", ...args, "--dry-run"]);
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, pattern);
+    }
+
+    writeBot(botsDir, "bridgebot", {
+      name: "bridgebot",
+      endpoint: "ws://127.0.0.1:9944",
+      brain: "bridge",
+      allow: [],
+      bridgePort: 8799,
+      bridgeToken: "a-long-enough-bridge-token-for-tests",
+    });
+    result = runCli(botsDir, ["deploy", "bridgebot", "--host", "root@example.test", "--harness", "openclaw", "--allowed-tools", "read", "--dry-run"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /require a built-in direct engine/i);
 
     writeBot(botsDir, "publicmedia", {
       name: "publicmedia",
@@ -391,54 +415,27 @@ test("direct deployment defaults to no tools and makes private tool access expli
       bridgePort: 8799,
       bridgeToken: "a-long-enough-bridge-token-for-tests",
     });
-    result = runCli(botsDir, ["deploy", "publicmedia", "--host", "root@example.test", "--media-analyzer", "--dry-run"]);
+    result = runCli(botsDir, ["deploy", "publicmedia", "--host", "root@example.test", "--allowed-tools", "read", "--media-analyzer", "--dry-run"]);
     assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^BOT_AI_TOOL_CAPABILITIES=read$/m);
     assert.match(result.stdout, /^BOT_T3AMS_MEDIA_ANALYZER_URL=http:\/\/media-analyzer:8798\/v1\/analyze$/m);
     assert.match(result.stdout, /^BOT_T3AMS_MEDIA_ANALYZER_TOKEN=<hidden>$/m);
     assert.match(result.stdout, /media-analyzer:\n[\s\S]*cap_drop:\n      - ALL/);
     assert.match(result.stdout, /depends_on:\n      media-analyzer:\n        condition: service_healthy/);
     assert.match(result.stdout, /env_file:\n      - \.\/media\.env\n      - \.\/media-token\.env/);
-    assert.doesNotMatch(result.stdout, /ANTHROPIC_API_KEY=/);
+    assert.doesNotMatch(result.stdout, /ANTHROPIC_API_KEY=|BOT_T3AMS_PUBLIC_ATTACHMENT_READ=/);
     const publicMedia = readBot(botsDir, "publicmedia");
     assert.equal(typeof publicMedia.mediaAnalyzerToken, "string");
     assert.ok(publicMedia.mediaAnalyzerToken.length >= 32);
     assert.notEqual(publicMedia.mediaAnalyzerToken, publicMedia.bridgeToken);
 
-    result = runCli(botsDir, ["deploy", "publicmedia", "--host", "root@example.test", "--attachment-read", "--dry-run"]);
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /^BOT_T3AMS_PUBLIC_ATTACHMENT_READ=1$/m);
-    assert.match(result.stdout, /^BOT_AI_ALLOWED_TOOLS=Read$/m);
-    assert.doesNotMatch(result.stdout, /media-analyzer:\n/);
-
-    result = runCli(botsDir, ["deploy", "publicmedia", "--host", "root@example.test", "--safe-tools", "--dry-run"]);
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /^BOT_AI_ALLOWED_TOOLS=Bash,Read,Edit,Write$/m);
-    assert.match(result.stdout, /^BOT_AI_SAFE_MODE=1$/m);
-
-    result = runCli(botsDir, ["deploy", "publicmedia", "--host", "root@example.test", "--full-autonomy", "--dry-run"]);
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /^BOT_AI_SKIP_PERMISSIONS=1$/m);
-
-    result = runCli(botsDir, ["deploy", "publicmedia", "--host", "root@example.test", "--attachment-read", "--safe-tools", "--dry-run"]);
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /cannot be combined with --safe-tools/i);
-
-    result = runCli(botsDir, ["deploy", "publicmedia", "--host", "root@example.test", "--attachment-read", "--media-analyzer", "--dry-run"]);
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /Choose one attachment analysis route/i);
-
-    result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--attachment-read", "--dry-run"]);
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /requires a public T3ams Claude direct-engine deployment/i);
-
     result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--media-analyzer", "--dry-run"]);
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /requires a T3ams direct-engine deployment/);
+    assert.match(result.stderr, /requires a T3ams direct-engine deployment/i);
   } finally {
     fs.rmSync(botsDir, { recursive: true, force: true });
   }
 });
-
 test("Paseo private-bot onboarding configures a testnet file-delivery profile", () => {
   const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
   try {

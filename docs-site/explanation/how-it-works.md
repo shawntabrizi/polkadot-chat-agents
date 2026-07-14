@@ -70,10 +70,11 @@ key *is* the identity. In a deployed direct bot, the transport keeps that key
 and the session state while the AI-agent CLI runs as a non-root user in its own
 container. The agent does not receive the signing key or chat session state,
 but its provider-login home is readable by that same process when it has tools.
-That protects the chat identity, not the provider credential. Direct Claude
-therefore starts with no tools, and public built-in AI direct bots stay on
-Claude's hardened no-tools profile. A local `pca run` uses your local environment, so
-reserve tool-enabled runs for trusted senders.
+That protects the chat identity, not the provider credential. Direct Claude,
+Codex, and OpenCode therefore start with no tools; their deployer explicitly
+chooses portable capabilities, scope, and tool-network access for either public
+or allowlisted bots. A local `pca run` uses your local environment, so treat its
+selected policy as especially consequential.
 
 ## How the promises map to the mechanism
 

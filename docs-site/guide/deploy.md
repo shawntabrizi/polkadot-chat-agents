@@ -27,37 +27,49 @@ steps.
 
 `claude`, `codex`, and `opencode` deploy as a **single container**: the
 transport process holds the seed and writes `/state`, while the agent CLI it
-spawns is dropped to a non-root user that can only touch its `/workspace` and
-OAuth home — it can't read the seed or the session state. The container is
-read-only except for those volumes and a size-capped `tmpfs`.
+spawns is dropped to a non-root user — it can't read the seed or session state.
+The container is read-only except for its intended volumes and a size-capped
+`tmpfs`.
 
 The seed split protects the chat identity, but the mounted OAuth home is not a
 safe boundary for an agent with filesystem or shell tools: that same agent
-needs to read it to authenticate. A direct Claude deployment starts with no
-model tools. A public built-in AI direct bot must remain Claude's hardened
-no-tools profile; use an externally isolated bridge runtime for public tools or
-file analysis.
+needs to read it to authenticate. Every direct engine starts with no
+capabilities, workspace scope, and no tool network. A deployer may select
+portable `read`, `write`, and `bash` capabilities with
+`--allowed-tools read,write,bash`; `write` includes `read` and `bash` includes
+both. `--tool-scope workspace|container` chooses the file boundary, and
+`--tool-network none|internet` chooses tool-process egress (`internet` requires
+`bash`).
 
-For a private, allowlisted Claude bot, choose tool access deliberately at
-deploy time: `--safe-tools` opts into `Bash,Read,Edit,Write`,
-`--allowed-tools Read,...` selects an exact list, and `--full-autonomy` is the
-explicit unrestricted override. Do not combine `--full-autonomy` with either
-tool-list flag.
+For Bash, OpenCode requires `--tool-network internet` because it has no network
+sandbox. Claude requires internet for container-scoped Bash but can use `none`
+for workspace-scoped Bash; Codex can keep `none` in either scope. `pca deploy`
+validates the combination and reports the effective enforcement.
+
+Workspace scope is the normal project boundary; container scope deliberately
+grants selected tools the non-root agent account's container-visible files,
+including its OAuth home. Claude and Codex provide native workspace enforcement
+for their applicable policies; OpenCode's Bash policy remains bounded by the
+container rather than an OS filesystem sandbox. For a public bot, every sender
+can direct the selected capability. Use a bridge runtime when a separate
+tool-and-credential boundary is required.
 
 After a direct deployment, run the printed one-time CLI login command (for a
 Claude bot, `claude login` through the printed `docker exec` command) so the
 agent can authenticate through its mounted OAuth home. Those credentials survive
-restarts and redeploys; keep a tool-enabled deployment private and allowlisted.
+restarts and redeploys; keep the selected policy in the deployment command or
+release script.
 
 `echo` also deploys as a single container, but it does not spawn an AI CLI and
 needs no provider login.
 
 ## Photo and document understanding for T3ams
 
-A public no-tools Claude bot can safely receive encrypted photos and files, but
-it cannot inspect a staged file itself: its OAuth home is intentionally kept
-out of reach of model tools. For a T3ams direct bot, use the explicit
-`--media-analyzer` deployment option to add a separate API-only worker:
+A no-tools direct bot can safely receive encrypted photos and files, but it
+cannot inspect a staged file itself. Enable `--allowed-tools read` with
+workspace scope when the direct brain should inspect its current staged
+attachment. For a separate API-only attachment-analysis worker, use the
+explicit `--media-analyzer` deployment option:
 
 ```bash
 # First create the private remote directory and edit its media.env directly on
@@ -73,7 +85,7 @@ pca deploy mycoolbot --host root@your-server --media-analyzer
 ```
 
 The generated worker has no published port and does not mount `/state`, the
-agent workspace, the Claude OAuth home, or the bot's bridge token. It receives
+agent workspace, any direct-engine OAuth home, or the bot's bridge token. It receives
 only verified, bounded attachment bytes, then returns a small untrusted
 summary for the brain. It supports common images, PDFs, text documents, and
 `.docx`/`.xlsx`/`.pptx`; other file types continue to be delivered/downloadable

@@ -246,19 +246,26 @@ turn, not the media-cache path itself. `/file put <path>` can retain one such
 attachment in the conversation vault, and `/file get <path>` publishes a new
 encrypted attachment back into that same DM or channel.
 
-Public Claude bots remain metadata-only by default. The deployer can deliberately
-enable a normal Claude allowlist (`--allowed-tools`), the
-`Bash,Read,Edit,Write` `--safe-tools` profile, or `--full-autonomy` when the
-group bot should take write/edit actions inside its dedicated container.
-`pca deploy <bot> --attachment-read` is the narrower subscription-backed
-alternative: while a verified attachment is staged, PCA gives Claude Code only
-a path-scoped native `Read` permission for that temporary directory. It has no
-shell, edit, write, browser, plugin, MCP, or slash-command capability, and the
-staged directory is removed after the turn. This uses the bot's existing Claude
-Code login; it does not require an Anthropic API key. The bot's OAuth/session
-home remains inside the same dedicated container, so choose the default
-no-tools mode or the separate API-only media analyzer if that residual boundary
-is not appropriate.
+Direct T3ams bots start with no tools, regardless of whether they use Claude,
+Codex, or OpenCode. The deployer can deliberately enable portable
+`read`, `write`, and `bash` capabilities with
+`--allowed-tools read,write,bash`, choose
+`--tool-scope workspace|container`, and choose
+`--tool-network none|internet`. `read` lets the agent inspect a verified
+attachment staged for its current turn; `write` also lets it create a returnable
+artifact. The staged directory is removed after the turn. This uses the
+selected CLI's existing login and does not require an API key for the direct
+brain. Container scope deliberately includes the non-root agent account's
+OAuth/session home, so choose the default no-tools policy, workspace scope, or
+the separate API-only media analyzer as appropriate for the bot's trust
+boundary.
+
+For `bash`, deploy validates the engine-specific network choice: OpenCode
+requires `--tool-network internet`; Claude requires it for container-scoped
+Bash but can use `none` in workspace scope; Codex can keep `none` in either
+scope. Claude and Codex provide native workspace enforcement for their
+applicable policies. OpenCode's Bash policy remains bounded by the container,
+not an OS filesystem sandbox.
 
 Direct Claude, Codex, and OpenCode turns can also return generated files. For a
 turn, the bot creates a private `PCA_OUTPUT_DIR`; only bounded top-level regular

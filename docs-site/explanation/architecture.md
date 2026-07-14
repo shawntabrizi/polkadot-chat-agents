@@ -44,11 +44,13 @@ home. That split protects the chat identity, but the provider-login home is
 readable by the same agent that needs it to authenticate. It is not a safe
 credential boundary once that agent has filesystem or shell tools.
 
-Direct Claude starts with no model tools. A public built-in AI direct bot is limited
-to Claude's hardened no-tools profile; a public bot that needs tools or file
-analysis needs an externally isolated bridge runtime instead. Use `--owner` or
-`--allow` before deliberately enabling Claude tools for a personal or coding
-bot. See [Private & public bots](/guide/access) for the deployment profiles.
+Direct Claude, Codex, and OpenCode start with no tools. Their deployer may
+select portable `read`, `write`, and `bash` capabilities, workspace or container
+scope, and tool-process network access for either public or allowlisted bots.
+Container scope deliberately exposes the non-root agent account's OAuth home;
+use a bridge runtime when a separately isolated tool-and-credential boundary is
+required. See [Private & public bots](/guide/access) for the deployment
+profiles.
 
 ## Files and attachments
 

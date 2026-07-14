@@ -313,18 +313,28 @@ test("direct-agent output artifacts are flat, bounded, snapshotted before delive
   let observed = [];
   let snapshotDir = null;
   let renderedOutputDir = null;
+  let buildInput = null;
+  let environmentInput = null;
+  const outputScript = [
+    'test -n "$PCA_OUTPUT_DIR"',
+    'printf "first" > "$PCA_OUTPUT_DIR/b.txt"',
+    'printf "second" > "$PCA_OUTPUT_DIR/a.txt"',
+    'printf "third" > "$PCA_OUTPUT_DIR/c.txt"',
+    'mkdir "$PCA_OUTPUT_DIR/nested"',
+    'printf "nested" > "$PCA_OUTPUT_DIR/nested/ignored.txt"',
+    'ln -s a.txt "$PCA_OUTPUT_DIR/linked.txt"',
+    'printf \'{"type":"result","result":"done"}\\n\'',
+  ].join("; ");
   const h = makeRuntime({
     maxOutputArtifacts: 2,
-    script: [
-      'test -n "$PCA_OUTPUT_DIR"',
-      'printf "first" > "$PCA_OUTPUT_DIR/b.txt"',
-      'printf "second" > "$PCA_OUTPUT_DIR/a.txt"',
-      'printf "third" > "$PCA_OUTPUT_DIR/c.txt"',
-      'mkdir "$PCA_OUTPUT_DIR/nested"',
-      'printf "nested" > "$PCA_OUTPUT_DIR/nested/ignored.txt"',
-      'ln -s a.txt "$PCA_OUTPUT_DIR/linked.txt"',
-      'printf \'{"type":"result","result":"done"}\\n\'',
-    ].join("; "),
+    buildArgs: (input) => {
+      buildInput = input;
+      return ["-c", outputScript];
+    },
+    buildTurnEnvironment: (input) => {
+      environmentInput = input;
+      return {};
+    },
     renderMessage: (message) => {
       renderedOutputDir = message.outputDir ?? null;
       return message.text;
@@ -337,8 +347,8 @@ test("direct-agent output artifacts are flat, bounded, snapshotted before delive
         assert.equal(peerHex, "peer");
         snapshotDir = path.dirname(artifacts[0].filePath);
         assert.equal(fs.existsSync(snapshotDir), true, "the callback must receive files before cleanup");
-        assert.notEqual(snapshotDir, renderedOutputDir, "the transport must receive a snapshot, not the agent-writable directory");
-        assert.equal(fs.existsSync(renderedOutputDir), false, "the agent-writable handoff directory must be gone before delivery");
+        assert.notEqual(snapshotDir, buildInput.outputDir, "the transport must receive a snapshot, not the agent-writable directory");
+        assert.equal(fs.existsSync(buildInput.outputDir), false, "the agent-writable handoff directory must be gone before delivery");
         observed = artifacts.map((artifact) => ({
           ...artifact,
           contents: fs.readFileSync(artifact.filePath, "utf8"),
@@ -354,9 +364,11 @@ test("direct-agent output artifacts are flat, bounded, snapshotted before delive
     { filename: "b.txt", filePath: path.join(snapshotDir, "b.txt"), size: 5, contents: "first" },
   ]);
   assert.match(renderedOutputDir, /\.pca-output-/);
+  assert.equal(path.isAbsolute(renderedOutputDir), false, "the model receives a workspace-relative output path");
+  assert.equal(path.resolve(h.workspace, renderedOutputDir), buildInput.outputDir, "the prompt path resolves to the runner-scoped output leaf");
+  assert.equal(environmentInput.outputDir, buildInput.outputDir, "runner environment receives the absolute scoped output path");
   assert.equal(fs.existsSync(snapshotDir), false, "the private transport snapshot must be removed after delivery");
 });
-
 test("a durable deliverTurn handoff receives immutable artifacts and final text together", async () => {
   const turns = [];
   const h = makeRuntime({

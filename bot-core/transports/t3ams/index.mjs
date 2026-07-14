@@ -16,7 +16,8 @@ import { createWorkspaces } from "../../lib/workspaces.mjs";
 import { createKeyedDispatcher } from "../../lib/keyed-dispatcher.mjs";
 import { createFileStore } from "../../lib/file-store.mjs";
 import { createFileCommandHandler } from "../../lib/file-commands.mjs";
-import { RUNNERS, resolveEngine } from "../../lib/runners.mjs";
+import { RUNNERS, resolveEngine, assertEngineToolPolicy, toolPolicyEnforcement } from "../../lib/runners.mjs";
+import { ToolPolicyError, hasToolCapability, toolPolicyFromEnvironment, toolPolicySummary } from "../../lib/tool-policy.mjs";
 import { deriveT3amsBulletinUploadSigner, deriveT3amsIdentity } from "./t3ams-identity.mjs";
 import { createT3amsProtocol, hexToBytes, bareHex } from "./t3ams-protocol.mjs";
 import { createT3amsMedia } from "./t3ams-media.mjs";
@@ -2638,47 +2639,30 @@ if (customCmd && env.BOT_AI_ARGS) {
   if (!Array.isArray(customArgs)) { console.error("BOT_AI_ARGS must be a JSON array"); process.exit(2); }
 }
 const engine = customCmd ? RUNNERS.custom : resolveEngine(brain);
-// A public direct bot receives hostile prompts and attachments. Claude's OAuth
-// login lives in its home directory, so the default built-in profile stays
-// text-only. A deployer may choose a broader tool profile, or the narrower
-// path-scoped attachment Read profile below. A custom command is an
-// operator-managed boundary and is deliberately left to that command's own
-// sandbox policy.
-const aiAllowedTools = String(env.BOT_AI_ALLOWED_TOOLS ?? "")
-  .split(",")
-  .map((item) => item.trim())
-  .filter(Boolean);
-const aiSkipPermissions = env.BOT_AI_SKIP_PERMISSIONS === "1";
-const aiSafeMode = env.BOT_AI_SAFE_MODE === "1";
-const publicAttachmentReadSetting = String(env.BOT_T3AMS_PUBLIC_ATTACHMENT_READ ?? "").trim();
-if (!["", "1"].includes(publicAttachmentReadSetting)) {
-  console.error("BOT_T3AMS_PUBLIC_ATTACHMENT_READ must be 1 when enabled");
+// Direct engines all consume the same PCA policy. The default is no tools;
+// an operator decides the portable capabilities, filesystem scope, and tool
+// network access without exposing an engine-native flag in the bot config.
+let aiToolPolicy;
+try { aiToolPolicy = toolPolicyFromEnvironment(env); }
+catch (error) {
+  console.error(error instanceof ToolPolicyError ? error.message : `Invalid tool policy: ${String(error?.message ?? error)}`);
   process.exit(2);
 }
-const publicAttachmentReadEnabled = publicAttachmentReadSetting === "1";
-const hasExactlyReadTool = aiAllowedTools.length === 1 && aiAllowedTools[0] === "Read";
-// All public direct engines consume an operator-funded resource, including an
-// explicitly sandboxed custom command. Keep their default turn budget small;
-// a private allowlist retains the historical defaults below.
+if (customCmd && (aiToolPolicy.capabilities.length || aiToolPolicy.scope !== "workspace" || aiToolPolicy.network !== "none")) {
+  console.error("BOT_AI_CMD owns its own tool boundary; BOT_AI_TOOL_CAPABILITIES, BOT_AI_TOOL_SCOPE, and BOT_AI_TOOL_NETWORK are only supported by the built-in claude, codex, and opencode brains.");
+  process.exit(2);
+}
+if (engine && !customCmd) {
+  try { aiToolPolicy = assertEngineToolPolicy(brain, aiToolPolicy); }
+  catch (error) {
+    console.error(error instanceof ToolPolicyError ? error.message : `Invalid tool policy: ${String(error?.message ?? error)}`);
+    process.exit(2);
+  }
+}
+// All public direct engines consume an operator-funded resource, including a
+// custom command. Keep their default turn budget small; a private allowlist
+// retains the historical defaults below.
 const publicDirectAgent = engine != null && publicTofuEnrollment;
-const publicBuiltInDirectAgent = publicDirectAgent && !customCmd;
-if (publicBuiltInDirectAgent && brain !== "claude") {
-  console.error("Public direct bots currently support only Claude's direct runtime; use a private allowlist or an externally isolated bridge runtime for other engines");
-  process.exit(2);
-}
-// This is the narrow profile selected by `pca deploy --attachment-read`: the
-// runner exposes Read only for a per-turn copy of a verified attachment and
-// scopes Claude's allow rule to that temporary directory. A deployer who wants
-// normal broader Read or other tools uses BOT_AI_ALLOWED_TOOLS instead.
-const publicAttachmentReadProfile = publicBuiltInDirectAgent
-  && brain === "claude"
-  && publicAttachmentReadEnabled
-  && !aiSkipPermissions
-  && hasExactlyReadTool;
-if (publicAttachmentReadEnabled && !publicAttachmentReadProfile) {
-  console.error("BOT_T3AMS_PUBLIC_ATTACHMENT_READ=1 requires a public built-in Claude bot with exactly BOT_AI_ALLOWED_TOOLS=Read and without BOT_AI_SKIP_PERMISSIONS");
-  process.exit(2);
-}
 const optionalPosixId = (name) => {
   if (env[name] == null || env[name] === "") return null;
   return numberEnv(name, 0, { min: 0, max: 2_147_483_647 });
@@ -2689,41 +2673,6 @@ const defaultAiWorkspace = env.BOT_STATE_DIR
   ? path.join(path.dirname(path.resolve(stateDir)), `${path.basename(path.resolve(stateDir))}-workspace`)
   : fs.mkdtempSync(path.join(os.tmpdir(), "pca-t3ams-workspace-"));
 const aiWorkspace = env.BOT_AI_WORKSPACE ?? defaultAiWorkspace;
-// CLI permission rules use `//` for a filesystem-root absolute path. Reject
-// rule metacharacters defensively: attachment stage paths are generated by the
-// runtime, but an operator-configured protected path must not be able to alter
-// the rule list that reaches Claude Code.
-const claudeReadRule = (directory) => {
-  const absolute = path.resolve(directory);
-  if (/[\0\r\n()]/.test(absolute)) throw new Error("invalid path for Claude Read permission");
-  return `Read(//${absolute.replace(/^\/+/, "")}/**)`;
-};
-const isAncestorPath = (parent, child) => {
-  const normalizedParent = path.resolve(parent);
-  const normalizedChild = path.resolve(child);
-  return normalizedChild === normalizedParent || normalizedChild.startsWith(`${normalizedParent}${path.sep}`);
-};
-// Public attachment reads are per turn. With no downloaded attachment, do not
-// expose Read at all. With one, Claude Code's `dontAsk` mode permits only the
-// generated absolute stage rule; explicit denies prevent its normal
-// working-directory convenience rule from exposing the bot workspace or OAuth
-// home. The Docker deployment stages below a root-owned /tmp parent, outside
-// every denied persistent directory.
-const publicAttachmentReadPolicy = (attachmentDir, workingDirectory) => {
-  if (!publicAttachmentReadProfile) return null;
-  if (!attachmentDir) return { tools: [], allowedRules: [], deniedRules: [] };
-  const protectedDirectories = [aiWorkspace, workingDirectory, stateDir, env.HOME, "/app"]
-    .filter((directory) => typeof directory === "string" && directory.trim())
-    // A same-UID local development run stages below its workspace. Do not
-    // generate a deny rule that would override the one allowed stage path;
-    // deployed public bots use the protected /tmp staging parent above.
-    .filter((directory) => !isAncestorPath(directory, attachmentDir));
-  return {
-    tools: ["Read"],
-    allowedRules: [claudeReadRule(attachmentDir)],
-    deniedRules: [...new Set(protectedDirectories.map(claudeReadRule))],
-  };
-};
 let aiProjects = {};
 if (env.BOT_AI_PROJECTS) {
   try { aiProjects = JSON.parse(env.BOT_AI_PROJECTS); } catch { console.error("BOT_AI_PROJECTS must be a JSON object {alias: path}"); process.exit(2); }
@@ -2745,7 +2694,9 @@ const agentArtifactDeliveryEnabled = agentOutputArtifactMaxCount > 0
   && attachmentMaxCount > 0
   && t3amsMedia.enabled
   && isT3amsAttachmentMimeAllowed(attachmentOptions.allowedMimeTypes, "application/octet-stream");
-const effectiveAgentOutputArtifactMaxCount = agentArtifactDeliveryEnabled ? agentOutputArtifactMaxCount : 0;
+const effectiveAgentOutputArtifactMaxCount = agentArtifactDeliveryEnabled && (customCmd || hasToolCapability(aiToolPolicy, "write"))
+  ? agentOutputArtifactMaxCount
+  : 0;
 if (engine != null && !agentArtifactDeliveryEnabled && agentOutputArtifactMaxCount > 0) {
   log("T3AMS_AGENT_ARTIFACTS_DISABLED", {
     mediaEnabled: t3amsMedia.enabled,
@@ -2759,10 +2710,7 @@ const renderT3amsForBrain = (message) => {
     ? `channel ${message.workspaceId}/${message.channelId}`
     : "direct message";
   const thread = message.threadRootId ? `; thread ${message.threadRootId}` : "";
-  const claudeCanInspectStagedFiles = brain !== "claude"
-    || customCmd
-    || aiSkipPermissions
-    || aiAllowedTools.some((tool) => /^(?:read|bash)(?:\(|$)/i.test(tool));
+  const canInspectStagedFiles = customCmd || hasToolCapability(aiToolPolicy, "read");
   const analyzedAttachments = new Map((message.mediaAnalysis?.results ?? [])
     .filter((result) => result?.status === "analyzed" && Number.isSafeInteger(result.index) && typeof result.summary === "string" && result.summary)
     .map((result) => [result.index, result]));
@@ -2794,7 +2742,7 @@ const renderT3amsForBrain = (message) => {
         summary: analysis.summary,
       });
     }
-    return attachment.downloaded && attachment.path && claudeCanInspectStagedFiles
+    return attachment.downloaded && attachment.path && canInspectStagedFiles
       ? `[User attached a ${noun} saved at ${attachment.path} (${attachment.filename}; ${attachment.mime}, ${size}${duration})]`
       : attachment.downloaded && attachment.path
         ? `[User attached a ${noun} (${attachment.filename}; ${attachment.mime}, ${size}${duration}) — bytes are staged but deliberately unavailable to this no-tools agent. Do not claim to have inspected them.]`
@@ -2806,11 +2754,8 @@ const renderT3amsForBrain = (message) => {
     const thread = record.threadRootId ? `; thread ${record.threadRootId}` : "";
     return `[Earlier channel message from ${name}${thread}]: ${record.text}`;
   });
-  const claudeCanWriteArtifacts = brain !== "claude"
-    || customCmd
-    || aiSkipPermissions
-    || aiAllowedTools.some((tool) => /^(?:bash|edit|write)(?:\(|$)/i.test(tool));
-  const outputInstruction = message.outputDir == null || !claudeCanWriteArtifacts
+  const canWriteArtifacts = customCmd || hasToolCapability(aiToolPolicy, "write");
+  const outputInstruction = message.outputDir == null || !canWriteArtifacts
     ? null
     : `[To return a generated file to the user, write up to ${effectiveAgentOutputArtifactMaxCount} regular files directly inside ${message.outputDir}. Do not create subdirectories or symlinks; only those top-level files will be attached to your reply.]`;
   // The runtime owns the conversation/thread session key. Include the
@@ -2820,6 +2765,10 @@ const renderT3amsForBrain = (message) => {
 };
 if (engine != null) {
   const directCapacityDefaults = t3amsDirectCapacityDefaults({ publicDirect: publicDirectAgent });
+  if (!customCmd) log("BOT_TOOL_POLICY", {
+    ...toolPolicySummary(aiToolPolicy),
+    enforcement: toolPolicyEnforcement(brain, aiToolPolicy),
+  });
   fs.mkdirSync(aiWorkspace, { recursive: true, mode: 0o700 });
   const workspaces = createWorkspaces({
     projects: aiProjects,
@@ -2832,23 +2781,27 @@ if (engine != null) {
     engine,
     engineName: customCmd ? "custom" : brain,
     engineCommand: customCmd || engine.command,
-    buildArgs: ({ prompt, model, resume, effort, attachmentDir, workingDirectory }) => customCmd
+    buildArgs: ({ prompt, model, resume, effort, attachmentDir, outputDir, workingDirectory }) => customCmd
       ? (customArgs ? customArgs.map((item) => item === "__PROMPT__" ? prompt : item) : [prompt])
-      : (() => {
-        const attachmentReadPolicy = publicAttachmentReadPolicy(attachmentDir, workingDirectory);
-        return engine.buildArgs({
-          prompt, model, resume, effort,
-          allowedTools: attachmentReadPolicy?.tools ?? aiAllowedTools,
-          allowedToolRules: attachmentReadPolicy?.allowedRules ?? null,
-          disallowedTools: attachmentReadPolicy?.deniedRules ?? null,
-          skipPermissions: aiSkipPermissions,
-          // Default no-tools and the scoped attachment reader do not load
-          // user/project plugins, MCP servers, hooks, browser control, or
-          // slash commands. An operator who explicitly enables regular tools
-          // or full autonomy owns the broader Claude Code configuration too.
-          safeMode: brain === "claude" && (aiSafeMode || publicAttachmentReadProfile || aiAllowedTools.length === 0),
-        });
-      })(),
+      : engine.buildArgs({
+        prompt,
+        model,
+        resume,
+        effort,
+        policy: aiToolPolicy,
+        attachmentDir,
+        outputDir,
+        workingDirectory,
+        protectedPaths: [stateDir, env.HOME, "/app"],
+      }),
+    buildTurnEnvironment: ({ attachmentDir, outputDir, workingDirectory }) => customCmd
+      ? null
+      : engine.buildEnvironment?.({
+        policy: aiToolPolicy,
+        attachmentDir,
+        outputDir,
+        workingDirectory,
+      }) ?? null,
     workspace: aiWorkspace,
     workspaces,
     model: aiModel,

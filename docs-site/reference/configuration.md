@@ -49,10 +49,10 @@ BOT_AI_WORKSPACE=/workspace     # where the agent's tools run; persists across r
 BOT_BRIDGE_PORT=8799            # port the bridge listens on
 BOT_BRIDGE_TOKEN=Xk3…≥32chars   # shared secret; every bridge request must present it. MANDATORY (process exits without it)
 
-# agent sandboxing (direct engines)
-BOT_AI_SKIP_PERMISSIONS=0       # default: Claude has no tools
-# Private, trusted bot only: BOT_AI_ALLOWED_TOOLS=Read (or a deliberate narrow list)
-# Private, trusted bot only: BOT_AI_SKIP_PERMISSIONS=1 for full autonomy
+# portable tool policy (direct engines)
+BOT_AI_TOOL_CAPABILITIES=       # default: no tools; comma-separated read,write,bash
+BOT_AI_TOOL_SCOPE=workspace     # workspace (default) | container
+BOT_AI_TOOL_NETWORK=none        # none (default) | internet; internet requires bash
 BOT_AI_AGENT_UID=1000           # spawned agent CLI is dropped to this uid — cannot read /state or the seed
 BOT_AI_AGENT_GID=1000           # …and this gid (transport stays root solely to hold the seed)
 
@@ -110,7 +110,9 @@ BOT_ALLOWED_PEERS=<peer-hex-1>,<peer-hex-2>
 # Trusted owners may select a model in chat. Do not also set
 # BOT_AI_ALLOWED_MODELS: an empty value deliberately locks switching.
 BOT_AI_MODEL_SWITCHING=open
-BOT_AI_SKIP_PERMISSIONS=1
+BOT_AI_TOOL_CAPABILITIES=read,write
+BOT_AI_TOOL_SCOPE=workspace
+BOT_AI_TOOL_NETWORK=none
 BOT_AI_MAX_CONCURRENT_TURNS=2
 BOT_AI_MAX_QUEUED_TURNS=20
 
@@ -122,22 +124,26 @@ BOT_FILE_MAX_ENTRIES=4000
 BOT_FILE_MAX_PEER_ENTRIES=2000
 ```
 
-`BOT_AI_SKIP_PERMISSIONS=1` gives a direct agent full tool autonomy inside its
-container. Use it only when every allowlisted sender is trusted with the bot's
-workspace, services it can reach, and the CLI's own OAuth home: a tool-enabled
-agent can read or misuse its own provider credential. For a production HOP
-configuration, pin the download and upload nodes you trust, and provision its
-allowance through the appropriate operator flow. The generated framework
-deployment exposes its bridge only to the private Compose network; do not
-publish that port.
+`BOT_AI_TOOL_CAPABILITIES=read,write` gives a direct agent the normal file
+outcomes; `write` includes `read`. Add `bash` when the bot should run commands;
+it includes both file capabilities.
+Workspace scope is the default; container scope deliberately grants the
+non-root agent account all of its container-visible files, including its OAuth
+home. `BOT_AI_TOOL_NETWORK=internet` requires `bash`; the default is no tool
+network. Every sender of a public bot can direct the policy the deployer chose.
+For a production HOP configuration, pin the download and upload nodes you
+trust, and provision its allowance through the appropriate operator flow. The
+generated framework deployment exposes its bridge only to the private Compose
+network; do not publish that port.
 
 ### Public bot: deliberately bounded
 
 A public bot has `BOT_ALLOWED_PEERS` unset or empty. It must assume arbitrary
 prompts, attachment floods, repeated requests, and attempts to spend model or
 storage capacity. Give it one narrow task, a pinned low-cost model, and a
-read-only or disposable workspace. Built-in public direct deployment currently
-supports Claude's hardened no-tools profile only.
+read-only or disposable workspace. Claude, Codex, and OpenCode use the same
+portable direct-agent tool policy; this example leaves its conservative
+no-tools default in place.
 
 ```sh
 BOT_ALLOWED_PEERS=
@@ -145,9 +151,12 @@ BOT_ALLOWED_PEERS=
 # Public bots may expose only a small approved model set.
 BOT_AI_MODEL=<pinned-low-cost-model>
 BOT_AI_ALLOWED_MODELS=<pinned-low-cost-model>,<second-low-cost-model>
-BOT_AI_SKIP_PERMISSIONS=0
-# Do not set BOT_AI_ALLOWED_TOOLS. Public direct bots use Claude's hardened
-# no-tools profile; it can answer text but cannot inspect staged file bytes.
+BOT_AI_TOOL_CAPABILITIES=
+BOT_AI_TOOL_SCOPE=workspace
+BOT_AI_TOOL_NETWORK=none
+# This no-tools profile can answer text but cannot inspect staged file bytes.
+# Enable work deliberately with --allowed-tools read,write plus a scope
+# and tool-network choice appropriate to the bot.
 BOT_AI_MAX_CONCURRENT_TURNS=2
 BOT_AI_MAX_QUEUED_TURNS=20
 BOT_AI_MAX_OUTPUT_BYTES=262144
@@ -193,11 +202,13 @@ Do not publish the authenticated bridge port. The deploy container and resource
 limits help, but they cannot make a sensitive host mount or exposed bridge token
 safe.
 
-`BOT_AI_ALLOWED_TOOLS` is a Claude setting, not a general sandbox. Public
-direct deployment rejects built-in Codex/OpenCode until their tool execution is
-separately isolated from the model's authentication material. Use a bridge
-runtime with its own isolation boundary when a public bot needs tools or file
-analysis.
+The portable policy is not a claim that a mounted OAuth home is safe from an
+agent. Workspace scope is the normal project boundary; container scope
+deliberately exposes the non-root agent account's container-visible files.
+Claude and Codex provide native workspace enforcement for their applicable
+policies. OpenCode's Bash policy remains bounded by the container rather than
+an OS filesystem sandbox. Use a bridge runtime when you need a separately
+designed tool-and-credential boundary.
 
 ---
 
@@ -271,8 +282,9 @@ variables `pca deploy` writes into `bot.env` automatically.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BOT_AI_ALLOWED_TOOLS` | `""` | Claude-only explicit tool availability/approval list. Unset or empty disables all built-in tools. Public direct bots must leave it empty. |
-| `BOT_AI_SKIP_PERMISSIONS` | `0` | `1` = explicit full autonomy for a trusted, allowlisted bot only; rejected for public direct bots. Deploy emits it only with `--full-autonomy`. |
+| `BOT_AI_TOOL_CAPABILITIES` | `""` | Comma-separated portable direct-agent outcomes: `read`, `write`, `bash`. Empty disables tools; `write` includes `read`, and `bash` includes both. **gen (deploy)** |
+| `BOT_AI_TOOL_SCOPE` | `workspace` | `workspace` scopes normal work to the selected project and current staged attachments; `container` deliberately grants the non-root agent account all of its container-visible files. **gen (deploy)** |
+| `BOT_AI_TOOL_NETWORK` | `none` | `none` or `internet` for tool-process egress. `internet` requires `bash`; enforcement depends on the selected engine. **gen (deploy)** |
 | `BOT_AI_AGENT_UID` / `BOT_AI_AGENT_GID` | unset | Drop the spawned agent to this uid/gid so it can't read `/state` or the seed. **gen (deploy: 1000)** |
 | `BOT_AI_IDLE_TIMEOUT_MS` | 600000 | Kill a turn that has emitted nothing for this long (wedge backstop). |
 | `BOT_AI_MAX_MS` | 3600000 | Hard per-turn wall-clock cap. |
@@ -280,6 +292,12 @@ variables `pca deploy` writes into `bot.env` automatically.
 | `BOT_AI_MAX_QUEUED_TURNS` | 100; public T3ams direct: 20 | Global cap on queued turns before backpressure. An explicit value always overrides the T3ams profile default. |
 | `BOT_AI_MAX_OUTPUT_BYTES` | 1000000 | Cap on captured agent output per turn. |
 | `BOT_AI_CMD` / `BOT_AI_ARGS` | unset | Escape hatch: a custom CLI speaking claude-shaped stream-json (`BOT_AI_ARGS` is a JSON array; `__PROMPT__` is substituted). |
+
+For Bash, deploy validates the engine-specific network combination: OpenCode
+requires `--tool-network internet` because it has no network sandbox; Claude
+requires it for container-scoped Bash but can use `none` for workspace-scoped
+Bash; Codex can keep `none` in either scope. The deploy report names the
+effective enforcement level.
 
 ### Direct engine — projects & workspace
 
@@ -439,9 +457,9 @@ private and exposes only an opaque bridge media handle.
 ### Optional isolated photo and document analysis
 
 Attachment retrieval and attachment understanding are deliberately separate.
-Without this feature, a hardened public direct bot receives metadata only: its
-Claude process has no filesystem tools and must not claim it read a staged
-photo or document. That remains the safe default for a bot with an OAuth home.
+Without a `read` capability, a direct bot receives metadata only and must not
+claim it read a staged photo or document. That remains the no-tools default for
+a bot with an OAuth home.
 
 `pca deploy <bot> --media-analyzer` is available for a T3ams direct engine. It
 adds a separate API-only `media-analyzer` container. The transport passes it

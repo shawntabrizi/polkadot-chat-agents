@@ -109,17 +109,16 @@ nor a bridge framework receives the decryption ticket.
 Operators can narrow the policy with exact MIME types or `type/*` patterns in
 `BOT_T3AMS_ATTACHMENT_MIME_TYPES`; `*/*` is the broad default. Image dimensions
 and audio/video duration are available as safe metadata when present. A direct
-brain with explicitly enabled file tools can inspect a temporary staged copy for
-the turn. Claude's default no-tools profile — required for a public built-in AI
-direct bot — cannot inspect the staged bytes. A bridge gets an opaque,
+brain with the portable `read` capability can inspect a temporary staged copy
+for the turn; the default no-tools policy cannot. A bridge gets an opaque,
 authenticated `/media/<id>` URL that can materialize the bytes on demand.
 `BOT_T3AMS_ATTACHMENT_MAX_DURATION_MS` bounds declared duration metadata to
 seven days by default.
 
-A tool-enabled private direct turn can also return a generated file. The bot
-gives that turn a private `PCA_OUTPUT_DIR`; files written directly at its top
-level are uploaded as native attachments and then removed locally. The default
-and public Claude no-tools profiles cannot produce those files. The limit is
+A direct turn with the portable `write` capability can also return a generated
+file. The bot gives that turn a private `PCA_OUTPUT_DIR`; files written directly
+at its top level are uploaded as native attachments and then removed locally.
+The default no-tools policy cannot produce those files. The limit is
 `BOT_T3AMS_AGENT_OUTPUT_MAX_ARTIFACTS` (the attachment-count limit by default);
 `BOT_T3AMS_AGENT_OUTPUT_MAX_TOTAL_BYTES` also caps the total batch. Nested files
 and symlinks are ignored, and the normal outbound size and MIME policy still

@@ -312,5 +312,8 @@ app username) or an explicit `--public` for any brain that costs money.
   container has an init reaper, no-new-privileges, and process/memory/CPU limits.
   The container limits host exposure, but it is not a credential boundary for a
   tool-enabled OAuth CLI: the model can otherwise reach its own login. Direct
-  deployment therefore starts with no tools; private allowlisted operators can
-  opt into `--safe-tools`, `--allowed-tools`, or `--full-autonomy` deliberately.
+  deployment therefore starts with no tools. The deployer may deliberately
+  enable portable `read`, `write`, and `bash` capabilities, choose workspace
+  or container scope, and decide whether tool processes may use the network.
+  That choice applies equally to public and allowlisted bots: anyone who can
+  message a bot can direct the capabilities configured for it.

@@ -121,8 +121,8 @@ generated photos, documents, and other files as native attachments.
 ## Brains
 
 Direct engines run a headless coding-agent CLI as an autonomous agent — verbatim
-prompts, native session memory (`--resume`), and real tools (bash/read/edit/
-write) in a container that is their sandbox.
+prompts, native session memory (`--resume`), and deployer-selected portable
+`read`, `write`, and `bash` capabilities in their container runtime.
 
 | `--brain` | Replies come from | Reaches | Authentication |
 |---|---|---|---|
@@ -159,13 +159,19 @@ manage it. File return needs an operator-pinned HOP node and an active Bulletin
 allowance. The named private Paseo profile provisions its testnet allowance
 locally; other networks need separate operator provisioning.
 
-Public T3ams Claude bots start metadata-only, but the deployer may explicitly
-choose `--allowed-tools`, `--safe-tools` (`Bash,Read,Edit,Write` with Claude
-safe mode), or `--full-autonomy` when the bot should do work in its dedicated container. For
-the narrower file-reading case, `pca deploy <bot> --attachment-read` lets the
-logged-in Claude subscription inspect only the temporary staged attachment
-directory—no Anthropic API key, shell, or write tools. See [the configuration guide](docs/CONFIGURATION.md#tool-profiles)
-for the capability and container-boundary tradeoffs.
+Direct T3ams agents start with no tools. A deployer opts into portable,
+lowercase capabilities with `--allowed-tools read,write,bash`, chooses
+`--tool-scope workspace|container`, and chooses
+`--tool-network none|internet`. `write` includes `read`; `bash` includes both.
+The default is no capabilities, workspace scope, and no tool network. `read`
+also lets a direct agent inspect a verified attachment staged for its current
+turn, while `write` lets it produce returnable files. Workspace scope is the
+normal project boundary; container scope deliberately grants the non-root
+agent account access to all of its container-visible files, including its
+OAuth home. See [the configuration guide](docs/CONFIGURATION.md#tool-policy)
+for engine enforcement and boundary tradeoffs. In particular, OpenCode Bash
+requires `--tool-network internet`; Claude needs it for container-scoped Bash
+but not workspace-scoped Bash, while Codex can keep `none` in either scope.
 
 **Projects.** `pca project <bot> add <alias> <path>` registers a directory the
 agent can work in (repeat for more). In chat, `/project <alias>` points your

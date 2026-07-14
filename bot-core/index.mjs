@@ -48,8 +48,9 @@
 //   Direct engines (BOT_BRAIN=claude|codex|opencode): BOT_AI_MODEL (opencode
 //   takes a provider/model slug), BOT_AI_ALLOWED_MODELS (comma-sep /model
 //   allowlist; unset/empty = locked), BOT_AI_MODEL_SWITCHING (locked|open;
-//   open requires a non-public bot), BOT_AI_ALLOWED_TOOLS (empty = no tools),
-//   BOT_AI_SKIP_PERMISSIONS (1 = full autonomy), BOT_AI_IDLE_TIMEOUT_MS
+//   open requires a non-public bot), BOT_AI_TOOL_CAPABILITIES (empty = no
+//   tools), BOT_AI_TOOL_SCOPE (workspace|container), BOT_AI_TOOL_NETWORK
+//   (none|internet), BOT_AI_IDLE_TIMEOUT_MS
 //   (600000, kills a silent/wedged turn), BOT_AI_MAX_MS (3600000 default hard
 //   cap), BOT_AI_MAX_CONCURRENT_TURNS / BOT_AI_MAX_QUEUED_TURNS, BOT_AI_WORKSPACE
 //   (a non-secret agent workspace separate from BOT_STATE_DIR),
@@ -77,7 +78,8 @@ import { createMediaStore } from "./lib/media-store.mjs";
 import { createFileStore } from "./lib/file-store.mjs";
 import { createFileCommandHandler } from "./lib/file-commands.mjs";
 import { createLiveReplies, createProgressTracker } from "./lib/live-reply.mjs";
-import { RUNNERS, resolveEngine, ENGINES } from "./lib/runners.mjs";
+import { RUNNERS, resolveEngine, ENGINES, assertEngineToolPolicy, toolPolicyEnforcement } from "./lib/runners.mjs";
+import { ToolPolicyError, hasToolCapability, toolPolicyFromEnvironment, toolPolicySummary } from "./lib/tool-policy.mjs";
 import { createKeyedDispatcher } from "./lib/keyed-dispatcher.mjs";
 import { createClient as createPapiClient } from "polkadot-api";
 import { getWsProvider, WsEvent } from "polkadot-api/ws";
@@ -180,12 +182,16 @@ const aiModel = (env.BOT_AI_MODEL ?? "").trim();
 // aiAllowedModels (the /model switching policy) is derived below, once the
 // peer allowlist is known. It is locked by default; open switching requires an
 // explicit non-public operator opt-in. See resolveModelPolicy.
-// Claude defaults to an explicit no-tools profile. A deployer may deliberately
-// opt a public or private bot into a narrow allowlist or full autonomy; the
-// resulting capability is then available to people who can message that bot.
-const allowedTools = (env.BOT_AI_ALLOWED_TOOLS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-const skipPermissions = env.BOT_AI_SKIP_PERMISSIONS === "1";
-const aiSafeMode = env.BOT_AI_SAFE_MODE === "1";
+// Tool authority is an explicit PCA policy, not an engine-native allowlist.
+// The default is no tools. A deployer can opt into portable capabilities and
+// choose whether they are restricted to the current workspace or the whole
+// non-root container account.
+let aiToolPolicy;
+try { aiToolPolicy = toolPolicyFromEnvironment(env); }
+catch (error) {
+  console.error(error instanceof ToolPolicyError ? error.message : `Invalid tool policy: ${String(error?.message ?? error)}`);
+  process.exit(2);
+}
 // No wall-clock timeout: a long agent turn (a big build/test) is legitimate.
 // Instead an idle-silence backstop kills a process that has emitted nothing for
 // this long — a wedge — and unblocks the peer's queue. /stop is the user lever.
@@ -228,6 +234,17 @@ if (customCmd && env.BOT_AI_ARGS) {
 }
 const engine = customCmd ? RUNNERS.custom : resolveEngine(brain); // null unless a direct engine
 const engineCommand = customCmd || engine?.command;
+if (customCmd && (aiToolPolicy.capabilities.length || aiToolPolicy.scope !== "workspace" || aiToolPolicy.network !== "none")) {
+  console.error("BOT_AI_CMD owns its own tool boundary; BOT_AI_TOOL_CAPABILITIES, BOT_AI_TOOL_SCOPE, and BOT_AI_TOOL_NETWORK are only supported by the built-in claude, codex, and opencode brains.");
+  process.exit(2);
+}
+if (engine && !customCmd) {
+  try { aiToolPolicy = assertEngineToolPolicy(brain, aiToolPolicy); }
+  catch (error) {
+    console.error(error instanceof ToolPolicyError ? error.message : `Invalid tool policy: ${String(error?.message ?? error)}`);
+    process.exit(2);
+  }
+}
 if (engine) fs.mkdirSync(aiWorkspace, { recursive: true, mode: 0o700 });
 // Default reasoning effort (engine-specific flag; see lib/runners.mjs).
 // Validated here so a typo fails at startup, not silently per turn.
@@ -236,18 +253,27 @@ if (engine && aiReasoning && !engine.effortLevels?.includes(aiReasoning)) {
   console.error(`BOT_AI_REASONING=${aiReasoning} is not valid for this engine${engine.effortLevels ? ` (levels: ${engine.effortLevels.join(", ")})` : " (it has no reasoning control)"}`);
   process.exit(2);
 }
-const buildEngineArgs = ({ prompt, model, resume, effort }) => {
+const buildEngineArgs = ({ prompt, model, resume, effort, attachmentDir, outputDir, workingDirectory }) => {
   if (customCmd) return customArgsTmpl ? customArgsTmpl.map((a) => (a === "__PROMPT__" ? prompt : a)) : [prompt];
   return engine.buildArgs({
     prompt,
     model,
     resume,
     effort,
-    allowedTools,
-    skipPermissions,
-    safeMode: brain === "claude" && (aiSafeMode || allowedTools.length === 0),
+    policy: aiToolPolicy,
+    attachmentDir,
+    outputDir,
+    workingDirectory,
+    protectedPaths: [env.BOT_STATE_DIR, env.HOME, "/app"],
   });
 };
+const buildEngineTurnEnvironment = ({ attachmentDir, outputDir, workingDirectory }) =>
+  customCmd ? null : engine.buildEnvironment?.({
+    policy: aiToolPolicy,
+    attachmentDir,
+    outputDir,
+    workingDirectory,
+  }) ?? null;
 const lookbackDays = numberEnv("BOT_REQUEST_LOOKBACK_DAYS", 7, { min: 0, max: 365 });
 const futureDays = numberEnv("BOT_REQUEST_FUTURE_DAYS", 2, { min: 0, max: 30 });
 const pollMs = numberEnv("BOT_POLL_MS", 2000, { min: 100, max: 86_400_000 });
@@ -1040,12 +1066,17 @@ if (engine) log("BOT_MODEL_POLICY", {
   switching: aiAllowedModels == null ? "open" : aiAllowedModels.length ? "restricted" : "locked",
   ...(Array.isArray(aiAllowedModels) && aiAllowedModels.length ? { allowed: aiAllowedModels } : {}),
 });
+if (engine && !customCmd) log("BOT_TOOL_POLICY", {
+  ...toolPolicySummary(aiToolPolicy),
+  enforcement: toolPolicyEnforcement(brain, aiToolPolicy),
+});
 
 const agentRuntime = engine ? createAgentRuntime({
   engine,
   engineName: customCmd ? "custom" : brain,
   engineCommand,
   buildArgs: buildEngineArgs,
+  buildTurnEnvironment: buildEngineTurnEnvironment,
   workspace: aiWorkspace,
   workspaces,
   model: aiModel,
@@ -1093,12 +1124,15 @@ const publicAttachment = (a) => ({
 // prefixes. msg.text is the raw caption and may be empty.
 const renderForBrain = (msg) => {
   const parts = [];
+  const canReadAttachments = customCmd || !engine || hasToolCapability(aiToolPolicy, "read");
   if (msg.editOf) parts.push("[edited their earlier message]");
   else if (msg.replyTo) parts.push("[replying to your earlier message]");
   if (msg.text) parts.push(msg.text);
   for (const a of msg.attachments ?? []) {
-    parts.push(a.downloaded
+    parts.push(a.downloaded && canReadAttachments
       ? `[User sent a ${attachmentNoun(a)} saved at ${a.path} (${a.mime}, ${humanSize(a.size)})]`
+      : a.downloaded
+        ? `[User sent a ${attachmentNoun(a)} (${a.mime}, ${humanSize(a.size)}) — bytes are staged but unavailable to this no-tools agent.]`
       : `[User sent a ${attachmentNoun(a)} (${a.mime}, ${humanSize(a.size)}) — download failed: ${a.error ?? "unknown error"}]`);
   }
   return parts.join(" ") || synthesizeText("", msg.attachments);

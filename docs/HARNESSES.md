@@ -234,13 +234,18 @@ Related settings:
   Switching is locked by default. `allow` persists an approved list;
   `open` is an explicit option for allowlisted bots only. Public bots cannot
   allow unrestricted switching.
-- Claude starts with no tools. A deployer can set `BOT_AI_ALLOWED_TOOLS`
-  deliberately (or deploy with `--safe-tools` for the conventional
-  `Bash,Read,Edit,Write` list in Claude safe mode) for a public or private bot. A public T3ams Claude bot can
-  instead use `pca deploy <bot> --attachment-read`: PCA enables only a
-  per-turn, path-scoped native `Read` permission for staged attachments.
-  `BOT_AI_SKIP_PERMISSIONS=1` is the explicit full-autonomy override; the
-  deployer may select it for a public direct bot as well as a private one.
+- Direct agents start with no tools. For Claude, Codex, or OpenCode, a deployer
+  selects portable lowercase capabilities with `--allowed-tools read,write,bash`,
+  then chooses `--tool-scope workspace|container` and
+  `--tool-network none|internet`. `write` includes `read`, and `bash` includes
+  both. The generated environment records those choices as
+  `BOT_AI_TOOL_CAPABILITIES`, `BOT_AI_TOOL_SCOPE`, and
+  `BOT_AI_TOOL_NETWORK`. A direct agent with `read` can inspect its current
+  turn's staged attachment; one with `write` can produce returnable files.
+  For `bash`, OpenCode requires `--tool-network internet`; Claude requires it
+  for container scope but can use `none` for workspace scope; Codex can keep
+  `none` in either scope. Deploy validates the combination and reports the
+  engine's enforcement level.
 - The agent works in a persistent non-secret workspace (`BOT_AI_WORKSPACE`,
   defaulting to a sibling of `BOT_STATE_DIR`) that survives restarts.
 - `BOT_AI_CMD`/`BOT_AI_ARGS` wire in a custom CLI that speaks claude-shaped
@@ -271,14 +276,13 @@ read-only; the container uses an init reaper, no-new-privileges, and
 process/memory/CPU ceilings. Those are useful hardening layers, but they do not
 make an OAuth home safe from the model: a tool-enabled agent can read or misuse
 its own provider credential. Therefore direct deployments start with no tools.
-The deployer can deliberately choose `--safe-tools`, `--allowed-tools`, or
-`--full-autonomy` for either public or allowlisted bots; for a public bot this
-means its message senders can direct that capability. The narrower public
-T3ams Claude option is `--attachment-read`: it remains container-scoped but
-receives only `Read` for one temporary attachment directory and no shell/write
-tools. Use the default no-tools profile or an external runtime when that
-tradeoff is not acceptable. Sessions and the workspace persist across
-redeploys.
+The deployer can deliberately select the portable tool policy for either
+public or allowlisted bots; for a public bot this means every sender can direct
+the chosen capability. Workspace scope is the normal project boundary;
+container scope intentionally grants the non-root agent account all files it
+can see, including its OAuth home. Use the default no-tools policy or an
+external runtime when that tradeoff is not acceptable. Sessions and the
+workspace persist across redeploys.
 
 An AI brain spends quota, so `create` requires an allowlist or an explicit
 `--public`.

@@ -1,3 +1,11 @@
+import path from "node:path";
+import {
+  DEFAULT_TOOL_POLICY,
+  ToolPolicyError,
+  createToolPolicy,
+  hasToolCapability,
+} from "./tool-policy.mjs";
+
 // Agent-CLI runners. Each engine is a small config that knows how to invoke a
 // headless coding-agent CLI and normalize its JSONL event stream to one
 // vocabulary; bot-core owns the generic spawn/stream/idle-backstop loop.
@@ -34,49 +42,247 @@ export const toolActionTitle = (name, input = {}) => {
   return String(name || "tool");
 };
 
+const absolutePath = (value, label) => {
+  const resolved = path.resolve(String(value ?? "/workspace"));
+  if (/[\x00\r\n]/.test(resolved)) throw new ToolPolicyError(`${label} contains an invalid path.`);
+  return resolved;
+};
+
+const claudeRulePath = (directory) => {
+  const resolved = absolutePath(directory, "tool policy path");
+  // Claude's native rules are a comma-separated mini-language. Paths come
+  // from deployer configuration, not chat input, but still reject grammar and
+  // glob metacharacters rather than allowing a directory name to widen a rule.
+  if (/[(),*?\[\]{}\\]/.test(resolved)) throw new ToolPolicyError("tool policy path contains characters unsafe for Claude permission rules.");
+  return resolved;
+};
+
+const openCodeRulePath = (directory) => {
+  const resolved = absolutePath(directory, "tool policy path");
+  // OpenCode permission objects use glob keys. Never let a configured
+  // workspace or staging path become a wildcard grant.
+  if (/[*?\[\]{}\\]/.test(resolved)) throw new ToolPolicyError("tool policy path contains characters unsafe for OpenCode permission rules.");
+  return resolved;
+};
+
+const pathPattern = (directory) => `${openCodeRulePath(directory)}/**`;
+const claudePathPattern = (directory) => `${claudeRulePath(directory)}/**`;
+const claudePath = (directory) => `//${claudeRulePath(directory).replace(/^\/+/, "")}/**`;
+const claudeRule = (tool, directory) => `${tool}(${claudePath(directory)})`;
+const scopedPaths = ({ policy, workingDirectory, attachmentDir, outputDir }) => {
+  const workspace = absolutePath(workingDirectory ?? "/workspace", "workspace");
+  const readPaths = [workspace];
+  const writePaths = hasToolCapability(policy, "write") ? [workspace] : [];
+  if (hasToolCapability(policy, "read") && attachmentDir) readPaths.push(absolutePath(attachmentDir, "attachment directory"));
+  // A transport-owned artifact handoff directory is writable only when the
+  // deployer chose write. It is outside the project workspace so it must be
+  // granted explicitly to every native runner.
+  if (hasToolCapability(policy, "write") && outputDir) {
+    const outputPath = absolutePath(outputDir, "artifact output directory");
+    readPaths.push(outputPath);
+    writePaths.push(outputPath);
+  }
+  return { workspace, readPaths: [...new Set(readPaths)], writePaths: [...new Set(writePaths)] };
+};
+
+const isAncestorPath = (ancestor, candidate) =>
+  candidate === ancestor || candidate.startsWith(ancestor + path.sep);
+
+const protectedPaths = (paths = [], allowedPaths = []) => [...new Set(paths
+  .filter((directory) => typeof directory === "string" && directory.trim())
+  .map((directory) => absolutePath(directory, "protected path"))
+  // Claude's deny rules take precedence over path-specific tool allow rules.
+  // A local workspace commonly lives below $HOME, so denying its ancestor
+  // would accidentally make the explicitly granted workspace unusable.
+  .filter((directory) => !allowedPaths.some((allowedPath) => isAncestorPath(directory, allowedPath))))];
+
+const claudeTools = (policy) => {
+  const tools = [];
+  if (hasToolCapability(policy, "read")) tools.push("Read", "Glob", "Grep");
+  if (hasToolCapability(policy, "write")) tools.push("Edit", "Write");
+  if (hasToolCapability(policy, "bash")) tools.push("Bash");
+  return tools;
+};
+
+const claudeApprovalRules = (policy, { readPaths, writePaths }) => {
+  if (policy.scope === "container") return claudeTools(policy);
+  const rules = [];
+  if (hasToolCapability(policy, "read")) {
+    for (const directory of readPaths) rules.push(...["Read", "Glob", "Grep"].map((tool) => claudeRule(tool, directory)));
+  }
+  if (hasToolCapability(policy, "write")) {
+    for (const directory of writePaths) rules.push(claudeRule("Edit", directory), claudeRule("Write", directory));
+  }
+  if (hasToolCapability(policy, "bash")) rules.push("Bash(*)");
+  return rules;
+};
+
+const claudeDeniedRules = (policy, paths) => {
+  if (policy.scope !== "workspace") return [];
+  const nativeFileTools = ["Read", "Glob", "Grep", "Edit", "Write"];
+  return paths.flatMap((directory) => nativeFileTools.map((tool) => claudeRule(tool, directory)));
+};
+
+const claudeSettings = (policy, { readPaths, writePaths, protectedDirectories }) => {
+  // Native Read/Edit/Write rules are sufficient when Bash is absent. Bash
+  // needs Claude's Linux sandbox as the real filesystem boundary: a cwd alone
+  // cannot stop `cat /home/node/...`.
+  if (policy.scope !== "workspace" || !hasToolCapability(policy, "bash")) return null;
+  const allowedWritePaths = hasToolCapability(policy, "write") ? writePaths.map(claudePathPattern) : [];
+  const denied = protectedDirectories.map(claudePathPattern);
+  return {
+    sandbox: {
+      enabled: true,
+      failIfUnavailable: true,
+      autoAllowBashIfSandboxed: false,
+      allowUnsandboxedCommands: false,
+      filesystem: {
+        allowRead: readPaths.map(claudePathPattern),
+        allowWrite: allowedWritePaths,
+        denyRead: denied,
+        denyWrite: denied,
+      },
+      network: {
+        allowedDomains: policy.network === "internet" ? ["*"] : [],
+      },
+    },
+  };
+};
+
+const tomlBasicString = (value) => JSON.stringify(String(value));
+
+const codexPermissionProfile = (policy, { workspace, readPaths, writePaths }) => {
+  // `-c` parses a TOML assignment, rather than JSON. Keep this compact
+  // inline table deliberately explicit: the built-in `workspace-write`
+  // profile includes `:root` and would expose the agent OAuth home.
+  const filesystem = [];
+
+  filesystem[0] = '":minimal"="read"';
+  if (hasToolCapability(policy, "read")) {
+    const access = hasToolCapability(policy, "write") ? "write" : "read";
+    if (policy.scope === "container") filesystem.push(`":root"=${tomlBasicString(access)}`);
+    else filesystem.push(`":workspace_roots"={"."=${tomlBasicString(access)}}`);
+  }
+  // Staged attachments are read-only. A transport-owned artifact handoff
+  // directory is writable only when it appears in writePaths.
+  const writablePaths = new Set(writePaths);
+  for (const directory of readPaths) {
+    if (directory !== workspace) filesystem.push(`${tomlBasicString(directory)}=${tomlBasicString(writablePaths.has(directory) ? "write" : "read")}`);
+  }
+  const network = policy.network === "internet"
+    ? ",network={enabled=true,mode=\"full\"}"
+    : ",network={enabled=false}";
+  return `permissions={pca={workspace_roots={${tomlBasicString(workspace)}=true},filesystem={${filesystem.join(",")}}${network}}}`;
+};
+
+const opencodePathRules = (directories) => {
+  const rules = { "*": "deny" };
+  for (const directory of directories) rules[pathPattern(directory)] = "allow";
+  return rules;
+};
+
+const opencodePermissions = (policy, { workingDirectory = "/workspace", attachmentDir = null, outputDir = null } = {}) => {
+  // OpenCode applies matching rules in insertion order, with the later match
+  // winning. Keep the catch-all first, then explicitly open only PCA's chosen
+  // capabilities.
+  const scope = scopedPaths({ policy, workingDirectory, attachmentDir, outputDir });
+  const permissions = { "*": "deny" };
+  if (hasToolCapability(policy, "read")) {
+    permissions.read = policy.scope === "container" ? "allow" : opencodePathRules(scope.readPaths);
+    permissions.glob = "allow";
+    permissions.grep = "allow";
+    permissions.list = "allow";
+  }
+  if (hasToolCapability(policy, "write")) {
+    permissions.edit = policy.scope === "container" ? "allow" : opencodePathRules(scope.writePaths);
+  }
+  if (hasToolCapability(policy, "bash")) permissions.bash = "allow";
+  if (policy.scope === "container") {
+    permissions.external_directory = "allow";
+  } else {
+    // The attachment and output leaves are generated by bot-core and vanish
+    // after this turn. OpenCode applies edit path rules as defense in depth,
+    // but its external-directory gate is not an OS filesystem sandbox.
+    const externalPaths = scope.readPaths.filter((directory) => directory !== scope.workspace);
+    permissions.external_directory = externalPaths.length ? opencodePathRules(externalPaths) : "deny";
+  }
+  return permissions;
+};
+
+export const assertEngineToolPolicy = (engineName, policyInput = DEFAULT_TOOL_POLICY) => {
+  const policy = createToolPolicy(policyInput);
+  if (!["claude", "codex", "opencode", "custom"].includes(engineName)) {
+    throw new ToolPolicyError(`No direct-agent tool-policy adapter exists for "${engineName}".`);
+  }
+  // Claude's container profile uses its native tools without a filesystem or
+  // network sandbox. Codex's native permission profile can still enforce its
+  // network-disabled setting, so do not apply this restriction there.
+  if (engineName === "claude" && policy.scope === "container" && hasToolCapability(policy, "bash") && policy.network !== "internet") {
+    throw new ToolPolicyError("Claude container-scoped Bash has no network sandbox; use --tool-network internet or workspace scope.");
+  }
+  if (engineName === "opencode" && hasToolCapability(policy, "bash") && policy.network !== "internet") {
+    throw new ToolPolicyError("OpenCode Bash has no network sandbox; --allowed-tools bash requires --tool-network internet. Use Claude or Codex for workspace-scoped Bash with network disabled.");
+  }
+  // OpenCode's Bash runner does not provide a hard filesystem sandbox for
+  // command arguments. Its workspace policy still constrains its file tools,
+  // but the deployer must see this distinction in the deploy report.
+  return policy;
+};
+
+export const toolPolicyEnforcement = (engineName, policyInput = DEFAULT_TOOL_POLICY) => {
+  const policy = assertEngineToolPolicy(engineName, policyInput);
+  if (!policy.capabilities.length) return { kind: "none", detail: "all native tools disabled" };
+  if (policy.scope === "container") return { kind: "container", detail: "selected tools run as the non-root agent across its container-visible files" };
+  if (engineName === "claude") {
+    return hasToolCapability(policy, "bash")
+      ? { kind: "native-sandbox", detail: "Claude workspace sandbox; startup fails if the sandbox is unavailable" }
+      : { kind: "native-rules", detail: "Claude path-scoped file-tool rules" };
+  }
+  if (engineName === "codex") return { kind: "native-sandbox", detail: "Codex native workspace permission/sandbox profile" };
+  if (engineName === "opencode" && hasToolCapability(policy, "bash")) {
+    return { kind: "permission-policy", detail: "OpenCode deny-first file policy; Bash remains limited by the container, not a filesystem sandbox" };
+  }
+  return { kind: "permission-policy", detail: "OpenCode deny-first file-tool policy" };
+};
+
 // ---- claude (Claude Code) --------------------------------------------------
 // Invocation & event schema verified live against the claude CLI.
 const claude = {
   command: "claude",
   effortLevels: ["low", "medium", "high", "xhigh", "max"],
-  buildArgs({ prompt, model, resume, allowedTools, allowedToolRules = null, disallowedTools = null, skipPermissions, safeMode = false, effort }) {
+  buildArgs({ prompt, model, resume, policy: policyInput = DEFAULT_TOOL_POLICY, effort, attachmentDir = null, outputDir = null, workingDirectory = "/workspace", protectedPaths: protectedList = [] }) {
+    const policy = assertEngineToolPolicy("claude", policyInput);
+    const scope = scopedPaths({ policy, workingDirectory, attachmentDir, outputDir });
+    const protectedDirectories = protectedPaths(protectedList, scope.readPaths);
     // Claude emits final-answer deltas as `stream_event` frames only when
     // this flag is present. They are intentionally kept separate from the
     // terminal assistant message below: transports can safely live-render
     // user-visible prose without treating it as model reasoning or doubling
     // the durable final answer.
-    const args = ["-p", "--output-format", "stream-json", "--include-partial-messages", "--verbose"];
+    const args = [
+      "-p", "--output-format", "stream-json", "--include-partial-messages", "--verbose",
+      // PCA owns the policy for a bot turn. Do not let project/user settings,
+      // MCP configuration, browser control, or slash-command customizations
+      // silently widen it.
+      "--setting-sources", "", "--strict-mcp-config", "--disable-slash-commands", "--no-chrome",
+    ];
     if (resume) args.push("--resume", resume);
     if (model) args.push("--model", model);
     if (effort) args.push("--effort", effort);
-    if (skipPermissions) {
-      args.push("--dangerously-skip-permissions");
-    } else {
-      // `--allowedTools` only pre-approves listed tools; it does not remove
-      // every other built-in capability. `--tools` is the availability
-      // boundary. Always emit it so an unset/empty operator setting means
-      // *no tools*, rather than whatever the CLI happens to enable by default.
-      const tools = Array.isArray(allowedTools)
-        ? allowedTools.map((tool) => String(tool).trim()).filter(Boolean)
-        : [];
-      // A caller may expose a built-in tool by name while pre-approving a
-      // narrower permission rule for it (for example, Read only inside a
-      // per-turn attachment directory). With `dontAsk`, every other tool
-      // request is denied rather than becoming an interactive prompt.
-      const approvalRules = Array.isArray(allowedToolRules)
-        ? allowedToolRules.map((tool) => String(tool).trim()).filter(Boolean)
-        : tools;
-      const deniedRules = Array.isArray(disallowedTools)
-        ? disallowedTools.map((tool) => String(tool).trim()).filter(Boolean)
-        : [];
-      args.push("--permission-mode", "dontAsk");
-      if (safeMode) args.push("--safe-mode", "--strict-mcp-config", "--disable-slash-commands", "--no-chrome", "--setting-sources", "");
-      if (tools.length === 0) args.push("--tools", "");
-      else {
-        args.push("--tools", tools.join(","));
-        if (approvalRules.length > 0) args.push("--allowedTools", approvalRules.join(","));
-        if (deniedRules.length > 0) args.push("--disallowedTools", deniedRules.join(","));
-      }
+    // `--tools` is the availability boundary. `dontAsk` makes an attempt to
+    // use anything outside the generated allowlist fail instead of blocking a
+    // chat turn on an invisible terminal prompt.
+    const tools = claudeTools(policy);
+    args.push("--permission-mode", "dontAsk", "--tools", tools.join(","));
+    if (tools.length) {
+      const approvals = claudeApprovalRules(policy, scope);
+      if (approvals.length) args.push("--allowedTools", approvals.join(","));
+      const denied = claudeDeniedRules(policy, protectedDirectories);
+      if (denied.length) args.push("--disallowedTools", denied.join(","));
+    }
+    const settings = claudeSettings(policy, { ...scope, protectedDirectories });
+    if (settings) {
+      args.push("--settings", JSON.stringify(settings));
     }
     args.push("--", prompt);
     return args;
@@ -121,16 +327,24 @@ const claude = {
 const codex = {
   command: "codex",
   effortLevels: ["minimal", "low", "medium", "high", "xhigh"],
-  buildArgs({ prompt, model, resume, skipPermissions, effort }) {
-    const args = ["exec", "--json", "--skip-git-repo-check", "--color=never"];
+  buildArgs({ prompt, model, resume, policy: policyInput = DEFAULT_TOOL_POLICY, effort, attachmentDir = null, outputDir = null, workingDirectory = "/workspace" }) {
+    const policy = assertEngineToolPolicy("codex", policyInput);
+    const scope = scopedPaths({ policy, workingDirectory, attachmentDir, outputDir });
+    const args = ["--ask-for-approval", "never", "exec", "--json", "--skip-git-repo-check", "--color=never", "--ignore-user-config", "--ignore-rules", "-C", scope.workspace];
     if (model) args.push("-m", model);
     if (effort) args.push("-c", `model_reasoning_effort=${effort}`);
-    if (skipPermissions) args.push("--dangerously-bypass-approvals-and-sandbox");
-    else args.push("-s", "workspace-write");
+    // Codex's built-in workspace-write profile grants read access to `:root`,
+    // which includes the OAuth home. The custom profile below deliberately
+    // starts from `:minimal` and opens only this turn's workspace (and staged
+    // attachment/output directories) through its native permission profile.
+    args.push("-c", "default_permissions=\"pca\"");
+    args.push("-c", codexPermissionProfile(policy, scope));
+    args.push("-c", `features.shell_tool=${hasToolCapability(policy, "bash") ? "true" : "false"}`);
+    args.push("-c", "features.apps=false", "-c", "features.plugins=false", "-c", "features.multi_agent=false", "-c", "tools.web_search=false", "-c", "web_search=\"disabled\"");
     // `exec resume <id> <prompt>` continues a thread; fresh runs take the prompt
     // positionally. The prompt goes last either way.
-    if (resume) args.push("resume", resume, prompt);
-    else args.push(prompt);
+    if (resume) args.push("resume", resume, "--", prompt);
+    else args.push("--", prompt);
     return args;
   },
   parseEvent(obj) {
@@ -172,14 +386,29 @@ const codex = {
 const opencode = {
   command: "opencode",
   effortLevels: null, // OpenCode exposes no reasoning-effort flag.
-  buildArgs({ prompt, model, resume, skipPermissions }) {
-    const args = ["run", "--format", "json"];
+  buildArgs({ prompt, model, resume, policy: policyInput = DEFAULT_TOOL_POLICY, workingDirectory = "/workspace" }) {
+    const policy = assertEngineToolPolicy("opencode", policyInput);
+    const workspace = absolutePath(workingDirectory, "workspace");
+    const args = ["--pure", "run", "--format", "json", "--dir", workspace];
     if (resume) args.push("--session", resume);
     if (model) args.push("--model", model);
-    if (skipPermissions) args.push("--dangerously-skip-permissions");
     // Append a period so OpenCode does not misparse a purely numeric prompt.
-    args.push(/^\d+$/.test(prompt) ? `${prompt}.` : prompt);
+    args.push("--", /^\d+$/.test(prompt) ? `${prompt}.` : prompt);
     return args;
+  },
+  buildEnvironment({ policy: policyInput = DEFAULT_TOOL_POLICY, attachmentDir = null, outputDir = null, workingDirectory = "/workspace" }) {
+    const policy = assertEngineToolPolicy("opencode", policyInput);
+    const permission = opencodePermissions(policy, { workingDirectory, attachmentDir, outputDir });
+    const config = { permission, plugin: [] };
+    return {
+      OPENCODE_PERMISSION: JSON.stringify(permission),
+      OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
+      OPENCODE_PURE: "1",
+      OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+      OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
+      OPENCODE_DISABLE_CLAUDE_CODE: "1",
+      OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
+    };
   },
   parseEvent(obj) {
     const out = [];

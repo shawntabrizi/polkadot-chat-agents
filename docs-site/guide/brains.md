@@ -4,12 +4,12 @@ A bot's **brain** is what produces its replies. Pick it with `--brain` at
 `create`.
 
 Direct engines run a headless AI-agent CLI with verbatim prompts and native
-session memory (`--resume`). Direct Claude starts with no model tools. Tool
-access is an explicit option for a private, trusted deployment; it is not safe
-to give a public prompt access to the same OAuth home the CLI uses to log in.
-Public built-in AI direct deployment supports only Claude's hardened no-tools
-profile. Use a separately isolated bridge runtime for public file analysis or
-tool use.
+session memory (`--resume`). Claude, Codex, and OpenCode start with no tools;
+their deployer may select the same portable policy for either public or
+allowlisted bots. Workspace scope is the normal project boundary, while
+container scope deliberately exposes the non-root agent account's OAuth home.
+Use a separately isolated bridge runtime when that is not an acceptable
+credential boundary.
 
 | `--brain` | Replies come from | Reaches | Authentication |
 |---|---|---|---|
@@ -24,17 +24,24 @@ Google, xAI, OpenRouter, local models, and more.
 
 ## Tool policy
 
-For a private, allowlisted Claude bot, `pca deploy --safe-tools` enables the
-conventional `Bash,Read,Edit,Write` list, while
-`pca deploy --allowed-tools Read,...` selects an exact Claude list.
-`pca deploy --full-autonomy` is the explicit unrestricted override and cannot
-be combined with either tool-list flag. The default is no Claude tools.
+Use `pca deploy --allowed-tools read,write,bash` to select exact lowercase
+outcome capabilities. `write` includes `read`, and `bash` includes both.
+`--tool-scope workspace|container` chooses the filesystem boundary;
+`--tool-network none|internet` selects tool-process egress (`internet` requires
+`bash`). The default is no capabilities, workspace scope, and no tool network.
+A read-capable turn can inspect its staged attachment, and a write-capable turn
+can produce returnable files.
 
-`BOT_AI_ALLOWED_TOOLS` is not a general sandbox, and its OAuth home is readable
-by the same tool-enabled process. Keep tool-enabled bots private and trusted.
-Codex and OpenCode need their own isolation controls; built-in public AI direct
-deployment rejects them for now. See [Private & public bots](/guide/access) for
-the boundary.
+For Bash, OpenCode requires `--tool-network internet` because it has no network
+sandbox. Claude requires internet for container-scoped Bash but can use `none`
+for workspace-scoped Bash; Codex can keep `none` in either scope. `pca deploy`
+validates the combination and reports the effective enforcement.
+
+The policy is not a general credential sandbox: the OAuth home is visible to
+the agent under container scope. Claude and Codex provide native workspace
+enforcement for their applicable policies; OpenCode's Bash policy remains
+bounded by the container rather than an OS filesystem sandbox. See
+[Private & public bots](/guide/access) for the boundary.
 
 ## Pinning a model
 
