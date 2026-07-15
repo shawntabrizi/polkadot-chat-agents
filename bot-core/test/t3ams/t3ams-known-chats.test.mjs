@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createT3amsKnownChats } from "../lib/t3ams-known-chats.mjs";
+import { createT3amsKnownChats } from "../../transports/t3ams/t3ams-known-chats.mjs";
 
 test("known chat state is LRU-bounded and ignores malformed restored keys", () => {
   const chats = createT3amsKnownChats({

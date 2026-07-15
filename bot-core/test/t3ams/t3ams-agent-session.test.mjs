@@ -6,8 +6,8 @@ import {
   conversationForAgentSessionKey,
   ingressLaneKeyForT3ams,
   isT3amsConversationKey,
-} from "../lib/t3ams-agent-session.mjs";
-import { createKeyedDispatcher } from "../lib/keyed-dispatcher.mjs";
+} from "../../transports/t3ams/t3ams-agent-session.mjs";
+import { createKeyedDispatcher } from "../../lib/keyed-dispatcher.mjs";
 
 const dm = `t3ams:dm:${"a1".repeat(32)}`;
 const channel = `t3ams:channel:${"b2".repeat(32)}:${"c3".repeat(32)}`;

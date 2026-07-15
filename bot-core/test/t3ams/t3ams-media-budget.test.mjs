@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createT3amsMediaAnalysisBudget } from "../lib/t3ams-media-budget.mjs";
+import { createT3amsMediaAnalysisBudget } from "../../transports/t3ams/t3ams-media-budget.mjs";
 
 test("media budget consumes both global and per-sender tokens, then refills deterministically", () => {
   let now = 0;

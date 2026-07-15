@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createT3amsChannelContext } from "../lib/t3ams-channel-context.mjs";
+import { createT3amsChannelContext } from "../../transports/t3ams/t3ams-channel-context.mjs";
 
 const xid = (value) => Number(value).toString(16).padStart(64, "0");
 const chat = (value) => `t3ams:channel:${xid(value)}:${xid(Number(value) + 1000)}`;

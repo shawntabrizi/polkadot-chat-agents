@@ -14,7 +14,7 @@ import {
   extractOfficeText,
   mediaAnalyzerKind,
   renderUntrustedAttachmentAnalysis,
-} from "../lib/t3ams-media-analyzer.mjs";
+} from "../../transports/t3ams/t3ams-media-analyzer.mjs";
 
 const roots = [];
 after(() => { for (const root of roots) fs.rmSync(root, { recursive: true, force: true }); });

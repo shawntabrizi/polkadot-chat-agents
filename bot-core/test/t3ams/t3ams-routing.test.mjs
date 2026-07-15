@@ -9,7 +9,7 @@ import {
   replyTargetFor,
   restoreT3amsIngressRoute,
   toT3amsBridgeInbound,
-} from "../lib/t3ams-routing.mjs";
+} from "../../transports/t3ams/t3ams-routing.mjs";
 
 const bot = { xid: "bot-xid-42", aliases: ["Atlas", "atlas-helper"] };
 

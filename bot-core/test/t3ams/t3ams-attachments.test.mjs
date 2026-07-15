@@ -7,7 +7,7 @@ import {
   normalizeT3amsAttachmentRef,
   normalizeT3amsAttachmentRefs,
   parseT3amsHopReference,
-} from "../lib/t3ams-attachments.mjs";
+} from "../../transports/t3ams/t3ams-attachments.mjs";
 
 const hex = (byte) => byte.repeat(64);
 const bytes = (byte) => Uint8Array.from({ length: 32 }, () => Number.parseInt(byte, 16));

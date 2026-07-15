@@ -11,7 +11,7 @@ import {
   normalizeT3amsState,
   stateDocSupersedes,
   t3amsConversationKey,
-} from "../lib/t3ams-protocol.mjs";
+} from "../../transports/t3ams/t3ams-protocol.mjs";
 
 test("hex helpers canonicalize prefixes and round-trip bytes", () => {
   assert.equal(bareHex(" 0XDeAdBEEF "), "deadbeef");

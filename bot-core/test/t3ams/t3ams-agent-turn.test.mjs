@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { deliverAgentReplyBeforeArtifacts } from "../lib/t3ams-agent-turn.mjs";
+import { deliverAgentReplyBeforeArtifacts } from "../../transports/t3ams/t3ams-agent-turn.mjs";
 
 test("a retryable artifact failure cannot hold back a durable final reply", async () => {
   const reply = { parts: ["final answer"], nextPart: 0 };

@@ -5,7 +5,7 @@ import {
   createSerializedSubmitter,
   createT3amsPriorityClock,
   restoreT3amsPriority,
-} from "../lib/t3ams-submission.mjs";
+} from "../../transports/t3ams/t3ams-submission.mjs";
 
 test("T3ams priorities use a 24-hour expiry and remain monotonic across restores", () => {
   const advances = [];

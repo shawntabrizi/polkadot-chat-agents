@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { t3amsDirectCapacityDefaults } from "../lib/t3ams-direct-capacity.mjs";
+import { t3amsDirectCapacityDefaults } from "../../transports/t3ams/t3ams-direct-capacity.mjs";
 
 test("T3ams public direct bots default to a bounded model-turn budget", () => {
   assert.deepEqual(t3amsDirectCapacityDefaults({ publicDirect: true }), {

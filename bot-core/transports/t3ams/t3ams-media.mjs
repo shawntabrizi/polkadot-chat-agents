@@ -9,8 +9,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { blake2b } from "@noble/hashes/blake2.js";
-import { createMediaStore } from "./media-store.mjs";
-import { downloadP2PFile, uploadP2PFile, validateHopUrl } from "./hop-client.mjs";
+import { createMediaStore } from "../../lib/media-store.mjs";
+import { downloadP2PFile, uploadP2PFile, validateHopUrl } from "../../lib/hop-client.mjs";
 import {
   encodeT3amsHopReference,
   normalizeT3amsAttachmentRefs,

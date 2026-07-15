@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createT3amsMessageLifecycle } from "../lib/t3ams-message-lifecycle.mjs";
+import { createT3amsMessageLifecycle } from "../../transports/t3ams/t3ams-message-lifecycle.mjs";
 
 const chatId = `t3ams:channel:${"a1".repeat(32)}:${"b2".repeat(32)}`;
 const alice = "c3".repeat(32);

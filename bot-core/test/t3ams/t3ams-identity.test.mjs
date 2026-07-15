@@ -12,8 +12,8 @@ import {
   deriveT3amsBulletinUploadSignerFromSeed,
   deriveT3amsIdentity,
   deriveT3amsIdentityFromSeed,
-} from "../lib/t3ams-identity.mjs";
-import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
+} from "../../transports/t3ams/t3ams-identity.mjs";
+import { deriveSr25519PairFromSeed } from "../../vendor/lib/wallet-keys.mjs";
 
 const sha256 = (value) => new Uint8Array(createHash("sha256").update(value).digest());
 const concat = (...parts) => {

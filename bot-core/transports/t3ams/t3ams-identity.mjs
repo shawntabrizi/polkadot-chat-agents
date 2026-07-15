@@ -7,7 +7,7 @@
 // T3ams app's account-XID convention.
 
 import { createHash } from "node:crypto";
-import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
+import { deriveSr25519PairFromSeed } from "../../vendor/lib/wallet-keys.mjs";
 
 export const T3AMS_IDENTITY_SIGN_DOMAIN = "t3ams:identity:sign:v1";
 export const T3AMS_IDENTITY_AGREEMENT_DOMAIN = "t3ams:identity:agree:v1";
