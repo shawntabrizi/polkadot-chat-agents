@@ -312,15 +312,14 @@ app username) or an explicit `--public` for any brain that costs money.
   spawns the CLI as uid/gid 1000 with a read-only source mount and access only to
   `/workspace`, `/home/node`, and private per-turn attachment directories. The
   container has an init reaper, no-new-privileges, and process/memory/CPU limits.
-  Tool access is separately scoped. With Claude workspace scope, native
-  permission rules constrain file tools; when Bash is enabled, its required
-  Bubblewrap filesystem policy explicitly denies `/home/node`, `/state`, and
-  `/app`. Container scope is the deliberate broad option: selected tools can
-  reach the non-root agent account's container-visible files, including its
-  OAuth home. Codex and OpenCode use their own documented workspace policies;
-  in particular, OpenCode Bash is bounded by the container rather than an OS
-  filesystem sandbox. Direct deployment starts with no tools, then the deployer
-  may deliberately enable portable `read`, `write`, and `bash` capabilities,
-  choose a scope, and decide whether tool processes may use the network. That
-  choice applies equally to public and allowlisted bots: anyone who can message
-  a bot can direct the configured capabilities.
+  Direct deployment starts with no tools, then the deployer may deliberately
+  enable portable `read`, `write`, and `bash` capabilities, choose a workspace
+  or container scope. Workspace scopes native file tools to the selected project;
+  Bash uses the agent process boundary in either scope: the dedicated bot
+  container for a deployment or the local process account for `pca run`.
+  Container scope deliberately exposes all files visible to the non-root agent
+  account, including its OAuth home. The deployed bot container is the concrete
+  isolation boundary.
+  That choice applies equally to public and allowlisted bots: anyone who can
+  message a bot can direct the configured capabilities. Do not mount unrelated
+  host repositories, credentials, Docker sockets, or home directories into it.

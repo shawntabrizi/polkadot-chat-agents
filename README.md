@@ -163,45 +163,25 @@ locally; other networks need separate operator provisioning.
 
 Direct T3ams agents start with no tools. An operator opts into portable,
 lowercase capabilities with `--allowed-tools read,write,bash`, chooses
-`--tool-scope workspace|container`, and chooses
-`--tool-network none|internet`. `write` includes `read`; `bash` includes both.
-The default is no capabilities, workspace scope, and no tool network. `read`
+`--tool-scope workspace|container`. `write` includes `read`; `bash` includes
+both. The default is no capabilities and workspace scope. `read`
 also lets a direct agent inspect a verified attachment staged for its current
-turn, while `write` lets it produce returnable files. Workspace scope is the
-normal project boundary. Authentication is separate from tool access: the CLI
-keeps its OAuth home only to authenticate and refresh its own session. With
-Claude workspace scope, native path rules constrain file tools; workspace Bash
-also runs under a Bubblewrap allow/deny filesystem policy that hides
-`/home/node`, `/state`, and `/app`. `container` is the deliberate broad scope:
-selected tools can reach the non-root agent account's container-visible files,
-including its OAuth home. See [the configuration guide](docs/CONFIGURATION.md#tool-policy)
-for engine enforcement and boundary tradeoffs. In particular, OpenCode Bash
-requires `--tool-network internet` and remains bounded by the container rather
-than an OS filesystem sandbox; Claude needs internet for container-scoped Bash
-but not workspace-scoped Bash, while Codex can keep `none` in either scope.
+turn, while `write` lets it produce returnable files. `workspace` scopes native
+file tools to the selected project and staged attachments; `container` lets them
+work with every file visible to the non-root agent account. Bash is
+bounded by the agent process in either scope: the dedicated bot container for a
+deployment, or your local process account for `pca run`. Treat local Bash bots
+as trusted-machine tools. See [the configuration guide](docs/CONFIGURATION.md#tool-policy)
+for the exact options.
 
-For a Docker-deployed Claude bot with workspace Bash, prepare the Linux host
-once with `pca prepare-host --host root@server`. PCA installs a confined,
-versioned AppArmor profile; deploy then supplies a pinned Docker seccomp profile
-and runs a real non-root Bubblewrap probe before it replaces the live bot. It
-keeps `no-new-privileges`, never adds `CAP_SYS_ADMIN` to the outer Docker
-container, and never uses privileged mode, `userns=host`, or an unconfined
-security profile. The Claude CLI stays in that direct-agent container; each sandboxed
-Bash subprocess runs in Bubblewrap's private namespaces with a fresh `/proc`,
-a read-only root, and no effective Linux capabilities. Its writes follow the
-configured filesystem policy, including the selected workspace and, when
-enabled, PCA's per-turn output directory; the stacked AppArmor payload profile
-is a second capability boundary. In workspace scope, that policy explicitly
-hides the CLI OAuth home at `/home/node` from sandboxed Bash.
-
-In Docker, PCA sets Claude's `allowAllUnixSockets: true`, opting out of
-Claude's optional Unix-socket seccomp filter. This does not enable
-`enableWeakerNestedSandbox`: sandboxed Bash retains Bubblewrap's normal
-filesystem, fresh-`/proc`, and IP-network boundaries. `--tool-network none`
-blocks IP egress from sandboxed Bash only; it does not block Unix-domain
-sockets visible inside the container. Generated direct-agent services mount no
-Docker or host sockets—do not add one. If a sensitive Unix socket must be
-exposed, use a separate worker container.
+Every deployed direct bot has its own Docker container. The transport owns
+`/state` (the chat seed, session state, and bridge token) and the agent runs as
+the non-root `node` user, so the agent cannot read those transport secrets. Its
+OAuth home is intentionally part of that bot container so its CLI can
+authenticate. Container-scoped native file tools and Bash can access it. The
+container is the concrete isolation boundary: do not mount unrelated host
+repositories, credentials, Docker sockets, or home directories into it—especially
+for a public bot.
 
 **Projects.** `pca project <bot> add <alias> <path>` registers a directory the
 agent can work in (repeat for more). In chat, `/project <alias>` points your

@@ -6,12 +6,8 @@ A bot's **brain** is what produces its replies. Pick it with `--brain` at
 Direct engines run a headless AI-agent CLI with verbatim prompts and native
 session memory (`--resume`). Claude, Codex, and OpenCode start with no tools;
 their deployer may select the same portable policy for either public or
-allowlisted bots. The CLI retains its OAuth home only to authenticate.
-Workspace-scoped Claude tools are separately constrained by native path rules,
-and workspace Bash hides `/home/node`, `/state`, and `/app` through its
-Bubblewrap filesystem policy. Container scope deliberately exposes the
-non-root agent account's OAuth home; Codex and OpenCode have their documented
-scope boundaries.
+allowlisted bots. The CLI retains its OAuth home inside that bot's container so
+it can authenticate; container-scoped native file tools and Bash can access it.
 
 | `--brain` | Replies come from | Reaches | Authentication |
 |---|---|---|---|
@@ -28,25 +24,18 @@ Google, xAI, OpenRouter, local models, and more.
 
 Use `pca deploy --allowed-tools read,write,bash` to select exact lowercase
 outcome capabilities. `write` includes `read`, and `bash` includes both.
-`--tool-scope workspace|container` chooses the filesystem boundary;
-`--tool-network none|internet` selects tool-process egress (`internet` requires
-`bash`). The default is no capabilities, workspace scope, and no tool network.
+`--tool-scope workspace|container` scopes native file tools. The default is no
+capabilities and workspace scope.
 A read-capable turn can inspect its staged attachment, and a write-capable turn
 can produce returnable files.
 
-For Bash, OpenCode requires `--tool-network internet` because it has no network
-sandbox. Claude requires internet for container-scoped Bash but can use `none`
-for workspace-scoped Bash; Codex can keep `none` in either scope. `pca deploy`
-validates the combination and reports the effective enforcement.
-
-Authentication and tool access are separate: the CLI retains its OAuth home to
-log in, while the configured scope governs model-directed tools. Claude
-workspace file tools use native path rules, and workspace Bash has an
-allow/deny Bubblewrap filesystem policy that hides `/home/node`, `/state`, and
-`/app`. Container scope deliberately exposes the home. Codex and OpenCode use
-their documented enforcement; OpenCode Bash remains bounded by the container
-rather than an OS filesystem sandbox. See [Private & public bots](/guide/access)
-for the boundary.
+Workspace scopes native file tools to the normal project working area; container
+scope deliberately exposes all files visible to the non-root agent account,
+including its OAuth home. Bash uses the agent process boundary in either scope:
+the dedicated bot container for a deployment, or the local process account for
+`pca run`. Treat local Bash bots as trusted-machine tools. Do not mount unrelated
+host repositories, credentials, Docker sockets, or home directories into a
+deployed bot container. See [Private & public bots](/guide/access) for the boundary.
 
 ## Pinning a model
 

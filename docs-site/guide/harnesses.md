@@ -197,7 +197,7 @@ autonomous agent, not a chat wrapper: the user's message is passed verbatim (no
 injected persona), conversation continuity is the CLI's own native session
 (`--resume`), and bot-core presents its progress and answer in the chat. Direct
 Claude, Codex, and OpenCode engines start with no tools; the deployer chooses a
-portable capability, scope, and tool-network policy explicitly.
+portable capability and scope policy explicitly.
 
 | Engine | Invokes | Reaches | Authentication |
 |---|---|---|---|
@@ -224,18 +224,16 @@ Related settings:
   `open` is an explicit option for allowlisted bots only. Public bots cannot
   allow unrestricted switching.
 - Claude, Codex, and OpenCode start with no tools. Deploy a portable policy
-  with `--allowed-tools read,write,bash`, `--tool-scope workspace|container`,
-  and `--tool-network none|internet`. `write` includes `read`; `bash` includes
-  both. The generated environment uses `BOT_AI_TOOL_CAPABILITIES`,
-  `BOT_AI_TOOL_SCOPE`, and `BOT_AI_TOOL_NETWORK`.
+  with `--allowed-tools read,write,bash` and
+  `--tool-scope workspace|container`. `write` includes `read`; `bash` includes
+  both. The generated environment uses `BOT_AI_TOOL_CAPABILITIES` and
+  `BOT_AI_TOOL_SCOPE`.
 - Public direct bots use the same policy. Every sender can direct the selected
-  capability, so choose the model, scope, and network deliberately. A
+  capability, so choose the model and scope deliberately. A
   read-capable turn can inspect its staged attachment, and a write-capable turn
   can return generated files.
-- For `bash`, OpenCode requires `--tool-network internet` because it has no
-  network sandbox. Claude requires internet for container-scoped Bash but can
-  use `none` for workspace-scoped Bash; Codex can keep `none` in either scope.
-  Deploy validates the combination and reports the enforcement level.
+- Workspace scopes native file tools to the selected project and staged
+  attachments. Bash uses the agent process boundary in either scope.
 - The agent works in a persistent non-secret workspace (`BOT_AI_WORKSPACE`,
   defaulting to a sibling of `BOT_STATE_DIR`) that survives restarts.
 - `BOT_AI_CMD`/`BOT_AI_ARGS` wire in a custom CLI that speaks claude-shaped
@@ -270,14 +268,13 @@ no-new-privileges, and process/memory/CPU ceilings. This protects the chat
 identity from the agent process.
 
 The CLI retains `/home/node` only to authenticate and refresh its own OAuth
-session; tool access is separately scoped. Claude workspace file tools use
-native path rules, while workspace Bash has an allow/deny Bubblewrap filesystem
-policy that hides `/home/node`, `/state`, and `/app`. Container scope
-deliberately exposes the home to selected tools. Codex and OpenCode use their
-documented enforcement; OpenCode Bash remains bounded by the container rather
-than an OS filesystem sandbox. For a public bot, every sender can direct the
-policy the deployer selected. Sessions and the workspace persist across
-redeploys.
+session; container-scoped native file tools and Bash can access it. Workspace
+scopes native file tools to the selected project; Bash uses the agent process
+boundary in either scope. A deployed bot has a dedicated container; local
+`pca run` uses the local process account and should be treated as a
+trusted-machine tool. Container scope deliberately exposes the home to native
+file tools. For a public bot, every sender can direct the policy the deployer
+selected. Sessions and the workspace persist across redeploys.
 
 An AI brain spends quota, so `create` requires an allowlist or an explicit
 `--public`.

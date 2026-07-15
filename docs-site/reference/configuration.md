@@ -52,7 +52,6 @@ BOT_BRIDGE_TOKEN=Xk3…≥32chars   # shared secret; every bridge request must p
 # portable tool policy (direct engines)
 BOT_AI_TOOL_CAPABILITIES=       # default: no tools; comma-separated read,write,bash
 BOT_AI_TOOL_SCOPE=workspace     # workspace (default) | container
-BOT_AI_TOOL_NETWORK=none        # none (default) | internet; internet requires bash
 BOT_AI_AGENT_UID=1000           # spawned agent CLI is dropped to this uid — cannot read /state or the seed
 BOT_AI_AGENT_GID=1000           # …and this gid (transport stays root solely to hold the seed)
 
@@ -112,7 +111,6 @@ BOT_ALLOWED_PEERS=<peer-hex-1>,<peer-hex-2>
 BOT_AI_MODEL_SWITCHING=open
 BOT_AI_TOOL_CAPABILITIES=read,write
 BOT_AI_TOOL_SCOPE=workspace
-BOT_AI_TOOL_NETWORK=none
 BOT_AI_MAX_CONCURRENT_TURNS=2
 BOT_AI_MAX_QUEUED_TURNS=20
 
@@ -127,12 +125,13 @@ BOT_FILE_MAX_PEER_ENTRIES=2000
 `BOT_AI_TOOL_CAPABILITIES=read,write` gives a direct agent the normal file
 outcomes; `write` includes `read`. Add `bash` when the bot should run commands;
 it includes both file capabilities.
-Workspace scope is the default; container scope deliberately grants the
+Workspace scope is the default native file-tool scope; container scope deliberately grants the
 non-root agent account all of its container-visible files, including its OAuth
-home. The CLI retains that home only to authenticate; it is not implicitly a
-workspace tool grant. `BOT_AI_TOOL_NETWORK=internet` requires `bash`; the
-default is no tool network. Every sender of a public bot can direct the policy
-the deployer chose.
+home. The CLI retains that home so it can authenticate; container-scoped native
+file tools and Bash can access it. Workspace scope applies to native file tools;
+Bash uses the agent process boundary in either scope. In a deployment that is
+the dedicated bot container; with `pca run`, it is the local process account.
+Every sender of a public bot can direct the policy the deployer chose.
 For a production HOP configuration, pin the download and upload nodes you
 trust, and provision its allowance through the appropriate operator flow. The
 generated framework deployment exposes its bridge only to the private Compose
@@ -155,10 +154,9 @@ BOT_AI_MODEL=<pinned-low-cost-model>
 BOT_AI_ALLOWED_MODELS=<pinned-low-cost-model>,<second-low-cost-model>
 BOT_AI_TOOL_CAPABILITIES=
 BOT_AI_TOOL_SCOPE=workspace
-BOT_AI_TOOL_NETWORK=none
 # This no-tools profile can answer text but cannot inspect staged file bytes.
 # Enable work deliberately with --allowed-tools read,write plus a scope
-# and tool-network choice appropriate to the bot.
+# appropriate to the bot.
 BOT_AI_MAX_CONCURRENT_TURNS=2
 BOT_AI_MAX_QUEUED_TURNS=20
 BOT_AI_MAX_OUTPUT_BYTES=262144
@@ -204,14 +202,10 @@ Do not publish the authenticated bridge port. The deploy container and resource
 limits help, but they cannot make a sensitive host mount or exposed bridge token
 safe.
 
-Authentication and tool access are separate. The direct CLI retains its OAuth
-home only to authenticate and refresh its own session. In workspace scope,
-Claude's native path rules constrain file tools; workspace Bash also has an
-allow/deny Bubblewrap filesystem policy that hides `/home/node`, `/state`, and
-`/app`. Container scope deliberately exposes the non-root agent account's
-container-visible files, including its OAuth home. Codex and OpenCode use the
-enforcement reported at deploy time; OpenCode Bash remains bounded by the
-container rather than an OS filesystem sandbox.
+The dedicated bot container is the concrete isolation boundary. The transport
+keeps the chat seed, session state, and bridge token in `/state`, inaccessible to
+the non-root agent. Do not mount unrelated host repositories, credentials,
+Docker sockets, or home directories into a public bot container.
 
 ---
 
@@ -286,8 +280,7 @@ variables `pca deploy` writes into `bot.env` automatically.
 | Variable | Default | Purpose |
 |---|---|---|
 | `BOT_AI_TOOL_CAPABILITIES` | `""` | Comma-separated portable direct-agent outcomes: `read`, `write`, `bash`. Empty disables tools; `write` includes `read`, and `bash` includes both. **gen (run/deploy)** |
-| `BOT_AI_TOOL_SCOPE` | `workspace` | `workspace` scopes normal work to the selected project and current staged attachments; for Claude workspace Bash, the sandbox also denies `/home/node`, `/state`, and `/app`. `container` deliberately grants the non-root agent account all of its container-visible files. **gen (run/deploy)** |
-| `BOT_AI_TOOL_NETWORK` | `none` | `none` or `internet` for tool-process egress. `internet` requires `bash`; enforcement depends on the selected engine. **gen (run/deploy)** |
+| `BOT_AI_TOOL_SCOPE` | `workspace` | `workspace` scopes native file tools to the current project and staged attachments. `container` deliberately grants native file tools all files visible to the non-root agent account. Bash uses the agent process boundary in either scope. **gen (run/deploy)** |
 | `BOT_AI_AGENT_UID` / `BOT_AI_AGENT_GID` | unset | Drop the spawned agent to this uid/gid so it can't read `/state` or the seed. **gen (deploy: 1000)** |
 | `BOT_AI_IDLE_TIMEOUT_MS` | 600000 | Kill a turn that has emitted nothing for this long (wedge backstop). |
 | `BOT_AI_MAX_MS` | 3600000 | Hard per-turn wall-clock cap. |
@@ -296,48 +289,18 @@ variables `pca deploy` writes into `bot.env` automatically.
 | `BOT_AI_MAX_OUTPUT_BYTES` | 1000000 | Cap on captured agent output per turn. |
 | `BOT_AI_CMD` / `BOT_AI_ARGS` | unset | Escape hatch: a custom CLI speaking claude-shaped stream-json (`BOT_AI_ARGS` is a JSON array; `__PROMPT__` is substituted). |
 
-For Bash, run and deploy validate the engine-specific network combination: OpenCode
-requires `--tool-network internet` because it has no network sandbox; Claude
-requires it for container-scoped Bash but can use `none` for workspace-scoped
-Bash; Codex can keep `none` in either scope. The deploy report names the
-effective enforcement level.
+Workspace scopes native file tools to the selected project and staged
+attachments; Bash uses the agent process boundary in either scope. Container
+scope deliberately exposes all files visible to the non-root agent account,
+including its OAuth home. For `pca deploy`, the agent process is in the dedicated
+bot container. For local `pca run`, Bash uses the local process account, so treat
+it as a trusted-machine tool. Exact engine behavior varies, so use the deploy
+report to inspect the generated command.
 
-Authentication and tool access are separate. A direct CLI retains its mounted
-OAuth home only to log in and refresh its own session. Claude workspace file
-tools use native path rules, and workspace Bash has an allow/deny Bubblewrap
-filesystem policy that hides `/home/node`, `/state`, and `/app`. Container
-scope deliberately exposes that home. Codex and OpenCode use the enforcement
-named in the deploy report; OpenCode Bash is container-bounded rather than an
-OS filesystem sandbox.
-
-#### Claude workspace Bash in Docker
-
-For a Docker-deployed Claude bot with workspace-scoped Bash, run this explicit
-one-time host preparation first:
-
-```bash
-pca prepare-host --host root@your-server
-```
-
-It installs PCA's confined, versioned AppArmor profile. The generated compose
-service keeps `no-new-privileges`, adds a pinned derivative of Docker's default
-seccomp profile, and never uses a privileged container, adds `CAP_SYS_ADMIN`
-to the outer Docker container, enables `userns=host`, or uses an unconfined
-profile. `pca deploy` runs a real non-root Bubblewrap readiness probe before it
-replaces the live bot and fails closed if the host is not ready. The Claude CLI
-remains in the direct-agent container; each sandboxed Bash subprocess gets a
-fresh `/proc`, a read-only root, and a payload AppArmor profile that denies
-capability use. Its writes follow the configured filesystem policy, including
-the selected workspace and, when enabled, PCA's per-turn output directory. The
-workspace policy explicitly denies the CLI OAuth home at `/home/node` (as well
-as `/state` and `/app`) to sandboxed Bash.
-
-Docker mode sets Claude's `allowAllUnixSockets: true`, opting out of its
-optional Unix-socket seccomp filter without enabling
-`enableWeakerNestedSandbox`. Sandboxed Bash retains Bubblewrap's filesystem,
-fresh-`/proc`, and IP-network boundaries; with `--tool-network none`, it has no
-IP egress, but can still reach Unix-domain sockets visible inside the container.
-Generated direct-agent services mount no Docker or host socket—do not add one.
+The dedicated bot container is the concrete isolation boundary. The transport
+keeps the chat seed, session state, and bridge token in `/state`, inaccessible to
+the non-root agent. Do not mount unrelated host repositories, credentials,
+Docker sockets, or home directories into a bot container.
 
 ### Direct engine — projects & workspace
 

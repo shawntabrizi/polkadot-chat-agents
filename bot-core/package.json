@@ -51,7 +51,6 @@
     "t3ams.mjs",
     "media-analyzer.mjs",
     "cli.mjs",
-    "deploy/",
     "test-client.mjs",
     "test-client-device.mjs",
     "lib/",

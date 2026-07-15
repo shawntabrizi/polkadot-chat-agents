@@ -48,11 +48,10 @@ has a conservative starting point.
 
 Public direct bots can use Claude, Codex, or OpenCode with the same portable
 tool policy. They start with no tools, but their deployer may deliberately
-enable `read`, `write`, or `bash`, choose workspace or container scope, and
-choose tool-process network access. Every public sender can direct the chosen
-capabilities: `read` can inspect staged attachment bytes and `write` can create
-generated files. Use a bridge runtime when a public bot needs a separately
-designed tool-and-credential boundary.
+enable `read`, `write`, or `bash` and choose workspace or container scope. Every
+public sender can direct the chosen capabilities: `read` can inspect staged
+attachment bytes and `write` can create generated files. Use a bridge runtime
+when a public bot needs a separately designed tool-and-credential boundary.
 
 ## What changes between the two
 
@@ -66,7 +65,7 @@ allows in chat:
 | `/model` switching | Can be opened (`pca model <bot> open`) — trusted peers only | Never unrestricted; at most an approved set (`pca model <bot> allow a,b`) |
 | Returning saved files | Ready automatically on the default Paseo testnet profile | No automatic finite-allowance profile |
 | Sensible model | Your call | Pin a cheaper model |
-| Built-in direct-agent tools | No tools by default; deployer chooses portable capability/scope/network policy | Same policy; every sender can direct the selected capability |
+| Built-in direct-agent tools | No tools by default; deployer chooses portable capability/scope policy | Same policy; every sender can direct the selected capability |
 
 The model-switching rule exists because switching to an expensive model spends
 *your* quota: a stranger on a public bot must never be able to pick the
@@ -81,53 +80,23 @@ the model can talk its way around. The deployer chooses one portable policy:
 
 | Choice | Effect |
 |---|---|
-| no tool flag | No capabilities; workspace scope and no tool network. |
+| no tool flag | No capabilities and workspace scope. |
 | `--allowed-tools read,write,bash` | Exact lowercase outcome capabilities. `write` includes `read`; `bash` includes both. |
-| `--tool-scope workspace` | Default project scope; a read-capable turn can also inspect its current staged attachment. |
-| `--tool-scope container` | Deliberately broad access to files visible to the non-root agent account, including its OAuth home. |
-| `--tool-network none` / `internet` | Default `none` requests no tool-process egress. `internet` requires `bash`. |
+| `--tool-scope workspace` | Default native file-tool scope; a read-capable turn can also inspect its current staged attachment. Bash uses the agent process boundary. |
+| `--tool-scope container` | Deliberately broad native file-tool access to files visible to the non-root agent account, including its OAuth home. Bash uses the agent process boundary. |
 
-For Bash, deploy validates the engine-specific network combination: OpenCode
-requires `--tool-network internet` because it has no network sandbox; Claude
-requires it for container-scoped Bash but can use `none` for workspace-scoped
-Bash; Codex can keep `none` in either scope. The deploy report names the
-effective enforcement level.
+`workspace` scopes native file tools to the normal working area, and `container`
+is the deliberate broad option. Bash uses the agent process boundary in either
+scope: the dedicated bot container for a deployment, or the local process
+account for `pca run`. Treat local Bash bots as trusted-machine tools. Exact
+engine behavior varies, so use the deploy report to inspect the generated command.
 
-Authentication and tool access are separate. The direct CLI retains its OAuth
-home only to authenticate and refresh its own session. In workspace scope,
-Claude's native path rules constrain file tools; workspace Bash also has an
-allow/deny Bubblewrap filesystem policy that hides `/home/node`, `/state`, and
-`/app`. Container scope deliberately exposes the non-root agent account's
-container-visible files, including its OAuth home. Codex and OpenCode use the
-enforcement reported at deploy time; OpenCode Bash remains bounded by the
-container rather than an OS filesystem sandbox. The deploy report states the
-selected engine's enforcement level.
-
-For Docker Claude workspace Bash, the deployer must explicitly prepare the
-Linux host once with `pca prepare-host --host root@your-server`. PCA then keeps
-`no-new-privileges`, installs a confined AppArmor profile, uses a pinned Docker
-seccomp derivative, and probes Bubblewrap before replacing the bot. It never
-falls back to a privileged container, adds `CAP_SYS_ADMIN` to the outer Docker
-container, enables `userns=host`, or uses an unconfined security profile. The
-Claude CLI remains in the direct-agent container; each sandboxed Bash
-subprocess gets a fresh `/proc`, a read-only root, and a payload AppArmor
-profile that denies capability use. Its writes follow the configured filesystem
-policy, including the selected workspace and, when enabled, PCA's per-turn
-output directory. The workspace policy explicitly denies `/home/node`,
-`/state`, and `/app` to sandboxed Bash. Docker mode sets
-`allowAllUnixSockets: true`, opting out of its optional Unix-socket seccomp
-filter without enabling
-`enableWeakerNestedSandbox`. Sandboxed Bash retains Bubblewrap's filesystem,
-fresh-`/proc`, and IP-network boundaries; with `--tool-network none`, it has no
-IP egress, but can still reach Unix-domain sockets visible inside the container.
-Generated direct-agent services mount no Docker or host socket—do not add one.
-
-The deployed transport still protects the chat identity: it owns `/state`, the
-signing seed, session keys, and bridge token, while the agent CLI runs as a
-non-root user. The CLI keeps its mounted OAuth home for authentication, not as
-a tool grant; the selected engine's scope determines whether a model-directed
-tool action can reach it. In particular, Claude workspace Bash is denied that
-home, while container scope deliberately exposes it.
+Every deployed direct bot has its own container. The transport owns `/state`,
+the signing seed, session keys, and bridge token, while the agent CLI runs as a
+non-root user and cannot read them. The CLI's OAuth home is intentionally part
+of the bot container so it can authenticate; container-scoped native file tools
+and Bash can access it. Do not mount unrelated host repositories, credentials,
+Docker sockets, or home directories into a bot container.
 
 For a public deployment, treat every sender as able to direct the chosen policy;
 for `pca run`, remember that the local machine is the runtime boundary. Use a
@@ -155,7 +124,6 @@ The decisions on this page map to these settings, all detailed in
 - `BOT_BRIDGE_TOKEN` — bridge authentication.
 - `BOT_AI_TOOL_CAPABILITIES` — empty by default; comma-separated portable
   `read`, `write`, and `bash` outcomes.
-- `BOT_AI_TOOL_SCOPE` / `BOT_AI_TOOL_NETWORK` — workspace versus container
-  scope and no-network versus internet tool-process egress.
+- `BOT_AI_TOOL_SCOPE` — workspace versus container native file-tool scope.
 - `BOT_T3AMS_ATTACHMENT_MIME_TYPES` / `BOT_T3AMS_ATTACHMENT_MAX_*` — T3ams
   attachment admission policy and media bounds.

@@ -429,66 +429,43 @@ test("direct deployment uses one portable tool policy across every direct engine
       assert.equal(result.status, 0, result.stderr);
       assert.match(result.stdout, /^BOT_AI_TOOL_CAPABILITIES=$/m);
       assert.match(result.stdout, /^BOT_AI_TOOL_SCOPE=workspace$/m);
-      assert.match(result.stdout, /^BOT_AI_TOOL_NETWORK=none$/m);
-      assert.match(result.stdout, /^BOT_AI_RUNTIME_CONTAINER=1$/m);
-      assert.match(result.stdout, /Tool policy: none; scope=workspace; tool network=none/);
-      assert.doesNotMatch(result.stdout, /BOT_AI_ALLOWED_TOOLS=|BOT_AI_SAFE_MODE=|BOT_AI_SKIP_PERMISSIONS=|BOT_T3AMS_PUBLIC_ATTACHMENT_READ=|apparmor=pca-agent-sandbox-v1|seccomp=\.\/pca-agent-sandbox-v1\.seccomp\.json/);
+      assert.match(result.stdout, /Tool policy: none; scope=workspace\./);
+      assert.doesNotMatch(result.stdout, /BOT_AI_TOOL_NETWORK=|BOT_AI_RUNTIME_CONTAINER=|BOT_AI_ALLOWED_TOOLS=|BOT_AI_SAFE_MODE=|BOT_AI_SKIP_PERMISSIONS=|BOT_T3AMS_PUBLIC_ATTACHMENT_READ=|apparmor=|seccomp=|bubblewrap/);
     }
 
     let result = runCli(botsDir, ["deploy", "privateclaude", "--host", "root@example.test", "--allowed-tools", "write", "--dry-run"]);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /^BOT_AI_TOOL_CAPABILITIES=read,write$/m);
     assert.match(result.stdout, /^BOT_AI_TOOL_SCOPE=workspace$/m);
-    assert.match(result.stdout, /^BOT_AI_TOOL_NETWORK=none$/m);
-    assert.match(result.stdout, /bubblewrap socat/);
+    assert.match(result.stdout, /git ca-certificates ripgrep/);
+    assert.doesNotMatch(result.stdout, /bubblewrap|socat|util-linux/);
 
     result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--allowed-tools", "bash", "--dry-run"]);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /^BOT_AI_TOOL_CAPABILITIES=read,write,bash$/m);
-    assert.match(result.stdout, /^BOT_AI_TOOL_NETWORK=none$/m);
-    assert.match(result.stdout, /apparmor=pca-agent-sandbox-v1/);
-    assert.match(result.stdout, /seccomp=\.\/pca-agent-sandbox-v1\.seccomp\.json/);
-    assert.match(result.stdout, /pca prepare-host --host root@example\.test/);
+    assert.match(result.stdout, /Bash runs inside this bot's container/i);
+    assert.match(result.stdout, /no-new-privileges:true/);
+    assert.doesNotMatch(result.stdout, /apparmor=|seccomp=|bubblewrap|prepare-host|cap_drop:/);
 
     result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--allowed-tools", "bash", "--tool-scope", "container", "--dry-run"]);
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /Claude container-scoped Bash has no network sandbox/i);
-
-    result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--allowed-tools", "bash", "--tool-scope", "container", "--tool-network", "internet", "--dry-run"]);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /^BOT_AI_TOOL_SCOPE=container$/m);
-    assert.match(result.stdout, /^BOT_AI_TOOL_NETWORK=internet$/m);
 
     result = runCli(botsDir, ["deploy", "publiccodex", "--host", "root@example.test", "--allowed-tools", "bash", "--tool-scope", "container", "--dry-run"]);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /^BOT_AI_TOOL_CAPABILITIES=read,write,bash$/m);
     assert.match(result.stdout, /^BOT_AI_TOOL_SCOPE=container$/m);
-    assert.match(result.stdout, /^BOT_AI_TOOL_NETWORK=none$/m);
-    assert.doesNotMatch(result.stdout, /apparmor=pca-agent-sandbox-v1|pca-agent-sandbox-v1\.seccomp/);
+    assert.doesNotMatch(result.stdout, /apparmor=|seccomp=|bubblewrap/);
 
     result = runCli(botsDir, ["deploy", "publicopencode", "--host", "root@example.test", "--allowed-tools", "bash", "--dry-run"]);
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /OpenCode Bash has no network sandbox/i);
-
-    result = runCli(botsDir, ["deploy", "publicopencode", "--host", "root@example.test", "--allowed-tools", "bash", "--tool-network", "internet", "--dry-run"]);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /^BOT_AI_TOOL_NETWORK=internet$/m);
-    assert.match(result.stdout, /OpenCode Bash follows the container boundary/i);
-
-    result = runCli(botsDir, ["prepare-host", "--host", "root@example.test", "--dry-run"]);
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /PCA Linux sandbox host preparation/);
-    assert.match(result.stdout, /pca-agent-sandbox-v1/);
-
-    result = runCli(botsDir, ["run", "publicopencode", "--allowed-tools", "bash"]);
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /OpenCode Bash has no network sandbox/i);
+    assert.match(result.stdout, /Bash.*container/i);
 
     for (const [args, pattern] of [
       [["--allowed-tools", "Read"], /unsupported capability/i],
       [["--allowed-tools", "read,read"], /duplicate capability/i],
       [["--allowed-tools", "read,,write"], /empty capability/i],
-      [["--tool-network", "internet"], /requires the bash capability/i],
+      [["--tool-network", "internet"], /Unknown flag.*tool-network/i],
       [["--tool-scope", "host"], /must be one of/i],
       [["--safe-tools"], /Unknown flag.*safe-tools/i],
       [["--full-autonomy"], /Unknown flag.*full-autonomy/i],

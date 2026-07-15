@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { RUNNERS, toolActionTitle, resolveEngine, ENGINES, toolPolicyEnforcement } from "../lib/runners.mjs";
 
-const policy = (capabilities = [], scope = "workspace", network = "none") => ({ capabilities, scope, network });
+const policy = (capabilities = [], scope = "workspace") => ({ capabilities, scope });
 
 // Accumulate a fixture event stream through an engine's parseEvent the way
 // bot-core's loop does, returning the normalized outcome.
@@ -63,21 +63,7 @@ test("claude compiles portable capabilities to scoped native tools", () => {
   assert.match(allow, /Bash\(\*\)/);
   const deny = fresh[fresh.indexOf("--disallowedTools") + 1];
   assert.match(deny, /Read\(\/\/home\/node\/\*\*\)/);
-  const settings = JSON.parse(fresh[fresh.indexOf("--settings") + 1]);
-  assert.equal(settings.sandbox.failIfUnavailable, true);
-  assert.equal(settings.sandbox.allowUnsandboxedCommands, false);
-  assert.deepEqual(settings.sandbox.network.allowedDomains, []);
-  assert.deepEqual(settings.sandbox.filesystem.allowRead, [
-    "/workspace/project",
-    "/tmp/pca-stage/attachment",
-    "/tmp/pca-stage/output",
-  ]);
-  assert.deepEqual(settings.sandbox.filesystem.allowWrite, [
-    "/workspace/project",
-    "/tmp/pca-stage/output",
-  ]);
-  assert.deepEqual(settings.sandbox.filesystem.denyRead, ["/home/node", "/state", "/app"]);
-  assert.deepEqual(settings.sandbox.filesystem.denyWrite, ["/home/node", "/state", "/app"]);
+  assert.equal(fresh.includes("--settings"), false, "Bash uses the agent process boundary, not a Claude-specific sandbox");
   // prompt is always last, after `--` (leading-dash safety)
   assert.equal(fresh.at(-2), "--");
   assert.equal(fresh.at(-1), "hi");
@@ -97,12 +83,12 @@ test("claude read policy exposes staged attachments without shell or edits", () 
   });
   assert.equal(args[args.indexOf("--tools") + 1], "Read,Glob,Grep");
   assert.match(args[args.indexOf("--allowedTools") + 1], /Read\(\/\/tmp\/pca-agent-stage-123\/\.pca-attachment-456\/\*\*\)/);
-  assert.equal(args.includes("--settings"), false, "Bash is the only capability that needs Claude's command sandbox");
+  assert.equal(args.includes("--settings"), false);
   assert.equal(args.includes("Bash"), false, "no shell tool is exposed");
   assert.equal(args.includes("Edit"), false, "no write tool is exposed");
 });
 
-test("claude keeps a protected home denied to Bash while permitting a local workspace", () => {
+test("claude keeps native file tools scoped while Bash follows the process boundary", () => {
   const args = RUNNERS.claude.buildArgs({
     prompt: "inspect",
     policy: policy(["bash"]),
@@ -115,34 +101,7 @@ test("claude keeps a protected home denied to Bash while permitting a local work
   assert.match(denied, /state/);
   assert.match(allowed, /Read\(\/\/home\/node\/projects\/demo\/\*\*\)/);
   assert.doesNotMatch(allowed, /Read\(\/\/home\/node\/\*\*\)/);
-  const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
-  assert.deepEqual(settings.sandbox.filesystem.denyRead, ["/home/node", "/state"]);
-  assert.deepEqual(settings.sandbox.filesystem.denyWrite, ["/state"]);
-  assert.deepEqual(settings.sandbox.filesystem.allowRead, ["/home/node/projects/demo"]);
-  assert.deepEqual(settings.sandbox.filesystem.allowWrite, ["/home/node/projects/demo"]);
-});
-
-test("claude keeps the normal Bubblewrap sandbox and permits visible Unix sockets only for a Docker runtime", () => {
-  const direct = RUNNERS.claude.buildArgs({
-    prompt: "hi",
-    policy: policy(["bash"]),
-    workingDirectory: "/workspace",
-    protectedPaths: ["/state", "/home/node"],
-    containerRuntime: true,
-  });
-  const settings = JSON.parse(direct[direct.indexOf("--settings") + 1]);
-  assert.equal(settings.sandbox.network.allowAllUnixSockets, true);
-  assert.equal("enableWeakerNestedSandbox" in settings.sandbox, false);
-
-  const local = RUNNERS.claude.buildArgs({
-    prompt: "hi",
-    policy: policy(["bash"]),
-    workingDirectory: "/workspace",
-    protectedPaths: ["/state", "/home/node"],
-  });
-  const localSettings = JSON.parse(local[local.indexOf("--settings") + 1]);
-  assert.equal("allowAllUnixSockets" in localSettings.sandbox.network, false);
-  assert.equal("enableWeakerNestedSandbox" in localSettings.sandbox, false);
+  assert.equal(args.includes("--settings"), false);
 });
 
 test("claude rejects paths that could alter native permission rules", () => {
@@ -209,7 +168,7 @@ test("codex compiles a custom workspace permission profile", () => {
   assert.match(profile, /":workspace_roots"=\{"\."="write"\}/);
   assert.match(profile, /"\/tmp\/pca-attachment"="read"/);
   assert.match(profile, /"\/tmp\/pca-output"="write"/);
-  assert.match(profile, /network=\{enabled=false\}/);
+  assert.doesNotMatch(profile, /network=/);
   assert.ok(fresh.includes("features.shell_tool=false"), "read/write must not quietly enable Bash");
   assert.equal(fresh.at(-1), "hi");
 
@@ -221,11 +180,11 @@ test("codex compiles a custom workspace permission profile", () => {
   const guarded = RUNNERS.codex.buildArgs({ prompt: untrustedPrompt, policy: policy(["read"]) });
   assert.deepEqual(guarded.slice(-2), ["--", untrustedPrompt]);
 
-  const container = RUNNERS.codex.buildArgs({ prompt: "hi", policy: policy(["bash"], "container", "internet") });
+  const container = RUNNERS.codex.buildArgs({ prompt: "hi", policy: policy(["bash"], "container") });
   const containerProfile = container.find((value) => String(value).startsWith("permissions="));
   assert.equal(container.includes("-s"), false, "container scope still uses Codex's native profile");
   assert.match(containerProfile, /":root"="write"/);
-  assert.match(containerProfile, /network=\{enabled=true,mode="full"\}/);
+  assert.doesNotMatch(containerProfile, /network=/);
   assert.ok(container.includes("features.shell_tool=true"));
 
   const noTools = RUNNERS.codex.buildArgs({ prompt: "hi" });
@@ -281,10 +240,7 @@ test("opencode compiles deny-first permissions and isolates configuration", () =
   assert.deepEqual(permission.external_directory, { "*": "deny", "/tmp/pca-stage/**": "allow", "/tmp/pca-output/**": "allow" });
   assert.equal(env.OPENCODE_DISABLE_PROJECT_CONFIG, "1");
   assert.equal(env.OPENCODE_DISABLE_DEFAULT_PLUGINS, "1");
-  assert.throws(
-    () => RUNNERS.opencode.buildArgs({ prompt: "bash", policy: policy(["bash"]) }),
-    /no network sandbox/,
-  );
+  assert.ok(RUNNERS.opencode.buildArgs({ prompt: "bash", policy: policy(["bash"]) }).includes("bash"));
   assert.throws(
     () => RUNNERS.opencode.buildEnvironment({ policy: policy(["read"]), workingDirectory: "/workspace/evil*" }),
     /unsafe for OpenCode permission rules/,
@@ -335,12 +291,12 @@ test("reasoning effort maps to each engine's own flag", () => {
 });
 
 test("runner reports the scope enforcement it actually provides", () => {
-  assert.equal(toolPolicyEnforcement("claude", policy(["bash"])).kind, "native-sandbox");
-  assert.match(toolPolicyEnforcement("claude", policy(["bash"])).detail, /Bubblewrap readiness probe/);
+  assert.equal(toolPolicyEnforcement("claude", policy(["bash"])).kind, "process-boundary");
+  assert.match(toolPolicyEnforcement("claude", policy(["bash"])).detail, /Bash follows the agent process boundary/);
   assert.equal(toolPolicyEnforcement("codex", policy(["read", "write"])).kind, "native-sandbox");
-  const openCode = toolPolicyEnforcement("opencode", policy(["bash"], "workspace", "internet"));
-  assert.equal(openCode.kind, "permission-policy");
-  assert.match(openCode.detail, /container/);
+  const openCode = toolPolicyEnforcement("opencode", policy(["bash"]));
+  assert.equal(openCode.kind, "process-boundary");
+  assert.match(openCode.detail, /process boundary/);
 });
 
 test("claude result events carry token/cost usage", () => {

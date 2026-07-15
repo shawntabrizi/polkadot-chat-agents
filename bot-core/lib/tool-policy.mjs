@@ -1,18 +1,16 @@
 // Portable direct-agent tool policy.
 //
 // This module is deliberately independent of each CLI's native tool names.
-// Operators choose the outcomes they want (`read`, `write`, and `bash`), the
-// filesystem scope those tools may reach, and whether tool subprocesses may
-// use the network. Runners compile that policy to the selected engine.
+// Operators choose the outcomes they want (`read`, `write`, and `bash`) and
+// the filesystem scope those tools may reach. Runners compile that policy to
+// the selected engine.
 
 export const TOOL_CAPABILITIES = Object.freeze(["read", "write", "bash"]);
 export const TOOL_SCOPES = Object.freeze(["workspace", "container"]);
-export const TOOL_NETWORKS = Object.freeze(["none", "internet"]);
 
 export const DEFAULT_TOOL_POLICY = Object.freeze({
   capabilities: Object.freeze([]),
   scope: "workspace",
-  network: "none",
 });
 
 const capabilityRank = new Map(TOOL_CAPABILITIES.map((capability, index) => [capability, index]));
@@ -67,14 +65,10 @@ const canonicalEnum = (value, values, label, fallback) => {
   return selected;
 };
 
-export const createToolPolicy = ({ capabilities = [], scope = "workspace", network = "none" } = {}) => {
+export const createToolPolicy = ({ capabilities = [], scope = "workspace" } = {}) => {
   const canonical = canonicalCapabilities(capabilities, "tool capabilities");
   const selectedScope = canonicalEnum(scope, TOOL_SCOPES, "tool scope", "workspace");
-  const selectedNetwork = canonicalEnum(network, TOOL_NETWORKS, "tool network", "none");
-  if (selectedNetwork !== "none" && !canonical.includes("bash")) {
-    throw new ToolPolicyError("--tool-network internet requires the bash capability.");
-  }
-  return Object.freeze({ capabilities: canonical, scope: selectedScope, network: selectedNetwork });
+  return Object.freeze({ capabilities: canonical, scope: selectedScope });
 };
 
 export const parseToolCapabilities = (value, label = "--allowed-tools") =>
@@ -83,7 +77,6 @@ export const parseToolCapabilities = (value, label = "--allowed-tools") =>
 export const toolPolicyFromEnvironment = (env = process.env) => createToolPolicy({
   capabilities: env.BOT_AI_TOOL_CAPABILITIES ?? "",
   scope: env.BOT_AI_TOOL_SCOPE ?? "workspace",
-  network: env.BOT_AI_TOOL_NETWORK ?? "none",
 });
 
 export const toolPolicyEnvironment = (policy) => {
@@ -91,7 +84,6 @@ export const toolPolicyEnvironment = (policy) => {
   return {
     BOT_AI_TOOL_CAPABILITIES: normalized.capabilities.join(","),
     BOT_AI_TOOL_SCOPE: normalized.scope,
-    BOT_AI_TOOL_NETWORK: normalized.network,
   };
 };
 
@@ -103,6 +95,5 @@ export const toolPolicySummary = (policy) => {
   return {
     capabilities: normalized.capabilities.length ? normalized.capabilities.join(", ") : "none",
     scope: normalized.scope,
-    network: normalized.network,
   };
 };

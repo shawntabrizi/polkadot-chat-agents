@@ -165,7 +165,6 @@ describe("transport e2e", { concurrency: 8 }, () => {
             BOT_AI_MODEL_SWITCHING: "locked",
             BOT_AI_TOOL_CAPABILITIES: "",
             BOT_AI_TOOL_SCOPE: "workspace",
-            BOT_AI_TOOL_NETWORK: "none",
           },
         });
         bots.push(bot);

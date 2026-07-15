@@ -30,8 +30,6 @@ import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
 import { deriveP256PrivateKey, p256PublicKeyFromPrivateKey } from "./vendor/app-chat-codec.mjs";
 import { entrypointForTransport } from "./lib/transport-entrypoint.mjs";
 import { assertEngineToolPolicy, toolPolicyEnforcement } from "./lib/runners.mjs";
-import { claudeWorkspaceSandboxProbeArgs, requiresClaudeWorkspaceSandbox } from "./lib/claude-sandbox.mjs";
-import { withoutContainerRuntime } from "./lib/runtime-topology.mjs";
 import {
   DEFAULT_TOOL_POLICY,
   ToolPolicyError,
@@ -49,27 +47,6 @@ import {
 } from "./lib/testnet-file-allowance.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const LINUX_SANDBOX_DIR = path.join(HERE, "deploy", "linux-sandbox");
-const PCA_AGENT_SANDBOX_PROFILE = "pca-agent-sandbox-v1";
-const PCA_AGENT_SANDBOX_APPARMOR_FILE = `${PCA_AGENT_SANDBOX_PROFILE}.apparmor`;
-const PCA_AGENT_SANDBOX_SECCOMP_FILE = `${PCA_AGENT_SANDBOX_PROFILE}.seccomp.json`;
-const PCA_AGENT_SANDBOX_SECCOMP_META_FILE = `${PCA_AGENT_SANDBOX_PROFILE}.seccomp.meta.json`;
-const PCA_AGENT_SANDBOX_APPARMOR_SHA256 = "6361ccee4e91c19dd2895f277e88940c9fae35c464315d0a92185e984f1f96dc";
-const PCA_AGENT_SANDBOX_SECCOMP_SHA256 = "7f55e3ea6420d170cf0a1f78c35ea237106571bb0500fdcf0b5f9d602ffb5b6b";
-const PCA_AGENT_SANDBOX_SECCOMP_BASE = Object.freeze({
-  repository: "https://github.com/moby/profiles",
-  ref: "seccomp/v0.2.3",
-  commit: "836ae4d37ef2ec995c77c99fc55f5b5f3af3a897",
-  path: "seccomp/default.json",
-  sha256: "536529b665dd0972c37bfb569f5d4ac8a53592e7b00752bc39ff063ca9864c74",
-});
-const PCA_BWRAP_SETUP_SYSCALLS = Object.freeze(["mount", "umount2", "pivot_root"]);
-const PCA_BWRAP_CLONE_NAMESPACE_MASK = 2114060288;
-const PCA_BWRAP_CLONE_NAMESPACE_VALUES = Object.freeze([
-  Object.freeze({ value: 805437440, flags: "NEWUSER|NEWNS|NEWPID" }),
-  Object.freeze({ value: 1879179264, flags: "NEWUSER|NEWNS|NEWPID|NEWNET" }),
-]);
-const PCA_BWRAP_SECCOMP_COMMENT_PREFIX = "PCA Bubblewrap ";
 // Proofs run via the vendored wasm build by default (no Rust toolchain needed);
 // set PCA_BANDERSNATCH_CLI to a natively built binary to override.
 const BANDERSNATCH_BIN = process.env.PCA_BANDERSNATCH_CLI ?? null;
@@ -776,126 +753,6 @@ function sshTarget(value) {
 const shellQuote = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
 const redactEnv = (content) => content.replace(/^([A-Z0-9_]*(?:SEED_HEX|TOKEN|API_KEY))=.*/gm, "$1=<hidden>");
 
-function pcaBubblewrapCloneRule({ index, value, flags, s390 }) {
-  return {
-    names: ["clone"],
-    action: "SCMP_ACT_ALLOW",
-    args: [{ index, value: PCA_BWRAP_CLONE_NAMESPACE_MASK, valueTwo: value, op: "SCMP_CMP_MASKED_EQ" }],
-    comment: `${PCA_BWRAP_SECCOMP_COMMENT_PREFIX}user namespace setup (${flags}); constrained by pca-agent-sandbox-v1 AppArmor stack.`,
-    ...(s390
-      ? { includes: { arches: ["s390", "s390x"] }, excludes: { caps: ["CAP_SYS_ADMIN"] } }
-      : { excludes: { caps: ["CAP_SYS_ADMIN"], arches: ["s390", "s390x"] } }),
-  };
-}
-
-function expectedPcaBubblewrapSeccompRules() {
-  return [
-    {
-      names: [...PCA_BWRAP_SETUP_SYSCALLS],
-      action: "SCMP_ACT_ALLOW",
-      comment: `${PCA_BWRAP_SECCOMP_COMMENT_PREFIX}mount setup; constrained by pca-agent-sandbox-v1 AppArmor stack.`,
-    },
-    ...PCA_BWRAP_CLONE_NAMESPACE_VALUES.map((value) => pcaBubblewrapCloneRule({ index: 0, ...value, s390: false })),
-    ...PCA_BWRAP_CLONE_NAMESPACE_VALUES.map((value) => pcaBubblewrapCloneRule({ index: 1, ...value, s390: true })),
-  ];
-}
-
-// Docker cannot compose seccomp profiles, so PCA vendors a fully materialized
-// profile derived from a pinned Moby baseline. Verify the checked-in digest
-// before handing it to Docker; a malformed local asset must never broaden a
-// production container silently.
-function loadPcaAgentLinuxSandboxAssets() {
-  const apparmorPath = path.join(LINUX_SANDBOX_DIR, PCA_AGENT_SANDBOX_APPARMOR_FILE);
-  const seccompPath = path.join(LINUX_SANDBOX_DIR, PCA_AGENT_SANDBOX_SECCOMP_FILE);
-  const metadataPath = path.join(LINUX_SANDBOX_DIR, PCA_AGENT_SANDBOX_SECCOMP_META_FILE);
-  let apparmor;
-  let seccompRaw;
-  let metadata;
-  try {
-    apparmor = fs.readFileSync(apparmorPath);
-    seccompRaw = fs.readFileSync(seccompPath);
-    metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
-  } catch (error) {
-    fail(`PCA Linux sandbox assets are missing or invalid: ${String(error?.message ?? error)}`);
-  }
-  const apparmorSha256 = createHash("sha256").update(apparmor).digest("hex");
-  const seccompSha256 = createHash("sha256").update(seccompRaw).digest("hex");
-  if (apparmorSha256 !== PCA_AGENT_SANDBOX_APPARMOR_SHA256
-      || metadata?.format !== 2
-      || metadata?.profile !== PCA_AGENT_SANDBOX_PROFILE
-      || JSON.stringify(metadata?.base) !== JSON.stringify(PCA_AGENT_SANDBOX_SECCOMP_BASE)
-      || metadata?.generatedSha256 !== PCA_AGENT_SANDBOX_SECCOMP_SHA256
-      || seccompSha256 !== PCA_AGENT_SANDBOX_SECCOMP_SHA256) {
-    fail("PCA Linux sandbox seccomp asset digest does not match its pinned metadata.");
-  }
-  let seccomp;
-  try { seccomp = JSON.parse(seccompRaw.toString("utf8")); } catch { fail("PCA Linux sandbox seccomp asset is not valid JSON."); }
-  const expectedRules = expectedPcaBubblewrapSeccompRules();
-  const pcaRules = Array.isArray(seccomp?.syscalls)
-    ? seccomp.syscalls.filter((rule) => String(rule?.comment ?? "").startsWith(PCA_BWRAP_SECCOMP_COMMENT_PREFIX))
-    : [];
-  const pcaRulePolicyMatches = pcaRules.length === expectedRules.length
-    && pcaRules.every((rule, index) => JSON.stringify(rule) === JSON.stringify(expectedRules[index]));
-  const residualPrivilegedSetup = Array.isArray(seccomp?.syscalls)
-    && seccomp.syscalls.some((rule) => rule?.includes?.caps?.includes("CAP_SYS_ADMIN")
-      && rule?.names?.some((name) => ["clone", "mount", "umount2"].includes(name)));
-  if (seccomp?.defaultAction !== "SCMP_ACT_ERRNO"
-      || JSON.stringify(metadata?.pcaSetupSyscalls) !== JSON.stringify(PCA_BWRAP_SETUP_SYSCALLS)
-      || metadata?.pcaCloneNamespaceMask !== PCA_BWRAP_CLONE_NAMESPACE_MASK
-      || JSON.stringify(metadata?.pcaCloneNamespaceValues) !== JSON.stringify(PCA_BWRAP_CLONE_NAMESPACE_VALUES.map(({ value }) => value))
-      || !pcaRulePolicyMatches
-      || residualPrivilegedSetup) {
-    fail("PCA Linux sandbox seccomp asset has an unexpected syscall policy.");
-  }
-  return { apparmorPath, seccompPath, apparmorSha256, seccompSha256 };
-}
-
-// Loading AppArmor policy is an explicit host-administration operation. Deploy
-// never mutates the host LSM on its own; it only refuses to replace a bot when
-// the required confined profile cannot make Bubblewrap work.
-async function cmdPrepareHost(arg, flags) {
-  if (arg != null) fail("Usage: pca prepare-host --host <ssh-target> [--dry-run]");
-  const host = flags.host ? sshTarget(flags.host) : null;
-  if (!host) fail("Usage: pca prepare-host --host <ssh-target> [--dry-run]");
-  const assets = loadPcaAgentLinuxSandboxAssets();
-  const remoteProfile = `/etc/apparmor.d/${PCA_AGENT_SANDBOX_PROFILE}`;
-  if (flags["dry-run"] === true) {
-    console.log(`PCA Linux sandbox host preparation for ${host}\n`);
-    note(`Would verify AppArmor, then install/load ${remoteProfile}.`);
-    note(`Profile SHA-256: ${assets.apparmorSha256}`);
-    note(`Deploys keep no-new-privileges and use ${PCA_AGENT_SANDBOX_SECCOMP_FILE} only for Claude workspace Bash.`);
-    return;
-  }
-
-  const sshOpts = ["-o", "ConnectTimeout=10", "-o", "BatchMode=yes"];
-  step(`Checking AppArmor on ${host}…`);
-  const prerequisite = runLocal("ssh", [...sshOpts, host,
-    "command -v apparmor_parser >/dev/null && test -r /sys/kernel/security/apparmor/profiles"], { capture: true });
-  if (prerequisite.status !== 0) {
-    fail(`${host} does not have an active AppArmor parser/profile filesystem. Claude workspace Bash in Docker needs an AppArmor-enabled Linux host.`);
-  }
-
-  // Do not overwrite an operator-maintained profile under the same name. A
-  // version bump gets a new profile name; identical content is safe to reload.
-  const existing = runLocal("ssh", [...sshOpts, host,
-    `if [ -e ${shellQuote(remoteProfile)} ]; then test ! -L ${shellQuote(remoteProfile)} && test "$(sha256sum ${shellQuote(remoteProfile)} | cut -d ' ' -f1)" = ${shellQuote(assets.apparmorSha256)}; fi`], { capture: true });
-  if (existing.status !== 0) {
-    fail(`${remoteProfile} already exists on ${host} with different content. PCA will not overwrite it; inspect it or use a new profile version.`);
-  }
-
-  const remoteTemp = `/tmp/${PCA_AGENT_SANDBOX_APPARMOR_FILE}.${randomBytes(12).toString("hex")}`;
-  step("Uploading and validating the confined PCA AppArmor profile…");
-  const upload = runLocal("scp", [...sshOpts, assets.apparmorPath, `${host}:${remoteTemp}`]);
-  if (upload.status !== 0) fail("Could not upload the PCA AppArmor profile.");
-  const install = runLocal("ssh", [...sshOpts, host,
-    `set -eu; trap 'rm -f ${remoteTemp}' EXIT; apparmor_parser -Q -K -T ${shellQuote(remoteTemp)}; install -m 0644 ${shellQuote(remoteTemp)} ${shellQuote(remoteProfile)}; apparmor_parser -r -W ${shellQuote(remoteProfile)}; grep -Fqx ${shellQuote(`${PCA_AGENT_SANDBOX_PROFILE} (enforce)`)} /sys/kernel/security/apparmor/profiles`], { capture: true });
-  if (install.status !== 0) {
-    fail(`Could not load ${PCA_AGENT_SANDBOX_PROFILE} on ${host}. No bot was changed.\n${(install.stderr || install.stdout || "").trim()}`);
-  }
-  ok(`Loaded ${PCA_AGENT_SANDBOX_PROFILE} on ${host}.`);
-  note("Claude workspace-Bash deploys will now run a disposable Bubblewrap readiness check before replacing a bot.");
-}
-
 const deeplink = (accountIdHex) => {
   if (!accountIdHex) return null;
   const id = String(accountIdHex).replace(/^0x/, "");
@@ -1422,10 +1279,10 @@ async function cmdStorage(positional, flags = {}) {
 }
 
 function requestedDirectToolPolicy(brain, flags, command) {
-  const toolPolicyFlagUsed = flags["allowed-tools"] != null || flags["tool-scope"] != null || flags["tool-network"] != null;
+  const toolPolicyFlagUsed = flags["allowed-tools"] != null || flags["tool-scope"] != null;
   if (!DIRECT_BRAIN_CLIS.has(brain)) {
     if (toolPolicyFlagUsed) {
-      fail(`--allowed-tools, --tool-scope, and --tool-network require a built-in direct engine (claude, codex, or opencode); ${brain} has no direct-agent tools.`);
+      fail(`--allowed-tools and --tool-scope require a built-in direct engine (claude, codex, or opencode); ${brain} has no direct-agent tools.`);
     }
     return DEFAULT_TOOL_POLICY;
   }
@@ -1435,7 +1292,6 @@ function requestedDirectToolPolicy(brain, flags, command) {
         ? []
         : parseToolCapabilities(flagValue(flags["allowed-tools"], "allowed-tools")),
       scope: flags["tool-scope"] == null ? "workspace" : flagValue(flags["tool-scope"], "tool-scope"),
-      network: flags["tool-network"] == null ? "none" : flagValue(flags["tool-network"], "tool-network"),
     }));
   } catch (error) {
     fail(error instanceof ToolPolicyError ? error.message : `Invalid tool policy for ${command}: ${String(error?.message ?? error)}`);
@@ -1461,11 +1317,14 @@ function cmdRun(name, flags = {}) {
   step(`Starting "${name}" (${cfg.brain})…`);
   if (DIRECT_BRAIN_CLIS.has(cfg.brain)) {
     const summary = toolPolicySummary(runToolPolicy);
-    note(`Tool policy: ${summary.capabilities}; scope=${summary.scope}; tool network=${summary.network}.`);
+    note(`Tool policy: ${summary.capabilities}; scope=${summary.scope}.`);
+    if (runToolPolicy.capabilities.includes("bash") || runToolPolicy.scope === "container") {
+      warn("Local agent tools follow this machine's process boundary; use pca deploy for per-bot container isolation.");
+    }
   }
   note(`Check health from another terminal:  pca status ${name}   (Ctrl-C here stops the bot)`);
   const env = {
-    ...withoutContainerRuntime(process.env),
+    ...process.env,
     BOT_SEED_HEX: secret.seedHex,
     BOT_ENDPOINT: cfg.endpoint,
     BOT_BRIDGE_PORT: String(bridgePort),
@@ -1482,7 +1341,6 @@ function cmdRun(name, flags = {}) {
   // broader policy from the operator's shell for a local bot run.
   delete env.BOT_AI_TOOL_CAPABILITIES;
   delete env.BOT_AI_TOOL_SCOPE;
-  delete env.BOT_AI_TOOL_NETWORK;
   if (DIRECT_BRAIN_CLIS.has(cfg.brain)) Object.assign(env, toolPolicyEnvironment(runToolPolicy));
   // A local operator may deliberately override a test HOP endpoint in their
   // shell. Deploys always use the persisted profile, but don't erase that
@@ -1542,7 +1400,7 @@ const t3amsHealthWaitCommand = (container, tail = 30) =>
   `status=unknown; for i in $(seq 1 45); do status="$(docker inspect --format '{{.State.Health.Status}}' ${container} 2>/dev/null || true)"; [ "$status" = healthy ] && break; sleep 2; done; echo "T3AMS_BOT_HEALTH=$status"; docker logs --tail ${tail} ${container} 2>&1; [ "$status" = healthy ]`;
 
 async function cmdDeploy(name, flags) {
-  if (!name) fail("Usage: pca deploy <name> --host <ssh-target> [--harness openclaw|hermes] [--model <m>] [--allowed-tools <read,write,bash>] [--tool-scope workspace|container] [--tool-network none|internet] [--media-analyzer] [--dry-run]");
+  if (!name) fail("Usage: pca deploy <name> --host <ssh-target> [--harness openclaw|hermes] [--model <m>] [--allowed-tools <read,write,bash>] [--tool-scope workspace|container] [--media-analyzer] [--dry-run]");
   const host = flags.host ? sshTarget(flags.host) : null;
   if (!host) fail(`--host <ssh-target> is required, e.g.  pca deploy ${name} --host root@1.2.3.4`);
   const cfg = readConfig(name);
@@ -1550,7 +1408,7 @@ async function cmdDeploy(name, flags) {
   const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
   const transport = configuredTransport(cfg);
   const mediaAnalyzerEnabled = flags["media-analyzer"] === true;
-  const toolPolicyFlagUsed = flags["allowed-tools"] != null || flags["tool-scope"] != null || flags["tool-network"] != null;
+  const toolPolicyFlagUsed = flags["allowed-tools"] != null || flags["tool-scope"] != null;
   const suppliedKeyFlag = Object.values(KEY_FLAGS).find((key) => flags[key] != null);
   if (suppliedKeyFlag) {
     fail(`--${suppliedKeyFlag} is no longer accepted: API keys are not injected into autonomous agents. Authenticate the selected CLI or framework through its own persistent credential store instead.`);
@@ -1560,7 +1418,7 @@ async function cmdDeploy(name, flags) {
       fail("--media-analyzer requires a T3ams direct-engine deployment (claude, codex, or opencode); bridge bots own their attachment runtime.");
     }
     if (toolPolicyFlagUsed) {
-      fail("--allowed-tools, --tool-scope, and --tool-network require a built-in direct engine (claude, codex, or opencode); bridge bots own their agent runtime.");
+      fail("--allowed-tools and --tool-scope require a built-in direct engine (claude, codex, or opencode); bridge bots own their agent runtime.");
     }
     const harness = flags.harness ? String(flags.harness).toLowerCase() : null;
     if (harness !== "openclaw" && harness !== "hermes") {
@@ -1585,11 +1443,6 @@ async function cmdDeploy(name, flags) {
   const base = remoteDir(flags["remote-dir"] ?? `pca-bots/${name}`);
   const sshOpts = ["-o", "ConnectTimeout=10", "-o", "BatchMode=yes"];
   const deployToolPolicy = requestedDirectToolPolicy(cfg.brain, flags, "deploy");
-  const claudeWorkspaceDockerSandbox = spec.pkg != null
-    && requiresClaudeWorkspaceSandbox(cfg.brain, deployToolPolicy);
-  const claudeWorkspaceSandboxAssets = claudeWorkspaceDockerSandbox
-    ? loadPcaAgentLinuxSandboxAssets()
-    : null;
 
   // Verify the SDK before generating any deployment credentials or touching
   // the VPS. A dry run remains inspectable, but reports an import failure that
@@ -1643,22 +1496,19 @@ async function cmdDeploy(name, flags) {
     envLines.push(
       "BOT_AI_AGENT_UID=1000",
       "BOT_AI_AGENT_GID=1000",
-      "BOT_AI_RUNTIME_CONTAINER=1",
     );
   }
 
   // echo needs no CLI; direct engines get a fixed CLI image. Keep the bot as
   // root so it can read `/state`, then let agent-runtime setuid to node.
   const dockerfile = spec.pkg
-    ? `FROM ${NODE_IMAGE}\nRUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates ripgrep bubblewrap socat util-linux && rm -rf /var/lib/apt/lists/*\nRUN npm install --global --no-audit --no-fund ${spec.pkg} && npm cache clean --force\nRUN mkdir -p /home/node /workspace /state && chown -R 1000:1000 /home/node /workspace && chmod 700 /home/node /workspace /state\nENV HOME=/home/node\nWORKDIR /app\nCMD ["node", "${entrypoint}"]\n`
+    ? `FROM ${NODE_IMAGE}\nRUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates ripgrep && rm -rf /var/lib/apt/lists/*\nRUN npm install --global --no-audit --no-fund ${spec.pkg} && npm cache clean --force\nRUN mkdir -p /home/node /workspace /state && chown -R 1000:1000 /home/node /workspace && chmod 700 /home/node /workspace /state\nENV HOME=/home/node\nWORKDIR /app\nCMD ["node", "${entrypoint}"]\n`
     : null;
   const mediaDependsOn = mediaAnalyzerEnabled
     ? "    depends_on:\n      media-analyzer:\n        condition: service_healthy\n"
     : "";
   const botHealthcheck = t3amsBotHealthcheck(transport);
-  const engineSecurityOptions = claudeWorkspaceDockerSandbox
-    ? `      - no-new-privileges:true\n      - apparmor=${PCA_AGENT_SANDBOX_PROFILE}\n      - seccomp=./${PCA_AGENT_SANDBOX_SECCOMP_FILE}\n`
-    : "      - no-new-privileges:true\n";
+  const engineSecurityOptions = "      - no-new-privileges:true\n";
   const engineService = spec.pkg
     ? `  bot:\n    build: ./image\n    user: "0:0"\n    init: true\n    read_only: true\n    pids_limit: 256\n    mem_limit: 2g\n    cpus: "2.0"\n    security_opt:\n${engineSecurityOptions}    tmpfs:\n      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777\n    container_name: ${cn}\n    restart: unless-stopped\n${mediaDependsOn}${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n      - ./workspace:/workspace\n      - ./home:/home/node\n${botHealthcheck}    command: ["node", "${entrypoint}"]\n`
     : `  bot:\n    image: ${NODE_IMAGE}\n    user: "1000:1000"\n    init: true\n    read_only: true\n    pids_limit: 128\n    mem_limit: 512m\n    cpus: "1.0"\n    security_opt:\n      - no-new-privileges:true\n    tmpfs:\n      - /tmp:rw,noexec,nosuid,nodev,size=128m,mode=1777\n    container_name: ${cn}\n    restart: unless-stopped\n${mediaDependsOn}${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n${botHealthcheck}    command: ["node", "${entrypoint}"]\n`;
@@ -1673,13 +1523,10 @@ async function cmdDeploy(name, flags) {
   if (spec.pkg) {
     const summary = toolPolicySummary(deployToolPolicy);
     const enforcement = toolPolicyEnforcement(cfg.brain, deployToolPolicy);
-    note(`Tool policy: ${summary.capabilities}; scope=${summary.scope}; tool network=${summary.network}.`);
+    note(`Tool policy: ${summary.capabilities}; scope=${summary.scope}.`);
     note(`Enforcement: ${enforcement.detail}.`);
-    if (claudeWorkspaceDockerSandbox) {
-      note(`Claude workspace Bash needs this host prepared once: pca prepare-host --host ${host}`);
-    }
-    if (enforcement.kind === "permission-policy" && deployToolPolicy.capabilities.includes("bash")) {
-      warn("OpenCode Bash follows the container boundary; choose Claude or Codex when workspace-only Bash isolation is required.");
+    if (enforcement.kind === "process-boundary" && deployToolPolicy.capabilities.includes("bash")) {
+      warn("Bash runs inside this bot's container; workspace scope still applies to native file tools.");
     }
   }
 
@@ -1740,12 +1587,6 @@ async function cmdDeploy(name, flags) {
   fs.writeFileSync(path.join(tmp, "docker-compose.yml"), compose);
   if (dockerfile) fs.writeFileSync(path.join(tmp, "Dockerfile"), dockerfile);
   const scpFiles = [path.join(tmp, "bot.env"), path.join(tmp, "docker-compose.yml")];
-  if (claudeWorkspaceSandboxAssets) {
-    const seccompDestination = path.join(tmp, PCA_AGENT_SANDBOX_SECCOMP_FILE);
-    fs.copyFileSync(claudeWorkspaceSandboxAssets.seccompPath, seccompDestination);
-    fs.chmodSync(seccompDestination, 0o644);
-    scpFiles.push(seccompDestination);
-  }
   if (mediaAnalyzerEnabled) scpFiles.push(path.join(tmp, "media-token.env"));
   const cp = runLocal("scp", [...sshOpts, ...scpFiles, `${host}:${base}/`]);
   const dockerCp = dockerfile
@@ -1765,26 +1606,6 @@ async function cmdDeploy(name, flags) {
     step("Building the agent image (first run pulls the CLI — a few minutes)…");
     const build = runLocal("ssh", [...sshOpts, host, `cd ${base} && docker compose -p ${cn} build`]);
     if (build.status !== 0) fail("docker compose build failed.");
-  }
-  if (claudeWorkspaceDockerSandbox) {
-    step("Probing the confined Claude Bubblewrap sandbox before replacement…");
-    const probeArgs = claudeWorkspaceSandboxProbeArgs({
-      workingDirectory: "/workspace",
-      protectedDirectories: ["/state", "/home/node", "/app"],
-      requirePayloadProfile: true,
-    })
-      .map(shellQuote)
-      .join(" ");
-    const probeEnvironment = ["-i", "PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/tmp", "LANG=C.UTF-8", "bwrap"]
-      .map(shellQuote)
-      .join(" ");
-    const probe = runLocal("ssh", [...sshOpts, host,
-      `cd ${base} && docker compose -p ${cn} run --rm --no-deps --user 1000:1000 --entrypoint /usr/bin/env bot ${probeEnvironment} ${probeArgs}`], { capture: true });
-    if (probe.status !== 0) {
-      const detail = String(probe.stderr || probe.stdout || "Bubblewrap probe failed").trim().slice(-1200);
-      fail(`Claude workspace Bash is not ready on ${host}; the existing bot was not replaced.\n${detail}\nPrepare the confined host profile with: pca prepare-host --host ${host}\nThen retry this deploy.`);
-    }
-    ok("Claude Bubblewrap sandbox is ready (fresh proc, payload capability operations denied, scoped filesystem probe passed).");
   }
   step("Starting the container…");
   const up = runLocal("ssh", [...sshOpts, host, `cd ${base} && docker compose -p ${cn} up -d --force-recreate --remove-orphans`]);
@@ -2148,10 +1969,9 @@ function usage() {
 
   pca create <botname> [--brain echo|claude|codex|opencode|bridge] [--transport polkadot-app|t3ams] [--owner <your username or address>] [--public] [--network paseo] [--username name]
   pca register <name>                  finish/retry registration for an existing bot
-  pca run <name> [--model <m>] [--allowed-tools <read,write,bash>] [--tool-scope workspace|container] [--tool-network none|internet] [--greet]
+  pca run <name> [--model <m>] [--allowed-tools <read,write,bash>] [--tool-scope workspace|container] [--greet]
                                        start the bot locally (foreground)
   pca deploy <name> --host <ssh>       ship it to a server and run it in Docker
-  pca prepare-host --host <ssh>         explicitly install PCA's confined Linux sandbox profile
   pca logs <name> [-f] [--tail N]      tail a deployed bot's logs
   pca status <name>                    is the bot running + healthy? (local or deployed)
   pca stop <name>                      stop a deployed bot
@@ -2188,29 +2008,23 @@ create flags:
 model controls:  show current policy  ·  set <model> pins the default model  ·  allow <a,b>
   restricts chat-side switching  ·  lock disables it  ·  open permits it only for allowlisted bots
 
-deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --model <m>  ·  --allowed-tools <read,write,bash>  ·  --tool-scope workspace|container  ·  --tool-network none|internet  ·  --media-analyzer  ·  --dry-run
+deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --model <m>  ·  --allowed-tools <read,write,bash>  ·  --tool-scope workspace|container  ·  --media-analyzer  ·  --dry-run
   Needs Docker on the server + SSH access. Direct engines (echo/claude/codex/opencode)
   deploy with root-only transport state and a non-root agent CLI, with a persistent
   /workspace the agent works in; bridge bots deploy a two-container stack. Direct
   agents start with no tools. --allowed-tools accepts portable lowercase
   capabilities: read (inspect files), write (edit files; includes read), and
   bash (run commands; includes read and write). --tool-scope workspace keeps
-  normal work in the selected project; container deliberately grants the
-  non-root agent account's container-visible files. --tool-network controls
-  tool-process egress when the selected engine can sandbox it. Every direct bot
-  starts no-tools, including public Claude, Codex, and OpenCode bots. Inbound
-  attachments are staged per turn and become readable when the read capability
-  is enabled. Alternatively,
+  native file tools in the selected project; container grants those tools the
+  non-root agent account's container-visible files. Bash always runs inside
+  the bot container, so a workspace-scoped policy still uses the container as
+  its Bash boundary. Every direct bot starts no-tools, including public Claude,
+  Codex, and OpenCode bots. Inbound attachments are staged per turn and become
+  readable when the read capability is enabled. Alternatively,
   --media-analyzer adds an isolated API-only photo/document worker; provision
   its remote media.env with a provider API key and model first. The deploy output
   gives the one-time OAuth login command for direct engines; logs/status/stop reuse
   the saved host (override with --host).
-
-  Claude workspace Bash additionally needs one explicit Linux host preparation:
-  pca prepare-host --host root@server. It installs a confined AppArmor profile;
-  deploy then verifies Bubblewrap before it replaces the running bot. This never
-  adds CAP_SYS_ADMIN to the outer Docker container, enables privileged mode or
-  userns=host, or uses an unconfined Docker profile.
 
 Brains:  echo (test)  ·  claude/codex/opencode (direct agent engines — verbatim prompts,
   native session resume, tools in a container; opencode reaches many providers via
@@ -2225,9 +2039,8 @@ Bots live in ${BOTS_DIR} (override with PCA_BOTS_DIR).`);
 const COMMAND_FLAGS = {
   create: ["brain", "transport", "owner", "allow", "t3ams-peer-key", "t3ams-display-name", "t3ams-auto-accept-workspaces", "t3ams-no-auto-accept-workspaces", "public", "network", "endpoint", "backend", "username", "digits", "model", "port", "wait", "no-register"],
   register: ["username", "digits", "wait"],
-  run: ["model", "allowed-tools", "tool-scope", "tool-network", "greet"],
-  deploy: ["host", "harness", "anthropic-key", "openai-key", "openrouter-key", "gemini-key", "groq-key", "allowed-tools", "tool-scope", "tool-network", "media-analyzer", "model", "dry-run", "remote-dir", "greet"],
-  "prepare-host": ["host", "dry-run"],
+  run: ["model", "allowed-tools", "tool-scope", "greet"],
+  deploy: ["host", "harness", "anthropic-key", "openai-key", "openrouter-key", "gemini-key", "groq-key", "allowed-tools", "tool-scope", "media-analyzer", "model", "dry-run", "remote-dir", "greet"],
   logs: ["host", "follow", "tail"],
   status: ["host"],
   stop: ["host"],
@@ -2257,7 +2070,6 @@ try {
     case "register": await cmdRegister(arg, flags); break;
     case "run": cmdRun(arg, flags); break;                 // spawns a child; manages its own exit
     case "deploy": await cmdDeploy(arg, flags); break;
-    case "prepare-host": await cmdPrepareHost(arg, flags); break;
     case "logs": cmdLogs(arg, flags); break;
     case "status": await cmdStatus(arg, flags); break;
     case "stop": cmdStop(arg, flags); break;

@@ -18,8 +18,6 @@ import { createFileStore } from "../../lib/file-store.mjs";
 import { createFileCommandHandler } from "../../lib/file-commands.mjs";
 import { RUNNERS, resolveEngine, assertEngineToolPolicy, toolPolicyEnforcement } from "../../lib/runners.mjs";
 import { ToolPolicyError, hasToolCapability, toolPolicyFromEnvironment, toolPolicySummary } from "../../lib/tool-policy.mjs";
-import { assertClaudeWorkspaceSandbox } from "../../lib/claude-sandbox.mjs";
-import { isContainerRuntime } from "../../lib/runtime-topology.mjs";
 import { deriveT3amsBulletinUploadSigner, deriveT3amsIdentity } from "./t3ams-identity.mjs";
 import { createT3amsProtocol, hexToBytes, bareHex } from "./t3ams-protocol.mjs";
 import { createT3amsMedia } from "./t3ams-media.mjs";
@@ -2726,16 +2724,16 @@ if (customCmd && env.BOT_AI_ARGS) {
 }
 const engine = customCmd ? RUNNERS.custom : resolveEngine(brain);
 // Direct engines all consume the same PCA policy. The default is no tools;
-// an operator decides the portable capabilities, filesystem scope, and tool
-// network access without exposing an engine-native flag in the bot config.
+// an operator decides the portable capabilities and filesystem scope without
+// exposing an engine-native flag in the bot config.
 let aiToolPolicy;
 try { aiToolPolicy = toolPolicyFromEnvironment(env); }
 catch (error) {
   console.error(error instanceof ToolPolicyError ? error.message : `Invalid tool policy: ${String(error?.message ?? error)}`);
   process.exit(2);
 }
-if (customCmd && (aiToolPolicy.capabilities.length || aiToolPolicy.scope !== "workspace" || aiToolPolicy.network !== "none")) {
-  console.error("BOT_AI_CMD owns its own tool boundary; BOT_AI_TOOL_CAPABILITIES, BOT_AI_TOOL_SCOPE, and BOT_AI_TOOL_NETWORK are only supported by the built-in claude, codex, and opencode brains.");
+if (customCmd && (aiToolPolicy.capabilities.length || aiToolPolicy.scope !== "workspace")) {
+  console.error("BOT_AI_CMD owns its own tool boundary; BOT_AI_TOOL_CAPABILITIES and BOT_AI_TOOL_SCOPE are only supported by the built-in claude, codex, and opencode brains.");
   process.exit(2);
 }
 if (engine && !customCmd) {
@@ -2755,10 +2753,6 @@ const optionalPosixId = (name) => {
 };
 const aiAgentUid = optionalPosixId("BOT_AI_AGENT_UID");
 const aiAgentGid = optionalPosixId("BOT_AI_AGENT_GID");
-// Generated Docker deployments mark runtime topology so Claude applies the
-// Docker Unix-socket setting while retaining its normal Bubblewrap sandbox for
-// Bash. This is not an operator-facing tool capability.
-const aiContainerRuntime = isContainerRuntime(env);
 const defaultAiWorkspace = env.BOT_STATE_DIR
   ? path.join(path.dirname(path.resolve(stateDir)), `${path.basename(path.resolve(stateDir))}-workspace`)
   : fs.mkdtempSync(path.join(os.tmpdir(), "pca-t3ams-workspace-"));
@@ -2860,23 +2854,6 @@ if (engine != null) {
     enforcement: toolPolicyEnforcement(brain, aiToolPolicy),
   });
   fs.mkdirSync(aiWorkspace, { recursive: true, mode: 0o700 });
-  if (!customCmd) {
-    try {
-      const sandbox = assertClaudeWorkspaceSandbox({
-        engineName: brain,
-        policy: aiToolPolicy,
-        workingDirectory: aiWorkspace,
-        protectedDirectories: [stateDir, env.HOME, "/app"],
-        containerRuntime: aiContainerRuntime,
-        agentUid: aiAgentUid,
-        agentGid: aiAgentGid,
-      });
-      if (sandbox.checked) log("BOT_TOOL_SANDBOX_READY", { engine: brain, container: aiContainerRuntime, unixSockets: aiContainerRuntime ? "allowed" : "claude-default" });
-    } catch (error) {
-      console.error(error?.message ?? String(error));
-      process.exit(2);
-    }
-  }
   const workspaces = createWorkspaces({
     projects: aiProjects,
     worktreesDir: env.BOT_AI_WORKTREES_DIR ?? path.join(aiWorkspace, ".worktrees"),
@@ -2899,7 +2876,6 @@ if (engine != null) {
         attachmentDir,
         outputDir,
         workingDirectory,
-        containerRuntime: aiContainerRuntime,
         protectedPaths: [stateDir, env.HOME, "/app"],
       }),
     buildTurnEnvironment: ({ attachmentDir, outputDir, workingDirectory }) => customCmd

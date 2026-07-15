@@ -240,16 +240,12 @@ Related settings:
   allow unrestricted switching.
 - Direct agents start with no tools. For Claude, Codex, or OpenCode, a deployer
   selects portable lowercase capabilities with `--allowed-tools read,write,bash`,
-  then chooses `--tool-scope workspace|container` and
-  `--tool-network none|internet`. `write` includes `read`, and `bash` includes
-  both. The generated environment records those choices as
-  `BOT_AI_TOOL_CAPABILITIES`, `BOT_AI_TOOL_SCOPE`, and
-  `BOT_AI_TOOL_NETWORK`. A direct agent with `read` can inspect its current
-  turn's staged attachment; one with `write` can produce returnable files.
-  For `bash`, OpenCode requires `--tool-network internet`; Claude requires it
-  for container scope but can use `none` for workspace scope; Codex can keep
-  `none` in either scope. Deploy validates the combination and reports the
-  engine's enforcement level.
+  then chooses `--tool-scope workspace|container`. `write` includes `read`, and
+  `bash` includes both. The generated environment records those choices as
+  `BOT_AI_TOOL_CAPABILITIES` and `BOT_AI_TOOL_SCOPE`. A direct agent with `read`
+  can inspect its current turn's staged attachment; one with `write` can produce
+  returnable files. Workspace scopes native file tools to the selected project
+  and staged attachments; Bash uses the agent process boundary in either scope.
 - The agent works in a persistent non-secret workspace (`BOT_AI_WORKSPACE`,
   defaulting to a sibling of `BOT_STATE_DIR`) that survives restarts.
 - `BOT_AI_CMD`/`BOT_AI_ARGS` wire in a custom CLI that speaks claude-shaped
@@ -278,16 +274,17 @@ session keys, and bridge token), then spawns the agent as the non-root `node`
 user with persistent `/workspace` and `/home/node` access. The source mount is
 read-only; the container uses an init reaper, no-new-privileges, and
 process/memory/CPU ceilings. The CLI retains `/home/node` to authenticate and
-refresh its own OAuth session, while tool actions use the configured
-engine-specific policy. With Claude workspace scope, native permission rules
-limit file tools; workspace Bash also runs under a Bubblewrap allow/deny
-filesystem policy that hides `/home/node`, `/state`, and `/app`. Container
-scope intentionally grants selected tools the non-root account's
-container-visible files, including its OAuth home. Codex and OpenCode have the
-enforcement reported at deploy time; OpenCode Bash remains bounded by the
-container rather than an OS filesystem sandbox. Direct deployments therefore
-start with no tools, and the deployer deliberately selects any policy for a
-public or allowlisted bot. Sessions and the workspace persist across redeploys.
+refresh its own OAuth session; container-scoped native file tools and Bash can
+access that home.
+Direct deployments start with no tools; the deployer then deliberately selects
+portable `read`, `write`, and `bash` capabilities, a workspace or container
+scope. Workspace scopes native file tools to the selected project; Bash is
+bounded by the agent process in either scope. Container scope exposes the
+non-root account's container-visible files. A deployed bot's dedicated container
+is the concrete isolation boundary; a local `pca run` uses the local process
+account and should be treated as a trusted-machine tool.
+Sessions and the workspace persist across redeploys; do not mount unrelated host
+repositories, credentials, Docker sockets, or home directories into it.
 
 An AI brain spends quota, so `create` requires an allowlist or an explicit
 `--public`.

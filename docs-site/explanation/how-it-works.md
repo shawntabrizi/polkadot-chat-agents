@@ -69,15 +69,16 @@ The bot itself is just a process you run. It holds its own signing key — the
 key *is* the identity. In a deployed direct bot, the transport keeps that key
 and the session state while the AI-agent CLI runs as a non-root user in its own
 container. The agent does not receive the signing key or chat session state.
-Its CLI retains its provider-login home only to authenticate, while tool access
-uses the selected engine scope. With Claude workspace scope, native path rules
-constrain file tools and workspace Bash hides `/home/node`, `/state`, and
-`/app` through its Bubblewrap filesystem policy; container scope deliberately
-exposes the home. Codex and OpenCode have their own documented enforcement.
-Direct Claude, Codex, and OpenCode therefore start with no tools; their
-deployer explicitly chooses portable capabilities, scope, and tool-network
-access for either public or allowlisted bots. A local `pca run` uses your local
-environment, so treat its selected policy as especially consequential.
+Its CLI retains its provider-login home inside that bot container so it can
+authenticate; container-scoped native file tools and Bash can access it. Direct
+Claude, Codex, and OpenCode therefore start with no tools; their deployer
+explicitly chooses portable capabilities and a workspace or container scope for
+either public or allowlisted bots. Workspace scopes native file tools; Bash is
+bounded by the agent process in either scope. For a deployment that is the bot's
+dedicated container; local `pca run` uses the local process account, so treat a
+Bash-enabled local bot as a trusted-machine tool. Do not mount unrelated host
+repositories, credentials, Docker sockets, or home directories into a deployed
+bot container.
 
 ## How the promises map to the mechanism
 

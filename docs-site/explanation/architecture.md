@@ -41,18 +41,19 @@ For Claude, Codex, and OpenCode bots, `pca deploy` separates the chat transport
 from the agent CLI. The transport retains the signing seed and session state;
 the agent runs as a non-root user with its own workspace and provider-login
 home. The CLI process retains that home only to authenticate and refresh its
-session; tool access is governed separately by the selected engine and scope.
-With Claude workspace scope, native file-tool rules are path-scoped and
-workspace Bash runs under an allow/deny Bubblewrap filesystem policy that hides
-`/home/node`, `/state`, and `/app`.
+session; container-scoped native file tools and Bash can access it inside that
+bot container.
 
 Direct Claude, Codex, and OpenCode start with no tools. Their deployer may
 select portable `read`, `write`, and `bash` capabilities, workspace or container
-scope, and tool-process network access for either public or allowlisted bots.
-Container scope deliberately exposes the non-root agent account's OAuth home.
-Codex and OpenCode use their documented workspace enforcement; OpenCode Bash
-remains container-bounded rather than OS-filesystem-sandboxed. See
-[Private & public bots](/guide/access) for the deployment profiles.
+scope for either public or allowlisted bots. Workspace scopes native file tools
+to the normal working area; container scope deliberately exposes all files
+visible to the non-root agent account. Bash uses the agent process boundary in
+either scope: the bot's dedicated container for a deployment, or the local
+process account for `pca run`. Treat local Bash bots as trusted-machine tools.
+Do not mount unrelated host repositories, credentials, Docker sockets, or home
+directories into a deployed bot container. See [Private & public bots](/guide/access)
+for the deployment profiles.
 
 ## Files and attachments
 

@@ -49,8 +49,7 @@
 //   takes a provider/model slug), BOT_AI_ALLOWED_MODELS (comma-sep /model
 //   allowlist; unset/empty = locked), BOT_AI_MODEL_SWITCHING (locked|open;
 //   open requires a non-public bot), BOT_AI_TOOL_CAPABILITIES (empty = no
-//   tools), BOT_AI_TOOL_SCOPE (workspace|container), BOT_AI_TOOL_NETWORK
-//   (none|internet), BOT_AI_IDLE_TIMEOUT_MS
+//   tools), BOT_AI_TOOL_SCOPE (workspace|container), BOT_AI_IDLE_TIMEOUT_MS
 //   (600000, kills a silent/wedged turn), BOT_AI_MAX_MS (3600000 default hard
 //   cap), BOT_AI_MAX_CONCURRENT_TURNS / BOT_AI_MAX_QUEUED_TURNS, BOT_AI_WORKSPACE
 //   (a non-secret agent workspace separate from BOT_STATE_DIR),
@@ -80,8 +79,6 @@ import { createFileCommandHandler } from "./lib/file-commands.mjs";
 import { createLiveReplies, createProgressTracker } from "./lib/live-reply.mjs";
 import { RUNNERS, resolveEngine, ENGINES, assertEngineToolPolicy, toolPolicyEnforcement } from "./lib/runners.mjs";
 import { ToolPolicyError, hasToolCapability, toolPolicyFromEnvironment, toolPolicySummary } from "./lib/tool-policy.mjs";
-import { assertClaudeWorkspaceSandbox } from "./lib/claude-sandbox.mjs";
-import { isContainerRuntime } from "./lib/runtime-topology.mjs";
 import { createKeyedDispatcher } from "./lib/keyed-dispatcher.mjs";
 import { createClient as createPapiClient } from "polkadot-api";
 import { getWsProvider, WsEvent } from "polkadot-api/ws";
@@ -212,10 +209,6 @@ const optionalPosixId = (name) => {
 };
 const aiAgentUid = optionalPosixId("BOT_AI_AGENT_UID");
 const aiAgentGid = optionalPosixId("BOT_AI_AGENT_GID");
-// Generated Docker deployments mark runtime topology so Claude applies the
-// Docker Unix-socket setting while retaining its normal Bubblewrap sandbox for
-// Bash. This is not an operator-facing tool capability.
-const aiContainerRuntime = isContainerRuntime(env);
 // The agent workspace is intentionally outside state/secrets. A deployment can
 // grant its unprivileged agent user this directory without exposing the seed,
 // session keys, or the bridge token kept in BOT_STATE_DIR.
@@ -244,8 +237,8 @@ if (customCmd && env.BOT_AI_ARGS) {
 }
 const engine = customCmd ? RUNNERS.custom : resolveEngine(brain); // null unless a direct engine
 const engineCommand = customCmd || engine?.command;
-if (customCmd && (aiToolPolicy.capabilities.length || aiToolPolicy.scope !== "workspace" || aiToolPolicy.network !== "none")) {
-  console.error("BOT_AI_CMD owns its own tool boundary; BOT_AI_TOOL_CAPABILITIES, BOT_AI_TOOL_SCOPE, and BOT_AI_TOOL_NETWORK are only supported by the built-in claude, codex, and opencode brains.");
+if (customCmd && (aiToolPolicy.capabilities.length || aiToolPolicy.scope !== "workspace")) {
+  console.error("BOT_AI_CMD owns its own tool boundary; BOT_AI_TOOL_CAPABILITIES and BOT_AI_TOOL_SCOPE are only supported by the built-in claude, codex, and opencode brains.");
   process.exit(2);
 }
 if (engine && !customCmd) {
@@ -274,7 +267,6 @@ const buildEngineArgs = ({ prompt, model, resume, effort, attachmentDir, outputD
     attachmentDir,
     outputDir,
     workingDirectory,
-    containerRuntime: aiContainerRuntime,
     protectedPaths: [env.BOT_STATE_DIR, env.HOME, "/app"],
   });
 };
@@ -1072,24 +1064,6 @@ if (engine && !customCmd) log("BOT_TOOL_POLICY", {
   ...toolPolicySummary(aiToolPolicy),
   enforcement: toolPolicyEnforcement(brain, aiToolPolicy),
 });
-if (engine && !customCmd) {
-  try {
-    const sandbox = assertClaudeWorkspaceSandbox({
-      engineName: brain,
-      policy: aiToolPolicy,
-      workingDirectory: aiWorkspace,
-      protectedDirectories: [env.BOT_STATE_DIR, env.HOME, "/app"],
-      containerRuntime: aiContainerRuntime,
-      agentUid: aiAgentUid,
-      agentGid: aiAgentGid,
-    });
-    if (sandbox.checked) log("BOT_TOOL_SANDBOX_READY", { engine: brain, container: aiContainerRuntime, unixSockets: aiContainerRuntime ? "allowed" : "claude-default" });
-  } catch (error) {
-    console.error(error?.message ?? String(error));
-    process.exit(2);
-  }
-}
-
 const agentRuntime = engine ? createAgentRuntime({
   engine,
   engineName: customCmd ? "custom" : brain,
