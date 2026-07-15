@@ -304,12 +304,22 @@ app username) or an explicit `--public` for any brain that costs money.
   receives it.
 - The bot-core transport never forwards provider API-key environment variables
   to direct agents. Deployed CLIs authenticate through their native OAuth store
-  in `/home/node`; that credential is intentionally available to the agent, but
-  the signing seed and session state are not.
+  in `/home/node`. The CLI process retains that home only to authenticate and
+  refresh its own session; it is not passed through the transport or agent
+  environment. The signing seed and session state are not available to the
+  agent.
 - A direct deployment runs the transport as root only to own `/state`, then
   spawns the CLI as uid/gid 1000 with a read-only source mount and access only to
   `/workspace`, `/home/node`, and private per-turn attachment directories. The
   container has an init reaper, no-new-privileges, and process/memory/CPU limits.
-  The container remains the tool boundary (open egress, nothing from the host);
-  the allowlist gates who can drive it.
-  `--safe-tools` restricts to a read/write/edit/bash allowlist.
+  Direct deployment starts with no tools, then the deployer may deliberately
+  enable portable `read`, `write`, and `bash` capabilities, choose a workspace
+  or container scope. Workspace scopes native file tools to the selected project;
+  Bash uses the agent process boundary in either scope: the dedicated bot
+  container for a deployment or the local process account for `pca run`.
+  Container scope deliberately exposes all files visible to the non-root agent
+  account, including its OAuth home. The deployed bot container is the concrete
+  isolation boundary.
+  That choice applies equally to public and allowlisted bots: anyone who can
+  message a bot can direct the configured capabilities. Do not mount unrelated
+  host repositories, credentials, Docker sockets, or home directories into it.

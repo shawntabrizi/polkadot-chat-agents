@@ -64,7 +64,14 @@ export const polkadotPlugin: ChannelPlugin<ResolvedPolkadotAccount> = createChat
       channel: POLKADOT_CHANNEL_ID,
       sendText: async ({ cfg, to, text, accountId }: { cfg: unknown; to: string; text: string; accountId?: string | null }) => {
         const account = resolvePolkadotAccount({ cfg, accountId });
-        const res = await createBridge(account.bridgeUrl, account.bridgeToken).send(to, text);
+        // Attached results can be produced outside the inbound gateway turn,
+        // so they have no delivery/lease pair. Only request the deliberately
+        // separate proactive capability when an operator configured it.
+        const res = await createBridge(
+          account.bridgeUrl,
+          account.bridgeToken,
+          account.bridgeProactiveToken,
+        ).send(to, text, { proactive: account.bridgeProactiveToken.length > 0 });
         if (!res.success) throw new Error(`polkadot /send failed for ${to}: ${res.error ?? "unknown"}`);
         const messageId = String(res.message_id ?? Date.now());
         return {
@@ -76,6 +83,21 @@ export const polkadotPlugin: ChannelPlugin<ResolvedPolkadotAccount> = createChat
           }),
         };
       },
+    },
+  },
+
+  // Scheduled framework activity has no inbound lease. Only send a typing
+  // signal when the operator deliberately configured the narrower proactive
+  // capability; regular replies carry their leased delivery pair in gateway.
+  heartbeat: {
+    sendTyping: async ({ cfg, to, accountId }: { cfg: unknown; to: string; accountId?: string | null }) => {
+      const account = resolvePolkadotAccount({ cfg, accountId });
+      if (!account.bridgeProactiveToken) return;
+      await createBridge(
+        account.bridgeUrl,
+        account.bridgeToken,
+        account.bridgeProactiveToken,
+      ).typing(to, { proactive: true });
     },
   },
 });

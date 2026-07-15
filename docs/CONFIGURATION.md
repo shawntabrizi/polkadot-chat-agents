@@ -1,8 +1,10 @@
 # Configuration reference
 
-Every bot is configured entirely through environment variables read by
-`bot-core/index.mjs`. `pca create/run/deploy` generate the common ones for you;
-this document is the full reference, plus annotated `bot.env` examples.
+Every bot is configured entirely through environment variables read by its
+transport entry point: `bot-core/index.mjs` for `polkadot-app` or
+`bot-core/t3ams.mjs` for `t3ams`. `pca create/run/deploy` generate the common
+ones for you; this document is the full reference, plus annotated `bot.env`
+examples.
 
 - **Local runs** (`pca run`): the CLI builds the environment from the bot's
   `~/.pca/bots/<name>/config.json` + `secret.json` and passes it to the process.
@@ -15,8 +17,8 @@ commit or log it. The agent CLI a direct-engine bot spawns is deliberately
 *not* given this file (see [DESIGN.md](DESIGN.md) security model): its child
 environment is a scrubbed allowlist with the seed and all secrets removed.
 
-The authoritative, always-current list lives in the header comment at the top
-of `bot-core/index.mjs`. This doc mirrors it; if they disagree, the code wins.
+The authoritative, always-current lists live in the runtime source. This doc
+mirrors them; if it and the code disagree, the code wins.
 
 ---
 
@@ -34,7 +36,7 @@ BOT_USERNAME=codebot.61         # registered network username (display/search); 
 BOT_ALLOWED_PEERS=40d4fd…,7015… # peer account hexes allowed to message it. EMPTY = public (anyone)
 
 # brain
-BOT_BRAIN=claude                # claude|codex|opencode (direct CLI) · bridge/hermes (external) · echo (test)
+BOT_BRAIN=claude                # claude|codex|opencode (direct CLI) · bridge (external) · echo (test)
 
 # state & workspace (paths inside the container)
 BOT_STATE_DIR=/state            # session keys, dedup set, owed-reply journal, bot.pid. Root-owned; survives restarts
@@ -44,8 +46,9 @@ BOT_AI_WORKSPACE=/workspace     # where the agent's tools run; persists across r
 BOT_BRIDGE_PORT=8799            # port the bridge listens on
 BOT_BRIDGE_TOKEN=Xk3…≥32chars   # shared secret; every bridge request must present it. MANDATORY (process exits without it)
 
-# agent sandboxing (direct engines)
-BOT_AI_SKIP_PERMISSIONS=1       # full tool autonomy (the container IS the sandbox); omit for a read/write/edit/bash allowlist
+# portable tool policy (direct engines)
+BOT_AI_TOOL_CAPABILITIES=       # default: no tools; comma-separated read,write,bash
+BOT_AI_TOOL_SCOPE=workspace     # workspace (default) | container
 BOT_AI_AGENT_UID=1000           # spawned agent CLI is dropped to this uid — cannot read /state or the seed
 BOT_AI_AGENT_GID=1000           # …and this gid (transport stays root solely to hold the seed)
 
@@ -61,7 +64,7 @@ environment that strips every secret-shaped variable (including `*_API_KEY`), so
 a direct engine cannot be given provider credentials through the environment;
 log in the CLI once against the mounted home instead.
 
-## Example: bridge bot (`hermes` / `openclaw`)
+## Example: bridge bot (Hermes or OpenClaw)
 
 ```sh
 BOT_SEED_HEX=0x…
@@ -72,6 +75,9 @@ BOT_USERNAME=hermesbot.01
 BOT_STATE_DIR=/state
 BOT_BRIDGE_PORT=8799
 BOT_BRIDGE_TOKEN=…              # the harness container presents this to drive the bot
+# T3ams only, optional: a distinct secret for framework-originated sends with
+# no leased inbound turn (for example OpenClaw attached results).
+BOT_BRIDGE_PROACTIVE_TOKEN=…
 BOT_BRIDGE_HOST=0.0.0.0         # bind beyond loopback so the harness container can reach it (no host ports published)
 ```
 
@@ -100,11 +106,12 @@ BOT_ALLOWED_PEERS=40d4fd...,7015aa...
 # Let trusted owners select the model in chat. Do not set BOT_AI_ALLOWED_MODELS
 # at the same time: an empty value is an intentional lock.
 BOT_AI_MODEL_SWITCHING=open
-BOT_AI_SKIP_PERMISSIONS=1
+BOT_AI_TOOL_CAPABILITIES=read,write
+BOT_AI_TOOL_SCOPE=workspace
 BOT_AI_MAX_CONCURRENT_TURNS=2
 BOT_AI_MAX_QUEUED_TURNS=20
 
-# Durable files for a small, trusted group. Size these to the actual /state volume.
+# Durable files for a small, trusted team. Size these to the actual /state volume.
 BOT_FILE_MAX_BYTES=104857600
 BOT_FILE_MAX_TOTAL_MB=2048
 BOT_FILE_MAX_PEER_MB=1024
@@ -117,19 +124,28 @@ BOT_HOP_ALLOWED_NODES=hop.example.org
 BOT_HOP_UPLOAD_NODE=wss://hop.example.org
 ```
 
-`BOT_AI_SKIP_PERMISSIONS=1` gives the direct agent full tool autonomy inside its
-container. Use it only when every allowlisted sender is trusted with the bot's
-workspace and its reachable services. Keep the bridge on loopback for a local
-run; in a generated framework deployment, `BOT_BRIDGE_HOST=0.0.0.0` is only
-reachable on the private Compose network and no bridge port is published.
+`BOT_AI_TOOL_CAPABILITIES=read,write` gives a direct agent the normal file
+outcomes; `write` includes `read`. Add `bash` when the bot should run commands;
+it includes both file capabilities.
+The default workspace scope keeps native file-tool work in the selected project; choose
+`BOT_AI_TOOL_SCOPE=container` only when the deployer intentionally wants the
+non-root agent account to reach all files visible inside its container,
+including its OAuth home. Workspace scope applies to native file tools; Bash is
+bounded by the agent process in either scope. In a deployment that is the
+dedicated bot container; with `pca run`, it is the local process account. Every
+sender of a public bot can direct the policy chosen for it. Keep the bridge on
+loopback for a local run; in a generated framework deployment,
+`BOT_BRIDGE_HOST=0.0.0.0` is only reachable on the private Compose network and
+no bridge port is published.
 
 ### Public bot: deliberately bounded
 
 A public bot has `BOT_ALLOWED_PEERS` unset or empty. It must assume arbitrary
 prompts, attachment floods, repeated requests, and attempts to spend model or
 storage allowance. Prefer a narrow task, a fixed model allowlist, and a
-read-only or disposable workspace. The following is a usable conservative
-baseline for a directly hosted public bot:
+read-only or disposable workspace. Claude, Codex, and OpenCode use the same
+portable direct-agent tool policy; the following keeps the conservative
+no-tools default visible:
 
 ```sh
 BOT_ALLOWED_PEERS=
@@ -138,8 +154,11 @@ BOT_ALLOWED_PEERS=
 # if switching is needed, expose only a small approved list.
 BOT_AI_MODEL=provider/model
 BOT_AI_ALLOWED_MODELS=provider/model,provider/low-cost-model
-BOT_AI_SKIP_PERMISSIONS=0
-BOT_AI_ALLOWED_TOOLS=Read
+BOT_AI_TOOL_CAPABILITIES=
+BOT_AI_TOOL_SCOPE=workspace
+# This no-tools profile can answer text but cannot inspect staged file bytes.
+# To enable work deliberately, run or deploy with --allowed-tools read,write
+# plus the scope appropriate to the bot.
 BOT_AI_MAX_CONCURRENT_TURNS=2
 BOT_AI_MAX_QUEUED_TURNS=20
 BOT_AI_MAX_OUTPUT_BYTES=262144
@@ -160,6 +179,22 @@ BOT_MEDIA_DOWNLOAD_QUEUE_CAP=20
 # BOT_HOP_UPLOAD_NODE=
 ```
 
+For a public **T3ams** direct engine, `2` active turns and `20` queued turns are
+runtime defaults when those variables are unset; the explicit values above make
+the intended budget visible in deployment configuration. Authenticated `GET /health`
+also exposes `direct.queue` for this open direct profile, so an operator can see
+active, queued, and configured capacity without exposing it to chat users.
+
+To let a direct public bot inspect verified attachment bytes, deploy it with
+`--allowed-tools read --tool-scope workspace`. PCA stages each attachment for
+the current turn and removes it afterwards. Add `write` when the bot should
+also create returnable files, and add `bash` only when it should run commands.
+This remains an operator choice: the direct CLI keeps its OAuth/session home in
+its bot container so it can authenticate; container-scoped native file tools and
+Bash can access it. Use the default no-tools policy for the narrowest direct profile, or
+`--media-analyzer` when you prefer a separate API-only attachment-analysis
+container instead.
+
 For a public bot, do not mount a valuable host repository, credentials, Docker
 socket, or home directory into the agent container. Run it under a separate
 bot identity on a dedicated VM or volume with disk quotas; do not publish the
@@ -179,9 +214,9 @@ variables `pca deploy` writes into `bot.env` automatically.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BOT_SEED_HEX` | — (required) | Root mini-secret; all keys derive from it. `FAUCET_CHAT_SERVICE_SECRET` is an accepted alias. **gen** |
+| `BOT_SEED_HEX` | — (required) | Root mini-secret; all keys derive from it. **gen** |
 | `BOT_ENDPOINT` | Paseo people-next wss | Statement-store RPC node to poll and publish to. **gen** |
-| `BOT_USERNAME` | `""` | Registered network username (display/search only). `FAUCET_CHAT_SERVICE_USERNAME` alias. **gen** |
+| `BOT_USERNAME` | `""` | Registered network username (display/search only). **gen** |
 | `BOT_PEER_IDENTIFIER_KEYS` | `""` | `peerhex=keyhex,…` — pin identifier keys, skipping the on-chain lookup (tests / fixed fleets). |
 
 ### Access control
@@ -194,8 +229,8 @@ variables `pca deploy` writes into `bot.env` automatically.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BOT_BRAIN` | `bridge` | `claude`\|`codex`\|`opencode` (direct CLI), `bridge`/`hermes` (external harness), `echo` (test). **gen** |
-| `BOT_ACK_TEXT` | "Connecting you to the agent…" (bridge/hermes) | First-contact acknowledgement text. |
+| `BOT_BRAIN` | `bridge` | `claude`\|`codex`\|`opencode` (direct CLI), `bridge` (external harness), `echo` (test). **gen** |
+| `BOT_ACK_TEXT` | "Connecting you to the agent…" (bridge) | First-contact acknowledgement text. |
 | `BOT_GREET` | `0` | `1` = message allowlisted owners once on startup (proof of life). **gen when --greet** |
 | `BOT_GREET_TEXT` | auto | Custom greeting text. |
 
@@ -210,11 +245,19 @@ variables `pca deploy` writes into `bot.env` automatically.
 | `BOT_MAX_OWED_REPLIES` | 2000 | Cap on the crash-durable owed-reply backlog. |
 | `BOT_MAX_OWED_BYTES` | 16 MB | Byte cap on that backlog. |
 
+For `BOT_TRANSPORT=t3ams`, `BOT_STATE_DIR` is also the private root for
+`t3ams-state.json`, the encrypted-media cache, and the durable file vault.
+The T3ams runner creates it with mode `0700`; do not share it with the agent
+workspace or a host user, and encrypt or otherwise protect backups. A retained
+T3ams ingress record can contain an attachment's Bulletin claim capability, so
+the directory is sensitive even if no model session has been created.
+
 ### HTTP bridge (authenticated control surface)
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `BOT_BRIDGE_TOKEN` | — (required) | 32+ char shared secret; every request must present it (`Authorization: Bearer` or `x-bridge-token`). Process exits if unset/short. **gen** |
+| `BOT_BRIDGE_PROACTIVE_TOKEN` | unset | T3ams bridge mode only: optional, distinct 32+ char outbound capability. An otherwise authenticated unleased `POST /send`, `/react`, or `/typing` must present it in `x-bridge-proactive-token`; it does not replace `BOT_BRIDGE_TOKEN`. |
 | `BOT_BRIDGE_PORT` | 8799 | Port the bridge listens on. **gen** |
 | `BOT_BRIDGE_HOST` | `127.0.0.1` | Bind address. Deploy sets `0.0.0.0` for harness stacks (compose network only). **gen for bridge** |
 | `BOT_BRIDGE_BODY_MAX_BYTES` | 1000000 | Max request body. |
@@ -238,15 +281,48 @@ variables `pca deploy` writes into `bot.env` automatically.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BOT_AI_ALLOWED_TOOLS` | `Bash,Read,Edit,Write` | Tool allowlist used when permissions are not skipped. |
-| `BOT_AI_SKIP_PERMISSIONS` | `0` | `1` = full tool autonomy (the container is the sandbox). **gen unless --safe-tools** |
+| `BOT_AI_TOOL_CAPABILITIES` | `""` | Comma-separated portable direct-agent outcomes: `read`, `write`, `bash`. Empty disables tools; `write` includes `read`, and `bash` includes both. **gen (run/deploy)** |
+| `BOT_AI_TOOL_SCOPE` | `workspace` | `workspace` scopes native file tools to the current project and staged attachments. `container` deliberately grants native file tools all files visible to the non-root agent account. Bash uses the agent process boundary in either scope. **gen (run/deploy)** |
 | `BOT_AI_AGENT_UID` / `BOT_AI_AGENT_GID` | unset | Drop the spawned agent to this uid/gid so it can't read `/state` or the seed. **gen (deploy: 1000)** |
 | `BOT_AI_IDLE_TIMEOUT_MS` | 600000 | Kill a turn that has emitted nothing for this long (wedge backstop). |
 | `BOT_AI_MAX_MS` | 3600000 | Hard per-turn wall-clock cap. |
-| `BOT_AI_MAX_CONCURRENT_TURNS` | 4 | Global cap on simultaneously-running agent turns. |
-| `BOT_AI_MAX_QUEUED_TURNS` | 100 | Global cap on queued turns before backpressure. |
+| `BOT_AI_MAX_CONCURRENT_TURNS` | 4; public T3ams direct: 2 | Global cap on simultaneously-running agent turns. An explicit value always overrides the T3ams profile default. |
+| `BOT_AI_MAX_QUEUED_TURNS` | 100; public T3ams direct: 20 | Global cap on queued turns before backpressure. An explicit value always overrides the T3ams profile default. |
 | `BOT_AI_MAX_OUTPUT_BYTES` | 1000000 | Cap on captured agent output per turn. |
 | `BOT_AI_CMD` / `BOT_AI_ARGS` | unset | Escape hatch: a custom CLI speaking claude-shaped stream-json (`BOT_AI_ARGS` is a JSON array; `__PROMPT__` is substituted). |
+
+#### Tool policy
+
+`pca run` and `pca deploy` both select a tool policy explicitly. Make it part
+of the command or release script. Omitting `--allowed-tools` intentionally
+returns a direct bot to the no-tools default.
+
+| Deploy selection | Effective capability |
+|---|---|
+| *(no tool flag)* | No direct-agent tools. The generated policy is empty capabilities and workspace scope. |
+| `--allowed-tools read,write,bash` | Exact lowercase portable capabilities for Claude, Codex, and OpenCode. `write` includes `read`; `bash` includes both. A `read`-capable turn can inspect its staged inbound attachment, and a `write`-capable turn can create a returnable artifact. |
+| `--tool-scope workspace` | Default. Native file tools work in the selected project; per-turn attachments are readable when `read` is enabled. Bash uses the agent process boundary. |
+| `--tool-scope container` | Deliberately broad: native file tools can reach the non-root agent account's container-visible files, including its OAuth home. Bash uses the agent process boundary. |
+
+Tool details vary by engine, so use the deploy report to confirm the generated
+command. Workspace scope is native file-tool policy; Bash uses the agent process
+boundary. For `pca deploy`, that is the dedicated bot container. For local
+`pca run`, Bash uses the local process account, so treat it as a trusted-machine
+tool.
+
+Authentication and tool access are separate. A direct CLI retains its mounted
+OAuth home to log in and refresh its own session. It is part of the bot
+container, so container-scoped native file tools and Bash can access it. The
+transport secrets remain in `/state`, owned by the transport and inaccessible to
+the non-root agent.
+Never mount unrelated host credentials, repositories, Docker sockets, or home
+directories into a bot container.
+
+The policy works for public and allowlisted **Claude, Codex, and OpenCode**
+direct bots. For a public bot, every sender can direct the capability the
+deployer selected. `--media-analyzer` is separate from tool policy: it may
+accompany the normal policy, but requires an API credential in its isolated
+worker.
 
 ### Direct engine — projects & workspace
 
@@ -264,7 +340,7 @@ variables `pca deploy` writes into `bot.env` automatically.
 | `BOT_THINKING_TEXT` | "🤔 One moment — thinking…" | Placeholder text; empty disables it. |
 | `BOT_THINKING_AFTER_MS` | 5000 | Post the placeholder if no reply within this delay. |
 | `BOT_LIVE_EDIT_MIN_MS` / `BOT_LIVE_EDIT_MAX_MS` | 3000 / 15000 | Live-edit throttle (escalating). |
-| `BOT_LIVE_HEARTBEAT_MS` | 15000 | Elapsed-clock frame cadence. |
+| `BOT_LIVE_HEARTBEAT_MS` | 5000 | Typing refresh and elapsed-clock frame cadence; stays below the T3ams client's 6-second typing expiry. |
 | `BOT_LIVE_ACK_TIMEOUT_MS` | 60000 | Give up gating edits on the peer's ACK after this. |
 | `BOT_LIVE_FINAL_ACK_WAIT_MS` | 10000 | Wait for the placeholder ACK before finalizing. |
 | `BOT_LIVE_PROGRESS` | `1` | `0` = placeholder and final only (no per-tool progress frames). |
@@ -272,7 +348,14 @@ variables `pca deploy` writes into `bot.env` automatically.
 | `BOT_LIVE_TIMEOUT_TEXT` | auto | That timeout note's text. |
 | `BOT_OUTBOUND_ACK_GRACE_MS` | 60000 | How long an un-ACKed statement holds the channel slot before a queued one takes over. |
 
-### Attachments (HOP)
+T3ams uses the same thinking, edit cadence, progress, final-wait, timeout, and
+chunk settings. Its protocol can safely apply an edit without the default
+transport's peer-ACK gate, so `BOT_LIVE_ACK_TIMEOUT_MS` is not read by the
+T3ams runner. Remember that every placeholder, live edit, typing signal, and
+reaction is a publish operation: set `BOT_LIVE_EDIT_MIN_MS` conservatively for
+the available Statement Store allowance and submit queue.
+
+### Attachments (Polkadot-app HOP transport)
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -288,7 +371,7 @@ variables `pca deploy` writes into `bot.env` automatically.
 | `BOT_HOP_UPLOAD_NODE` | `""` | Operator-pinned HOP endpoint for outbound files. It must satisfy `BOT_HOP_ALLOWED_NODES` in production and needs an active Bulletin storage allowance. |
 | `BOT_HOP_UPLOAD_TIMEOUT_MS` | 120000 | Whole-upload deadline. |
 
-### Durable files
+### Durable files (Polkadot-app HOP transport)
 
 `/file put <path>` saves exactly one same-message attachment in the sender's
 private vault. `/file ls`, `/file info`, `/file rm`, and `/file get` use that
@@ -366,6 +449,224 @@ is an operational fallback for the fixed testnet profile, not a normal onboardin
 step. After using it, check `status` and run `recover` if a local guard remains.
 `pca` deliberately excludes public bots and arbitrary `wss://` endpoints: a
 public sender must not be able to spend a finite upload allowance by default.
+
+### T3ams attachments, media, and file vault
+
+T3ams supports DMs and workspace channels, including threads, live replies,
+media, and files. Native ad-hoc T3ams groups are not supported yet.
+
+`BOT_TRANSPORT=t3ams` has a separate encrypted Bulletin/HOP data path. Its
+settings deliberately do **not** inherit `BOT_HOP_ALLOWED_NODES`,
+`BOT_MEDIA_*`, or `BOT_HOP_UPLOAD_NODE` from the default Polkadot-app
+transport. The T3ams parser accepts only an encrypted `hop:` BCTS reference;
+the claim ticket is never returned in a bridge item or logged.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BOT_T3AMS_ATTACHMENT_MAX_BYTES` | 25 MiB | Per-attachment maximum. It may be narrowed but not raised above 25 MiB. |
+| `BOT_T3AMS_ATTACHMENT_MAX_COUNT` | 8 | Maximum rich-text attachments per T3ams message (0–16). |
+| `BOT_T3AMS_AGENT_OUTPUT_MAX_ARTIFACTS` | `BOT_T3AMS_ATTACHMENT_MAX_COUNT` | Maximum top-level regular files a direct Claude/Codex/OpenCode turn can return from its private `PCA_OUTPUT_DIR` (0–16; `0` disables generated-file delivery). |
+| `BOT_T3AMS_AGENT_OUTPUT_MAX_TOTAL_BYTES` | min(64 MiB, count × attachment cap), at least one attachment cap | Cumulative byte budget for all generated files from one direct turn (1 byte–512 MiB). |
+| `BOT_T3AMS_AGENT_OUTBOX_MAX_ENTRIES` | min(1024, max(16, `128 ×` artifact count)) | Global count cap for private generated-file snapshots waiting for upload. |
+| `BOT_T3AMS_AGENT_OUTBOX_MAX_BYTES` | max(per-turn artifact cap, min(512 MiB, `8 ×` per-turn cap)) | Global byte cap for generated-file snapshots waiting for upload (up to 4 GiB). |
+| `BOT_T3AMS_REPLY_OUTBOX_MAX_ENTRIES` | 128 | Global cap for incomplete durable direct-agent final replies. |
+| `BOT_T3AMS_REPLY_OUTBOX_MAX_BYTES` | max(one reply, min(128 MiB, `32 ×` one reply)) | Global serialized-byte cap for incomplete durable direct-agent final replies (up to 4 GiB). |
+| `BOT_T3AMS_ATTACHMENT_MAX_DURATION_MS` | 604800000 (7 days) | Maximum declared audio/video duration accepted as attachment metadata (0–31 days). |
+| `BOT_T3AMS_ATTACHMENT_MIME_TYPES` | `*/*` | Comma-separated MIME admission policy. Exact MIME types and `type/*` patterns narrow the broad default. |
+| `BOT_T3AMS_BULLETIN_RPC` | `wss://paseo-bulletin-next-rpc.polkadot.io` | Trusted T3ams Bulletin RPC endpoint for encrypted downloads and uploads. Set it to an explicit empty value to run metadata-only: retrieval and file delivery are disabled. |
+| `BOT_T3AMS_HOP_ALLOW_INSECURE` | `0` | `1` permits insecure `ws://` only for a local test mock. Production uses a validated TLS endpoint. |
+| `BOT_T3AMS_HOP_TIMEOUT_MS` | 120000 | Whole encrypted download/upload deadline. |
+| `BOT_T3AMS_HOP_RPC_FRAME_MAX_BYTES` | 4.5 MB | Largest accepted Bulletin/HOP RPC frame. |
+| `BOT_T3AMS_MEDIA_TTL_HOURS` | 48 | TTL for the evictable downloaded-media cache below `BOT_STATE_DIR/media`. |
+| `BOT_T3AMS_MEDIA_MAX_TOTAL_MB` | 512 | Total media-cache capacity. |
+| `BOT_T3AMS_MEDIA_MAX_CONCURRENT_DOWNLOADS` | 2 | Concurrent encrypted attachment downloads. |
+| `BOT_T3AMS_MEDIA_MAX_INFLIGHT_BYTES` | max(64 MiB, `2 × attachment cap + 4 MiB`) | Reservation for active download/decrypt work. It cannot be set below the value required for one allowed attachment. |
+| `BOT_T3AMS_MEDIA_DOWNLOAD_QUEUE_CAP` | 100 | Queued attachment-download limit. |
+| `BOT_T3AMS_BRIDGE_MEDIA_REF_CAP` | max(256, min(100000, `BOT_INBOUND_CAP × attachment count`)) | Bounded process-local opaque media references that bridge deliveries may fetch. |
+| `BOT_T3AMS_BRIDGE_MEDIA_REF_TTL_MS` | 3600000 | Lifetime of an opaque bridge-media reference; fetching it renews its short-lived TTL. |
+| `BOT_BRIDGE_FILE_MAX_BYTES` | `BOT_FILE_MAX_BYTES` | Largest raw `PUT /files` bridge upload; it cannot exceed the T3ams durable-file cap. |
+
+### Attachment understanding options
+
+Fetching a T3ams attachment and understanding its contents are intentionally
+different capabilities. By default, a direct bot receives only attachment
+metadata and must not claim that it read a staged file. That remains the
+no-tools default for a bot with an OAuth home.
+
+For any T3ams direct engine, `pca deploy <bot> --allowed-tools read
+--tool-scope workspace` lets the brain inspect the verified temporary copy PCA
+gives it for that turn, alongside the selected project. It does not require a
+separate attachment API call. Add `write` when the bot should create files for
+return, or `bash` when it should run commands. The staged attachment is removed
+after the turn; container scope is a separate, deliberately broader choice.
+
+For a T3ams direct deployment, `pca deploy <bot> --media-analyzer` adds a
+separate API-only `media-analyzer` container. The transport sends it only
+bounded, HOP-verified bytes; it returns a bounded summary that is explicitly
+wrapped as **untrusted attachment-derived data** before it reaches the brain.
+The worker has no bot seed, `/state`, `/workspace`, OAuth home, bridge token,
+published port, or tools. It is the only container that receives the provider
+API key.
+
+Enabling it changes the data boundary: supported attachment bytes and the
+user's accompanying request are sent to the configured Anthropic API. Do not
+enable it for content that must remain entirely within the VPS. The worker can
+summarize JPEG/PNG/GIF/WebP images, PDFs, UTF-8 plain text/Markdown/CSV/TSV/
+XML/RTF/JSON/NDJSON, and common Office XML files (`.docx`, `.xlsx`, `.pptx`).
+Office files are projected through a bounded ZIP/XML reader; they are not run
+through a shell or desktop converter. Audio/video, legacy Office binaries,
+archives, and arbitrary binary files remain normal downloadable T3ams
+attachments with metadata only. Plain-text and Office projections are capped at
+256 KiB before the provider call even when the encrypted attachment itself is
+within the larger file limit. Images above 40 megapixels, encrypted PDFs, and
+PDFs with more than 50 visible page markers are rejected for semantic analysis
+but remain downloadable.
+
+| Transport variable | Default | Purpose |
+|---|---|---|
+| `BOT_T3AMS_MEDIA_ANALYZER_URL` | unset | Exact worker endpoint, normally `http://media-analyzer:8798/v1/analyze`. Set together with the token; leaving both empty disables analysis. |
+| `BOT_T3AMS_MEDIA_ANALYZER_TOKEN` | unset | 32+ character capability for the worker request. Generated by `pca deploy --media-analyzer` and written to `bot.env`; never pass it to an agent. |
+| `BOT_T3AMS_MEDIA_ANALYZER_HTTP_HOSTS` | `media-analyzer` | Comma-separated hosts allowed for an `http:` worker URL. Use HTTPS for any non-internal endpoint. |
+| `BOT_T3AMS_MEDIA_ANALYZER_MAX_FILES` | 4 | Maximum supported files copied to one analysis request (1–8). |
+| `BOT_T3AMS_MEDIA_ANALYZER_MAX_FILE_BYTES` | 7 MiB | Per-file byte cap for semantic analysis (1 byte–12 MiB). Larger chat attachments remain downloadable but are not sent to the worker. |
+| `BOT_T3AMS_MEDIA_ANALYZER_MAX_TOTAL_BYTES` | 12 MiB | Cumulative worker request cap (at least the per-file cap; at most 16 MiB). |
+| `BOT_T3AMS_MEDIA_ANALYZER_TIMEOUT_MS` | 90000 | Transport wait for the isolated worker (1 s–10 min). A timeout degrades to metadata-only, not a failed chat turn. |
+| `BOT_T3AMS_MEDIA_ANALYZER_MAX_PROMPT_BYTES` | 12288 | User-request text copied to the worker. |
+| `BOT_T3AMS_MEDIA_ANALYZER_MAX_SUMMARY_BYTES` | 6144 | Maximum worker summary copied into the brain prompt. |
+| `BOT_T3AMS_MEDIA_ANALYZER_MAX_CONCURRENT` | 1 | Maximum provider analyses in flight before the direct-agent queue (1–8). |
+| `BOT_T3AMS_MEDIA_ANALYZER_MAX_QUEUED` | 20 | Bounded waiting analyses (0–1000); a full queue falls back to metadata-only. |
+| `BOT_T3AMS_MEDIA_ANALYZER_SENDER_CAP` | 4 | Durable analyses available to one authenticated sender in its refill window. |
+| `BOT_T3AMS_MEDIA_ANALYZER_SENDER_WINDOW_MS` | 3600000 | Sender-token refill window (1 s–31 days). |
+| `BOT_T3AMS_MEDIA_ANALYZER_GLOBAL_CAP` | 30 | Durable analyses available to the entire bot in its refill window. |
+| `BOT_T3AMS_MEDIA_ANALYZER_GLOBAL_WINDOW_MS` | 3600000 | Global-token refill window (1 s–31 days). |
+| `BOT_T3AMS_MEDIA_ANALYZER_SENDER_BUCKET_CAP` | 1000 | Maximum remembered sender buckets; least-recent/stale records are evicted. |
+
+Before a supported file is sent externally, bot-core persists both its rate
+reservation and a `submitted` marker. `/stop`, edits, and deletes abort the
+transport-to-worker request; if a process dies after submission but before it
+can save the result, the next attempt intentionally uses metadata only rather
+than uploading the same private attachment a second time.
+
+The deploy command creates a distinct `media-token.env` containing the worker
+capability, but never creates, reads, prints, uploads, or overwrites the
+server-side `media.env`. Before the first deployment, create that file on the
+VPS with mode `0600` and exactly the provider configuration you intend to use:
+
+```sh
+# On the VPS: make the remote directory private, then create this file with
+# your editor or secret manager. Keep the key out of local shell history/CI.
+install -d -m 700 <remote bot directory>
+# <remote bot directory>/media.env — pca never reads it
+ANTHROPIC_API_KEY=...
+MEDIA_ANALYZER_MODEL=<an available Anthropic API model>
+chmod 600 <remote bot directory>/media.env
+```
+
+The worker also accepts `MEDIA_ANALYZER_MAX_FILES`,
+`MEDIA_ANALYZER_MAX_FILE_BYTES`, `MEDIA_ANALYZER_MAX_TOTAL_BYTES`,
+`MEDIA_ANALYZER_MAX_PROMPT_BYTES`, `MEDIA_ANALYZER_MAX_SUMMARY_BYTES`,
+`MEDIA_ANALYZER_MAX_TOKENS`, and `MEDIA_ANALYZER_TIMEOUT_MS`; keep its limits
+at or below the transport limits. Docker Compose gives the worker ordinary
+outbound HTTPS access so it can call the provider; use a VPS firewall or egress
+proxy if it must be restricted further to an exact provider endpoint.
+
+T3ams uses the shared `BOT_FILE_MAX_BYTES`, `BOT_FILE_MAX_TOTAL_MB`,
+`BOT_FILE_MAX_ENTRIES`, `BOT_FILE_MAX_PEER_MB`, and
+`BOT_FILE_MAX_PEER_ENTRIES` settings for a conversation-scoped durable vault
+under `BOT_STATE_DIR/files`. For this transport, `BOT_FILE_MAX_BYTES` defaults
+to `BOT_T3AMS_ATTACHMENT_MAX_BYTES` and cannot exceed it. A DM and a workspace
+channel are different vault namespaces; each workspace channel intentionally
+shares one vault among its members. `/file put` requires exactly one
+successfully downloaded attachment, and `/file get` uploads the saved regular file as a new encrypted
+T3ams attachment. The bridge can access the same private namespace with its
+authenticated `/files` routes and can send only a vault `file_path`, never an
+arbitrary host path.
+
+For a direct brain, generated files are uploaded from a fresh private
+`PCA_OUTPUT_DIR` at the end of a turn. Only top-level regular files are
+considered; nested paths and symlinks are ignored and the directory is removed
+after delivery. Before the first upload or final-answer statement, bot-core
+durably records the final reply chunks and copies accepted bytes into a private
+per-turn outbox. A normal delivery retry drains that exact turn rather than
+asking the model to create a second text response, image, or document. Uploaded
+Bulletin references are also persisted before their chat statement, avoiding a
+repeat upload on a later statement retry. Generated files follow the same
+outbound MIME, per-file size, and cumulative-output policy. If Bulletin upload,
+attachments, or generic `application/octet-stream` delivery is disabled by
+configuration, direct-agent file generation is disabled rather than creating a
+stuck retry; text replies continue normally.
+
+The remote Bulletin upload and Statement Store submission APIs do not expose a
+transactional cross-service idempotency key. A process loss after a remote
+statement succeeds but before local journal progress is flushed can therefore
+produce one at-least-once duplicate on recovery; the durable turn outbox avoids
+rerunning the completed model turn in ordinary delivery-retry cases.
+
+Keep Bulletin capacity separate from the Statement Store allowance that funds
+text and live operations. Before enabling `/file get` or bridge `file_path`,
+ensure the bot account has the required T3ams Bulletin upload allowance and
+monitor it independently; `pca storage <bot>` and its named Paseo faucet flow
+document the default Polkadot-app transport, not a T3ams Bulletin preflight.
+The bridge token authorizes access to cached media and every file in every
+conversation vault, so do not publish the bridge port or inject that token into
+an untrusted agent process.
+
+In T3ams bridge mode, regular outbound `/send`, `/react`, and `/typing`
+requests remain bound to their active inbound `delivery_id` and `lease_id`.
+`BOT_BRIDGE_PROACTIVE_TOKEN` is a separate opt-in for a framework action that
+has no inbound lease at all (such as a generic attached result). It must be a
+different random secret, is required in the `x-bridge-proactive-token` header
+in addition to normal bridge authentication, and never makes a stale supplied
+lease valid. Leave it unset unless that explicit proactive behavior is needed.
+
+### T3ams workspace-channel context (optional)
+
+T3ams remains mention-gated by default: unmentioned channel traffic is never
+sent to a brain. Set `BOT_T3AMS_CHANNEL_CONTEXT=1` only when a later explicit
+mention should receive a small, in-memory snapshot of recent authenticated
+channel context. It is not persisted, does not change membership/private-key
+checks, and its caps should stay small on a public bot.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BOT_T3AMS_CHANNEL_CONTEXT` | `0` | `1` enables passive, memory-only context collection for channel chats. |
+| `BOT_T3AMS_CHANNEL_CONTEXT_TTL_MS` | 1800000 | Retention time; `0` expires records immediately. |
+| `BOT_T3AMS_CHANNEL_CONTEXT_MAX_CHATS` | 128 | Channel conversations retained in memory. |
+| `BOT_T3AMS_CHANNEL_CONTEXT_MAX_RECORDS` | 16 | Records per channel. |
+| `BOT_T3AMS_CHANNEL_CONTEXT_MAX_BYTES` | 8192 | Text budget per channel. |
+| `BOT_T3AMS_CHANNEL_CONTEXT_MAX_RECORD_BYTES` | 2048 | Maximum one retained message. |
+| `BOT_T3AMS_CHANNEL_CONTEXT_MAX_RECORDS_PER_SENDER` | 4 | Fairness cap per sender in one channel. |
+| `BOT_T3AMS_CHANNEL_CONTEXT_MAX_BYTES_PER_SENDER` | 2048 | Per-sender text budget in one channel. |
+| `BOT_T3AMS_CHANNEL_CONTEXT_MAX_TOTAL_BYTES` | 262144 | Process-wide memory budget for passive context. |
+
+### T3ams channel direct-brain controls
+
+Top-level channel prompts use the channel's direct-brain session, while each
+thread receives its own isolated native session. Normal mentioned prompts
+remain available to channel members, but the session-changing direct commands
+`/reset`, `/model`, `/reasoning`, and `/project` are role-gated from the
+authenticated T3ams workspace state. This setting does not apply to DMs or a
+bridge framework's own commands. `/stop` remains available to any channel
+member and targets the current channel conversation/thread.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BOT_T3AMS_CHANNEL_CONTROL_ROLE` | `admin` | Minimum role for channel/thread session commands: `admin` permits owners/admins; `mod` also permits moderators; `all` permits any member whose message reaches the bot. |
+
+### T3ams message-operation reconciliation
+
+T3ams retains messages separately from edit/delete operations. bot-core keeps a
+bounded, persisted lifecycle index so a valid edit/deletion can arrive before its
+message carrier, update pending channel context/work, or cancel a queued direct
+turn. Reactions and typing never become model prompts, and a deletion cannot
+retract a response already published by the bot.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BOT_T3AMS_MESSAGE_LIFECYCLE_MAX_RECORDS` | max(1024, `4 × BOT_INBOUND_CAP`) | Cap for recently seen message/edit/delete state. |
+| `BOT_T3AMS_MESSAGE_LIFECYCLE_TTL_MS` | 21600000 (6 hours) | Lifecycle retention; `0` expires state immediately. |
+| `BOT_T3AMS_MESSAGE_LIFECYCLE_MAX_BYTES` | 8 MiB | Aggregate durable lifecycle-state budget; oldest records are evicted before the journal grows beyond it. |
+| `BOT_T3AMS_SUBSCRIPTION_CAP` | 1024 | Active T3ams subscription cap; each known DM needs carrier and operation routes. |
 
 ### Ingress (poll / subscribe)
 

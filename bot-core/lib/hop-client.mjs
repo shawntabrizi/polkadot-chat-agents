@@ -33,6 +33,8 @@ const HOP_CHUNK_PLAINTEXT_BYTES = 2_000_000;
 const HASH_BYTES = 32;
 const MIN_CHUNK_PLAINTEXT_BYTES = 64 * 1024;
 const MAX_METADATA_CHUNKS = 4_096;
+const HOP_DIALECTS = new Set(["legacy", "t3ams"]);
+const CONTENT_HASH_ALGORITHMS = new Set(["sha256", "blake2b-256"]);
 
 const toHex = (bytes) => `0x${Buffer.from(bytes).toString("hex")}`;
 const fromHex = (hex) => {
@@ -42,6 +44,9 @@ const fromHex = (hex) => {
 };
 
 const blake2b32 = (data, key) => blake2b(data, { dkLen: 32, key });
+const contentHash = (bytes, algorithm) => algorithm === "blake2b-256"
+  ? blake2b32(bytes)
+  : new Uint8Array(crypto.createHash("sha256").update(bytes).digest());
 
 const concatBytes = (...parts) => {
   const result = new Uint8Array(parts.reduce((total, part) => total + part.length, 0));
@@ -263,6 +268,16 @@ const validSender = (sender) => sender
 
 const multiSigner = (publicKey) => new Uint8Array([1, ...publicKey]); // MultiSigner::Sr25519
 const multiSignature = (signature) => new Uint8Array([1, ...signature]); // MultiSignature::Sr25519
+const requireDialect = (dialect) => {
+  if (!HOP_DIALECTS.has(dialect)) throw new Error("unsupported HOP RPC dialect");
+  return dialect;
+};
+const submitParams = ({ dialect, data, recipients, signature, signer, timestamp }) => dialect === "t3ams"
+  ? [data, recipients, signature, signer, timestamp]
+  : { data, recipients, signature, signer, submit_timestamp: timestamp };
+const claimParams = ({ dialect, rawHash, signature }) => dialect === "t3ams"
+  ? [rawHash, signature]
+  : { raw_hash: rawHash, signature };
 
 const uploadChunkSize = (maxRpcFrameBytes) => {
   // hop_submit serializes ciphertext as hex inside JSON. Reserve framing space
@@ -299,8 +314,12 @@ export async function uploadP2PFile({
   connectTimeoutMs = 10_000,
   allowInsecure = false,
   allowedNodes = null,
+  // T3ams' Bulletin relay exposes the same crypto protocol but uses
+  // positional JSON-RPC parameters; legacy PCA HOP nodes use by-name params.
+  dialect = "legacy",
   log = () => {},
 }) {
+  requireDialect(dialect);
   const url = validateHopUrl(wssUrl, { allowInsecure, allowedNodes });
   if (typeof filePath !== "string" || !filePath) throw new Error("upload file path is required");
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new Error("maxBytes must be a non-negative safe integer");
@@ -336,13 +355,14 @@ export async function uploadP2PFile({
       checkDeadline();
       const timestamp = Date.now();
       const { dataHash, signature } = submitProof(data, timestamp);
-      await rpc.call("hop_submit", {
+      await rpc.call("hop_submit", submitParams({
+        dialect,
         data: toHex(data),
         recipients: [toHex(recipient)],
         signature: toHex(multiSignature(signature)),
         signer: toHex(signer),
-        submit_timestamp: timestamp,
-      });
+        timestamp,
+      }));
       return dataHash;
     };
 
@@ -379,13 +399,24 @@ export async function downloadP2PFile({
   connectTimeoutMs = 10_000,
   allowInsecure = false,
   allowedNodes = null,
+  dialect = "legacy",
+  // T3ams AttachmentRef hashes plaintext with unkeyed BLAKE2b-256. This is
+  // optional for legacy callers, but required by the T3ams adapter after
+  // decryption. Legacy PCA callers retain SHA-256 as the default.
+  expectedContentHash = null,
+  contentHashAlgorithm = "sha256",
   log = () => {},
 }) {
+  requireDialect(dialect);
+  if (!CONTENT_HASH_ALGORITHMS.has(contentHashAlgorithm)) throw new Error("unsupported attachment content hash algorithm");
   const url = validateHopUrl(wssUrl, { allowInsecure, allowedNodes });
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new Error("maxBytes must be a non-negative safe integer");
   if (!Number.isSafeInteger(maxRpcFrameBytes) || maxRpcFrameBytes < 1024) throw new Error("maxRpcFrameBytes must be a safe integer of at least 1024");
   if (claimTicket?.length !== HASH_BYTES) throw new Error("claim ticket must be 32 bytes");
   if (identifier?.length !== HASH_BYTES) throw new Error("attachment identifier must be 32 bytes");
+  if (expectedContentHash != null && (!(expectedContentHash instanceof Uint8Array) || expectedContentHash.length !== HASH_BYTES)) {
+    throw new Error("expected attachment content hash must be 32 bytes");
+  }
 
   const aesKey = blake2b32(textEncoder.encode("encryption"), claimTicket);
   const secret = secretFromSeed(blake2b32(textEncoder.encode("signer"), claimTicket));
@@ -406,7 +437,11 @@ export async function downloadP2PFile({
     const claimBlob = async (rawHash) => {
       checkDeadline();
       if (rawHash?.length !== HASH_BYTES) throw new Error("invalid HOP blob hash");
-      const hex = await rpc.call("hop_claim", { raw_hash: toHex(rawHash), signature: proofFor(rawHash, CLAIM_CONTEXT) });
+      const hex = await rpc.call("hop_claim", claimParams({
+        dialect,
+        rawHash: toHex(rawHash),
+        signature: proofFor(rawHash, CLAIM_CONTEXT),
+      }));
       if (typeof hex !== "string") throw new Error("invalid HOP blob");
       const clean = hex.trim().replace(/^0x/i, "");
       if (clean.length > MAX_CHUNK_CIPHERTEXT * 2) throw new Error("HOP blob oversized");
@@ -415,10 +450,16 @@ export async function downloadP2PFile({
     // Ack right after a blob is decrypted (mirrors the app) so the
     // store-and-forward node can drop it. Best-effort: never fatal.
     const ackBlob = (rawHash) =>
-      rpc.call("hop_ack", { raw_hash: toHex(rawHash), signature: proofFor(rawHash, ACK_CONTEXT) }).catch(() => {});
+      rpc.call("hop_ack", claimParams({
+        dialect,
+        rawHash: toHex(rawHash),
+        signature: proofFor(rawHash, ACK_CONTEXT),
+      })).catch(() => {});
     try {
       if (meta == null) {
-        meta = decodeUploadedFile(aesGcmDecrypt(aesKey, await claimBlob(identifier)), maxBytes);
+        const encryptedMetadata = await claimBlob(identifier);
+        if (Buffer.compare(blake2b32(encryptedMetadata), identifier) !== 0) throw new Error("HOP metadata hash mismatch");
+        meta = decodeUploadedFile(aesGcmDecrypt(aesKey, encryptedMetadata), maxBytes);
         await ackBlob(identifier);
       }
       for (; chunkIndex < meta.chunkHashes.length; chunkIndex += 1) {
@@ -454,6 +495,10 @@ export async function downloadP2PFile({
   let offset = 0;
   for (const part of parts) { bytes.set(part, offset); offset += part.length; }
   if (meta && BigInt(bytes.length) !== meta.totalSize) throw new Error("attachment incomplete");
+  if (expectedContentHash != null) {
+    const actual = contentHash(bytes, contentHashAlgorithm);
+    if (Buffer.compare(actual, expectedContentHash) !== 0) throw new Error("attachment content hash mismatch");
+  }
   log("HOP_DOWNLOADED", { host: url.hostname, id: toHex(identifier).slice(0, 18), bytes: bytes.length, chunks: meta.chunkHashes.length });
   return bytes;
 }

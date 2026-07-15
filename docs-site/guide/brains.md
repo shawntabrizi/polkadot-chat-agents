@@ -3,10 +3,11 @@
 A bot's **brain** is what produces its replies. Pick it with `--brain` at
 `create`.
 
-Direct engines run a headless AI-agent CLI as an autonomous agent — verbatim
-prompts, native session memory (`--resume`), and real tools (bash, read, edit,
-and write). A deployed bot runs those tools in a container; `pca run` uses the
-local machine, so do not use it with untrusted senders.
+Direct engines run a headless AI-agent CLI with verbatim prompts and native
+session memory (`--resume`). Claude, Codex, and OpenCode start with no tools;
+their deployer may select the same portable policy for either public or
+allowlisted bots. The CLI retains its OAuth home inside that bot's container so
+it can authenticate; container-scoped native file tools and Bash can access it.
 
 | `--brain` | Replies come from | Reaches | Authentication |
 |---|---|---|---|
@@ -14,10 +15,27 @@ local machine, so do not use it with untrusted senders.
 | `codex` | the `codex` CLI | OpenAI models | ChatGPT / Codex login |
 | `opencode` | the `opencode` CLI | many providers via `--model provider/model` | `opencode auth login` |
 | `echo` | bot-core itself (repeats the message) | — | none |
-| `hermes` / `bridge` | an agent framework over the HTTP bridge | — | the framework's |
+| `bridge` | an agent framework over the HTTP bridge | — | the framework's |
 
 `opencode` is the many-models path — one engine reaches Anthropic, OpenAI,
 Google, xAI, OpenRouter, local models, and more.
+
+## Tool policy
+
+Use `pca deploy --allowed-tools read,write,bash` to select exact lowercase
+outcome capabilities. `write` includes `read`, and `bash` includes both.
+`--tool-scope workspace|container` scopes native file tools. The default is no
+capabilities and workspace scope.
+A read-capable turn can inspect its staged attachment, and a write-capable turn
+can produce returnable files.
+
+Workspace scopes native file tools to the normal project working area; container
+scope deliberately exposes all files visible to the non-root agent account,
+including its OAuth home. Bash uses the agent process boundary in either scope:
+the dedicated bot container for a deployment, or the local process account for
+`pca run`. Treat local Bash bots as trusted-machine tools. Do not mount unrelated
+host repositories, credentials, Docker sockets, or home directories into a
+deployed bot container. See [Private & public bots](/guide/access) for the boundary.
 
 ## Pinning a model
 

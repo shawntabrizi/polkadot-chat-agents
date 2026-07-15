@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createLiveReplies, createProgressTracker } from "../lib/live-reply.mjs";
+import { createDeferredProgressTracker, createLiveReplies, createProgressTracker } from "../lib/live-reply.mjs";
 
 // Deterministic clock + timers: advance() fires due timers in order.
 const makeClock = () => {
@@ -37,10 +37,10 @@ const makeHarness = ({ minIntervalMs = 1000, maxIntervalMs = 8000, finalAckWaitM
   let nextMsg = 1;
   const acks = new Map(); // requestId -> resolve
   const live = createLiveReplies({
-    send: async ({ peerHex, text, editOf, supersedes }) => {
+    send: async ({ peerHex, text, editOf, supersedes, guard }) => {
       const messageId = editOf ? null : `MSG-${nextMsg++}`;
       const token = `REQ-${sent.length + 1}`;
-      sent.push({ peerHex, text, editOf: editOf ?? null, messageId, supersedes: supersedes ?? null });
+      sent.push({ peerHex, text, editOf: editOf ?? null, messageId, supersedes: supersedes ?? null, guard: guard ?? null });
       return { messageId, delivered: token };
     },
     awaitAck: (token) => new Promise((resolve) => acks.set(token, resolve)),
@@ -65,6 +65,28 @@ test("no edits go out before the placeholder is ACKed", async () => {
   assert.equal(h.sent.length, 2);
   assert.equal(h.sent[1].editOf, handle.messageId);
   assert.equal(h.sent[1].text, "progress 1");
+});
+
+test("a lease guard follows a placeholder through progress and its final frame", async () => {
+  const h = makeHarness();
+  const guard = () => true;
+  const handle = await h.live.begin("peer", "thinking…", { guard });
+  assert.equal(h.sent[0].guard, guard);
+  await h.ack("REQ-1");
+  handle.update("progress");
+  await h.clock.advance(0);
+  assert.equal(h.sent.at(-1).guard, guard);
+  await handle.finalize("final");
+  assert.equal(h.sent.at(-1).guard, guard);
+});
+
+test("transport-owned cleanup can explicitly bypass a stale placeholder guard", async () => {
+  const h = makeHarness();
+  const handle = await h.live.begin("peer", "thinking…", { guard: () => false });
+  await h.ack("REQ-1");
+  await handle.finalize("timed out", { guard: null });
+  assert.equal(h.sent.at(-1).text, "timed out");
+  assert.equal(h.sent.at(-1).guard, null);
 });
 
 test("latest-wins coalescing under the min interval", async () => {
@@ -215,6 +237,62 @@ test("throttledEdit coalesces harness-driven edits of a delivered message", asyn
   assert.equal(h.sent[1].text, "v3");
 });
 
+test("finalizeExisting flushes the bridge's final edit and cancels queued progress", async () => {
+  const h = makeHarness({ minIntervalMs: 1000 });
+  h.live.throttledEdit("peer", "TARGET-1", "progress");
+  await h.clock.advance(0);
+  h.live.throttledEdit("peer", "TARGET-1", "late progress");
+  const result = await h.live.finalizeExisting("peer", "TARGET-1", "final answer");
+  assert.deepEqual(result, { messageId: "TARGET-1", edited: true });
+  assert.equal(h.sent.at(-1).editOf, "TARGET-1");
+  assert.equal(h.sent.at(-1).text, "final answer");
+  await h.clock.advance(10_000);
+  assert.equal(h.sent.at(-1).text, "final answer", "the queued progress frame must not overwrite the terminal edit");
+});
+
+test("finalizeExisting retries a transient terminal submit instead of stranding progress", async () => {
+  const clock = makeClock();
+  const sent = [];
+  let attempts = 0;
+  const live = createLiveReplies({
+    send: async ({ peerHex, text, editOf }) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("temporary submit outage");
+      sent.push({ peerHex, text, editOf: editOf ?? null });
+      return { messageId: editOf ?? "MSG-1", delivered: "REQ-1" };
+    },
+    awaitAck: async () => true,
+    now: clock.now,
+    timers: clock.timers,
+  });
+
+  await assert.rejects(live.finalizeExisting("peer", "TARGET-1", "final answer"), /temporary submit outage/);
+  const result = await live.finalizeExisting("peer", "TARGET-1", "final answer");
+  assert.deepEqual(result, { messageId: "TARGET-1", edited: true });
+  assert.equal(attempts, 2);
+  assert.deepEqual(sent, [{ peerHex: "peer", text: "final answer", editOf: "TARGET-1" }]);
+});
+
+test("cancelExisting and a guard fence discard a revoked queued bridge edit", async () => {
+  const h = makeHarness({ minIntervalMs: 1000 });
+  let active = true;
+  h.live.throttledEdit("peer", "TARGET-1", "first", { guard: () => active });
+  await h.clock.advance(0);
+  assert.equal(h.sent.length, 1);
+
+  h.live.throttledEdit("peer", "TARGET-1", "must not send", { guard: () => active });
+  active = false;
+  assert.equal(h.live.cancelExisting("peer", "TARGET-1"), true);
+  await h.clock.advance(10_000);
+  assert.deepEqual(h.sent.map((entry) => entry.text), ["first"]);
+
+  // Even if cancellation races a timer, the guard is evaluated directly
+  // before the protocol send and fences the stale frame.
+  h.live.throttledEdit("peer", "TARGET-2", "also stale", { guard: () => active });
+  await h.clock.advance(0);
+  assert.deepEqual(h.sent.map((entry) => entry.text), ["first"]);
+});
+
 test("progress tracker renders elapsed, steps and a rolling action window", () => {
   let t = 0;
   const tracker = createProgressTracker({ label: "working", maxActions: 2, now: () => t });
@@ -230,4 +308,42 @@ test("progress tracker renders elapsed, steps and a rolling action window", () =
   ].join("\n"));
   t = 84_000;
   assert.match(tracker.render(), /⏳ working · 1m 24s · step 3/);
+});
+
+test("deferred progress retains pre-placeholder actions and flushes them after attachment", () => {
+  const updates = [];
+  const tracker = createDeferredProgressTracker({ label: "working" });
+  tracker.add("downloading report.pdf");
+  assert.equal(updates.length, 0, "there is no live handle yet");
+
+  const handle = {
+    finalized: false,
+    update: (text) => updates.push(text),
+  };
+  tracker.attach(handle);
+  assert.match(updates[0], /step 1/);
+  assert.match(updates[0], /downloading report.pdf/);
+
+  tracker.add("reading report.pdf");
+  assert.match(updates.at(-1), /step 2/);
+  assert.match(updates.at(-1), /reading report.pdf/);
+
+  tracker.dispose();
+  tracker.add("must not render");
+  assert.equal(updates.length, 2);
+});
+
+test("deferred progress can safely replace activity with a transient live draft", () => {
+  const updates = [];
+  const tracker = createDeferredProgressTracker({ label: "working" });
+  tracker.setLiveText("✍️ Writing a reply…\nFirst draft before the placeholder");
+  const handle = { finalized: false, update: (text) => updates.push(text) };
+  tracker.attach(handle);
+  assert.equal(updates.at(-1), "✍️ Writing a reply…\nFirst draft before the placeholder");
+  tracker.add("downloading photo.jpg");
+  tracker.setLiveText("✍️ Writing a reply…\nThis is the visible draft");
+  assert.equal(updates.at(-1), "✍️ Writing a reply…\nThis is the visible draft");
+  assert.equal(tracker.render(), "✍️ Writing a reply…\nThis is the visible draft");
+  tracker.setLiveText("");
+  assert.match(updates.at(-1), /downloading photo\.jpg/);
 });

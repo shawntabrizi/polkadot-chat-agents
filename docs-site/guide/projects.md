@@ -51,8 +51,9 @@ can't see paths on your laptop, so projects apply to `pca run`.
 ## Sending files in
 
 Attachments you send are downloaded and staged into a private per-turn
-workspace directory, so "here's the spec, implement it" works with a document
-or photo attached. The staged copy is removed after the turn.
+workspace directory. A direct agent with the portable `read` capability can
+inspect a document or photo there; the default no-tools policy cannot inspect
+the staged bytes. The staged copy is removed after the turn.
 
 That temporary staging is separate from saved files. Attach exactly one file
 with the caption `/file put <path>` when you want to keep it for this chat;

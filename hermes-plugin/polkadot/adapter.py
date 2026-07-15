@@ -15,11 +15,15 @@ configured Hermes install. See ../../docs/DESIGN.md (section 6b).
 import asyncio
 from collections import deque
 import logging
+import mimetypes
 import os
 import re
+import secrets
 import shutil
+import stat
 import tempfile
 from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Set, Tuple
+from urllib.parse import quote
 
 import aiohttp
 
@@ -44,6 +48,47 @@ _MAX_PENDING_DISPATCHES = 100
 _MAX_ATTACHMENTS_PER_MESSAGE = 8
 _MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 _MAX_TOTAL_ATTACHMENT_BYTES = 32 * 1024 * 1024
+# T3ams admits at most 25 MiB per encrypted BCTS attachment. The bridge
+# advertises a possibly smaller PUT cap in /health, which wins per connection.
+_MAX_OUTBOUND_ATTACHMENT_BYTES = 25 * 1024 * 1024
+_OUTBOUND_UPLOAD_TIMEOUT_SECS = 120
+
+
+def _safe_outbound_filename(value: Any) -> str:
+    """Make a stable, inert filename for a bridge vault path and BCTS ref."""
+    raw = os.path.basename(str(value or "").replace("\\", "/")).strip()
+    # The T3ams attachment filename is user-visible. Keep a conventional
+    # ASCII basename rather than passing through path separators, controls, or
+    # terminal-sensitive Unicode controls from an agent-generated name.
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", raw).strip("._")
+    return (name or "attachment")[:120]
+
+
+def _bridge_error(data: Any, status: int) -> str:
+    """Use a bounded bridge error without assuming an error JSON shape."""
+    if isinstance(data, dict) and isinstance(data.get("error"), str) and data["error"]:
+        return data["error"][:300]
+    return f"HTTP {status}"
+
+
+def _channel_context_note(value: Any) -> str:
+    """Render the bridge's bounded passive channel snapshot for an agent.
+
+    Keep the actual triggering text first so Hermes command detection still
+    sees a leading slash; context is attribution-rich, advisory history only.
+    """
+    if not isinstance(value, list):
+        return ""
+    lines: List[str] = []
+    for record in value[:64]:
+        if not isinstance(record, dict):
+            continue
+        text = record.get("text")
+        if not isinstance(text, str) or not text:
+            continue
+        sender = record.get("sender_name") or record.get("sender_xid") or "channel member"
+        lines.append(f"[Earlier channel message from {str(sender)[:512]}]: {text[:4096]}")
+    return "\n\n" + "\n".join(lines) if lines else ""
 
 
 class _BoundedKeyedDispatcher:
@@ -135,8 +180,18 @@ class PolkadotAdapter(BasePlatformAdapter):
         self._recv_task: Optional[asyncio.Task] = None
         self._dispatcher: Optional[_BoundedKeyedDispatcher] = None
         self._attachment_dirs: Set[str] = set()
+        # A T3ams bridge delivery may carry a thread root. The dispatcher is
+        # ordered per chat, so this short-lived context safely routes Hermes's
+        # synchronous answer (and command/error replies) back to that thread.
+        self._active_thread_roots: Dict[str, Optional[str]] = {}
+        # A bridge delivery is also a capability to publish a reply. Keep its
+        # lease with the thread context for the duration of the synchronous
+        # Hermes turn, so every bridge /send can prove it still owns the
+        # inbound delivery that prompted the response.
+        self._active_delivery_claims: Dict[str, Tuple[str, str]] = {}
         self._running = False
         self._bot_account: Optional[str] = None
+        self._bridge_file_max_bytes = _MAX_OUTBOUND_ATTACHMENT_BYTES
 
     @property
     def name(self) -> str:
@@ -159,6 +214,18 @@ class PolkadotAdapter(BasePlatformAdapter):
                     return False
                 health = await resp.json()
                 self._bot_account = health.get("account")
+                files = health.get("files")
+                advertised_file_cap = (
+                    files.get("maxBridgeUploadBytes") if isinstance(files, dict) else None
+                )
+                if (
+                    isinstance(advertised_file_cap, int)
+                    and not isinstance(advertised_file_cap, bool)
+                    and advertised_file_cap > 0
+                ):
+                    self._bridge_file_max_bytes = min(
+                        advertised_file_cap, _MAX_OUTBOUND_ATTACHMENT_BYTES
+                    )
                 if resp.status == 503:
                     logger.warning(
                         "Polkadot bridge up but chain unreachable (bot account %s); continuing",
@@ -282,7 +349,11 @@ class PolkadotAdapter(BasePlatformAdapter):
                 logger.warning("Polkadot bridge attachment metadata is invalid")
                 continue
             url = a.get("url")
-            if not (a.get("downloaded") and isinstance(url, str) and url.startswith("/media/")):
+            # `downloaded` is only a cache-status hint. T3ams can provide an
+            # opaque authenticated /media capability before its asynchronous
+            # prewarm completes; fetching that URL performs the same bounded
+            # download on demand.
+            if not (isinstance(url, str) and url.startswith("/media/")):
                 logger.warning("Polkadot attachment %s is unavailable from the bridge", a.get("id"))
                 continue
             advertised_bytes = a.get("size")
@@ -454,40 +525,81 @@ class PolkadotAdapter(BasePlatformAdapter):
         if not chat_id or not text:
             logger.warning("Polkadot bridge delivery is missing chat_id or text")
             return False
+        delivery_id = msg.get("delivery_id")
+        lease_id = msg.get("lease_id")
+        if (
+            not isinstance(delivery_id, str)
+            or not delivery_id
+            or not isinstance(lease_id, str)
+            or not lease_id
+        ):
+            logger.warning("Polkadot bridge delivery is missing delivery_id or lease_id")
+            return False
         attachments = msg.get("attachments") or []
         if not isinstance(attachments, list):
             raise RuntimeError("bridge delivery attachments must be an array")
         media_paths, media_types, temp_dir = await self._fetch_attachments(attachments)
+        thread_root = msg.get("thread_root_id")
+        if not isinstance(thread_root, str) or not thread_root:
+            thread_root = None
+        had_previous_root = chat_id in self._active_thread_roots
+        previous_root = self._active_thread_roots.get(chat_id)
+        previous_claim = self._active_delivery_claims.get(chat_id)
+        self._active_thread_roots[chat_id] = thread_root
+        self._active_delivery_claims[chat_id] = (delivery_id, lease_id)
         try:
+            sender_id = msg.get("sender_xid") or chat_id
+            sender_name = msg.get("sender_name") or msg.get("user_name") or str(sender_id)[:8]
             source = self.build_source(
                 chat_id=chat_id,
-                chat_type="dm",
-                user_id=chat_id,
-                user_name=msg.get("user_name") or chat_id[:8],
+                chat_type="group" if msg.get("conversation_type") == "channel" else "dm",
+                user_id=sender_id,
+                user_name=sender_name,
                 message_id=msg.get("message_id"),
             )
             is_photo = any(t.startswith("image/") for t in media_types)
             event = MessageEvent(
-                text=text,
+                text=text + _channel_context_note(msg.get("channel_context")),
                 message_type=MessageType.PHOTO if is_photo else MessageType.TEXT,
                 source=source,
                 message_id=msg.get("message_id"),
                 media_urls=media_paths,
                 media_types=media_types,
-                reply_to_message_id=msg.get("reply_to"),
+                reply_to_message_id=thread_root or msg.get("reply_to"),
             )
             await self.handle_message(event)
             return True
         finally:
+            if had_previous_root:
+                self._active_thread_roots[chat_id] = previous_root
+            else:
+                self._active_thread_roots.pop(chat_id, None)
+            if previous_claim is not None:
+                self._active_delivery_claims[chat_id] = previous_claim
+            else:
+                self._active_delivery_claims.pop(chat_id, None)
             await self._cleanup_attachments(temp_dir)
+
+    def _add_active_delivery_claim(self, chat_id: str, body: Dict[str, Any]) -> None:
+        """Attach the inbound lease that authorizes this synchronous reply."""
+        claim = self._active_delivery_claims.get(chat_id)
+        if claim is not None:
+            body["delivery_id"], body["lease_id"] = claim
 
     async def send(self, chat_id: str, content: str, reply_to=None, metadata=None) -> SendResult:
         if not self._session:
             return SendResult(success=False, error="Polkadot bridge not connected")
         try:
+            body: Dict[str, Any] = {"chat_id": chat_id, "text": content}
+            thread_root = self._active_thread_roots.get(chat_id)
+            if thread_root:
+                body["thread_root_id"] = thread_root
+            self._add_active_delivery_claim(chat_id, body)
+            if reply_to:
+                body["reply_to"] = str(reply_to)
             async with self._session.post(
                 f"{self.bridge_url}/send",
-                json={"chat_id": chat_id, "text": content},
+                json=body,
                 timeout=60,
             ) as resp:
                 data = await resp.json()
@@ -496,6 +608,221 @@ class PolkadotAdapter(BasePlatformAdapter):
                 return SendResult(success=False, error=data.get("error") or f"HTTP {resp.status}")
         except Exception as exc:  # noqa: BLE001
             return SendResult(success=False, error=str(exc), retryable=True)
+
+    def _bridge_file_url(self, chat_id: str, vault_path: str) -> str:
+        """Address one conversation-scoped bridge vault file safely."""
+        return (
+            f"{self.bridge_url}/files/{quote(str(chat_id), safe='')}"
+            f"/{quote(vault_path, safe='/')}"
+        )
+
+    async def _stage_outbound_file(
+        self,
+        chat_id: str,
+        file_path: str,
+        *,
+        file_name: Optional[str] = None,
+    ) -> str:
+        """Copy one approved Hermes artifact into the chat's bridge vault.
+
+        The bridge deliberately accepts a vault-relative name, never a host
+        path. A random intermediate directory prevents concurrent outputs with
+        the same display name from replacing each other, while the final path
+        segment remains the clean filename carried in the T3ams attachment.
+        """
+        session = self._session
+        if not session:
+            raise RuntimeError("Polkadot bridge not connected")
+        safe_path = self.validate_media_delivery_path(str(file_path or ""))
+        if not safe_path:
+            raise ValueError("attachment path is not approved for native delivery")
+
+        descriptor: Optional[int] = None
+        try:
+            flags = os.O_RDONLY
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(safe_path, flags)
+            source_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(source_stat.st_mode):
+                raise ValueError("attachment must be a regular file")
+            if source_stat.st_size > self._bridge_file_max_bytes:
+                raise ValueError(
+                    f"attachment exceeds the Polkadot bridge limit ({self._bridge_file_max_bytes} bytes)"
+                )
+
+            display_name = _safe_outbound_filename(file_name or safe_path)
+            vault_path = f"hermes/{secrets.token_hex(12)}/{display_name}"
+            mime = mimetypes.guess_type(display_name)[0] or "application/octet-stream"
+            # Keep the descriptor open from approval through upload, so a
+            # symlink swap cannot make the bridge read a different host file.
+            with os.fdopen(descriptor, "rb") as source:
+                descriptor = None
+                async with session.put(
+                    self._bridge_file_url(chat_id, vault_path),
+                    data=source,
+                    headers={"Content-Type": mime},
+                    timeout=_OUTBOUND_UPLOAD_TIMEOUT_SECS,
+                ) as resp:
+                    try:
+                        data = await resp.json(content_type=None)
+                    except (aiohttp.ContentTypeError, ValueError):
+                        data = {}
+                    if not (200 <= resp.status < 300 and isinstance(data, dict) and data.get("success") is True):
+                        raise RuntimeError(f"bridge file upload failed: {_bridge_error(data, resp.status)}")
+            return vault_path
+        except ValueError:
+            raise
+        except OSError as exc:
+            # Avoid returning a host path from an OS exception to the chat.
+            raise RuntimeError("could not open attachment for upload") from exc
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+    async def _remove_staged_outbound_file(self, chat_id: str, vault_path: str) -> None:
+        """Best-effort cleanup after bot-core has finished the HOP upload."""
+        session = self._session
+        if not session:
+            return
+        try:
+            async with session.delete(self._bridge_file_url(chat_id, vault_path), timeout=10) as resp:
+                # Missing is also a successful cleanup: an operator may have
+                # pruned the vault while a slow transport send was in flight.
+                if resp.status not in (200, 404):
+                    logger.debug("Polkadot staged file cleanup returned HTTP %s", resp.status)
+        except Exception as exc:  # noqa: BLE001 -- stale staging data is non-fatal
+            logger.debug("Polkadot staged file cleanup failed: %s", exc)
+
+    async def _send_file_attachment(
+        self,
+        chat_id: str,
+        file_path: str,
+        *,
+        caption: Optional[str] = None,
+        file_name: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Stage a local Hermes artifact then publish it as a T3ams attachment."""
+        del metadata  # Thread routing follows the same active-delivery path as send().
+        if not self._session:
+            return SendResult(success=False, error="Polkadot bridge not connected")
+        vault_path: Optional[str] = None
+        try:
+            vault_path = await self._stage_outbound_file(
+                chat_id, file_path, file_name=file_name
+            )
+            body: Dict[str, Any] = {"chat_id": chat_id, "file_path": vault_path}
+            if isinstance(caption, str) and caption:
+                body["text"] = caption
+            thread_root = self._active_thread_roots.get(chat_id)
+            if thread_root:
+                body["thread_root_id"] = thread_root
+            self._add_active_delivery_claim(chat_id, body)
+            if reply_to:
+                body["reply_to"] = str(reply_to)
+            async with self._session.post(
+                f"{self.bridge_url}/send",
+                json=body,
+                timeout=_OUTBOUND_UPLOAD_TIMEOUT_SECS,
+            ) as resp:
+                try:
+                    data = await resp.json(content_type=None)
+                except (aiohttp.ContentTypeError, ValueError):
+                    data = {}
+                if resp.status == 200 and isinstance(data, dict) and data.get("success"):
+                    return SendResult(success=True, message_id=data.get("message_id"))
+                return SendResult(success=False, error=_bridge_error(data, resp.status))
+        except ValueError as exc:
+            return SendResult(success=False, error=str(exc))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Polkadot attachment delivery failed: %s", exc)
+            # _stage_outbound_file deliberately wraps local OS failures, so
+            # this can safely preserve actionable bridge transport errors.
+            return SendResult(success=False, error=str(exc)[:300], retryable=True)
+        finally:
+            if vault_path:
+                # /send does the encrypted HOP upload before it returns, so
+                # this transient harness staging record is safe to remove.
+                await self._remove_staged_outbound_file(chat_id, vault_path)
+
+    async def send_document(
+        self,
+        chat_id: str,
+        file_path: str,
+        caption: Optional[str] = None,
+        file_name: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        del kwargs
+        return await self._send_file_attachment(
+            chat_id,
+            file_path,
+            caption=caption,
+            file_name=file_name,
+            reply_to=reply_to,
+            metadata=metadata,
+        )
+
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        del kwargs
+        return await self._send_file_attachment(
+            chat_id,
+            image_path,
+            caption=caption,
+            reply_to=reply_to,
+            metadata=metadata,
+        )
+
+    async def send_voice(
+        self,
+        chat_id: str,
+        audio_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        del kwargs
+        return await self._send_file_attachment(
+            chat_id,
+            audio_path,
+            caption=caption,
+            reply_to=reply_to,
+            metadata=metadata,
+        )
+
+    async def send_video(
+        self,
+        chat_id: str,
+        video_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        del kwargs
+        return await self._send_file_attachment(
+            chat_id,
+            video_path,
+            caption=caption,
+            reply_to=reply_to,
+            metadata=metadata,
+        )
 
     async def edit_message(
         self,
@@ -515,9 +842,11 @@ class PolkadotAdapter(BasePlatformAdapter):
         if not self._session:
             return SendResult(success=False, error="Polkadot bridge not connected")
         try:
+            body: Dict[str, Any] = {"chat_id": chat_id, "text": content, "edit_of": message_id}
+            self._add_active_delivery_claim(chat_id, body)
             async with self._session.post(
                 f"{self.bridge_url}/send",
-                json={"chat_id": chat_id, "text": content, "edit_of": message_id},
+                json=body,
                 timeout=60,
             ) as resp:
                 data = await resp.json()
@@ -532,8 +861,10 @@ class PolkadotAdapter(BasePlatformAdapter):
         if not self._session:
             return
         try:
+            body: Dict[str, Any] = {"chat_id": chat_id}
+            self._add_active_delivery_claim(chat_id, body)
             async with self._session.post(
-                f"{self.bridge_url}/typing", json={"chat_id": chat_id}, timeout=5
+                f"{self.bridge_url}/typing", json=body, timeout=5
             ):
                 pass
         except Exception:  # noqa: BLE001

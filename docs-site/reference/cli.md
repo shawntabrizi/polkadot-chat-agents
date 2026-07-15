@@ -25,7 +25,7 @@ every command, including `project`, `model`, and `storage`.
 
 | Flag | Applies to | Meaning |
 |---|---|---|
-| `--brain <b>` | create | `echo`, `claude`, `codex`, `opencode`, `bridge`/`hermes`. |
+| `--brain <b>` | create | `echo`, `claude`, `codex`, `opencode`, `bridge`. |
 | `--owner <who>` | create | Lock to one account (username, SS58, or hex). |
 | `--allow a,b` | create | Allowlist several accounts. |
 | `--public` | create | Allow anyone to message it (required for a paid brain left open). |
@@ -37,10 +37,21 @@ every command, including `project`, `model`, and `storage`.
 | `--wait <seconds>` | create, register | How long to wait for on-chain registration confirmation. |
 | `--host <ssh>` | deploy, logs, status, stop | Target server (saved after first deploy). |
 | `--harness openclaw or hermes` | deploy | Agent framework for a bridge bot. |
-| `--safe-tools` | deploy | Disable full autonomy. Claude then uses its configured allowlist; Codex and OpenCode need their own sandbox or workspace controls. |
+| `--allowed-tools <read,write,bash>` | run, deploy | Select exact lowercase portable direct-agent capabilities. `write` includes `read`; `bash` includes both. |
+| `--tool-scope workspace\|container` | run, deploy | Scope native file tools to the selected workspace (default) or deliberately to all files visible to the non-root agent account in its container. Bash uses the agent process boundary in either scope. |
 | `--dry-run` | deploy | Print the generated files without deploying. |
 
 Bots live in `~/.pca/bots/<name>/` (override with `PCA_BOTS_DIR`).
+
+Direct Claude, Codex, and OpenCode runs and deployments start with no tools:
+empty capabilities and workspace scope. The same portable policy is available
+to public and allowlisted bots, so every sender of a public bot can direct
+whatever capabilities its deployer selects. A `read`-capable turn can inspect
+its staged inbound attachment; a `write`-capable turn can produce a returnable
+file. Workspace scope applies to native file tools; Bash uses the agent process
+boundary. A deployment uses its dedicated bot container; local `pca run` uses
+the local process account, so treat it as a trusted-machine tool. See [Private &
+public bots](/guide/access) for the trust boundary.
 
 ## Private Paseo file allowance
 

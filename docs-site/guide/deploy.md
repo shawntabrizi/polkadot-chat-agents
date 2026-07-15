@@ -27,17 +27,64 @@ steps.
 
 `claude`, `codex`, and `opencode` deploy as a **single container**: the
 transport process holds the seed and writes `/state`, while the agent CLI it
-spawns is dropped to a non-root user that can only touch its `/workspace` and
-OAuth home — it can't read the seed or the session state. The container is
-read-only except for those volumes and a size-capped `tmpfs`.
+spawns is dropped to a non-root user — it can't read the seed or session state.
+The container is read-only except for its intended volumes and a size-capped
+`tmpfs`.
+
+The seed split protects the chat identity. The CLI retains its mounted OAuth
+home to authenticate and refresh its own session. Every direct engine starts
+with no capabilities and workspace scope. A deployer may select portable
+`read`, `write`, and `bash` capabilities with
+`--allowed-tools read,write,bash`; `write` includes `read` and `bash` includes
+both. `--tool-scope workspace|container` scopes native file tools.
+
+Workspace scopes native file tools to the normal project working area; container
+scope deliberately grants them the non-root agent account's container-visible
+files, including its OAuth home. Bash uses the agent process boundary in either
+scope. The dedicated bot container is the concrete isolation boundary for a
+deployment. Do not mount unrelated host repositories, credentials, Docker
+sockets, or home directories into it. For a public bot, every sender can direct
+the selected capability.
 
 After a direct deployment, run the printed one-time CLI login command (for a
 Claude bot, `claude login` through the printed `docker exec` command) so the
 agent can authenticate through its mounted OAuth home. Those credentials survive
-restarts and redeploys.
+restarts and redeploys; keep the selected policy in the deployment command or
+release script.
 
 `echo` also deploys as a single container, but it does not spawn an AI CLI and
 needs no provider login.
+
+## Photo and document understanding for T3ams
+
+A no-tools direct bot can safely receive encrypted photos and files, but it
+cannot inspect a staged file itself. Enable `--allowed-tools read` with
+workspace scope when the direct brain should inspect its current staged
+attachment. For a separate API-only attachment-analysis worker, use the
+explicit `--media-analyzer` deployment option:
+
+```bash
+# First create the private remote directory and edit its media.env directly on
+# the VPS. Do not put this provider key in your local shell history or CI logs.
+install -d -m 700 /root/pca-bots/<bot>
+# In your editor or secret-manager workflow, create /root/pca-bots/<bot>/media.env:
+ANTHROPIC_API_KEY=...
+MEDIA_ANALYZER_MODEL=<an available Anthropic API model>
+chmod 600 /root/pca-bots/<bot>/media.env
+
+# Then deploy; the API key is never passed to bot.env, Claude, or your local pca command.
+pca deploy mycoolbot --host root@your-server --media-analyzer
+```
+
+The generated worker has no published port and does not mount `/state`, the
+agent workspace, any direct-engine OAuth home, or the bot's bridge token. It receives
+only verified, bounded attachment bytes, then returns a small untrusted
+summary for the brain. It supports common images, PDFs, text documents, and
+`.docx`/`.xlsx`/`.pptx`; other file types continue to be delivered/downloadable
+but are not semantically inspected. The worker sends supported files to the
+Anthropic API, so do not enable it for material that must remain entirely on
+your server. See [Configuration](/reference/configuration#optional-isolated-photo-and-document-analysis)
+for limits, cancellation, at-most-once recovery behavior, and egress guidance.
 
 ## Bridge bots
 

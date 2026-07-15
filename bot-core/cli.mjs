@@ -5,7 +5,7 @@
 // (override with PCA_BOTS_DIR). Blockchain details (keys, addresses, topics)
 // are handled for you; you just pick a name and a brain.
 //
-//   pca create <botname> [--brain echo|claude|codex|opencode|bridge|hermes] [--network paseo] [--allow 0x..,0x..]
+//   pca create <botname> [--brain echo|claude|codex|opencode|bridge] [--transport polkadot-app|t3ams] [--network paseo] [--allow 0x..,0x..]
 //   pca run <name>                  start the bot locally (foreground)
 //   pca deploy <name> --host <ssh>  ship it to a server and run it in Docker
 //   pca list                        list your bots
@@ -28,6 +28,16 @@ import { getWsProvider } from "polkadot-api/ws";
 import { paseoPeopleNext } from "./lib/descriptors.mjs";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
 import { deriveP256PrivateKey, p256PublicKeyFromPrivateKey } from "./vendor/app-chat-codec.mjs";
+import { entrypointForTransport } from "./lib/transport-entrypoint.mjs";
+import { assertEngineToolPolicy, toolPolicyEnforcement } from "./lib/runners.mjs";
+import {
+  DEFAULT_TOOL_POLICY,
+  ToolPolicyError,
+  createToolPolicy,
+  parseToolCapabilities,
+  toolPolicyEnvironment,
+  toolPolicySummary,
+} from "./lib/tool-policy.mjs";
 import { registerIdentity, waitForAttestation, withTimeout, DEFAULT_BACKENDS } from "./lib/register.mjs";
 import {
   PaseoAllowanceFinalizationUnknownError,
@@ -70,9 +80,11 @@ const NODE_IMAGE = "node:22.22.0-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048
 const HERMES_IMAGE = "nousresearch/hermes-agent@sha256:9c841866021c54c4596849f6135717e8a4d52ba510b7f52c50aef1de1a283973";
 // Cap container log growth on a VPS (json-file grows unbounded by default).
 const LOG_OPTS = `    logging:\n      driver: json-file\n      options: { max-size: "10m", max-file: "3" }\n`;
-const BRAINS = ["echo", "claude", "codex", "opencode", "bridge", "hermes"];
+const BRAINS = ["echo", "claude", "codex", "opencode", "bridge"];
+const DEFAULT_TRANSPORT = "polkadot-app";
+const TRANSPORTS = [DEFAULT_TRANSPORT, "t3ams"];
 // Brains that call a model and therefore spend your quota — never left open by default.
-const PAID_BRAINS = new Set(["claude", "codex", "opencode", "bridge", "hermes"]);
+const PAID_BRAINS = new Set(["claude", "codex", "opencode", "bridge"]);
 // Direct engines shell out to a same-named CLI on this machine. Warn (don't fail —
 // the bot may be destined for a server) when it isn't installed, or every message
 // dies with BOT_AI_SPAWN_FAILED and the user only sees the apology text.
@@ -126,7 +138,7 @@ const fail = (s) => { console.error(`${c("✗", "31")} ${s}`); process.exit(1); 
 
 // Flags that are always boolean — they must never consume the following token,
 // or `pca create --public mybot` would swallow the bot name into --public.
-const BOOLEAN_FLAGS = new Set(["public", "dry-run", "no-register", "follow", "greet", "yes", "help", "version"]);
+const BOOLEAN_FLAGS = new Set(["public", "dry-run", "no-register", "follow", "greet", "yes", "help", "version", "media-analyzer", "t3ams-auto-accept-workspaces", "t3ams-no-auto-accept-workspaces"]);
 const SHORT_FLAGS = { "-f": "follow", "-h": "help", "-V": "version" };
 function parseFlags(argv) {
   const flags = {};
@@ -158,11 +170,74 @@ const saveConfig = (name, cfg) => {
   fs.writeFileSync(configPath(name), `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 });
   fs.chmodSync(configPath(name), 0o600);
 };
+
+class CurrentConfigError extends Error {}
+
+const isRecord = (value) => value != null && typeof value === "object" && !Array.isArray(value);
+const nonEmptyConfigString = (value) => typeof value === "string" && value.trim() === value && value.length > 0;
+const configError = (name, detail) => new CurrentConfigError(
+  `Invalid config.json for "${name}": ${detail}. This is not a current PCA configuration; recreate it with: pca create ${name}`,
+);
+
+// Config files are written atomically by `pca create` and then updated only by
+// PCA commands. Treat that format as one current contract rather than trying
+// to infer missing fields or alternate shapes.
+function validateCurrentConfig(name, cfg) {
+  if (!isRecord(cfg)) throw configError(name, "expected an object");
+  if (cfg.name !== name) throw configError(name, "name does not match its bot directory");
+  if (!nonEmptyConfigString(cfg.endpoint)) throw configError(name, "endpoint is required");
+  if (!nonEmptyConfigString(cfg.backendUrl)) throw configError(name, "backendUrl is required");
+  if (typeof cfg.brain !== "string" || !BRAINS.includes(cfg.brain)) {
+    throw configError(name, `brain must be one of: ${BRAINS.join(", ")}`);
+  }
+  if (typeof cfg.transport !== "string" || !TRANSPORTS.includes(cfg.transport)) {
+    throw configError(name, `transport must be one of: ${TRANSPORTS.join(", ")}`);
+  }
+  if (!Array.isArray(cfg.allow) || cfg.allow.some((account) => !/^[0-9a-f]{64}$/.test(account))) {
+    throw configError(name, "allow must be an array of lowercase 32-byte account IDs");
+  }
+  if (!isRecord(cfg.allowLabels)) throw configError(name, "allowLabels is required");
+  if (!Number.isInteger(cfg.bridgePort) || cfg.bridgePort < 1 || cfg.bridgePort > 65535) {
+    throw configError(name, "bridgePort must be an integer from 1 to 65535");
+  }
+  if (!nonEmptyConfigString(cfg.bridgeToken) || cfg.bridgeToken.length < 32) {
+    throw configError(name, "bridgeToken must be a 32+ character secret");
+  }
+  if (typeof cfg.account !== "string" || !/^0x[0-9a-f]{64}$/i.test(cfg.account)) {
+    throw configError(name, "account must be a 32-byte hexadecimal account ID");
+  }
+  if (!nonEmptyConfigString(cfg.address)) throw configError(name, "address is required");
+  if (typeof cfg.identifierKey !== "string" || !/^0x[0-9a-f]+$/i.test(cfg.identifierKey) || cfg.identifierKey.length % 2 !== 0) {
+    throw configError(name, "identifierKey must be hexadecimal");
+  }
+  if (cfg.username !== null && !nonEmptyConfigString(cfg.username)) {
+    throw configError(name, "username must be null or a non-empty string");
+  }
+  if (typeof cfg.registered !== "boolean") throw configError(name, "registered must be true or false");
+  if (!nonEmptyConfigString(cfg.createdAt)) throw configError(name, "createdAt is required");
+  return cfg;
+}
+
+function loadCurrentConfig(name) {
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(configPath(name), "utf8"));
+  } catch (error) {
+    throw configError(name, `could not read JSON (${String(error?.message ?? error)})`);
+  }
+  return validateCurrentConfig(name, raw);
+}
+
 const readConfig = (name) => {
   if (!name) fail("Which bot? Usage: pca <command> <botname>   (list yours with: pca list)");
   if (!BOT_NAME_RE.test(name)) fail(`Invalid bot name "${String(name)}".`);
   if (!fs.existsSync(configPath(name))) fail(`No bot named "${name}". Create it: pca create ${name}`);
-  return JSON.parse(fs.readFileSync(configPath(name), "utf8"));
+  try {
+    return loadCurrentConfig(name);
+  } catch (error) {
+    if (error instanceof CurrentConfigError) fail(error.message);
+    throw error;
+  }
 };
 const listBots = () => (fs.existsSync(BOTS_DIR) ? fs.readdirSync(BOTS_DIR).filter((n) => fs.existsSync(configPath(n))) : []);
 
@@ -232,18 +307,25 @@ function acquireAllowanceProvisioningLock(name, address) {
 }
 
 const newBridgeToken = () => randomBytes(32).toString("base64url");
-function ensureBridgeToken(name, cfg) {
+function configuredBridgeToken(cfg) {
   const token = typeof cfg.bridgeToken === "string" ? cfg.bridgeToken.trim() : "";
   if (token.length >= 32) return token;
-  // Existing bots predate bridge authentication. Rotate only their bridge
-  // credential; their chain identity and active sessions stay untouched.
-  cfg.bridgeToken = newBridgeToken();
+  fail(`Invalid bridgeToken in config.json for "${cfg.name ?? "this bot"}". Recreate the bot instead of mutating an incomplete configuration.`);
+}
+
+// The media worker gets a distinct capability, rather than reusing the bridge
+// token. That makes its narrow attachment-analysis boundary independently
+// revocable and keeps a leaked bridge credential from becoming an API caller.
+function ensureMediaAnalyzerToken(name, cfg) {
+  const token = typeof cfg.mediaAnalyzerToken === "string" ? cfg.mediaAnalyzerToken.trim() : "";
+  if (token.length >= 32 && token !== cfg.bridgeToken) return token;
+  cfg.mediaAnalyzerToken = newBridgeToken();
   saveConfig(name, cfg);
-  return cfg.bridgeToken;
+  return cfg.mediaAnalyzerToken;
 }
 
 function bridgePortFor(cfg) {
-  const raw = cfg.bridgePort ?? 8799;
+  const raw = cfg.bridgePort;
   if (typeof raw === "boolean" || String(raw).trim() === "") {
     fail(`Invalid bridgePort in config.json: ${String(cfg.bridgePort)}`);
   }
@@ -315,7 +397,115 @@ function configuredModelPolicy(cfg) {
   return { allowedModels, open: mode === "open" };
 }
 
-const isPublicBot = (cfg) => !Array.isArray(cfg.allow) || cfg.allow.length === 0;
+const isPublicBot = (cfg) => cfg.allow.length === 0;
+const TAGGED_T3AMS_KEY_RE = /^(?:0x)?[0-9a-f]{2,4096}$/i;
+
+function normalizeT3amsDisplayName(value) {
+  const name = String(value ?? "").trim();
+  if (!name || name.length > 128 || /[\u0000-\u001f\u007f]/.test(name)) {
+    fail("--t3ams-display-name must be 1–128 printable characters.");
+  }
+  return name;
+}
+
+function normalizeT3amsSigningKey(value, label = "T3ams signing key") {
+  const raw = String(value ?? "").trim();
+  if (!TAGGED_T3AMS_KEY_RE.test(raw)) {
+    fail(`${label} must be an even-length tagged-CBOR hexadecimal public key.`);
+  }
+  const key = raw.replace(/^0x/i, "").toLowerCase();
+  if (key.length % 2 !== 0) fail(`${label} must be an even-length tagged-CBOR hexadecimal public key.`);
+  return key;
+}
+
+async function requestedT3amsTrustedSigningKeys(value, backendUrl) {
+  if (value == null) return {};
+  if (typeof value === "boolean" || String(value).trim() === "") {
+    fail("--t3ams-peer-key requires owner=tagged-cbor-public-key (comma-separate multiple pins).");
+  }
+  const keys = {};
+  for (const entry of String(value).split(",").map((item) => item.trim()).filter(Boolean)) {
+    const at = entry.indexOf("=");
+    if (at <= 0 || at === entry.length - 1 || entry.indexOf("=", at + 1) !== -1) {
+      fail(`Invalid --t3ams-peer-key entry "${entry}". Use owner=tagged-cbor-public-key.`);
+    }
+    const account = await resolvePeer(entry.slice(0, at), backendUrl);
+    if (keys[account] != null) fail(`Duplicate T3ams signing-key pin for ${entry.slice(0, at)}.`);
+    keys[account] = normalizeT3amsSigningKey(entry.slice(at + 1), `T3ams signing key for ${entry.slice(0, at)}`);
+  }
+  return keys;
+}
+
+function configuredTransport(cfg) {
+  const transport = cfg.transport;
+  if (typeof transport !== "string" || !TRANSPORTS.includes(transport)) {
+    fail(`Invalid transport in config.json for "${cfg.name ?? "this bot"}": ${String(transport)}. Expected one of: ${TRANSPORTS.join(", ")}.`);
+  }
+  return transport;
+}
+
+function configuredT3amsTrustedSigningKeys(cfg, transport = configuredTransport(cfg)) {
+  if (transport !== "t3ams") return {};
+  const raw = cfg.t3amsTrustedSigningKeys ?? {};
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    fail(`Invalid t3amsTrustedSigningKeys in config.json for "${cfg.name ?? "this bot"}".`);
+  }
+  const keys = {};
+  for (const [account, signingKey] of Object.entries(raw)) {
+    const normalizedAccount = toAccountHex(account);
+    if (keys[normalizedAccount] != null) fail(`Duplicate T3ams signing-key pin for ${normalizedAccount} in config.json.`);
+    keys[normalizedAccount] = normalizeT3amsSigningKey(signingKey, `T3ams signing key for ${normalizedAccount}`);
+  }
+  const allow = cfg.allow.map((account) => toAccountHex(account));
+  const missing = allow.filter((account) => keys[account] == null);
+  if (missing.length > 0) {
+    fail(`Private T3ams bot "${cfg.name ?? "this bot"}" needs an immutable tagged-CBOR signing-key pin for every allowlisted account. Recreate it with --t3ams-peer-key <owner>=<tagged-key>, or add t3amsTrustedSigningKeys to its private config.json.`);
+  }
+  return keys;
+}
+
+function t3amsEnvironment(cfg, transport = configuredTransport(cfg)) {
+  if (transport !== "t3ams") return {};
+  const values = { BOT_T3AMS_TRUSTED_SIGNING_KEYS: JSON.stringify(configuredT3amsTrustedSigningKeys(cfg, transport)) };
+  if (cfg.t3amsDisplayName != null) values.BOT_T3AMS_DISPLAY_NAME = normalizeT3amsDisplayName(cfg.t3amsDisplayName);
+  if (cfg.t3amsAutoAcceptWorkspaces != null) {
+    if (typeof cfg.t3amsAutoAcceptWorkspaces !== "boolean") {
+      fail(`Invalid t3amsAutoAcceptWorkspaces in config.json for "${cfg.name ?? "this bot"}".`);
+    }
+    values.BOT_T3AMS_AUTO_ACCEPT_WORKSPACES = cfg.t3amsAutoAcceptWorkspaces ? "1" : "0";
+  }
+  return values;
+}
+
+const t3amsSdkInstallHint = () => "Install the matching local T3ams BCTS tarball in bot-core, for example: npm install /path/to/t3ams-bcts-*.tgz";
+
+async function inspectT3amsSdkForDeploy(transport) {
+  if (transport !== "t3ams") return { ok: true };
+  try {
+    // Importing is the real deployment requirement. A package.json check can
+    // pass while a packed SDK or one of its transitive dependencies fails to
+    // load in the bot process.
+    await import("@t3ams/bcts");
+  } catch (error) {
+    return {
+      ok: false,
+      message: `Could not import the local @t3ams/bcts package required for T3ams deployment: ${String(error?.message ?? error)}. ${t3amsSdkInstallHint()}`,
+    };
+  }
+  return { ok: true };
+}
+
+async function requireT3amsSdkForDeploy(transport) {
+  const preflight = await inspectT3amsSdkForDeploy(transport);
+  if (!preflight.ok) fail(preflight.message);
+}
+
+async function warnForT3amsSdkDeployPreflight(transport) {
+  const preflight = await inspectT3amsSdkForDeploy(transport);
+  if (!preflight.ok) {
+    warn(`${preflight.message} This is only a dry run, so no deployment was blocked; a real T3ams deploy will fail until it is fixed.`);
+  }
+}
 
 function configuredFileDelivery(cfg) {
   if (cfg.fileDelivery == null) return null;
@@ -563,28 +753,7 @@ function sshTarget(value) {
 const shellQuote = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
 const redactEnv = (content) => content.replace(/^([A-Z0-9_]*(?:SEED_HEX|TOKEN|API_KEY))=.*/gm, "$1=<hidden>");
 
-// Older versions kept bots in ./bots relative to the working directory. A user
-// upgrading with bots there would see "No bots yet" — and following the
-// suggested `pca create` would mint a SECOND identity while the original
-// (possibly deployed) one sits stranded. Point them at the move instead.
-function warnLegacyBotsDir() {
-  if (process.env.PCA_BOTS_DIR) return;
-  const legacy = path.resolve(process.cwd(), "bots");
-  if (legacy === BOTS_DIR) return;
-  try {
-    const legacyHasBots = fs.existsSync(legacy)
-      && fs.readdirSync(legacy).some((n) => fs.existsSync(path.join(legacy, n, "config.json")));
-    if (legacyHasBots && listBots().length === 0) {
-      warn(`Found bots in ${legacy} from an older pca version — bots now live in ${BOTS_DIR}.`);
-      note(`Move them:  mkdir -p ${path.dirname(BOTS_DIR)} && mv "${legacy}" "${BOTS_DIR}"`);
-      note(`Or keep the old location:  export PCA_BOTS_DIR="${legacy}"`);
-    }
-  } catch { /* best-effort hint only */ }
-}
-
 const deeplink = (accountIdHex) => {
-  // cfg.account is absent in a reconstructed config (it is re-derived from the
-  // seed at runtime), so callers must tolerate a null link.
   if (!accountIdHex) return null;
   const id = String(accountIdHex).replace(/^0x/, "");
   return `polkadotapp://chat?id=0:0x${id}&force=false&chatId=${id}`;
@@ -596,6 +765,21 @@ const printReachLine = (accountIdHex, username) => {
   if (link) console.log(`  ${c(link, "36")}`);
   if (username) note(`${link ? "or search" : "search"}: ${username}`);
 };
+
+function printT3amsReachLine({ name, username, registered }) {
+  const dotnsUsername = typeof username === "string" ? username.trim() : "";
+  const registerCommand = `pca register ${name ?? "<botname>"}`;
+  if (dotnsUsername && registered) {
+    note(`Search or invite ${dotnsUsername} in T3ams.`);
+    return;
+  }
+  if (dotnsUsername) {
+    warn(`This T3ams bot's DotNS username (${dotnsUsername}) is not confirmed yet.`);
+  } else {
+    warn("This T3ams bot has no registered DotNS username yet.");
+  }
+  note(`Register it before people can search or invite it in T3ams:  ${registerCommand}`);
+}
 
 async function cmdCreate(name, flags) {
   if (!name) fail("Usage: pca create <botname>   (the first argument is your bot's name, e.g. pca create mycoolbot)");
@@ -610,6 +794,8 @@ async function cmdCreate(name, flags) {
   if (fs.existsSync(botDir(name))) fail(`Bot "${name}" already exists (${botDir(name)}). Use a different name.`);
   const brain = String(flags.brain ?? "echo").toLowerCase();
   if (!BRAINS.includes(brain)) fail(`--brain must be one of: ${BRAINS.join(", ")}`);
+  const transport = String(flags.transport ?? DEFAULT_TRANSPORT).toLowerCase();
+  if (!TRANSPORTS.includes(transport)) fail(`--transport must be one of: ${TRANSPORTS.join(", ")}`);
   warnMissingBrainCli(brain);
   const networkProfile = flags.network == null || flags.network === "paseo" ? "paseo" : null;
   const endpoint = networkProfile === "paseo" ? DEFAULT_ENDPOINT : String(flags.endpoint ?? flags.network);
@@ -625,8 +811,33 @@ async function cmdCreate(name, flags) {
     allow.push(hex);
     allowLabels[hex] = String(input).trim().replace(/^@/, "");
   }
+  if (transport !== "t3ams" && flags["t3ams-peer-key"] != null) {
+    fail("--t3ams-peer-key is only valid with --transport t3ams.");
+  }
+  if (transport !== "t3ams" && (flags["t3ams-display-name"] != null
+      || flags["t3ams-auto-accept-workspaces"] != null || flags["t3ams-no-auto-accept-workspaces"] != null)) {
+    fail("T3ams display-name and workspace-enrollment flags require --transport t3ams.");
+  }
+  if (flags["t3ams-auto-accept-workspaces"] === true && flags["t3ams-no-auto-accept-workspaces"] === true) {
+    fail("Use only one of --t3ams-auto-accept-workspaces or --t3ams-no-auto-accept-workspaces.");
+  }
+  const t3amsDisplayName = flags["t3ams-display-name"] == null
+    ? null
+    : normalizeT3amsDisplayName(flagValue(flags["t3ams-display-name"], "t3ams-display-name"));
+  const t3amsAutoAcceptWorkspaces = flags["t3ams-auto-accept-workspaces"] === true
+    ? true
+    : flags["t3ams-no-auto-accept-workspaces"] === true
+      ? false
+      : null;
+  const t3amsTrustedSigningKeys = transport === "t3ams"
+    ? await requestedT3amsTrustedSigningKeys(flags["t3ams-peer-key"], backendUrl)
+    : {};
+  const missingT3amsPins = allow.filter((account) => t3amsTrustedSigningKeys[account] == null);
+  if (transport === "t3ams" && missingT3amsPins.length > 0) {
+    fail("A private T3ams bot requires a tagged-CBOR signing-key pin for every --owner/--allow account. Add --t3ams-peer-key <owner>=<tagged-key>; account-derived XIDs alone are not an authenticated first-contact binding.");
+  }
   const isPublic = flags.public === true;
-  // Safety: a paid brain (codex/claude/gemini/grok/hermes) left open to everyone can burn your quota.
+  // Safety: a paid brain left open to everyone can burn the deployer's quota.
   if (allow.length === 0 && !isPublic && PAID_BRAINS.has(brain)) {
     fail(`The "${brain}" brain spends your quota, so this bot can't be left open by default.\n  Lock it to you:  --owner <your Polkadot app address>\n  Or open to all:  --public`);
   }
@@ -662,7 +873,10 @@ async function cmdCreate(name, flags) {
   fs.mkdirSync(botDir(name), { recursive: true, mode: 0o700 });
   fs.writeFileSync(secretPath(name), `${JSON.stringify({ mnemonic, seedHex: bytesToHex(seed) }, null, 2)}\n`, { mode: 0o600 });
   const config = {
-    name, endpoint, backendUrl, brain, allow, allowLabels,
+    name, endpoint, backendUrl, brain, transport, allow, allowLabels,
+    ...(Object.keys(t3amsTrustedSigningKeys).length > 0 ? { t3amsTrustedSigningKeys } : {}),
+    ...(t3amsDisplayName != null ? { t3amsDisplayName } : {}),
+    ...(t3amsAutoAcceptWorkspaces != null ? { t3amsAutoAcceptWorkspaces } : {}),
     ...(networkProfile ? { networkProfile } : {}),
     // Testnet uploads can spend a finite Bulletin allowance. Configure the
     // known HOP profile only for an allowlisted bot, never a public one.
@@ -703,11 +917,16 @@ async function cmdCreate(name, flags) {
     : null;
 
   console.log();
-  console.log(allow.length ? `Locked to ${allow.length} allowlisted address${allow.length > 1 ? "es" : ""} — only they can message it.`
+  console.log(allow.length ? `Locked to ${allow.length} allowlisted address${allow.length > 1 ? "es" : ""}${transport === "t3ams" ? " with pinned T3ams signing keys" : ""} — only they can message it.`
                    : "Open — anyone can message it.");
-  console.log("Message your bot in the Polkadot app:");
-  console.log(`  ${c(deeplink(accountIdHex), "36")}`);
-  if (config.username) note(`or search: ${config.username}`);
+  if (transport === "t3ams") {
+    console.log("Message your bot in T3ams:");
+    printT3amsReachLine(config);
+  } else {
+    console.log("Message your bot in the Polkadot app:");
+    console.log(`  ${c(deeplink(accountIdHex), "36")}`);
+    if (config.username) note(`or search: ${config.username}`);
+  }
   console.log();
   note(`Start it:  pca run ${name}`);
   if (config.fileDelivery) {
@@ -899,8 +1118,7 @@ function cmdModel(positional) {
   fail(`Unknown model action "${rawAction}". ${modelCommandUsage(name)}`);
 }
 
-// Short human form of an allowlist account hex when create didn't record what
-// was typed (older configs): the SS58 address, elided.
+// Short human form of an allowlist account hex for display.
 function shortAllowEntry(hex) {
   try {
     const bytes = Uint8Array.from(hex.match(/../g).map((b) => parseInt(b, 16)));
@@ -917,13 +1135,13 @@ function cmdList() {
   for (const name of bots) {
     // One damaged config must not make every bot unlistable.
     let cfg;
-    try { cfg = JSON.parse(fs.readFileSync(configPath(name), "utf8")); }
+    try { cfg = loadCurrentConfig(name); }
     catch { broken.push(name); continue; }
     const username = cfg.username
       ? (cfg.registered ? { text: cfg.username } : { text: `${cfg.username} (pending)`, color: "33" })
       : { text: "not registered", color: "33" };
     const brain = cfg.model ? `${cfg.brain} · ${cfg.model}` : cfg.brain;
-    const labels = (cfg.allow ?? []).map((hex) => cfg.allowLabels?.[hex] ?? shortAllowEntry(hex));
+    const labels = cfg.allow.map((hex) => cfg.allowLabels[hex] ?? shortAllowEntry(hex));
     const access = labels.length === 0
       ? { text: "public", color: "33" }
       : { text: labels.length <= 2 ? labels.join(", ") : `${labels[0]} +${labels.length - 1} more` };
@@ -948,6 +1166,7 @@ function cmdList() {
 
 async function cmdInfo(name) {
   const cfg = readConfig(name);
+  const transport = configuredTransport(cfg);
   // Live re-check: has the network confirmed (attested) the bot yet?
   let messageable = cfg.registered;
   let reachedNetwork = true;
@@ -966,9 +1185,10 @@ async function cmdInfo(name) {
     : c(`username claimed, confirmation pending — check again or run: pca register ${name}`, "33");
   console.log(`${c(name, "1")}${cfg.username ? ` (${cfg.username})` : ""}`);
   console.log(`  brain:    ${cfg.brain}`);
+  console.log(`  transport: ${transport}`);
   console.log(`  network:  ${cfg.endpoint}`);
   console.log(`  address:  ${cfg.address}`);
-  const allowShown = (cfg.allow ?? []).map((hex) => cfg.allowLabels?.[hex] ?? shortAllowEntry(hex));
+  const allowShown = cfg.allow.map((hex) => cfg.allowLabels[hex] ?? shortAllowEntry(hex));
   console.log(`  access:   ${allowShown.length ? `only ${allowShown.join(", ")} can message it` : c("open to anyone", "33")}`);
   console.log(`  status:   ${status}`);
   const delivery = configuredFileDelivery(cfg);
@@ -985,8 +1205,13 @@ async function cmdInfo(name) {
   }
   if (cfg.deploy?.host) console.log(`  deployed: ${cfg.deploy.host} (container ${cfg.deploy.container}) — pca status ${name}`);
   console.log();
-  console.log(`  Message this bot in the Polkadot app:`);
-  printReachLine(cfg.account, cfg.username);
+  if (transport === "t3ams") {
+    console.log("  Reach this bot in T3ams:");
+    printT3amsReachLine({ ...cfg, registered: messageable });
+  } else {
+    console.log("  Message this bot in the Polkadot app:");
+    printReachLine(cfg.account, cfg.username);
+  }
 }
 
 function storageCommandUsage(name = "<botname>") {
@@ -1053,12 +1278,35 @@ async function cmdStorage(positional, flags = {}) {
   fail(storageCommandUsage(name));
 }
 
+function requestedDirectToolPolicy(brain, flags, command) {
+  const toolPolicyFlagUsed = flags["allowed-tools"] != null || flags["tool-scope"] != null;
+  if (!DIRECT_BRAIN_CLIS.has(brain)) {
+    if (toolPolicyFlagUsed) {
+      fail(`--allowed-tools and --tool-scope require a built-in direct engine (claude, codex, or opencode); ${brain} has no direct-agent tools.`);
+    }
+    return DEFAULT_TOOL_POLICY;
+  }
+  try {
+    return assertEngineToolPolicy(brain, createToolPolicy({
+      capabilities: flags["allowed-tools"] == null
+        ? []
+        : parseToolCapabilities(flagValue(flags["allowed-tools"], "allowed-tools")),
+      scope: flags["tool-scope"] == null ? "workspace" : flagValue(flags["tool-scope"], "tool-scope"),
+    }));
+  } catch (error) {
+    fail(error instanceof ToolPolicyError ? error.message : `Invalid tool policy for ${command}: ${String(error?.message ?? error)}`);
+  }
+}
+
 function cmdRun(name, flags = {}) {
   const cfg = readConfig(name);
   if (!fs.existsSync(secretPath(name))) fail(`"${name}" has no secret.json — its identity is missing. Recreate it: pca create ${name}`);
   const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
-  const bridgeToken = ensureBridgeToken(name, cfg);
+  const bridgeToken = configuredBridgeToken(cfg);
   const bridgePort = bridgePortFor(cfg);
+  const transport = configuredTransport(cfg);
+  const runToolPolicy = requestedDirectToolPolicy(cfg.brain, flags, "run");
+  const transportEnv = t3amsEnvironment(cfg, transport);
   // Keep agent work away from the bot state directory. Local runs still share
   // the invoking user's permissions, so run them only on trusted machines.
   const workspace = path.join(BOTS_DIR, `${name}-workspace`);
@@ -1067,6 +1315,13 @@ function cmdRun(name, flags = {}) {
   warnMissingBrainCli(cfg.brain);
   if (cfg.deploy?.host) warn(`Heads up: "${name}" is also deployed on ${cfg.deploy.host}. Running it here too = two processes on one identity (they will double-reply). Stop one first.`);
   step(`Starting "${name}" (${cfg.brain})…`);
+  if (DIRECT_BRAIN_CLIS.has(cfg.brain)) {
+    const summary = toolPolicySummary(runToolPolicy);
+    note(`Tool policy: ${summary.capabilities}; scope=${summary.scope}.`);
+    if (runToolPolicy.capabilities.includes("bash") || runToolPolicy.scope === "container") {
+      warn("Local agent tools follow this machine's process boundary; use pca deploy for per-bot container isolation.");
+    }
+  }
   note(`Check health from another terminal:  pca status ${name}   (Ctrl-C here stops the bot)`);
   const env = {
     ...process.env,
@@ -1074,12 +1329,19 @@ function cmdRun(name, flags = {}) {
     BOT_ENDPOINT: cfg.endpoint,
     BOT_BRIDGE_PORT: String(bridgePort),
     BOT_BRIDGE_TOKEN: bridgeToken,
-    BOT_ALLOWED_PEERS: (cfg.allow ?? []).join(","),
+    BOT_ALLOWED_PEERS: cfg.allow.join(","),
     BOT_BRAIN: cfg.brain,
+    BOT_TRANSPORT: transport,
+    ...transportEnv,
     BOT_USERNAME: cfg.username ?? "",
     BOT_STATE_DIR: botDir(name),   // persist sessions so a restart keeps open threads
     BOT_AI_WORKSPACE: workspace,
   };
+  // Tool authority is always selected by this invocation. Never inherit a
+  // broader policy from the operator's shell for a local bot run.
+  delete env.BOT_AI_TOOL_CAPABILITIES;
+  delete env.BOT_AI_TOOL_SCOPE;
+  if (DIRECT_BRAIN_CLIS.has(cfg.brain)) Object.assign(env, toolPolicyEnvironment(runToolPolicy));
   // A local operator may deliberately override a test HOP endpoint in their
   // shell. Deploys always use the persisted profile, but don't erase that
   // local test override here.
@@ -1099,7 +1361,7 @@ function cmdRun(name, flags = {}) {
     env.BOT_GREET = "1";
     note("Greet mode: the bot will message its owner(s) first — watch your phone.");
   }
-  const child = spawn(process.execPath, [path.join(HERE, "index.mjs")], { env, stdio: "inherit" });
+  const child = spawn(process.execPath, [path.join(HERE, entrypointForTransport(transport))], { env, stdio: "inherit" });
   child.on("exit", (code) => process.exit(code ?? 0));
 }
 
@@ -1121,31 +1383,57 @@ const DEPLOY_ENGINES = {
 };
 const KEY_FLAGS = { ANTHROPIC_API_KEY: "anthropic-key", OPENAI_API_KEY: "openai-key", OPENROUTER_API_KEY: "openrouter-key", GEMINI_API_KEY: "gemini-key", GROQ_API_KEY: "groq-key" };
 
+// A T3ams process can emit BOT_LISTENING before its websocket is connected or
+// before it has rebuilt its retained inbox/workspace subscriptions. Keep the
+// readiness check inside the container: it authenticates to the loopback-only
+// bridge with the container's token, without exposing either the port or token
+// on the VPS. The endpoint's `ok` means the chain is connected; a nonzero
+// subscription count proves the bot is also listening for messages.
+const t3amsBotHealthcheck = (transport) =>
+  transport === "t3ams"
+    ? `    healthcheck:\n      test: ["CMD", "node", "-e", "const port=process.env.BOT_BRIDGE_PORT||'8799';fetch('http://127.0.0.1:'+port+'/health',{headers:{authorization:'Bearer '+(process.env.BOT_BRIDGE_TOKEN||'')},signal:AbortSignal.timeout(4000)}).then(async(r)=>{let h;try{h=await r.json()}catch{process.exit(1);return}process.exit(r.ok&&h?.ok===true&&h.transport==='t3ams'&&Number.isInteger(h.subscriptions)&&h.subscriptions>0?0:1)}).catch(()=>process.exit(1))"]\n      interval: 5s\n      timeout: 5s\n      retries: 3\n      start_period: 20s\n`
+    : "";
+
+// This waits on the healthcheck above rather than on a log line. Keep the
+// final logs in the command output so a failed deploy remains diagnosable.
+const t3amsHealthWaitCommand = (container, tail = 30) =>
+  `status=unknown; for i in $(seq 1 45); do status="$(docker inspect --format '{{.State.Health.Status}}' ${container} 2>/dev/null || true)"; [ "$status" = healthy ] && break; sleep 2; done; echo "T3AMS_BOT_HEALTH=$status"; docker logs --tail ${tail} ${container} 2>&1; [ "$status" = healthy ]`;
+
 async function cmdDeploy(name, flags) {
-  if (!name) fail("Usage: pca deploy <name> --host <ssh-target> [--harness openclaw|hermes] [--model <m>] [--safe-tools] [--dry-run]");
+  if (!name) fail("Usage: pca deploy <name> --host <ssh-target> [--harness openclaw|hermes] [--model <m>] [--allowed-tools <read,write,bash>] [--tool-scope workspace|container] [--media-analyzer] [--dry-run]");
   const host = flags.host ? sshTarget(flags.host) : null;
   if (!host) fail(`--host <ssh-target> is required, e.g.  pca deploy ${name} --host root@1.2.3.4`);
   const cfg = readConfig(name);
   if (!fs.existsSync(secretPath(name))) fail(`No secret found for "${name}".`);
   const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
+  const transport = configuredTransport(cfg);
+  const mediaAnalyzerEnabled = flags["media-analyzer"] === true;
+  const toolPolicyFlagUsed = flags["allowed-tools"] != null || flags["tool-scope"] != null;
   const suppliedKeyFlag = Object.values(KEY_FLAGS).find((key) => flags[key] != null);
   if (suppliedKeyFlag) {
     fail(`--${suppliedKeyFlag} is no longer accepted: API keys are not injected into autonomous agents. Authenticate the selected CLI or framework through its own persistent credential store instead.`);
   }
-  if (cfg.brain === "hermes" || cfg.brain === "bridge") {
+  if (cfg.brain === "bridge") {
+    if (mediaAnalyzerEnabled) {
+      fail("--media-analyzer requires a T3ams direct-engine deployment (claude, codex, or opencode); bridge bots own their attachment runtime.");
+    }
+    if (toolPolicyFlagUsed) {
+      fail("--allowed-tools and --tool-scope require a built-in direct engine (claude, codex, or opencode); bridge bots own their agent runtime.");
+    }
     const harness = flags.harness ? String(flags.harness).toLowerCase() : null;
     if (harness !== "openclaw" && harness !== "hermes") {
       fail(`"${name}" is a bridge-mode bot — pick which agent framework drives it:\n  pca deploy ${name} --host ${host} --harness openclaw   (fully headless if the server has Claude creds)\n  pca deploy ${name} --host ${host} --harness hermes     (one interactive codex login after deploy)`);
     }
-    if (flags["dry-run"] !== true) await provisionTestnetFileAllowance(name, cfg);
     return deployHarnessStack(name, cfg, secret, flags, host, harness);
   }
   const spec = DEPLOY_ENGINES[cfg.brain];
   if (!spec) fail(`deploy supports echo/claude/codex/opencode and --harness openclaw|hermes for bridge bots.\nFor "${cfg.brain}", set it up manually — see docs/HARNESSES.md.`);
+  if (mediaAnalyzerEnabled && (transport !== "t3ams" || !spec.pkg)) {
+    fail("--media-analyzer requires a T3ams direct-engine deployment (claude, codex, or opencode); it has no effect for echo or bridge bots.");
+  }
   if (!fs.existsSync(path.join(HERE, "node_modules")) || !fs.existsSync(path.join(HERE, ".papi"))) {
     fail(`bot-core dependencies missing. Run:  (cd ${HERE} && npm ci)  then retry.`);
   }
-  if (flags["dry-run"] !== true) await provisionTestnetFileAllowance(name, cfg);
   if (spec.pkg && Object.keys(KEY_FLAGS).some((key) => process.env[key])) {
     warn("Provider API keys from this shell are intentionally not copied into the container. Use the deployed CLI's OAuth login instead.");
   }
@@ -1154,25 +1442,40 @@ async function cmdDeploy(name, flags) {
   const cn = containerName(`pca-${name.replace(/\./g, "-")}`);
   const base = remoteDir(flags["remote-dir"] ?? `pca-bots/${name}`);
   const sshOpts = ["-o", "ConnectTimeout=10", "-o", "BatchMode=yes"];
-  // Full autonomy by default: the container IS the sandbox, and the point of a
-  // dockerized coding agent is to run tools without prompting. --safe-tools
-  // restricts to the Bash,Read,Edit,Write allowlist instead.
-  const skipPerms = spec.pkg && flags["safe-tools"] !== true;
+  const deployToolPolicy = requestedDirectToolPolicy(cfg.brain, flags, "deploy");
+
+  // Verify the SDK before generating any deployment credentials or touching
+  // the VPS. A dry run remains inspectable, but reports an import failure that
+  // would block the real deployment.
+  if (flags["dry-run"] === true) await warnForT3amsSdkDeployPreflight(transport);
+  else await requireT3amsSdkForDeploy(transport);
 
   // Generate env + compose + Dockerfile locally, then (unless dry-run) ship & launch.
-  const bridgeToken = ensureBridgeToken(name, cfg);
+  const bridgeToken = configuredBridgeToken(cfg);
+  const mediaAnalyzerToken = mediaAnalyzerEnabled ? ensureMediaAnalyzerToken(name, cfg) : null;
   const bridgePort = bridgePortFor(cfg);
+  const entrypoint = entrypointForTransport(transport);
+  const transportEnv = t3amsEnvironment(cfg, transport);
   const envLines = [
     envLine("BOT_SEED_HEX", secret.seedHex),
     envLine("BOT_ENDPOINT", cfg.endpoint),
     envLine("BOT_BRAIN", cfg.brain),
-    envLine("BOT_ALLOWED_PEERS", (cfg.allow ?? []).join(",")),
+    envLine("BOT_TRANSPORT", transport),
+    ...Object.entries(transportEnv).map(([key, value]) => envLine(key, value)),
+    envLine("BOT_ALLOWED_PEERS", cfg.allow.join(",")),
     envLine("BOT_USERNAME", cfg.username ?? ""),
     envLine("BOT_STATE_DIR", "/state"),
     envLine("BOT_AI_WORKSPACE", "/workspace"),
     envLine("BOT_BRIDGE_PORT", bridgePort),
     envLine("BOT_BRIDGE_TOKEN", bridgeToken),
   ];
+  if (mediaAnalyzerEnabled) {
+    envLines.push(
+      envLine("BOT_T3AMS_MEDIA_ANALYZER_URL", "http://media-analyzer:8798/v1/analyze"),
+      envLine("BOT_T3AMS_MEDIA_ANALYZER_TOKEN", mediaAnalyzerToken),
+      envLine("BOT_T3AMS_MEDIA_ANALYZER_HTTP_HOSTS", "media-analyzer"),
+    );
+  }
   for (const [key, value] of Object.entries(fileDeliveryEnvironment(cfg))) {
     envLines.push(envLine(key, value));
   }
@@ -1183,7 +1486,11 @@ async function cmdDeploy(name, flags) {
       envLines.push(envLine(key, value));
     }
   }
-  if (skipPerms) envLines.push("BOT_AI_SKIP_PERMISSIONS=1");
+  if (spec.pkg) {
+    for (const [key, value] of Object.entries(toolPolicyEnvironment(deployToolPolicy))) {
+      envLines.push(envLine(key, value));
+    }
+  }
   if (flags.greet === true) envLines.push("BOT_GREET=1");
   if (spec.pkg) {
     envLines.push(
@@ -1195,17 +1502,42 @@ async function cmdDeploy(name, flags) {
   // echo needs no CLI; direct engines get a fixed CLI image. Keep the bot as
   // root so it can read `/state`, then let agent-runtime setuid to node.
   const dockerfile = spec.pkg
-    ? `FROM ${NODE_IMAGE}\nRUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates ripgrep && rm -rf /var/lib/apt/lists/*\nRUN npm install --global --no-audit --no-fund ${spec.pkg} && npm cache clean --force\nRUN mkdir -p /home/node /workspace /state && chown -R 1000:1000 /home/node /workspace && chmod 700 /home/node /workspace /state\nENV HOME=/home/node\nWORKDIR /app\nCMD ["node", "index.mjs"]\n`
+    ? `FROM ${NODE_IMAGE}\nRUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates ripgrep && rm -rf /var/lib/apt/lists/*\nRUN npm install --global --no-audit --no-fund ${spec.pkg} && npm cache clean --force\nRUN mkdir -p /home/node /workspace /state && chown -R 1000:1000 /home/node /workspace && chmod 700 /home/node /workspace /state\nENV HOME=/home/node\nWORKDIR /app\nCMD ["node", "${entrypoint}"]\n`
     : null;
+  const mediaDependsOn = mediaAnalyzerEnabled
+    ? "    depends_on:\n      media-analyzer:\n        condition: service_healthy\n"
+    : "";
+  const botHealthcheck = t3amsBotHealthcheck(transport);
+  const engineSecurityOptions = "      - no-new-privileges:true\n";
   const engineService = spec.pkg
-    ? `  bot:\n    build: ./image\n    user: "0:0"\n    init: true\n    read_only: true\n    pids_limit: 256\n    mem_limit: 2g\n    cpus: "2.0"\n    security_opt:\n      - no-new-privileges:true\n    tmpfs:\n      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n      - ./workspace:/workspace\n      - ./home:/home/node\n    command: ["node", "index.mjs"]\n`
-    : `  bot:\n    image: ${NODE_IMAGE}\n    user: "1000:1000"\n    init: true\n    read_only: true\n    pids_limit: 128\n    mem_limit: 512m\n    cpus: "1.0"\n    security_opt:\n      - no-new-privileges:true\n    tmpfs:\n      - /tmp:rw,noexec,nosuid,nodev,size=128m,mode=1777\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n    command: ["node", "index.mjs"]\n`;
-  const compose = `services:\n${engineService}`;
+    ? `  bot:\n    build: ./image\n    user: "0:0"\n    init: true\n    read_only: true\n    pids_limit: 256\n    mem_limit: 2g\n    cpus: "2.0"\n    security_opt:\n${engineSecurityOptions}    tmpfs:\n      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777\n    container_name: ${cn}\n    restart: unless-stopped\n${mediaDependsOn}${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n      - ./workspace:/workspace\n      - ./home:/home/node\n${botHealthcheck}    command: ["node", "${entrypoint}"]\n`
+    : `  bot:\n    image: ${NODE_IMAGE}\n    user: "1000:1000"\n    init: true\n    read_only: true\n    pids_limit: 128\n    mem_limit: 512m\n    cpus: "1.0"\n    security_opt:\n      - no-new-privileges:true\n    tmpfs:\n      - /tmp:rw,noexec,nosuid,nodev,size=128m,mode=1777\n    container_name: ${cn}\n    restart: unless-stopped\n${mediaDependsOn}${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./bot.env\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n${botHealthcheck}    command: ["node", "${entrypoint}"]\n`;
+  const mediaContainer = mediaAnalyzerEnabled ? containerName(`${cn}-media`) : null;
+  // This service has no bot state, workspace, OAuth home, host port, or Docker
+  // socket. Its `media.env` is intentionally provisioned by the operator on
+  // the VPS and never read or overwritten by pca deploy.
+  const mediaService = mediaAnalyzerEnabled
+    ? `  media-analyzer:\n    image: ${NODE_IMAGE}\n    user: "1000:1000"\n    init: true\n    read_only: true\n    pids_limit: 64\n    mem_limit: 512m\n    cpus: "1.0"\n    cap_drop:\n      - ALL\n    security_opt:\n      - no-new-privileges:true\n    tmpfs:\n      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777\n    container_name: ${mediaContainer}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    env_file:\n      - ./media.env\n      - ./media-token.env\n    volumes:\n      - ./app:/app:ro\n    healthcheck:\n      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8798/healthz').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]\n      interval: 30s\n      timeout: 5s\n      retries: 3\n      start_period: 10s\n    command: ["node", "media-analyzer.mjs"]\n`
+    : "";
+  const compose = `services:\n${engineService}${mediaService}`;
+  if (spec.pkg) {
+    const summary = toolPolicySummary(deployToolPolicy);
+    const enforcement = toolPolicyEnforcement(cfg.brain, deployToolPolicy);
+    note(`Tool policy: ${summary.capabilities}; scope=${summary.scope}.`);
+    note(`Enforcement: ${enforcement.detail}.`);
+    if (enforcement.kind === "process-boundary" && deployToolPolicy.capabilities.includes("bash")) {
+      warn("Bash runs inside this bot's container; workspace scope still applies to native file tools.");
+    }
+  }
 
   if (flags["dry-run"] === true) {
     console.log(`\n--- ${base}/docker-compose.yml ---\n${compose}`);
     if (dockerfile) console.log(`--- ${base}/image/Dockerfile ---\n${dockerfile}`);
     console.log(`--- ${base}/bot.env (secrets hidden) ---\n${redactEnv(envLines.join("\n"))}`);
+    if (mediaAnalyzerEnabled) {
+      console.log(`--- ${base}/media-token.env (secrets hidden) ---\n${redactEnv(envLine("MEDIA_ANALYZER_TOKEN", mediaAnalyzerToken))}`);
+      note("Before a real deploy, create a mode-0600 media.env on the VPS with ANTHROPIC_API_KEY and MEDIA_ANALYZER_MODEL. pca never reads or overwrites that file.");
+    }
     note(`\nDry run — nothing deployed.`);
     return;
   }
@@ -1218,6 +1550,23 @@ async function cmdDeploy(name, flags) {
   // The transport owns /state and runs as root. Only the spawned agent gets
   // the node-owned workspace and OAuth home; it cannot read the signing seed.
   const remoteBase = shellQuote(base);
+  if (mediaAnalyzerEnabled) {
+    // Create the parent before credential preflight. The credentials themselves
+    // remain operator-provisioned on the VPS and are never read by this CLI.
+    const mediaBase = runLocal("ssh", [...sshOpts, host, `mkdir -p ${remoteBase} && chmod 700 ${remoteBase}`], { capture: true });
+    if (mediaBase.status !== 0) {
+      fail(`Could not securely prepare ${base} on ${host} for --media-analyzer.`);
+    }
+    // Do not inspect the credentials file: its API key must never transit the
+    // local CLI or stdout. We only prove the operator provisioned a regular,
+    // nonempty file before generating a compose service that depends on it.
+    const mediaEnv = runLocal("ssh", [...sshOpts, host,
+      `test -f ${remoteBase}/media.env && test ! -L ${remoteBase}/media.env && test -s ${remoteBase}/media.env && test "$(stat -c %a ${remoteBase}/media.env)" = 600`], { capture: true });
+    if (mediaEnv.status !== 0) {
+      fail(`--media-analyzer requires a regular, nonempty mode-0600 ${base}/media.env on ${host}. Create it there with ANTHROPIC_API_KEY and MEDIA_ANALYZER_MODEL; pca never reads or overwrites this file.`);
+    }
+  }
+  await provisionTestnetFileAllowance(name, cfg);
   const prepareVolumes = spec.pkg
     ? `mkdir -p ${remoteBase}/app ${remoteBase}/state ${remoteBase}/workspace ${remoteBase}/home ${remoteBase}/image && chown -R root:root ${remoteBase}/state && chmod 700 ${remoteBase}/state && chown -R 1000:1000 ${remoteBase}/workspace ${remoteBase}/home && chmod 700 ${remoteBase}/workspace ${remoteBase}/home`
     : `mkdir -p ${remoteBase}/app ${remoteBase}/state ${remoteBase}/image && chown -R 1000:1000 ${remoteBase}/state && chmod 700 ${remoteBase}/state`;
@@ -1232,17 +1581,26 @@ async function cmdDeploy(name, flags) {
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pca-deploy-"));
   fs.writeFileSync(path.join(tmp, "bot.env"), `${envLines.join("\n")}\n`, { mode: 0o600 });
+  if (mediaAnalyzerEnabled) {
+    fs.writeFileSync(path.join(tmp, "media-token.env"), `${envLine("MEDIA_ANALYZER_TOKEN", mediaAnalyzerToken)}\n`, { mode: 0o600 });
+  }
   fs.writeFileSync(path.join(tmp, "docker-compose.yml"), compose);
   if (dockerfile) fs.writeFileSync(path.join(tmp, "Dockerfile"), dockerfile);
   const scpFiles = [path.join(tmp, "bot.env"), path.join(tmp, "docker-compose.yml")];
+  if (mediaAnalyzerEnabled) scpFiles.push(path.join(tmp, "media-token.env"));
   const cp = runLocal("scp", [...sshOpts, ...scpFiles, `${host}:${base}/`]);
   const dockerCp = dockerfile
     ? runLocal("scp", [...sshOpts, path.join(tmp, "Dockerfile"), `${host}:${base}/image/`])
     : null;
   fs.rmSync(tmp, { recursive: true, force: true });
   if (cp.status !== 0 || dockerCp?.status !== 0) fail("Copying config (scp) failed.");
-  // scp applies the remote umask, so restore 0600 on the env (it holds the seed).
-  runLocal("ssh", [...sshOpts, host, `chmod 600 ${base}/bot.env`]);
+  // scp applies the remote umask, so fail closed unless every generated secret
+  // is mode 0600 before Compose is allowed to start a container with it.
+  const remoteSecretFiles = [`${remoteBase}/bot.env`];
+  if (mediaAnalyzerEnabled) remoteSecretFiles.push(`${remoteBase}/media-token.env`);
+  const secureSecrets = runLocal("ssh", [...sshOpts, host,
+    `chmod 600 ${remoteSecretFiles.join(" ")} && ${remoteSecretFiles.map((file) => `test "$(stat -c %a ${file})" = 600`).join(" && ")}`], { capture: true });
+  if (secureSecrets.status !== 0) fail("Could not secure generated deployment secret files.");
 
   if (dockerfile) {
     step("Building the agent image (first run pulls the CLI — a few minutes)…");
@@ -1257,24 +1615,47 @@ async function cmdDeploy(name, flags) {
   cfg.deploy = { host, dir: base, container: cn, at: new Date().toISOString() };
   saveConfig(name, cfg);
 
-  step("Waiting for the bot to come online…");
+  step(transport === "t3ams" ? "Waiting for authenticated T3ams health and subscriptions…" : "Waiting for the bot to come online…");
   const wait = runLocal("ssh", [...sshOpts, host,
-    `for i in $(seq 1 20); do docker logs ${cn} 2>&1 | grep -q BOT_LISTENING && break; sleep 2; done; docker logs --tail 30 ${cn} 2>&1`], { capture: true });
+    transport === "t3ams"
+      ? t3amsHealthWaitCommand(cn)
+      : `for i in $(seq 1 20); do docker logs ${cn} 2>&1 | grep -q BOT_LISTENING && break; sleep 2; done; docker logs --tail 30 ${cn} 2>&1`], { capture: true });
   const logs = wait.stdout || "";
-  if (/BOT_LISTENING/.test(logs)) {
+  const botReady = transport === "t3ams"
+    ? wait.status === 0 && /T3AMS_BOT_HEALTH=healthy/.test(logs)
+    : /BOT_LISTENING/.test(logs);
+  if (botReady) {
     ok(`"${name}" is live on ${host} (container ${cn}).`);
     console.log();
-    console.log("Message it in the Polkadot app:");
-    printReachLine(cfg.account, cfg.username);
+    if (transport === "t3ams") {
+      console.log("Message it in T3ams:");
+      printT3amsReachLine(cfg);
+    } else {
+      console.log("Message it in the Polkadot app:");
+      printReachLine(cfg.account, cfg.username);
+    }
     console.log();
     note(`Logs:  ssh ${host} 'docker logs -f ${cn}'`);
-    note(`Stop:  ssh ${host} 'docker rm -f ${cn}'`);
+    if (mediaAnalyzerEnabled) {
+      const mediaWait = runLocal("ssh", [...sshOpts, host,
+        `for i in $(seq 1 20); do status="$(docker inspect --format '{{.State.Health.Status}}' ${mediaContainer} 2>/dev/null || true)"; [ "$status" = healthy ] && break; sleep 1; done; docker inspect --format 'MEDIA_ANALYZER_HEALTH={{.State.Health.Status}}' ${mediaContainer} 2>&1; docker logs --tail 10 ${mediaContainer} 2>&1`], { capture: true });
+      if (/MEDIA_ANALYZER_HEALTH=healthy/.test(mediaWait.stdout || "")) {
+        ok(`Attachment analysis worker is live (container ${mediaContainer}).`);
+        note(`Worker logs: ssh ${host} 'docker logs -f ${mediaContainer}'`);
+      } else {
+        warn("Bot is live, but the attachment analysis worker did not report ready. Check its logs; normal chat replies remain available.");
+        console.log((mediaWait.stdout || "").split("\n").slice(-10).join("\n"));
+      }
+    }
+    note(`Stop:  pca stop ${name}`);
     if (spec.pkg) {
       const login = cfg.brain === "opencode" ? "opencode auth login" : `${cfg.brain} login`;
       note(`Model login (once): ssh ${host} 'docker exec -it --user 1000:1000 ${cn} ${login}'`);
     }
   } else {
-    warn("Container started, but I didn't see BOT_LISTENING. Recent logs:");
+    warn(transport === "t3ams"
+      ? "Container started, but it did not become healthy with a connected T3ams chain and active subscriptions. Recent logs:"
+      : "Container started, but I didn't see BOT_LISTENING. Recent logs:");
     console.log(logs.split("\n").slice(-15).join("\n"));
     note(`Check:  ssh ${host} 'docker logs -f ${cn}'`);
   }
@@ -1296,17 +1677,24 @@ async function deployHarnessStack(name, cfg, secret, flags, host, harness) {
   const hn = containerName(`pca-${name}-${harness}`);
   const base = remoteDir(flags["remote-dir"] ?? `pca-bots/${name}`);
   const sshOpts = ["-o", "ConnectTimeout=10", "-o", "BatchMode=yes"];
-  const allow = cfg.allow ?? [];
+  const allow = cfg.allow;
   const model = flags.model != null ? flagValue(flags.model, "model") : "claude-cli/claude-sonnet-4-6";
   if (/[\0\r\n]/.test(model)) fail("--model cannot contain a newline or NUL byte.");
+  const transport = configuredTransport(cfg);
+  if (flags["dry-run"] === true) await warnForT3amsSdkDeployPreflight(transport);
+  else await requireT3amsSdkForDeploy(transport);
   const bridgePort = bridgePortFor(cfg);
-  const bridgeToken = ensureBridgeToken(name, cfg);
+  const bridgeToken = configuredBridgeToken(cfg);
   const bridgeUrl = `http://bot:${bridgePort}`;
+  const entrypoint = entrypointForTransport(transport);
+  const transportEnv = t3amsEnvironment(cfg, transport);
 
   const botEnv = [
     envLine("BOT_SEED_HEX", secret.seedHex),
     envLine("BOT_ENDPOINT", cfg.endpoint),
     envLine("BOT_BRAIN", "bridge"),
+    envLine("BOT_TRANSPORT", transport),
+    ...Object.entries(transportEnv).map(([key, value]) => envLine(key, value)),
     envLine("BOT_ALLOWED_PEERS", allow.join(",")),
     envLine("BOT_USERNAME", cfg.username ?? ""),
     envLine("BOT_STATE_DIR", "/state"),
@@ -1320,17 +1708,30 @@ async function deployHarnessStack(name, cfg, secret, flags, host, harness) {
   ].join("\n");
   // State mounts at top-level /state, NOT nested under the read-only ./app:ro
   // mount — Docker cannot create a mountpoint inside a read-only bind.
-  const botService = `  bot:\n    image: ${NODE_IMAGE}\n    user: "1000:1000"\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n    env_file:\n      - ./bot.env\n    command: ["node", "index.mjs"]\n`;
+  const botHealthcheck = t3amsBotHealthcheck(transport);
+  // A T3ams harness should not start consuming bridge work before the bot has
+  // connected to the chain and installed its subscriptions. Polkadot-app
+  // deployments use their normal start-only dependency.
+  const harnessBotDependency = transport === "t3ams"
+    ? "    depends_on:\n      bot:\n        condition: service_healthy\n"
+    : "    depends_on: [bot]\n";
+  const botService = `  bot:\n    image: ${NODE_IMAGE}\n    user: "1000:1000"\n    container_name: ${cn}\n    restart: unless-stopped\n${LOG_OPTS}    working_dir: /app\n    volumes:\n      - ./app:/app:ro\n      - ./state:/state\n    env_file:\n      - ./bot.env\n${botHealthcheck}    command: ["node", "${entrypoint}"]\n`;
 
   const files = { "bot.env": `${botEnv}\n` };  // path (relative to base) -> content
   let compose, setup, afterUp;
   if (harness === "openclaw") {
-    compose = `services:\n${botService}\n  openclaw:\n    build: ./image\n    container_name: ${hn}\n    restart: unless-stopped\n${LOG_OPTS}    env_file:\n      - ./gateway.env\n    volumes:\n      - ./openclaw-home:/home/node\n      - ./plugin:/plugin:ro\n    depends_on: [bot]\n    command: ["openclaw", "gateway"]\n`;
+    compose = `services:\n${botService}\n  openclaw:\n    build: ./image\n    container_name: ${hn}\n    restart: unless-stopped\n${LOG_OPTS}    env_file:\n      - ./gateway.env\n    volumes:\n      - ./openclaw-home:/home/node\n      - ./plugin:/plugin:ro\n${harnessBotDependency}    command: ["openclaw", "gateway"]\n`;
     files["image/Dockerfile"] = `FROM ${NODE_IMAGE}\nRUN npm install --global --no-audit --no-fund openclaw@2026.6.11 @anthropic-ai/claude-code@2.1.207 && npm cache clean --force\nENV HOME=/home/node\nWORKDIR /home/node\nUSER node\nCMD ["openclaw", "gateway"]\n`;
     files["gateway.env"] = `${envLine("OPENCLAW_GATEWAY_TOKEN", randomBytes(32).toString("base64url"))}\n${envLine("POLKADOT_BRIDGE_TOKEN", bridgeToken)}\n`;
     // Runs inside the one-off setup container (home volume mounted) after `models set`
     // has created the config; merges in gateway mode + our channel.
-    const channel = allow.length
+    const channel = transport === "t3ams"
+      // T3ams deliveries are addressed to a workspace-channel session,
+      // not an owner's account ID. bot-core has already authenticated and
+      // allowlisted the actual T3ams sender, so do not make OpenClaw's
+      // DM-only gate reject that channel key a second time.
+      ? { enabled: true, bridgeUrl, dmPolicy: "open", allowFrom: ["*"] }
+      : allow.length
       ? { enabled: true, bridgeUrl, dmPolicy: "allowlist", allowFrom: allow }
       : { enabled: true, bridgeUrl, dmPolicy: "open", allowFrom: ["*"] };
     files["openclaw-home/setup-config.cjs"] = `const fs = require("fs");
@@ -1369,7 +1770,10 @@ docker compose -p ${cn} run --rm openclaw sh -lc ${shellQuote(`openclaw plugins 
       }
     };
   } else {
-    compose = `services:\n${botService}\n  hermes:\n    image: ${HERMES_IMAGE}\n    container_name: ${hn}\n    restart: unless-stopped\n${LOG_OPTS}    command: ["gateway", "run"]\n    env_file:\n      - ./hermes.env\n    environment:\n      - HERMES_UID=0\n      - HERMES_GID=0\n      - POLKADOT_BRIDGE_URL=${bridgeUrl}\n      - POLKADOT_ALLOWED_USERS=${allow.join(",")}\n    volumes:\n      - hermes-data:/opt/data\n      - ./plugin:/opt/data/plugins/polkadot:ro\n    depends_on: [bot]\n\nvolumes:\n  hermes-data:\n`;
+    const hermesAccess = transport === "t3ams"
+      ? "      - POLKADOT_ALLOW_ALL_USERS=1\n"
+      : `      - POLKADOT_ALLOWED_USERS=${allow.join(",")}\n`;
+    compose = `services:\n${botService}\n  hermes:\n    image: ${HERMES_IMAGE}\n    container_name: ${hn}\n    restart: unless-stopped\n${LOG_OPTS}    command: ["gateway", "run"]\n    env_file:\n      - ./hermes.env\n    environment:\n      - HERMES_UID=0\n      - HERMES_GID=0\n      - POLKADOT_BRIDGE_URL=${bridgeUrl}\n${hermesAccess}    volumes:\n      - hermes-data:/opt/data\n      - ./plugin:/opt/data/plugins/polkadot:ro\n${harnessBotDependency}\nvolumes:\n  hermes-data:\n`;
     files["hermes.env"] = `${envLine("POLKADOT_BRIDGE_TOKEN", bridgeToken)}\n`;
     setup = `cd ${base}\nchown -R root:root plugin 2>/dev/null || true\necho SETUP_OK`;
     afterUp = () => {
@@ -1389,6 +1793,8 @@ docker compose -p ${cn} run --rm openclaw sh -lc ${shellQuote(`openclaw plugins 
     note("Dry run — nothing deployed.");
     return;
   }
+
+  await provisionTestnetFileAllowance(name, cfg);
 
   step(`Checking ${host}…`);
   const pf = runLocal("ssh", [...sshOpts, host, "docker version --format '{{.Server.Version}}' >/dev/null && echo docker-ok"], { capture: true });
@@ -1430,20 +1836,32 @@ docker compose -p ${cn} run --rm openclaw sh -lc ${shellQuote(`openclaw plugins 
   cfg.deploy = { host, dir: base, container: cn, harness, at: new Date().toISOString() };
   saveConfig(name, cfg);
 
-  step("Waiting for the bot to come online…");
+  step(transport === "t3ams" ? "Waiting for authenticated T3ams health and subscriptions…" : "Waiting for the bot to come online…");
   const wait = runLocal("ssh", [...sshOpts, host,
-    `for i in $(seq 1 25); do docker logs ${cn} 2>&1 | grep -q BOT_LISTENING && break; sleep 2; done; docker logs --tail 5 ${cn} 2>&1`], { capture: true });
-  if (/BOT_LISTENING/.test(wait.stdout || "")) {
+    transport === "t3ams"
+      ? t3amsHealthWaitCommand(cn, 5)
+      : `for i in $(seq 1 25); do docker logs ${cn} 2>&1 | grep -q BOT_LISTENING && break; sleep 2; done; docker logs --tail 5 ${cn} 2>&1`], { capture: true });
+  const stackReady = transport === "t3ams"
+    ? wait.status === 0 && /T3AMS_BOT_HEALTH=healthy/.test(wait.stdout || "")
+    : /BOT_LISTENING/.test(wait.stdout || "");
+  if (stackReady) {
     ok(`"${name}" is live on ${host} (${cn} + ${hn}).`);
     console.log();
-    console.log("Message it in the Polkadot app:");
-    printReachLine(cfg.account, cfg.username);
+    if (transport === "t3ams") {
+      console.log("Message it in T3ams:");
+      printT3amsReachLine(cfg);
+    } else {
+      console.log("Message it in the Polkadot app:");
+      printReachLine(cfg.account, cfg.username);
+    }
     afterUp(credsSeeded);
     console.log();
     note(`Logs:   pca logs ${name} -f   (bridge)  ·  ssh ${host} 'docker logs -f ${hn}'  (${harness})`);
     note(`Status: pca status ${name}   ·  Stop: pca stop ${name}`);
   } else {
-    warn("Stack started, but the bot didn't report BOT_LISTENING. Recent logs:");
+    warn(transport === "t3ams"
+      ? "Stack started, but the bot did not become healthy with a connected T3ams chain and active subscriptions. Recent logs:"
+      : "Stack started, but the bot didn't report BOT_LISTENING. Recent logs:");
     console.log((wait.stdout || "").split("\n").slice(-6).join("\n"));
   }
 }
@@ -1484,7 +1902,7 @@ async function cmdStatus(name, flags) {
   const hostValue = flags.host ? flags.host : cfg.deploy?.host;
   const host = hostValue ? sshTarget(hostValue) : null;
   const port = bridgePortFor(cfg);
-  const bridgeToken = ensureBridgeToken(name, cfg);
+  const bridgeToken = configuredBridgeToken(cfg);
   const auth = { authorization: `Bearer ${bridgeToken}` };
   if (!host) {
     // Not deployed: a locally running bot's bridge binds loopback, so its
@@ -1549,9 +1967,10 @@ function cmdStop(name, flags) {
 function usage() {
   console.log(`pca — Polkadot Chat Agents
 
-  pca create <botname> [--brain echo|claude|codex|opencode|bridge] [--owner <your username or address>] [--public] [--network paseo] [--username name]
+  pca create <botname> [--brain echo|claude|codex|opencode|bridge] [--transport polkadot-app|t3ams] [--owner <your username or address>] [--public] [--network paseo] [--username name]
   pca register <name>                  finish/retry registration for an existing bot
-  pca run <name> [--model <m>] [--greet]   start the bot locally (foreground)
+  pca run <name> [--model <m>] [--allowed-tools <read,write,bash>] [--tool-scope workspace|container] [--greet]
+                                       start the bot locally (foreground)
   pca deploy <name> --host <ssh>       ship it to a server and run it in Docker
   pca logs <name> [-f] [--tail N]      tail a deployed bot's logs
   pca status <name>                    is the bot running + healthy? (local or deployed)
@@ -1565,9 +1984,18 @@ function usage() {
   pca info <name>                      show address + how to message it
 
 create flags:
+  --transport <name> select the message transport: polkadot-app (default) or t3ams
   --owner <who>    lock the bot to you — your app username (myname.42), address, or 0x hex (recommended)
   --allow a,b      allowlist several owners (usernames/addresses/hex, comma-separated)
-  --public         let anyone message it (required to leave an AI/hermes bot open)
+  --t3ams-peer-key owner=hex[,owner=hex]
+                   required for each private T3ams owner: immutable tagged-CBOR signing-key pin
+  --t3ams-display-name <name>
+                   name shown by a T3ams bot (defaults to its registered username)
+  --t3ams-auto-accept-workspaces
+                   allow public T3ams workspace enrollment; private bots default to allowed inviters
+  --t3ams-no-auto-accept-workspaces
+                   disable automatic T3ams workspace enrollment, including for private bots
+  --public         let anyone message it (required to leave a paid bot open)
   --username <u>   network username base if different from the bot name (6+ lowercase letters)
   --digits <NN>    request a specific username number (mybot.NN); omit to auto-assign a free one
   --model <m>      pin the AI model, passed to the brain CLI's own model flag
@@ -1580,17 +2008,27 @@ create flags:
 model controls:  show current policy  ·  set <model> pins the default model  ·  allow <a,b>
   restricts chat-side switching  ·  lock disables it  ·  open permits it only for allowlisted bots
 
-deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --model <m>  ·  --safe-tools  ·  --dry-run
+deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --model <m>  ·  --allowed-tools <read,write,bash>  ·  --tool-scope workspace|container  ·  --media-analyzer  ·  --dry-run
   Needs Docker on the server + SSH access. Direct engines (echo/claude/codex/opencode)
   deploy with root-only transport state and a non-root agent CLI, with a persistent
-  /workspace the agent works in; bridge bots deploy a two-container stack. The
-  agent runs tools autonomously by default (--safe-tools restricts to a
-  read/write/edit/bash allowlist). The deploy output gives the one-time OAuth login
-  command for direct engines; logs/status/stop reuse the saved host (override with --host).
+  /workspace the agent works in; bridge bots deploy a two-container stack. Direct
+  agents start with no tools. --allowed-tools accepts portable lowercase
+  capabilities: read (inspect files), write (edit files; includes read), and
+  bash (run commands; includes read and write). --tool-scope workspace keeps
+  native file tools in the selected project; container grants those tools the
+  non-root agent account's container-visible files. Bash always runs inside
+  the bot container, so a workspace-scoped policy still uses the container as
+  its Bash boundary. Every direct bot starts no-tools, including public Claude,
+  Codex, and OpenCode bots. Inbound attachments are staged per turn and become
+  readable when the read capability is enabled. Alternatively,
+  --media-analyzer adds an isolated API-only photo/document worker; provision
+  its remote media.env with a provider API key and model first. The deploy output
+  gives the one-time OAuth login command for direct engines; logs/status/stop reuse
+  the saved host (override with --host).
 
 Brains:  echo (test)  ·  claude/codex/opencode (direct agent engines — verbatim prompts,
   native session resume, tools in a container; opencode reaches many providers via
-  --model provider/model)  ·  bridge (hand off to an agent harness; "hermes" is an alias)
+  --model provider/model)  ·  bridge (hand off to an agent harness)
 
 Bots live in ${BOTS_DIR} (override with PCA_BOTS_DIR).`);
 }
@@ -1599,10 +2037,10 @@ Bots live in ${BOTS_DIR} (override with PCA_BOTS_DIR).`);
 // typo (--modle) or a misplaced flag (--greet on create) — and silently
 // ignoring it means the user believes a setting took effect when it didn't.
 const COMMAND_FLAGS = {
-  create: ["brain", "owner", "allow", "public", "network", "endpoint", "backend", "username", "digits", "model", "port", "wait", "no-register"],
+  create: ["brain", "transport", "owner", "allow", "t3ams-peer-key", "t3ams-display-name", "t3ams-auto-accept-workspaces", "t3ams-no-auto-accept-workspaces", "public", "network", "endpoint", "backend", "username", "digits", "model", "port", "wait", "no-register"],
   register: ["username", "digits", "wait"],
-  run: ["model", "greet"],
-  deploy: ["host", "harness", "anthropic-key", "openai-key", "openrouter-key", "gemini-key", "groq-key", "safe-tools", "model", "dry-run", "remote-dir", "greet"],
+  run: ["model", "allowed-tools", "tool-scope", "greet"],
+  deploy: ["host", "harness", "anthropic-key", "openai-key", "openrouter-key", "gemini-key", "groq-key", "allowed-tools", "tool-scope", "media-analyzer", "model", "dry-run", "remote-dir", "greet"],
   logs: ["host", "follow", "tail"],
   status: ["host"],
   stop: ["host"],
@@ -1627,7 +2065,6 @@ if (flags.version === true || flags.V === true || command === "version") {
   }
 }
 try {
-  warnLegacyBotsDir();
   switch (command) {
     case "create": await cmdCreate(arg, flags); break;
     case "register": await cmdRegister(arg, flags); break;

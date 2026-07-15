@@ -16,10 +16,10 @@ bot-core invokes a model CLI itself.
 Polkadot app <-> Statement Store <-> bot-core <-> HTTP bridge <-> framework plugin <-> agent
 ```
 
-Bridge mode is selected with the `hermes` brain:
+Bridge mode is selected with the `bridge` brain:
 
 ```bash
-pca create mybot --brain hermes --owner yourname.42
+pca create mybot --brain bridge --owner yourname.42
 pca run mybot
 ```
 
@@ -36,16 +36,16 @@ A framework plugin needs this small authenticated API:
 
 | Route | Purpose |
 |---|---|
-| `GET /health` | returns `{ ok, account, identifierKey, username }` |
-| `GET /inbound?wait=<secs>&limit=<n>` | long-poll; returns at most the requested bounded batch of leased `[{ delivery_id, lease_id, lease_ms, chat_id, text, message_id }, ...]`, or an empty array on timeout. `chat_id` is the peer's account-id hex. `text` is always non-empty (a placeholder like `[photo, image/jpeg, 245 KB]` is synthesized for caption-less attachments). Items may carry `kind` (`richText`/`reply`/`edited`), `reply_to`, `edit_of`, and `attachments: [{ id, kind, mime, size, width?, height?, duration?, downloaded, url?, error? }]`. Add `&events=1` to also receive non-message signals (`kind`: `reaction`, `coinageSend`, `leftChat`, `contactAdded`) — opt-in, so a harness that ignores them never chat-replies to a reaction. |
+| `GET /health` | returns `{ ok, transport, account, identifierKey, username, … }`, including live/media/file capability flags. |
+| `GET /inbound?wait=<secs>&limit=<n>` | long-poll; returns at most the requested bounded batch of leased `[{ delivery_id, lease_id, lease_ms, chat_id, text, message_id }, ...]`, or an empty array on timeout. `chat_id` is transport-specific. `text` is always non-empty (a safe placeholder is synthesized for a caption-less attachment). Items may carry `kind` (`richText`/`reply`/`edited`), `reply_to`, `edit_of`, and safe attachment metadata. Add `&events=1` to also receive non-message signals — opt-in, so a harness that ignores them never chat-replies to a reaction. |
 | `POST /inbound/ack { delivery_id, lease_id }` | permanently acknowledges a leased inbound row after the framework has successfully handed it to its own runtime. Accepts `deliveries: [{ delivery_id, lease_id }, ...]` for a batch. Unacknowledged rows are retried after their lease expires; a stale claim acknowledges zero rows. |
 | `POST /inbound/renew { delivery_id, lease_id }` | extends an active lease for a long-running turn. Renew before `lease_ms` elapses, then ACK only the current lease. |
-| `GET /media/<id>` | bytes of a downloaded attachment (`id`/`url` from the inbound item), served with its content type |
+| `GET /media/<id>` | authenticated attachment bytes (`url` from the inbound item), served with its content type. A T3ams URL can materialize validated encrypted media on demand. |
 | `GET /files/<chat_id>` / `GET /files/<chat_id>/<path>` | list a peer's durable vault (optional `?prefix=`), or stream one saved file. |
 | `PUT /files/<chat_id>/<path>` / `DELETE /files/<chat_id>/<path>` | save raw bytes in that peer's vault (use `?overwrite=1` to replace), or remove one file. |
-| `POST /send { chat_id, text?, file_path?, reply_to?, edit_of? }` | publishes a reply or a saved file to that peer; returns `{ success, message_id }`. `file_path` must identify a file already in that same peer's vault and cannot be combined with a reply or edit. `message_id` is the outgoing message's id — hold on to it to edit that message later. `reply_to: <message_id>` renders as a quote of that peer message in the app; `edit_of: <message_id>` rewrites a message the bot sent earlier (the app updates the bubble in place). The two are mutually exclusive. **Live replies:** when a turn runs long, bot-core posts a "thinking…" placeholder; the first plain send for that peer is auto-upgraded into the placeholder's final edit (the returned `message_id` is the placeholder's), so the user sees one evolving bubble instead of thinking + answer. `edit_of` sends are throttled and coalesced server-side (latest-wins) to a statement-store-safe cadence — a harness may stream edits as fast as it likes. `GET /health` advertises this under `live: { supportsEdit, minEditMs, placeholderAfterMs }`. |
-| `POST /react { chat_id, message_id, emoji, remove? }` | reacts to a peer message with an emoji (shown as a chip under the bubble in the app); `remove: true` retracts a previous reaction. Returns `{ success }`. |
-| `POST /typing { chat_id }` | best-effort, currently a no-op |
+| `POST /send { chat_id, text?, file_path?, reply_to?, edit_of? }` | publishes a reply, file, or edit; returns `{ success, message_id }`. `file_path` must identify a file already in that same chat's vault. `reply_to` and `edit_of` are mutually exclusive. A T3ams file may include a caption and reply target, but never `edit_of`. **Live replies:** when a turn runs long, bot-core posts a thinking placeholder; the first plain send resolves it into the final answer. `edit_of` frames are throttled and coalesced server-side, so a harness may stream freely. `GET /health` advertises the actual `live` capability. |
+| `POST /react { chat_id, message_id, emoji, remove? }` | reacts to a peer message with an emoji; `remove: true` retracts a prior reaction. T3ams publishes the native operation. |
+| `POST /typing { chat_id }` | best-effort typing signal. T3ams publishes it natively; transports without that operation can no-op. |
 
 An adapter is a loop: poll a bounded `/inbound` batch, renew each active lease
 while its agent turn runs, ACK only after that handoff succeeds, then use
@@ -57,8 +57,46 @@ senders never reach the agent or spend model quota.
 To return a framework-generated artifact, store it with
 `PUT /files/<chat_id>/<path>` and then call `POST /send` with that `file_path`.
 The bridge never accepts an arbitrary host path for delivery. `GET /health`
-reports the derived file-delivery allowance account and whether upload is
-configured.
+reports the relevant delivery status: the default transport's derived allowance
+account or T3ams's trusted Bulletin endpoint and operator-provisioned media
+status.
+
+### T3ams bridge behavior
+
+With `--transport t3ams`, the same poll loop drives DMs and workspace channels.
+Native ad-hoc T3ams groups are not supported yet. T3ams chat IDs begin with
+`t3ams:` and inbound rows include the conversation
+type, sender XID/name, channel/workspace IDs where applicable, and
+`thread_root_id` for a threaded message. Send that thread root back with the
+reply when the framework should stay in the same thread.
+
+T3ams rows can include `attachments` with safe metadata (`mime`, `size`,
+filename, optional dimensions, or `duration_ms`) and an opaque
+`/media/<media_id>` URL. The original encrypted Bulletin reference is
+deliberately absent. Fetch the bridge URL when the agent needs bytes;
+`downloaded` only says whether it is already cached, not whether the URL is
+usable. The framework can read or write only the same conversation's vault
+through `/files`, then return an artifact as an encrypted T3ams attachment with
+`file_path`.
+
+Slow T3ams turns use the same thinking placeholder pattern as direct brains.
+The bridge performs real typing, reaction, and edit operations, including
+coalesced edit streaming. Read `GET /health.live` rather than hard-coding
+support. An optional `channel_context` field is bounded earlier authenticated
+channel text supplied only with an explicit mention; it is background context,
+not an inbound message to answer independently. See the
+[Bridge HTTP API](/reference/bridge#t3ams-rich-chat) and
+[T3ams files](/guide/files#t3ams-photos-media-and-documents) for the
+transport-specific limits and allowance requirements.
+
+For `BOT_BRAIN=bridge`, normal `/send`, `/react`, and `/typing`
+calls carry the active inbound `delivery_id` and `lease_id`; a prompt edit or
+delete revokes that claim. A framework action with no inbound turn (such as an
+OpenClaw attached result) can instead use the opt-in, distinct
+`BOT_BRIDGE_PROACTIVE_TOKEN` in `x-bridge-proactive-token`, in addition to
+ordinary bridge authentication. It is accepted only for an entirely unleased
+operation and never validates a supplied stale lease. Leave it unset unless
+that proactive path is required.
 
 ## Bundled framework deployments
 
@@ -157,8 +195,9 @@ Hermes integration is a practical template.
 Without a framework, bot-core runs a headless AI-agent CLI itself — as an
 autonomous agent, not a chat wrapper: the user's message is passed verbatim (no
 injected persona), conversation continuity is the CLI's own native session
-(`--resume`), and tools are on. bot-core invokes the selected CLI and presents
-its progress and answer in the chat.
+(`--resume`), and bot-core presents its progress and answer in the chat. Direct
+Claude, Codex, and OpenCode engines start with no tools; the deployer chooses a
+portable capability and scope policy explicitly.
 
 | Engine | Invokes | Reaches | Authentication |
 |---|---|---|---|
@@ -184,11 +223,17 @@ Related settings:
   Switching is locked by default. `allow` persists an approved list;
   `open` is an explicit option for allowlisted bots only. Public bots cannot
   allow unrestricted switching.
-- Claude uses `BOT_AI_ALLOWED_TOOLS` (default `Bash,Read,Edit,Write`) when it
-  is not in full-autonomy mode. `BOT_AI_SKIP_PERMISSIONS=1` grants full autonomy
-  to a deployed engine inside its container. Codex uses `workspace-write` and
-  OpenCode follows its own CLI mode when that flag is disabled; neither consumes
-  the Claude allowlist.
+- Claude, Codex, and OpenCode start with no tools. Deploy a portable policy
+  with `--allowed-tools read,write,bash` and
+  `--tool-scope workspace|container`. `write` includes `read`; `bash` includes
+  both. The generated environment uses `BOT_AI_TOOL_CAPABILITIES` and
+  `BOT_AI_TOOL_SCOPE`.
+- Public direct bots use the same policy. Every sender can direct the selected
+  capability, so choose the model and scope deliberately. A
+  read-capable turn can inspect its staged attachment, and a write-capable turn
+  can return generated files.
+- Workspace scopes native file tools to the selected project and staged
+  attachments. Bash uses the agent process boundary in either scope.
 - The agent works in a persistent non-secret workspace (`BOT_AI_WORKSPACE`,
   defaulting to a sibling of `BOT_STATE_DIR`) that survives restarts.
 - `BOT_AI_CMD`/`BOT_AI_ARGS` wire in a custom CLI that speaks claude-shaped
@@ -215,18 +260,21 @@ Related settings:
 
 ### Safety model for containerized agents
 
-A deployed engine runs its tools autonomously, so the boundary is the
-**container**, not a permission prompt. `pca deploy` runs the transport as root
-only to own `/state` (the signing seed, session keys, and bridge token), then
-spawns the agent as the non-root `node` user with only persistent `/workspace`
-and `/home/node` access plus private per-turn attachment directories. The source
-mount is read-only; the container uses an init reaper, no-new-privileges, and
-process/memory/CPU ceilings. Provider API keys are not injected into the agent
-process; authenticate the CLI once through its native OAuth login in `/home/node`.
-An agent with tool access can still use its own provider credentials, so restrict
-senders with `--owner`/`--allow`. `--safe-tools` applies Claude's configured
-allowlist; Codex and OpenCode still need a disposable workspace or their own
-engine-specific controls. Sessions and the workspace persist across redeploys.
+`pca deploy` keeps the transport as root only to own `/state` (the signing seed,
+session keys, and bridge token), then spawns the agent as the non-root `node`
+user with persistent `/workspace`, `/home/node`, and private per-turn attachment
+directories. The source mount is read-only; the container uses an init reaper,
+no-new-privileges, and process/memory/CPU ceilings. This protects the chat
+identity from the agent process.
+
+The CLI retains `/home/node` only to authenticate and refresh its own OAuth
+session; container-scoped native file tools and Bash can access it. Workspace
+scopes native file tools to the selected project; Bash uses the agent process
+boundary in either scope. A deployed bot has a dedicated container; local
+`pca run` uses the local process account and should be treated as a
+trusted-machine tool. Container scope deliberately exposes the home to native
+file tools. For a public bot, every sender can direct the policy the deployer
+selected. Sessions and the workspace persist across redeploys.
 
 An AI brain spends quota, so `create` requires an allowlist or an explicit
 `--public`.

@@ -50,7 +50,7 @@ export const createLiveReplies = ({
   const intervalFor = (editsSent) =>
     Math.min(minIntervalMs * 2 ** Math.floor(editsSent / 3), maxIntervalMs);
 
-  const makeLane = (peerHex, messageId, ackState) => {
+  const makeLane = (peerHex, messageId, ackState, defaultGuard = null) => {
     const lane = {
       peerHex,
       messageId,
@@ -58,6 +58,14 @@ export const createLiveReplies = ({
       finalized: false,
       inFlight: null, // Promise while an edit submit is in flight
       pendingText: null,
+      // Optional fence for a queued external edit.  Bridge workers lease an
+      // inbound turn, and a coalesced edit may not leave the process after
+      // that lease is revoked or expires.
+      pendingGuard: null,
+      // A placeholder can itself be owned by a leased bridge turn. Keep its
+      // fence for heartbeat updates and terminal fallback frames unless a
+      // newer caller explicitly supplies a different claim.
+      defaultGuard,
       lastSentText: null,
       editsSent: 0,
       lastEditAt: null, // null = never sent on this lane -> first flush is immediate
@@ -75,12 +83,22 @@ export const createLiveReplies = ({
   const flush = async (lane) => {
     clearLaneTimer(lane);
     if (lane.finalized || lane.inFlight) return;
-    if (lane.pendingText == null || lane.pendingText === lane.lastSentText) { lane.pendingText = null; return; }
+    if (lane.pendingText == null || lane.pendingText === lane.lastSentText) {
+      lane.pendingText = null;
+      lane.pendingGuard = null;
+      return;
+    }
     const text = lane.pendingText;
+    const guard = lane.pendingGuard;
     lane.pendingText = null;
+    lane.pendingGuard = null;
     lane.inFlight = (async () => {
       try {
-        await send({ peerHex: lane.peerHex, text, editOf: lane.messageId });
+        if (guard != null && !guard()) {
+          log("BOT_LIVE_EDIT_FENCED", { to: lane.peerHex, messageId: lane.messageId });
+          return;
+        }
+        await send({ peerHex: lane.peerHex, text, editOf: lane.messageId, guard });
         lane.lastSentText = text;
         lane.editsSent += 1;
         lane.lastEditAt = now();
@@ -106,9 +124,10 @@ export const createLiveReplies = ({
     lane.timer = timers.set(() => { lane.timer = null; void flush(lane); }, wait);
   };
 
-  const update = (lane, text) => {
+  const update = (lane, text, guard = lane.defaultGuard) => {
     if (lane.finalized) return;
     lane.pendingText = text;
+    lane.pendingGuard = guard;
     scheduleFlush(lane);
   };
 
@@ -123,30 +142,45 @@ export const createLiveReplies = ({
     return lane.ackState === "pending" ? "failed" : lane.ackState;
   };
 
-  const finalize = async (lane, text) => {
+  const finalize = async (lane, text, guard = lane.defaultGuard) => {
     if (lane.finalized) throw new Error("live message already finalized");
     lane.finalized = true;
     clearLaneTimer(lane);
     lane.pendingText = null;
+    lane.pendingGuard = null;
     if (lane.inFlight) await lane.inFlight.catch(noop);
-    const ack = await settleAck(lane);
-    if (ack === "acked" || ack === "assumed") {
-      if (text === lane.lastSentText) return { messageId: lane.messageId, edited: true };
-      await send({ peerHex: lane.peerHex, text, editOf: lane.messageId });
-      return { messageId: lane.messageId, edited: true };
+    try {
+      const ack = await settleAck(lane);
+      if (guard != null && !guard()) {
+        const error = new Error("live edit fence is no longer active");
+        error.code = "LIVE_EDIT_FENCED";
+        throw error;
+      }
+      if (ack === "acked" || ack === "assumed") {
+        if (text === lane.lastSentText) return { messageId: lane.messageId, edited: true };
+        await send({ peerHex: lane.peerHex, text, editOf: lane.messageId, guard });
+        return { messageId: lane.messageId, edited: true };
+      }
+      // Peer never fetched the placeholder: send the answer as a plain message
+      // that supersedes it, so the slot ends up holding only the answer.
+      log("BOT_LIVE_FALLBACK", { to: lane.peerHex, placeholder: lane.messageId });
+      const sent = await send({ peerHex: lane.peerHex, text, supersedes: [lane.messageId], guard });
+      return { messageId: sent.messageId, edited: false };
+    } catch (error) {
+      // An ordinary terminal transport failure remains retryable through the
+      // bridge ACK path. A deliberate authorization fence stays terminal.
+      if (error?.code !== "LIVE_EDIT_FENCED" && error?.code !== "T3AMS_OUTBOUND_FENCED") {
+        lane.finalized = false;
+      }
+      throw error;
     }
-    // Peer never fetched the placeholder: send the answer as a plain message
-    // that supersedes it, so the slot ends up holding only the answer.
-    log("BOT_LIVE_FALLBACK", { to: lane.peerHex, placeholder: lane.messageId });
-    const sent = await send({ peerHex: lane.peerHex, text, supersedes: [lane.messageId] });
-    return { messageId: sent.messageId, edited: false };
   };
 
   return {
     // Send a live placeholder message; edits unlock when the peer ACKs it.
-    async begin(peerHex, text) {
-      const { messageId, delivered } = await send({ peerHex, text });
-      const lane = makeLane(peerHex, messageId, "pending");
+    async begin(peerHex, text, { guard = null } = {}) {
+      const { messageId, delivered } = await send({ peerHex, text, guard });
+      const lane = makeLane(peerHex, messageId, "pending", guard);
       lane.lastSentText = text;
       lane.lastEditAt = now();
       lane.ackResolvers = [];
@@ -160,18 +194,45 @@ export const createLiveReplies = ({
         messageId,
         get finalized() { return lane.finalized; },
         update: (t) => update(lane, t),
-        finalize: (t) => finalize(lane, t),
+        finalize: (t, options = {}) => finalize(
+          lane,
+          t,
+          Object.hasOwn(options, "guard") ? options.guard : lane.defaultGuard,
+        ),
       };
     },
 
     // Throttle a harness-driven edit of an existing bot message (the target
     // is presumed delivered — it was a previously ACK-tracked send or an old
     // message). Fire-and-forget: frames coalesce latest-wins.
-    throttledEdit(peerHex, messageId, text) {
+    throttledEdit(peerHex, messageId, text, { guard = null } = {}) {
       let lane = lanes.get(messageId);
       if (!lane) { lane = makeLane(peerHex, messageId, "assumed"); lane.ackResolvers = []; }
       if (lane.finalized) lane.finalized = false; // harness may keep editing a finalized live message
-      update(lane, text);
+      update(lane, text, guard);
+    },
+
+    // Drop a queued harness-driven edit when its surrounding turn is
+    // invalidated.  An already-submitted protocol request cannot be
+    // cancelled, but its caller's fence is checked immediately before send.
+    cancelExisting(peerHex, messageId) {
+      const lane = lanes.get(messageId);
+      if (lane == null || lane.peerHex !== peerHex) return false;
+      lane.finalized = true;
+      clearLaneTimer(lane);
+      lane.pendingText = null;
+      lane.pendingGuard = null;
+      return true;
+    },
+
+    // A bridge delivery is acknowledged only after its framework completed a
+    // streamed turn. Promote the latest throttled frame to the terminal edit
+    // at that point so no coalesced progress timer can overwrite the final
+    // answer after the worker has ACKed its lease.
+    async finalizeExisting(peerHex, messageId, text, options = {}) {
+      let lane = lanes.get(messageId);
+      if (!lane) { lane = makeLane(peerHex, messageId, "assumed"); lane.ackResolvers = []; }
+      return finalize(lane, text, Object.hasOwn(options, "guard") ? options.guard : lane.defaultGuard);
     },
   };
 };
@@ -198,5 +259,57 @@ export const createProgressTracker = ({ label = "working", maxActions = 3, now =
       const header = `⏳ ${label} · ${elapsed()}${step > 0 ? ` · step ${step}` : ""}`;
       return [header, ...actions.map((a) => `▸ ${a}`)].join("\n");
     },
+  };
+};
+
+// A turn may do useful work before its visible placeholder can be created:
+// for example, a transport can be downloading an attached PDF while the
+// outbound statement lane is still quiet. Retain those actions and attach a
+// live handle later so the first visible progress frame accurately describes
+// work that has already happened. This deliberately owns no timers or
+// transport state; the caller remains responsible for throttling/finalizing
+// the actual live reply.
+export const createDeferredProgressTracker = (options = {}) => {
+  const tracker = createProgressTracker(options);
+  let handle = null;
+  let disposed = false;
+  // A transport can replace the compact activity card with a user-visible
+  // draft of the final answer. The draft belongs to the display layer only:
+  // callers retain the terminal answer independently, so an interrupted
+  // stream never promotes a partial response into a durable final message.
+  let liveText = null;
+  const flush = () => {
+    if (disposed || handle == null || handle.finalized) return;
+    handle.update(liveText ?? tracker.render());
+  };
+  return {
+    add(title) {
+      if (disposed) return;
+      tracker.add(title);
+      flush();
+    },
+    setLiveText(text) {
+      if (disposed) return;
+      const next = typeof text === "string" && text.trim() ? text : null;
+      if (next === liveText) return;
+      liveText = next;
+      flush();
+    },
+    attach(nextHandle) {
+      if (disposed || nextHandle == null) return;
+      handle = nextHandle;
+      // Do not replace a fresh "thinking…" bubble with a redundant working
+      // frame unless there is real pre-placeholder work or user-visible final
+      // prose to report. A no-tools Claude turn can start streaming text
+      // before it emits any tool/action event.
+      if (tracker.step > 0 || liveText != null) flush();
+    },
+    detach() { handle = null; },
+    dispose() {
+      disposed = true;
+      handle = null;
+    },
+    get step() { return tracker.step; },
+    render: () => liveText ?? tracker.render(),
   };
 };

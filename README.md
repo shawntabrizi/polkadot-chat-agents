@@ -95,11 +95,36 @@ framework as a two-container stack: `--harness openclaw` requires no interactive
 steps if the server has Claude CLI credentials, and `--harness hermes` prints
 the one login command it cannot automate. See [docs/HARNESSES.md](docs/HARNESSES.md).
 
+## T3ams bots
+
+T3ams is an optional transport for bots that should receive DMs and workspace
+mentions from the T3ams SPA. Create one with `--transport t3ams`; it uses the
+same brains, account, and Statement Store connection as the default transport.
+Native ad-hoc T3ams groups are not supported yet; use a workspace channel for a
+shared bot conversation.
+The BCTS SDK is currently a **local package**, not a public npm dependency: build
+and pack it from `t3ams-spa/packages/bcts`, install that tarball into
+`bot-core`, then run or deploy the bot. Do not use `npm install @t3ams/bcts`.
+
+The operator flow—DotNS registration, local SDK packaging, Statement Store
+allowance, private account-to-device signing-key pins, auto-accepted DM pairs,
+workspace invitations, mention-only channel replies, and private-channel key
+grants—is documented in
+[docs/T3AMS.md](docs/T3AMS.md).
+
+T3ams direct brains keep a single message bubble live while they think, report
+tool progress, and finish. Its authenticated framework bridge can do the same
+through message edits, reactions, and typing signals. Rich-text attachment
+references are authenticated and constrained before they reach a brain or a
+bridge; see the T3ams guide for Bulletin media, private-state, and file-vault
+requirements. Direct Claude, Codex, and OpenCode turns can also return bounded
+generated photos, documents, and other files as native attachments.
+
 ## Brains
 
 Direct engines run a headless coding-agent CLI as an autonomous agent — verbatim
-prompts, native session memory (`--resume`), and real tools (bash/read/edit/
-write) in a container that is their sandbox.
+prompts, native session memory (`--resume`), and deployer-selected portable
+`read`, `write`, and `bash` capabilities in their container runtime.
 
 | `--brain` | Replies come from | Reaches | Authentication |
 |---|---|---|---|
@@ -107,7 +132,7 @@ write) in a container that is their sandbox.
 | `codex` | the `codex` CLI | OpenAI models | ChatGPT/Codex login |
 | `opencode` | the `opencode` CLI | many providers via `--model provider/model` | `opencode auth login` |
 | `echo` | bot-core itself (repeats the message) | — | none |
-| `hermes` / `bridge` | an agent framework over the HTTP bridge | — | the framework's |
+| `bridge` | an agent framework over the HTTP bridge | — | the framework's |
 
 `opencode` is the many-models path — one engine reaches Anthropic, OpenAI,
 Google, xAI, OpenRouter, local models, etc. In-chat: `/stop` cancels the current
@@ -136,6 +161,28 @@ manage it. File return needs an operator-pinned HOP node and an active Bulletin
 allowance. The named private Paseo profile provisions its testnet allowance
 locally; other networks need separate operator provisioning.
 
+Direct T3ams agents start with no tools. An operator opts into portable,
+lowercase capabilities with `--allowed-tools read,write,bash`, chooses
+`--tool-scope workspace|container`. `write` includes `read`; `bash` includes
+both. The default is no capabilities and workspace scope. `read`
+also lets a direct agent inspect a verified attachment staged for its current
+turn, while `write` lets it produce returnable files. `workspace` scopes native
+file tools to the selected project and staged attachments; `container` lets them
+work with every file visible to the non-root agent account. Bash is
+bounded by the agent process in either scope: the dedicated bot container for a
+deployment, or your local process account for `pca run`. Treat local Bash bots
+as trusted-machine tools. See [the configuration guide](docs/CONFIGURATION.md#tool-policy)
+for the exact options.
+
+Every deployed direct bot has its own Docker container. The transport owns
+`/state` (the chat seed, session state, and bridge token) and the agent runs as
+the non-root `node` user, so the agent cannot read those transport secrets. Its
+OAuth home is intentionally part of that bot container so its CLI can
+authenticate. Container-scoped native file tools and Bash can access it. The
+container is the concrete isolation boundary: do not mount unrelated host
+repositories, credentials, Docker sockets, or home directories into it—especially
+for a public bot.
+
 **Projects.** `pca project <bot> add <alias> <path>` registers a directory the
 agent can work in (repeat for more). In chat, `/project <alias>` points your
 conversation at that repo, `/project <alias>@<branch>` gives it an isolated
@@ -154,7 +201,7 @@ with `BOT_GREET_TEXT`.
 
 ## Agent frameworks
 
-For a bot with memory, tools, and a persona, run `--brain hermes` and let a
+For a bot with memory, tools, and a persona, run `--brain bridge` and let a
 framework drive the conversation through bot-core's authenticated HTTP bridge
 (a bounded long-poll `GET /inbound`, lease renewal/ACK endpoints, and `POST /send`). Two
 integrations are included and validated:

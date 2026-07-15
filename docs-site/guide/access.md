@@ -35,12 +35,23 @@ whoever messages it, at whatever rate they message it. Treat `--public` as
 "I am funding this for the world."
 :::
 
-Public bots receive attachment references, but only download and process their
-bytes after you configure `BOT_HOP_ALLOWED_NODES` with trusted HOP hosts. Their
-automatic Paseo file-delivery allowance is intentionally disabled. Keep outbound
-file delivery off unless you deliberately fund it and have set tight storage,
-queue, and model limits. The [public deployment profile](/reference/configuration#public-bot-deliberately-bounded)
+For the default Polkadot-app transport, public bots receive attachment
+references but only download and process their bytes after you configure
+`BOT_HOP_ALLOWED_NODES` with trusted HOP hosts. Its automatic Paseo
+file-delivery allowance is intentionally disabled. For T3ams, use a trusted
+`BOT_T3AMS_BULLETIN_RPC`, narrow `BOT_T3AMS_ATTACHMENT_MIME_TYPES`, and bound
+the count, size, cache, and vault; T3ams has no automatic Bulletin upload grant.
+Keep outbound file delivery off unless you deliberately fund it and have set
+tight storage, queue, and model limits. The
+[public deployment profile](/reference/configuration#public-bot-deliberately-bounded)
 has a conservative starting point.
+
+Public direct bots can use Claude, Codex, or OpenCode with the same portable
+tool policy. They start with no tools, but their deployer may deliberately
+enable `read`, `write`, or `bash` and choose workspace or container scope. Every
+public sender can direct the chosen capabilities: `read` can inspect staged
+attachment bytes and `write` can create generated files. Use a bridge runtime
+when a public bot needs a separately designed tool-and-credential boundary.
 
 ## What changes between the two
 
@@ -54,40 +65,54 @@ allows in chat:
 | `/model` switching | Can be opened (`pca model <bot> open`) — trusted peers only | Never unrestricted; at most an approved set (`pca model <bot> allow a,b`) |
 | Returning saved files | Ready automatically on the default Paseo testnet profile | No automatic finite-allowance profile |
 | Sensible model | Your call | Pin a cheaper model |
+| Built-in direct-agent tools | No tools by default; deployer chooses portable capability/scope policy | Same policy; every sender can direct the selected capability |
 
 The model-switching rule exists because switching to an expensive model spends
 *your* quota: a stranger on a public bot must never be able to pick the
 priciest model. See [Brains & engines](/guide/brains#model-switching-in-chat)
 for the full policy.
 
-## The security model behind "open tools"
+## Direct-agent tools and the trust boundary
 
-A `pca deploy` AI direct engine runs its agent with real tools and full autonomy
-by default through its engine-specific bypass flag. That relies on how the
-deployment is built, not on trust in the agent:
+A direct Claude, Codex, or OpenCode deployment starts with no tools. That is
+the default for both `pca run` and `pca deploy`, rather than a permission prompt
+the model can talk its way around. The deployer chooses one portable policy:
 
-- **The deployment is the boundary.** A deployed engine runs in a non-root
-  container with its own filesystem and no access to the host. The agent can do
-  what it likes *inside* that box. `pca run` does not set the full-autonomy flag,
-  but it uses the local machine, so reserve local runs for trusted senders.
-- **The agent never sees the chat identity.** The signing seed and session
-  state stay with the transport process; the agent CLI is dropped to a non-root
-  user that cannot read them. The agent does retain its own provider login and
-  normal network access, which is why the sender allowlist remains essential.
-- **The bridge is authenticated.** The local HTTP control surface requires a
-  32+ character `BOT_BRIDGE_TOKEN`, so nothing on the box can drive the bot
-  just by reaching the port.
+| Choice | Effect |
+|---|---|
+| no tool flag | No capabilities and workspace scope. |
+| `--allowed-tools read,write,bash` | Exact lowercase outcome capabilities. `write` includes `read`; `bash` includes both. |
+| `--tool-scope workspace` | Default native file-tool scope; a read-capable turn can also inspect its current staged attachment. Bash uses the agent process boundary. |
+| `--tool-scope container` | Deliberately broad native file-tool access to files visible to the non-root agent account, including its OAuth home. Bash uses the agent process boundary. |
 
-For Claude, `--safe-tools` enables the configured `BOT_AI_ALLOWED_TOOLS`
-allowlist. Codex and OpenCode do not consume that setting; use a disposable
-workspace or container and their engine-specific controls for those engines.
+`workspace` scopes native file tools to the normal working area, and `container`
+is the deliberate broad option. Bash uses the agent process boundary in either
+scope: the dedicated bot container for a deployment, or the local process
+account for `pca run`. Treat local Bash bots as trusted-machine tools. Exact
+engine behavior varies, so use the deploy report to inspect the generated command.
+
+Every deployed direct bot has its own container. The transport owns `/state`,
+the signing seed, session keys, and bridge token, while the agent CLI runs as a
+non-root user and cannot read them. The CLI's OAuth home is intentionally part
+of the bot container so it can authenticate; container-scoped native file tools
+and Bash can access it. Do not mount unrelated host repositories, credentials,
+Docker sockets, or home directories into a bot container.
+
+For a public deployment, treat every sender as able to direct the chosen policy;
+for `pca run`, remember that the local machine is the runtime boundary. Use a
+bridge runtime when you need a genuinely separate tool-and-credential boundary.
+The local HTTP bridge itself still requires a 32+ character `BOT_BRIDGE_TOKEN`,
+so nothing on the box can drive the transport just by reaching its port.
 
 ## Attachments are hostile input
 
-Files arrive from the peer, so their source node is chosen by the sender. The
-transport treats attachment fetches defensively (size caps, integrity checks,
-scheme restrictions). For production, pin the nodes you trust with
-`BOT_HOP_ALLOWED_NODES` — see [Configuration](/reference/configuration#attachments-hop).
+Files arrive from the peer and are hostile input. The transport treats fetches
+defensively with size caps, integrity checks, and strict reference handling. On
+the default transport, pin the trusted HOP hosts with `BOT_HOP_ALLOWED_NODES`.
+On T3ams, attachments are encrypted `hop:` capabilities rather than peer-chosen
+web URLs; use the trusted `BOT_T3AMS_BULLETIN_RPC`, narrow the MIME policy when
+appropriate, and keep the private media cache/vault bounded. See
+[T3ams media configuration](/reference/configuration#t3ams-media-and-file-vault).
 
 ## The knobs
 
@@ -97,5 +122,8 @@ The decisions on this page map to these settings, all detailed in
 - `BOT_ALLOWED_PEERS` — the allowlist (empty = public).
 - `BOT_AI_ALLOWED_MODELS` / `BOT_AI_MODEL_SWITCHING` — the `/model` policy.
 - `BOT_BRIDGE_TOKEN` — bridge authentication.
-- `BOT_AI_SKIP_PERMISSIONS` — full tool autonomy; Claude can also use
-  `BOT_AI_ALLOWED_TOOLS` when it is disabled.
+- `BOT_AI_TOOL_CAPABILITIES` — empty by default; comma-separated portable
+  `read`, `write`, and `bash` outcomes.
+- `BOT_AI_TOOL_SCOPE` — workspace versus container native file-tool scope.
+- `BOT_T3AMS_ATTACHMENT_MIME_TYPES` / `BOT_T3AMS_ATTACHMENT_MAX_*` — T3ams
+  attachment admission policy and media bounds.

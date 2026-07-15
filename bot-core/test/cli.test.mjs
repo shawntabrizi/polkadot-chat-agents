@@ -5,19 +5,53 @@ import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { entrypointForTransport } from "../lib/transport-entrypoint.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CLI = path.join(HERE, "..", "cli.mjs");
+const T3AMS_BCTS_LOADER = path.join(HERE, "fixtures", "t3ams", "bcts-loader.mjs");
 const ACCOUNT = "ab".repeat(32);
 
-const runCli = (botsDir, args) => spawnSync(process.execPath, [CLI, ...args], {
+const runCli = (botsDir, args, extraEnv = {}, nodeArgs = []) => spawnSync(process.execPath, [...nodeArgs, CLI, ...args], {
   cwd: path.join(HERE, ".."),
   encoding: "utf8",
-  env: { ...process.env, PCA_BOTS_DIR: botsDir, NO_COLOR: "1" },
+  env: { ...process.env, ...extraEnv, PCA_BOTS_DIR: botsDir, NO_COLOR: "1" },
 });
 
+const currentBotConfig = (name, overrides = {}) => {
+  const config = {
+    name,
+    endpoint: "ws://127.0.0.1:9944",
+    backendUrl: "https://backend.example.test",
+    brain: "echo",
+    transport: "polkadot-app",
+    allow: [],
+    allowLabels: {},
+    bridgePort: 8799,
+    bridgeToken: "a-long-enough-bridge-token-for-tests",
+    account: `0x${ACCOUNT}`,
+    address: "5FakePcaAddress",
+    identifierKey: `0x${"11".repeat(32)}`,
+    username: null,
+    registered: false,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    ...overrides,
+  };
+  if (!Object.hasOwn(overrides, "allowLabels")) {
+    config.allowLabels = Object.fromEntries(config.allow.map((account) => [account, account]));
+  }
+  return config;
+};
+
 const writeBot = (botsDir, name, config) => {
+  const dir = path.join(botsDir, name);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "config.json"), `${JSON.stringify(currentBotConfig(name, config))}\n`);
+  fs.writeFileSync(path.join(dir, "secret.json"), `${JSON.stringify({ seedHex: `0x${"11".repeat(32)}` })}\n`);
+};
+
+const writeRawBot = (botsDir, name, config) => {
   const dir = path.join(botsDir, name);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "config.json"), `${JSON.stringify(config)}\n`);
@@ -25,6 +59,290 @@ const writeBot = (botsDir, name, config) => {
 };
 
 const readBot = (botsDir, name) => JSON.parse(fs.readFileSync(path.join(botsDir, name, "config.json"), "utf8"));
+
+test("transport entrypoints route each supported transport to its runtime", () => {
+  assert.equal(entrypointForTransport("polkadot-app"), "index.mjs");
+  assert.equal(entrypointForTransport("t3ams"), "t3ams.mjs");
+  assert.throws(() => entrypointForTransport("unknown"), /Unsupported transport entrypoint/);
+});
+
+test("commands require the current config contract without adding defaults", () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
+  try {
+    const missingTransport = currentBotConfig("missingtransport");
+    delete missingTransport.transport;
+    writeRawBot(botsDir, "missingtransport", missingTransport);
+
+    let result = runCli(botsDir, ["deploy", "missingtransport", "--host", "root@example.test", "--dry-run"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Invalid config\.json.*transport must be one of/i);
+    assert.deepEqual(readBot(botsDir, "missingtransport"), missingTransport);
+
+    const missingToken = currentBotConfig("missingtoken");
+    delete missingToken.bridgeToken;
+    writeRawBot(botsDir, "missingtoken", missingToken);
+
+    result = runCli(botsDir, ["deploy", "missingtoken", "--host", "root@example.test", "--dry-run"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Invalid config\.json.*bridgeToken must be a 32\+ character secret/i);
+    assert.deepEqual(readBot(botsDir, "missingtoken"), missingToken);
+
+    const retiredHermesAlias = currentBotConfig("retiredhermes", { brain: "hermes" });
+    writeRawBot(botsDir, "retiredhermes", retiredHermesAlias);
+    result = runCli(botsDir, ["info", "retiredhermes"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Invalid config\.json.*brain must be one of: echo, claude, codex, opencode, bridge/i);
+    assert.deepEqual(readBot(botsDir, "retiredhermes"), retiredHermesAlias);
+  } finally {
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
+});
+
+test("T3ams deployment preflight accepts an importable BCTS SDK without native-group APIs", () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
+  try {
+    writeBot(botsDir, "t3amssdk", { transport: "t3ams" });
+    const genericSdk = path.join(botsDir, "generic-bcts.mjs");
+    fs.writeFileSync(genericSdk, "export const sdk = 'generic';\n");
+    const loaderArgs = ["--experimental-loader", T3AMS_BCTS_LOADER];
+
+    let result = runCli(
+      botsDir,
+      ["deploy", "t3amssdk", "--host", "root@example.test", "--dry-run"],
+      { PCA_TEST_T3AMS_BCTS_MODULE: pathToFileURL(genericSdk).href },
+      loaderArgs,
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /native[ -]?group/i);
+
+    writeBot(botsDir, "t3amsharnesssdk", { brain: "bridge", transport: "t3ams" });
+    result = runCli(
+      botsDir,
+      ["deploy", "t3amsharnesssdk", "--host", "root@example.test", "--harness", "openclaw", "--dry-run"],
+      { PCA_TEST_T3AMS_BCTS_MODULE: pathToFileURL(genericSdk).href },
+      loaderArgs,
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /native[ -]?group/i);
+
+    const brokenSdk = path.join(botsDir, "broken-bcts.mjs");
+    fs.writeFileSync(brokenSdk, "throw new Error('synthetic BCTS import failure');\n");
+    const before = readBot(botsDir, "t3amssdk");
+    result = runCli(
+      botsDir,
+      ["deploy", "t3amssdk", "--host", "root@example.test"],
+      { PCA_TEST_T3AMS_BCTS_MODULE: pathToFileURL(brokenSdk).href },
+      loaderArgs,
+    );
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Could not import the local @t3ams\/bcts package required for T3ams deployment/i);
+    assert.match(result.stderr, /synthetic BCTS import failure/i);
+    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /Checking root@example\.test|ssh root@example\.test/i);
+    assert.deepEqual(readBot(botsDir, "t3amssdk"), before);
+
+    const harnessBefore = readBot(botsDir, "t3amsharnesssdk");
+    result = runCli(
+      botsDir,
+      ["deploy", "t3amsharnesssdk", "--host", "root@example.test", "--harness", "openclaw"],
+      { PCA_TEST_T3AMS_BCTS_MODULE: pathToFileURL(brokenSdk).href },
+      loaderArgs,
+    );
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Could not import the local @t3ams\/bcts package required for T3ams deployment/i);
+    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /Checking root@example\.test|ssh root@example\.test/i);
+    assert.deepEqual(readBot(botsDir, "t3amsharnesssdk"), harnessBefore);
+  } finally {
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
+});
+
+test("private T3ams creation requires and persists a trusted device signing-key pin", () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
+  try {
+    let result = runCli(botsDir, [
+      "create", "pinnedbot", "--brain", "echo", "--transport", "t3ams",
+      "--owner", `0x${ACCOUNT}`, "--no-register",
+    ]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /requires a tagged-CBOR signing-key pin/i);
+    assert.equal(fs.existsSync(path.join(botsDir, "pinnedbot")), false);
+
+    result = runCli(botsDir, [
+      "create", "pinnedbot", "--brain", "echo", "--transport", "t3ams",
+      "--owner", `0x${ACCOUNT}`,
+      "--t3ams-peer-key", `0x${ACCOUNT}=11`,
+      "--t3ams-display-name", "Pinned Bot",
+      "--t3ams-no-auto-accept-workspaces",
+      "--no-register",
+    ]);
+    assert.equal(result.status, 0, result.stderr);
+    const config = readBot(botsDir, "pinnedbot");
+    assert.deepEqual(config.t3amsTrustedSigningKeys, { [ACCOUNT]: "11" });
+    assert.equal(config.t3amsDisplayName, "Pinned Bot");
+    assert.equal(config.t3amsAutoAcceptWorkspaces, false);
+
+    result = runCli(botsDir, ["deploy", "pinnedbot", "--host", "root@example.test", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^BOT_T3AMS_DISPLAY_NAME=Pinned Bot$/m);
+    assert.match(result.stdout, /^BOT_T3AMS_AUTO_ACCEPT_WORKSPACES=0$/m);
+  } finally {
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
+});
+
+test("create persists the selected transport and deployment passes it to the runtime", () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
+  try {
+    let result = runCli(botsDir, ["create", "t3amsbot", "--brain", "echo", "--transport", "t3ams", "--no-register"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readBot(botsDir, "t3amsbot").transport, "t3ams");
+    assert.match(result.stdout, /Message your bot in T3ams:/);
+    assert.match(result.stdout, /no registered DotNS username yet/);
+    assert.doesNotMatch(result.stdout, /polkadotapp:\/\//);
+
+    result = runCli(botsDir, ["info", "t3amsbot"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Reach this bot in T3ams:/);
+    assert.match(result.stdout, /no registered DotNS username yet/);
+    assert.doesNotMatch(result.stdout, /polkadotapp:\/\//);
+
+    result = runCli(botsDir, ["deploy", "t3amsbot", "--host", "root@example.test", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /command: \["node", "t3ams\.mjs"\]/);
+
+    const moduleOverride = "./vendor/t3ams-bcts.mjs";
+    result = runCli(botsDir, ["deploy", "t3amsbot", "--host", "root@example.test", "--dry-run"], {
+      BOT_T3AMS_BCTS_MODULE: moduleOverride,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, /BOT_T3AMS_BCTS_MODULE=/);
+
+    result = runCli(botsDir, ["deploy", "t3amsbot", "--host", "root@example.test", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^BOT_TRANSPORT=t3ams$/m);
+    assert.match(result.stdout, /command: \["node", "t3ams\.mjs"\]/);
+
+    writeBot(botsDir, "t3amsdirect", {
+      name: "t3amsdirect",
+      endpoint: "ws://127.0.0.1:9944",
+      brain: "claude",
+      transport: "t3ams",
+      allow: [],
+      bridgePort: 8799,
+      bridgeToken: "a-long-enough-bridge-token-for-tests",
+    });
+    result = runCli(botsDir, ["deploy", "t3amsdirect", "--host", "root@example.test", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /CMD \["node", "t3ams\.mjs"\]/);
+    assert.match(result.stdout, /command: \["node", "t3ams\.mjs"\]/);
+
+    writeBot(botsDir, "t3amsharness", {
+      name: "t3amsharness",
+      endpoint: "ws://127.0.0.1:9944",
+      brain: "bridge",
+      transport: "t3ams",
+      allow: [],
+      bridgePort: 8799,
+      bridgeToken: "a-long-enough-bridge-token-for-tests",
+    });
+    result = runCli(botsDir, ["deploy", "t3amsharness", "--host", "root@example.test", "--harness", "openclaw", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /command: \["node", "t3ams\.mjs"\]/);
+    assert.match(result.stdout, /"dmPolicy":"open","allowFrom":\["\*"\]/);
+
+    result = runCli(botsDir, ["deploy", "t3amsharness", "--host", "root@example.test", "--harness", "hermes", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /POLKADOT_ALLOW_ALL_USERS=1/);
+
+    writeBot(botsDir, "t3amslive", {
+      name: "t3amslive",
+      endpoint: "ws://127.0.0.1:9944",
+      brain: "echo",
+      transport: "t3ams",
+      username: "t3amsagent.42",
+      registered: true,
+      account: `0x${ACCOUNT}`,
+      address: "5FakeT3amsAddress",
+      allow: [],
+      bridgePort: 8799,
+      bridgeToken: "a-long-enough-bridge-token-for-tests",
+    });
+    result = runCli(botsDir, ["info", "t3amslive"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Search or invite t3amsagent\.42 in T3ams/);
+    assert.doesNotMatch(result.stdout, /polkadotapp:\/\//);
+
+    result = runCli(botsDir, ["create", "defaultbot", "--brain", "echo", "--no-register"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readBot(botsDir, "defaultbot").transport, "polkadot-app");
+
+    result = runCli(botsDir, ["deploy", "defaultbot", "--host", "root@example.test", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^BOT_TRANSPORT=polkadot-app$/m);
+
+    result = runCli(botsDir, ["create", "invalidbot", "--transport", "not-a-transport", "--no-register"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /--transport must be one of: polkadot-app, t3ams/);
+    assert.equal(fs.existsSync(path.join(botsDir, "invalidbot")), false);
+  } finally {
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
+});
+
+test("T3ams deploys use authenticated bridge health for readiness", () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
+  const bridgeToken = "a-long-enough-bridge-token-for-tests";
+  try {
+    writeBot(botsDir, "t3amshealth", {
+      name: "t3amshealth",
+      endpoint: "ws://127.0.0.1:9944",
+      brain: "echo",
+      transport: "t3ams",
+      allow: [],
+      bridgePort: 8799,
+      bridgeToken,
+    });
+    let result = runCli(botsDir, ["deploy", "t3amshealth", "--host", "root@example.test", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /healthcheck:\n      test: \["CMD", "node", "-e", ".*BOT_BRIDGE_TOKEN.*"\]/);
+    assert.match(result.stdout, /h\?\.ok===true.*h\.transport==='t3ams'.*h\.subscriptions.*>0/);
+    assert.match(result.stdout, /interval: 5s\n      timeout: 5s\n      retries: 3\n      start_period: 20s/);
+    assert.doesNotMatch(result.stdout, new RegExp(bridgeToken));
+
+    writeBot(botsDir, "plainhealth", {
+      name: "plainhealth",
+      endpoint: "ws://127.0.0.1:9944",
+      brain: "echo",
+      transport: "polkadot-app",
+      allow: [],
+      bridgePort: 8799,
+      bridgeToken,
+    });
+    result = runCli(botsDir, ["deploy", "plainhealth", "--host", "root@example.test", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, /healthcheck:/);
+
+    writeBot(botsDir, "t3amsharnesshealth", {
+      name: "t3amsharnesshealth",
+      endpoint: "ws://127.0.0.1:9944",
+      brain: "bridge",
+      transport: "t3ams",
+      allow: [],
+      bridgePort: 8799,
+      bridgeToken,
+    });
+    result = runCli(botsDir, [
+      "deploy", "t3amsharnesshealth", "--host", "root@example.test",
+      "--harness", "openclaw", "--dry-run",
+    ]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /healthcheck:\n      test: \["CMD", "node", "-e", ".*BOT_BRIDGE_TOKEN.*"\]/);
+    assert.match(result.stdout, /openclaw:[\s\S]*depends_on:\n      bot:\n        condition: service_healthy/);
+    assert.doesNotMatch(result.stdout, new RegExp(bridgeToken));
+  } finally {
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
+});
 
 test("pca model persists a safe policy and serializes it for direct deploys", () => {
   const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
@@ -86,6 +404,124 @@ test("pca model persists a safe policy and serializes it for direct deploys", ()
   }
 });
 
+test("direct deployment uses one portable tool policy across every direct engine", () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
+  try {
+    const directBots = [
+      ["privateclaude", "claude", [ACCOUNT]],
+      ["publicclaude", "claude", []],
+      ["publiccodex", "codex", []],
+      ["publicopencode", "opencode", []],
+    ];
+    for (const [name, brain, allow] of directBots) {
+      writeBot(botsDir, name, {
+        name,
+        endpoint: "ws://127.0.0.1:9944",
+        brain,
+        allow,
+        bridgePort: 8799,
+        bridgeToken: "a-long-enough-bridge-token-for-tests",
+      });
+    }
+
+    for (const [name] of directBots) {
+      const result = runCli(botsDir, ["deploy", name, "--host", "root@example.test", "--dry-run"]);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /^BOT_AI_TOOL_CAPABILITIES=$/m);
+      assert.match(result.stdout, /^BOT_AI_TOOL_SCOPE=workspace$/m);
+      assert.match(result.stdout, /Tool policy: none; scope=workspace\./);
+      assert.doesNotMatch(result.stdout, /BOT_AI_TOOL_NETWORK=|BOT_AI_RUNTIME_CONTAINER=|BOT_AI_ALLOWED_TOOLS=|BOT_AI_SAFE_MODE=|BOT_AI_SKIP_PERMISSIONS=|BOT_T3AMS_PUBLIC_ATTACHMENT_READ=|apparmor=|seccomp=|bubblewrap/);
+    }
+
+    let result = runCli(botsDir, ["deploy", "privateclaude", "--host", "root@example.test", "--allowed-tools", "write", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^BOT_AI_TOOL_CAPABILITIES=read,write$/m);
+    assert.match(result.stdout, /^BOT_AI_TOOL_SCOPE=workspace$/m);
+    assert.match(result.stdout, /git ca-certificates ripgrep/);
+    assert.doesNotMatch(result.stdout, /bubblewrap|socat|util-linux/);
+
+    result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--allowed-tools", "bash", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^BOT_AI_TOOL_CAPABILITIES=read,write,bash$/m);
+    assert.match(result.stdout, /Bash runs inside this bot's container/i);
+    assert.match(result.stdout, /no-new-privileges:true/);
+    assert.doesNotMatch(result.stdout, /apparmor=|seccomp=|bubblewrap|prepare-host|cap_drop:/);
+
+    result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--allowed-tools", "bash", "--tool-scope", "container", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^BOT_AI_TOOL_SCOPE=container$/m);
+
+    result = runCli(botsDir, ["deploy", "publiccodex", "--host", "root@example.test", "--allowed-tools", "bash", "--tool-scope", "container", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^BOT_AI_TOOL_CAPABILITIES=read,write,bash$/m);
+    assert.match(result.stdout, /^BOT_AI_TOOL_SCOPE=container$/m);
+    assert.doesNotMatch(result.stdout, /apparmor=|seccomp=|bubblewrap/);
+
+    result = runCli(botsDir, ["deploy", "publicopencode", "--host", "root@example.test", "--allowed-tools", "bash", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Bash.*container/i);
+
+    for (const [args, pattern] of [
+      [["--allowed-tools", "Read"], /unsupported capability/i],
+      [["--allowed-tools", "read,read"], /duplicate capability/i],
+      [["--allowed-tools", "read,,write"], /empty capability/i],
+      [["--tool-network", "internet"], /Unknown flag.*tool-network/i],
+      [["--tool-scope", "host"], /must be one of/i],
+      [["--safe-tools"], /Unknown flag.*safe-tools/i],
+      [["--full-autonomy"], /Unknown flag.*full-autonomy/i],
+      [["--attachment-read"], /Unknown flag.*attachment-read/i],
+    ]) {
+      result = runCli(botsDir, ["deploy", "privateclaude", "--host", "root@example.test", ...args, "--dry-run"]);
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, pattern);
+    }
+
+    writeBot(botsDir, "bridgebot", {
+      name: "bridgebot",
+      endpoint: "ws://127.0.0.1:9944",
+      brain: "bridge",
+      allow: [],
+      bridgePort: 8799,
+      bridgeToken: "a-long-enough-bridge-token-for-tests",
+    });
+    result = runCli(botsDir, ["deploy", "bridgebot", "--host", "root@example.test", "--harness", "openclaw", "--allowed-tools", "read", "--dry-run"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /require a built-in direct engine/i);
+
+    result = runCli(botsDir, ["run", "bridgebot", "--allowed-tools", "read"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /bridge has no direct-agent tools/i);
+
+    writeBot(botsDir, "publicmedia", {
+      name: "publicmedia",
+      endpoint: "ws://127.0.0.1:9944",
+      brain: "claude",
+      transport: "t3ams",
+      allow: [],
+      bridgePort: 8799,
+      bridgeToken: "a-long-enough-bridge-token-for-tests",
+    });
+    result = runCli(botsDir, ["deploy", "publicmedia", "--host", "root@example.test", "--allowed-tools", "read", "--media-analyzer", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^BOT_AI_TOOL_CAPABILITIES=read$/m);
+    assert.match(result.stdout, /^BOT_T3AMS_MEDIA_ANALYZER_URL=http:\/\/media-analyzer:8798\/v1\/analyze$/m);
+    assert.match(result.stdout, /^BOT_T3AMS_MEDIA_ANALYZER_TOKEN=<hidden>$/m);
+    assert.match(result.stdout, /media-analyzer:\n[\s\S]*cap_drop:\n      - ALL/);
+    assert.match(result.stdout, /depends_on:\n      media-analyzer:\n        condition: service_healthy/);
+    assert.match(result.stdout, /env_file:\n      - \.\/media\.env\n      - \.\/media-token\.env/);
+    assert.doesNotMatch(result.stdout, /ANTHROPIC_API_KEY=|BOT_T3AMS_PUBLIC_ATTACHMENT_READ=/);
+    const publicMedia = readBot(botsDir, "publicmedia");
+    assert.equal(typeof publicMedia.mediaAnalyzerToken, "string");
+    assert.ok(publicMedia.mediaAnalyzerToken.length >= 32);
+    assert.notEqual(publicMedia.mediaAnalyzerToken, publicMedia.bridgeToken);
+
+    result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--media-analyzer", "--dry-run"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /requires a T3ams direct-engine deployment/i);
+  } finally {
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
+});
 test("Paseo private-bot onboarding configures a testnet file-delivery profile", () => {
   const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
   try {
@@ -105,6 +541,8 @@ test("Paseo private-bot onboarding configures a testnet file-delivery profile", 
 
     result = runCli(botsDir, ["info", "filebot"]);
     assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Message this bot in the Polkadot app:/);
+    assert.match(result.stdout, /polkadotapp:\/\//);
     assert.match(result.stdout, /HOP delivery enabled/);
     assert.match(result.stdout, /allowance: 5/);
     assert.match(result.stdout, /pca storage filebot status/);

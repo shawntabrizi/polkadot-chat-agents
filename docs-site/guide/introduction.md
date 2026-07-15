@@ -37,5 +37,10 @@ agent framework connected through a small HTTP bridge.
 - For an AI brain: the model's CLI installed and logged in on the machine the
   bot runs on. `bot-core` invokes the CLI without forwarding its own secret
   environment; a deployed CLI authenticates through its persistent OAuth home.
+  The OAuth home is part of that bot container; container-scoped native file
+  tools and Bash can access it. Direct agents start with no tools and the
+  deployer explicitly chooses portable capabilities and native file-tool scope.
+  Bash uses the agent process boundary in either scope: the dedicated bot
+  container for a deployment, or the local process account for `pca run`.
 
 Continue to [Create your first bot](/guide/first-bot).

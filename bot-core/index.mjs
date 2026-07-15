@@ -18,7 +18,7 @@
 // Reuses ONLY the generic transport codec (vendor/) + a papi client for the
 // on-chain identifier-key lookup. No faucet-specific code (coinage/stripe/etc.).
 //
-// Env: BOT_SEED_HEX (root mini-secret; or FAUCET_CHAT_SERVICE_SECRET),
+// Env: BOT_SEED_HEX (root mini-secret),
 //   BOT_ENDPOINT (default Paseo), BOT_BRIDGE_PORT (8799), BOT_BRIDGE_HOST (127.0.0.1),
 //   BOT_ACK_TEXT, BOT_ALLOWED_PEERS (comma-sep peer account hexes; empty = allow all),
 //   BOT_REQUEST_LOOKBACK_DAYS (7), BOT_REQUEST_FUTURE_DAYS (2), BOT_POLL_MS (2000),
@@ -48,8 +48,8 @@
 //   Direct engines (BOT_BRAIN=claude|codex|opencode): BOT_AI_MODEL (opencode
 //   takes a provider/model slug), BOT_AI_ALLOWED_MODELS (comma-sep /model
 //   allowlist; unset/empty = locked), BOT_AI_MODEL_SWITCHING (locked|open;
-//   open requires a non-public bot), BOT_AI_ALLOWED_TOOLS (Bash,Read,Edit,Write),
-//   BOT_AI_SKIP_PERMISSIONS (1 = full autonomy), BOT_AI_IDLE_TIMEOUT_MS
+//   open requires a non-public bot), BOT_AI_TOOL_CAPABILITIES (empty = no
+//   tools), BOT_AI_TOOL_SCOPE (workspace|container), BOT_AI_IDLE_TIMEOUT_MS
 //   (600000, kills a silent/wedged turn), BOT_AI_MAX_MS (3600000 default hard
 //   cap), BOT_AI_MAX_CONCURRENT_TURNS / BOT_AI_MAX_QUEUED_TURNS, BOT_AI_WORKSPACE
 //   (a non-secret agent workspace separate from BOT_STATE_DIR),
@@ -77,7 +77,8 @@ import { createMediaStore } from "./lib/media-store.mjs";
 import { createFileStore } from "./lib/file-store.mjs";
 import { createFileCommandHandler } from "./lib/file-commands.mjs";
 import { createLiveReplies, createProgressTracker } from "./lib/live-reply.mjs";
-import { RUNNERS, resolveEngine, ENGINES } from "./lib/runners.mjs";
+import { RUNNERS, resolveEngine, ENGINES, assertEngineToolPolicy, toolPolicyEnforcement } from "./lib/runners.mjs";
+import { ToolPolicyError, hasToolCapability, toolPolicyFromEnvironment, toolPolicySummary } from "./lib/tool-policy.mjs";
 import { createKeyedDispatcher } from "./lib/keyed-dispatcher.mjs";
 import { createClient as createPapiClient } from "polkadot-api";
 import { getWsProvider, WsEvent } from "polkadot-api/ws";
@@ -125,7 +126,7 @@ const numberEnv = (name, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER, int
 };
 const DEFAULT_ENDPOINT = "wss://paseo-people-next-system-rpc.polkadot.io";
 const endpoint = env.BOT_ENDPOINT ?? DEFAULT_ENDPOINT;
-const seedHex = (env.BOT_SEED_HEX ?? env.FAUCET_CHAT_SERVICE_SECRET ?? "").trim();
+const seedHex = (env.BOT_SEED_HEX ?? "").trim();
 const bridgePort = numberEnv("BOT_BRIDGE_PORT", 8799, { min: 0, max: 65_535 });
 // The bridge exposes decrypted inbound messages and can publish as the bot.
 // Require an explicit shared secret even on loopback so a local co-tenant cannot
@@ -136,8 +137,12 @@ if (bridgeToken.length < 32) {
   console.error("BOT_BRIDGE_TOKEN must be set to a 32+ character random secret");
   process.exit(2);
 }
-const brain = (env.BOT_BRAIN ?? "bridge").trim().toLowerCase(); // bridge | hermes | echo | claude | codex | opencode
-const ackText = env.BOT_ACK_TEXT ?? (brain === "bridge" || brain === "hermes" ? "Connecting you to the agent…" : "");
+const brain = (env.BOT_BRAIN ?? "bridge").trim().toLowerCase(); // bridge | echo | claude | codex | opencode
+if (!new Set(["echo", "claude", "codex", "opencode", "bridge"]).has(brain)) {
+  console.error("BOT_BRAIN must be echo, claude, codex, opencode, or bridge");
+  process.exit(2);
+}
+const ackText = env.BOT_ACK_TEXT ?? (brain === "bridge" ? "Connecting you to the agent…" : "");
 // If a reply hasn't gone out within BOT_THINKING_AFTER_MS of receiving a message,
 // send a "thinking" ack so a slow answer (AI call, Hermes round-trip) doesn't feel
 // like the message was lost. Fast replies cancel it. Empty text disables it.
@@ -165,11 +170,12 @@ const replyChunkBytes = numberEnv("BOT_REPLY_CHUNK_BYTES", 4000, { min: 128, max
 // doesn't have to find and message the bot first. Only allowlisted peers are
 // ever greeted; an open bot has no owner to greet.
 const greet = env.BOT_GREET === "1" || env.BOT_GREET === "true";
-const greetText = env.BOT_GREET_TEXT ?? `👋 ${env.BOT_USERNAME || env.FAUCET_CHAT_SERVICE_USERNAME || "Your bot"} here — I'm alive! Say hi, or /help for what I can do.`;
+const greetText = env.BOT_GREET_TEXT ?? `👋 ${env.BOT_USERNAME || "Your bot"} here — I'm alive! Say hi, or /help for what I can do.`;
 
 // Direct engine "brains": bot-core runs a headless coding-agent CLI (claude /
-// codex / opencode) as an autonomous agent — verbatim prompt, native session
-// resume, tools on. The engine table (lib/runners.mjs) turns a
+// codex / opencode) as an autonomous agent — verbatim prompt and native
+// session resume. Tools require an explicit operator choice. The engine table
+// (lib/runners.mjs) turns a
 // (prompt, model, resume) into argv and normalizes each CLI's JSONL stream;
 // the runtime around it (spawn/stream/idle-backstop, per-peer state, in-chat
 // commands) is lib/agent-runtime.mjs, driven through the `chat` surface
@@ -179,10 +185,16 @@ const aiModel = (env.BOT_AI_MODEL ?? "").trim();
 // aiAllowedModels (the /model switching policy) is derived below, once the
 // peer allowlist is known. It is locked by default; open switching requires an
 // explicit non-public operator opt-in. See resolveModelPolicy.
-// Tools are on by default (the container is the sandbox). The allowlist is the
-// safe default; BOT_AI_SKIP_PERMISSIONS=1 grants full autonomy (all tools).
-const allowedTools = (env.BOT_AI_ALLOWED_TOOLS ?? "Bash,Read,Edit,Write").split(",").map((s) => s.trim()).filter(Boolean);
-const skipPermissions = env.BOT_AI_SKIP_PERMISSIONS === "1";
+// Tool authority is an explicit PCA policy, not an engine-native allowlist.
+// The default is no tools. A deployer can opt into portable capabilities and
+// choose whether they are restricted to the current workspace or the whole
+// non-root container account.
+let aiToolPolicy;
+try { aiToolPolicy = toolPolicyFromEnvironment(env); }
+catch (error) {
+  console.error(error instanceof ToolPolicyError ? error.message : `Invalid tool policy: ${String(error?.message ?? error)}`);
+  process.exit(2);
+}
 // No wall-clock timeout: a long agent turn (a big build/test) is legitimate.
 // Instead an idle-silence backstop kills a process that has emitted nothing for
 // this long — a wedge — and unblocks the peer's queue. /stop is the user lever.
@@ -216,7 +228,7 @@ if (env.BOT_AI_PROJECTS) {
 // Escape hatch: BOT_AI_CMD=<bin> [+ BOT_AI_ARGS=<JSON array> with "__PROMPT__"]
 // runs a custom CLI that speaks claude-shaped stream-json (also how the offline
 // e2e drives the loop with a mock `sh` script). Otherwise the engine is the
-// named brain (claude/codex/opencode); null for echo/bridge/hermes.
+// named brain (claude/codex/opencode); null for echo/bridge.
 const customCmd = (env.BOT_AI_CMD ?? "").trim();
 let customArgsTmpl = null;
 if (customCmd && env.BOT_AI_ARGS) {
@@ -225,6 +237,17 @@ if (customCmd && env.BOT_AI_ARGS) {
 }
 const engine = customCmd ? RUNNERS.custom : resolveEngine(brain); // null unless a direct engine
 const engineCommand = customCmd || engine?.command;
+if (customCmd && (aiToolPolicy.capabilities.length || aiToolPolicy.scope !== "workspace")) {
+  console.error("BOT_AI_CMD owns its own tool boundary; BOT_AI_TOOL_CAPABILITIES and BOT_AI_TOOL_SCOPE are only supported by the built-in claude, codex, and opencode brains.");
+  process.exit(2);
+}
+if (engine && !customCmd) {
+  try { aiToolPolicy = assertEngineToolPolicy(brain, aiToolPolicy); }
+  catch (error) {
+    console.error(error instanceof ToolPolicyError ? error.message : `Invalid tool policy: ${String(error?.message ?? error)}`);
+    process.exit(2);
+  }
+}
 if (engine) fs.mkdirSync(aiWorkspace, { recursive: true, mode: 0o700 });
 // Default reasoning effort (engine-specific flag; see lib/runners.mjs).
 // Validated here so a typo fails at startup, not silently per turn.
@@ -233,10 +256,27 @@ if (engine && aiReasoning && !engine.effortLevels?.includes(aiReasoning)) {
   console.error(`BOT_AI_REASONING=${aiReasoning} is not valid for this engine${engine.effortLevels ? ` (levels: ${engine.effortLevels.join(", ")})` : " (it has no reasoning control)"}`);
   process.exit(2);
 }
-const buildEngineArgs = ({ prompt, model, resume, effort }) => {
+const buildEngineArgs = ({ prompt, model, resume, effort, attachmentDir, outputDir, workingDirectory }) => {
   if (customCmd) return customArgsTmpl ? customArgsTmpl.map((a) => (a === "__PROMPT__" ? prompt : a)) : [prompt];
-  return engine.buildArgs({ prompt, model, resume, effort, allowedTools, skipPermissions });
+  return engine.buildArgs({
+    prompt,
+    model,
+    resume,
+    effort,
+    policy: aiToolPolicy,
+    attachmentDir,
+    outputDir,
+    workingDirectory,
+    protectedPaths: [env.BOT_STATE_DIR, env.HOME, "/app"],
+  });
 };
+const buildEngineTurnEnvironment = ({ attachmentDir, outputDir, workingDirectory }) =>
+  customCmd ? null : engine.buildEnvironment?.({
+    policy: aiToolPolicy,
+    attachmentDir,
+    outputDir,
+    workingDirectory,
+  }) ?? null;
 const lookbackDays = numberEnv("BOT_REQUEST_LOOKBACK_DAYS", 7, { min: 0, max: 365 });
 const futureDays = numberEnv("BOT_REQUEST_FUTURE_DAYS", 2, { min: 0, max: 30 });
 const pollMs = numberEnv("BOT_POLL_MS", 2000, { min: 100, max: 86_400_000 });
@@ -286,7 +326,7 @@ const aiAllowedModels = resolveModelPolicy({
   isPublic: allowedPeers.size === 0,
   allowOpen: modelSwitching === "open",
 });
-if (!seedHex) { console.error("BOT_SEED_HEX (or FAUCET_CHAT_SERVICE_SECRET) is required"); process.exit(2); }
+if (!seedHex) { console.error("BOT_SEED_HEX is required"); process.exit(2); }
 
 const hexToBytes = (hex) => {
   const clean = String(hex).trim().replace(/^0x/i, "");
@@ -517,7 +557,7 @@ const identifierKey = p256PublicKeyFromPrivateKey(p256PrivateKey);
 const accountId = wallet.publicKey;
 const accountIdHex = norm(bytesToHex(accountId));
 const hopUploadAccountIdHex = norm(bytesToHex(hopUploadPair.publicKey));
-const username = env.FAUCET_CHAT_SERVICE_USERNAME ?? env.BOT_USERNAME ?? "";
+const username = env.BOT_USERNAME ?? "";
 if (hopUploadNode) {
   log("BOT_HOP_UPLOAD_CONFIGURED", {
     account: `0x${hopUploadAccountIdHex}`,
@@ -1020,12 +1060,16 @@ if (engine) log("BOT_MODEL_POLICY", {
   switching: aiAllowedModels == null ? "open" : aiAllowedModels.length ? "restricted" : "locked",
   ...(Array.isArray(aiAllowedModels) && aiAllowedModels.length ? { allowed: aiAllowedModels } : {}),
 });
-
+if (engine && !customCmd) log("BOT_TOOL_POLICY", {
+  ...toolPolicySummary(aiToolPolicy),
+  enforcement: toolPolicyEnforcement(brain, aiToolPolicy),
+});
 const agentRuntime = engine ? createAgentRuntime({
   engine,
   engineName: customCmd ? "custom" : brain,
   engineCommand,
   buildArgs: buildEngineArgs,
+  buildTurnEnvironment: buildEngineTurnEnvironment,
   workspace: aiWorkspace,
   workspaces,
   model: aiModel,
@@ -1073,12 +1117,15 @@ const publicAttachment = (a) => ({
 // prefixes. msg.text is the raw caption and may be empty.
 const renderForBrain = (msg) => {
   const parts = [];
+  const canReadAttachments = customCmd || !engine || hasToolCapability(aiToolPolicy, "read");
   if (msg.editOf) parts.push("[edited their earlier message]");
   else if (msg.replyTo) parts.push("[replying to your earlier message]");
   if (msg.text) parts.push(msg.text);
   for (const a of msg.attachments ?? []) {
-    parts.push(a.downloaded
+    parts.push(a.downloaded && canReadAttachments
       ? `[User sent a ${attachmentNoun(a)} saved at ${a.path} (${a.mime}, ${humanSize(a.size)})]`
+      : a.downloaded
+        ? `[User sent a ${attachmentNoun(a)} (${a.mime}, ${humanSize(a.size)}) — bytes are staged but unavailable to this no-tools agent.]`
       : `[User sent a ${attachmentNoun(a)} (${a.mime}, ${humanSize(a.size)}) — download failed: ${a.error ?? "unknown error"}]`);
   }
   return parts.join(" ") || synthesizeText("", msg.attachments);
@@ -1100,7 +1147,7 @@ const handleInbound = async (peerHex, msg, owedId = null, { reservedBridge = fal
     return;
   }
   if (agentRuntime) return agentRuntime.handleMessage(peerHex, msg);
-  // bridge / hermes / unknown: hand off to an external agent via the HTTP bridge.
+  // bridge: hand off to an external agent via the HTTP bridge.
   // The agent replies via POST /send -> sendMessage, which disarms the ack.
   armThinking(peerHex);
   try {
@@ -1509,10 +1556,7 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
       && typeof m.text === "string" && (m.text.length > 0 || attachments.length > 0);
     if (isBrainKind) {
       const id = messageDedupId(peerHex, decoded.requestId, `${m.kind}:${m.text}`, m.messageId);
-      // Also honor the legacy plaintext key so entries persisted before this
-      // change still count as seen — but never add new plaintext keys.
-      const legacyKey = `${decoded.requestId}:${m.text}`;
-      const alreadySeen = seenRequests.has(id) || seenRequests.has(legacyKey) || batchSeen.has(id);
+      const alreadySeen = seenRequests.has(id) || batchSeen.has(id);
       if (alreadySeen) continue;
       batchSeen.add(id); newlySeen.push(id);
       fresh.push({
@@ -2206,7 +2250,7 @@ log("BOT_LISTENING", { account: `0x${accountIdHex}`, identifierKey: `0x${norm(by
 // file crash startup or allocate unbounded collections.
 const normalizeRestoredState = (raw) => {
   if (raw == null) return null;
-  if (typeof raw !== "object" || Array.isArray(raw) || ![1, 2].includes(raw.v)) {
+  if (typeof raw !== "object" || Array.isArray(raw) || raw.v !== 2) {
     log("BOT_STATE_INCOMPATIBLE", { version: raw?.v ?? null });
     return null;
   }
