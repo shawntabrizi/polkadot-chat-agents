@@ -14,7 +14,8 @@ frameworks. People discover the bot by its registered DotNS username, DM it,
 or invite it into a workspace/channel. The bot uses the normal T3ams encryption
 and membership flows; it does not bypass a private channel's key grants.
 It supports DMs and workspace channels, including threads, live replies, media,
-and files. Native ad-hoc T3ams groups are not supported yet.
+and files. Native ad-hoc T3ams groups are not supported yet; use a workspace
+channel for a shared bot conversation.
 
 Use `--transport t3ams` when you create the bot. Every current bot config
 records its chosen transport explicitly.
@@ -26,8 +27,14 @@ The T3ams runner requires the local `@t3ams/bcts` SDK package in the
 supplied by the T3ams project into `bot-core` before running or deploying the
 bot; see [T3ams transport setup](/reference/configuration#t3ams-transport-setup).
 
+People discover the bot by its registered DotNS username, so create it with
+`pca create` and wait for `pca info <bot>` to show that registration is
+complete.
+
 A private bot needs a verified T3ams signing public-key pin for every allowed
-person. Obtain that tagged-CBOR key out of band, then create the bot:
+person. Obtain that tagged-CBOR key out of band (see
+[signing-key pins](/reference/configuration#signing-key-pins)), then create
+the bot:
 
 ```bash
 pca create teamhelper --transport t3ams --brain claude \
@@ -44,14 +51,25 @@ you have set tight model, file, and queue limits.
 ## Join a DM or workspace
 
 1. Search for the bot's username in T3ams and send a DM. A private bot verifies
-   the configured signing-key pin before it accepts first contact.
-2. Invite it to a workspace through T3ams. A public bot does not automatically
+   the configured signing-key pin before it accepts first contact; a verified,
+   allowed DM pair is then accepted automatically, with no manual accept step
+   from the operator. For a public bot, this first pairing is also required
+   before it will accept that person's workspace invitation, so the invite
+   carries a verified signing key rather than relying on unauthenticated first
+   contact.
+2. Invite it to a workspace through T3ams. For a private bot, the inviter's
+   outer request must verify against that account's configured signing-key
+   pin — this is not trust-on-first-use. A public bot does not automatically
    accept arbitrary workspace invitations unless you explicitly enable that
-   policy.
+   policy. On accept, the bot announces itself as a member (and maintains
+   presence while running) and waits for the workspace owner to publish the
+   updated state document that includes it before subscribing to channel
+   traffic.
 3. Mention the bot in a channel. Channel messages remain mention-gated, so the
    bot does not turn ordinary room traffic into model work.
 4. For a private channel, grant the bot the channel key through T3ams's normal
    key-grant flow. Workspace membership alone is not enough to decrypt it.
+   Rotate keys through the normal T3ams flow whenever access changes.
 
 One T3ams DM and each workspace channel have independent conversation sessions.
 Top-level channel prompts use that channel session, while every reply thread has
@@ -90,7 +108,8 @@ Edits and deletes are authenticated on a separate retained operation route.
 bot-core reconciles them before queued work is dispatched: an edit updates the
 pending prompt/context and a deletion removes pending work or stops an active
 direct-agent turn. It cannot retract a reply already published before the bot
-received the deletion. Reactions and typing never become prompts.
+received the deletion. Reactions, typing, calls, and other non-message events
+never become prompts.
 
 In a channel, normal mentioned prompts and `/stop` are available to members.
 Top-level prompts share a channel session, while each reply thread has its own
@@ -160,12 +179,18 @@ full flow.
 ## Capacity and deployment checklist
 
 - Keep the bot's `BOT_STATE_DIR` private and persistent. It holds T3ams session
-  state, durable ingress work, and short-lived attachment capability material.
+  state, durable ingress work, short-lived attachment capability material, and
+  the brain's conversation state. The transport creates it with mode `0700`;
+  keep it on a private encrypted volume, never mount it into the agent
+  workspace, and treat backups as secrets.
 - T3ams media needs a trusted `BOT_T3AMS_BULLETIN_RPC`. Setting it empty leaves
   the bot in metadata-only mode: no encrypted media download or file return.
 - Text, placeholders, edits, typing, and reactions consume Statement Store
   publishing capacity. Media upload needs a separate T3ams Bulletin allowance.
   The normal `pca storage` flow for the default transport does not provision it.
+  A full submit queue or an exhausted allowance leaves the prompt in the
+  durable journal and retries with backoff; restore publishing allowance to
+  resume those replies.
 - Restrict a public bot's attachment count/size/MIME policy, media cache, vault,
   and model/agent capacity before inviting untrusted users.
 - An open direct engine defaults to two active turns and 20 queued turns; its

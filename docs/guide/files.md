@@ -26,6 +26,11 @@ is authenticated and checked before the bot fetches it; it is not an arbitrary
 web URL. The claim ticket that decrypts the bytes stays in the private transport
 state and is never passed to a direct brain, framework, log, or bridge payload.
 
+Invalid attachment metadata does not make a message trusted: a valid text body
+is still delivered with a safe attachment warning, while an attachment-only
+message with an invalid reference is represented only as an unavailable-file
+notice — never as fetched bytes.
+
 By default, T3ams accepts up to **eight** attachments per message, at most
 **25 MiB** each, for any valid MIME type. Image dimensions and audio/video
 duration are retained as metadata when supplied. That broad default is about

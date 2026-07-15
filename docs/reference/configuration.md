@@ -1,15 +1,18 @@
 ---
 prev:
-  text: "Agent frameworks"
-  link: "/guide/harnesses"
+  text: "Testing without a phone"
+  link: "/guide/testing"
 ---
 
 # Configuration reference
 
 Every bot is configured through environment variables. `pca create`, `pca run`,
-and `pca deploy` generate the common ones for you; the selected transport (the
-default Polkadot-app transport or T3ams) reads its matching settings. This
-document is the full operator reference, plus annotated `bot.env` examples.
+and `pca deploy` generate the common ones for you; the selected transport reads
+its matching settings through its entry point — `bot-core/index.mjs` for the
+default Polkadot-app transport, `bot-core/t3ams.mjs` for T3ams. This document
+is the full operator reference, plus annotated `bot.env` examples. The
+authoritative, always-current lists live in the runtime source; this page
+mirrors them, and if it and the code disagree, the code wins.
 
 - **Local runs** (`pca run`): the CLI builds the environment from the bot's
   `~/.pca/bots/<name>/config.json` + `secret.json` and passes it to the process.
@@ -120,6 +123,11 @@ BOT_FILE_MAX_TOTAL_MB=2048
 BOT_FILE_MAX_PEER_MB=1024
 BOT_FILE_MAX_ENTRIES=4000
 BOT_FILE_MAX_PEER_ENTRIES=2000
+
+# Required for production attachment download. File delivery additionally needs
+# an active Bulletin allowance for the derived account shown by /health.
+BOT_HOP_ALLOWED_NODES=hop.example.org
+BOT_HOP_UPLOAD_NODE=wss://hop.example.org
 ```
 
 `BOT_AI_TOOL_CAPABILITIES=read,write` gives a direct agent the normal file
@@ -136,9 +144,10 @@ it includes both file capabilities.
 - Every sender of a public bot can direct the policy the deployer chose.
 
 For a production HOP configuration, pin the download and upload nodes you
-trust, and provision its allowance through the appropriate operator flow. The
-generated framework deployment exposes its bridge only to the private Compose
-network; do not publish that port.
+trust, and provision its allowance through the appropriate operator flow. Keep
+the bridge on loopback for a local run; in a generated framework deployment,
+`BOT_BRIDGE_HOST=0.0.0.0` is only reachable on the private Compose network and
+no bridge port is published.
 
 ### Public bot: deliberately bounded
 
@@ -181,7 +190,8 @@ BOT_MEDIA_MAX_INFLIGHT_BYTES=33554432
 BOT_HOP_ALLOWED_NODES=<trusted-hop-host>
 
 # Keep outbound HOP file delivery disabled. Private Paseo's automatic grant
-# intentionally does not apply to public bots.
+# intentionally does not apply to public bots; inbound /file put remains
+# quota-bounded.
 # BOT_HOP_UPLOAD_NODE=
 ```
 
@@ -253,6 +263,13 @@ variables `pca deploy` writes into `bot.env` automatically.
 | `BOT_MAX_OWED_REPLIES` | 2000 | Cap on the crash-durable owed-reply backlog. |
 | `BOT_MAX_OWED_BYTES` | 16 MB | Byte cap on that backlog. |
 
+For `BOT_TRANSPORT=t3ams`, `BOT_STATE_DIR` is also the private root for
+`t3ams-state.json`, the encrypted-media cache, and the durable file vault. The
+T3ams runner creates it with mode `0700`; do not share it with the agent
+workspace or a host user, and encrypt or otherwise protect backups. A retained
+T3ams ingress record can contain an attachment's Bulletin claim capability, so
+the directory is sensitive even if no model session has been created.
+
 ### HTTP bridge (authenticated control surface)
 
 | Variable | Default | Purpose |
@@ -276,7 +293,7 @@ variables `pca deploy` writes into `bot.env` automatically.
 | `BOT_AI_MODEL` | `""` | Pin the model passed to the CLI's own model flag (opencode: a `provider/model` slug). **gen when --model** |
 | `BOT_AI_ALLOWED_MODELS` | `""` | `/model` allowlist. Empty = switching locked; `a,b` = only those. Always wins over `BOT_AI_MODEL_SWITCHING`. **gen (direct)** |
 | `BOT_AI_MODEL_SWITCHING` | `locked` | `locked` \| `open`. `open` allows free `/model` switching but **requires a peer allowlist** (public bots must use an approved set instead; the process refuses `open` + public). **gen (direct)** |
-| `BOT_AI_REASONING` | `""` | Default reasoning effort; per-engine levels (`/reasoning` overrides per peer). |
+| `BOT_AI_REASONING` | `""` | Default reasoning effort; `/reasoning` overrides per peer and is validated against the engine's levels — claude `--effort low\|medium\|high\|xhigh\|max`, codex `-c model_reasoning_effort=…`, opencode none. |
 
 ### Direct engine — tools, sandboxing & limits
 
@@ -292,6 +309,9 @@ variables `pca deploy` writes into `bot.env` automatically.
 | `BOT_AI_MAX_OUTPUT_BYTES` | 1000000 | Cap on captured agent output per turn. |
 | `BOT_AI_CMD` / `BOT_AI_ARGS` | unset | Escape hatch: a custom CLI speaking claude-shaped stream-json (`BOT_AI_ARGS` is a JSON array; `__PROMPT__` is substituted). |
 
+Each turn's token/cost usage from the CLI's result event is logged as
+`BOT_AI_USAGE` and tallied in-memory for the `/usage` command.
+
 Workspace scopes native file tools to the selected project and staged
 attachments; Bash uses the agent process boundary in either scope. Container
 scope deliberately exposes all files visible to the non-root agent account,
@@ -299,6 +319,19 @@ including its OAuth home. For `pca deploy`, the agent process is in the dedicate
 bot container. For local `pca run`, Bash uses the local process account, so treat
 it as a trusted-machine tool. Exact engine behavior varies, so use the deploy
 report to inspect the generated command.
+
+`pca run` and `pca deploy` both select a tool policy explicitly, so make it
+part of the command or release script — omitting `--allowed-tools`
+intentionally returns a direct bot to the no-tools default.
+
+| Deploy selection | Effective capability |
+|---|---|
+| `--allowed-tools read` | inspect staged/workspace files |
+| `--allowed-tools read,write` | normal file outcomes (`write` includes `read`) |
+| `--allowed-tools read,write,bash` | files plus command execution |
+| `--tool-scope workspace` | native file tools confined to the selected project and staged attachments |
+| `--tool-scope container` | native file tools see everything the non-root agent account can |
+| *(no tool flag)* | no-tools default, workspace scope |
 
 The dedicated bot container is the concrete isolation boundary. The transport
 keeps the chat seed, session state, and bridge token in `/state`, inaccessible to
@@ -370,12 +403,13 @@ same peer namespace. The authenticated bridge can manage the same vault with
 | `BOT_FILE_MAX_PEER_MB` | min(256 MB, global cap), raised to the file cap if needed | Capacity available to one chat peer. |
 | `BOT_FILE_MAX_PEER_ENTRIES` | min(500, global cap) | Entry cap for one chat peer. |
 
-Outbound `/file get` and bridge `file_path` delivery use HOP with the derived
-`//allowance//bulletin//chat` signer. The deployed `BOT_SEED_HEX` can derive and
-use that account, but it cannot safely mint a production allowance: the
-People-chain claim requires the original mnemonic-derived Bandersnatch person
-proof. Keep that proof off the VPS. `/health` reports the allowance account and
-whether an upload node is configured.
+Outbound `/file get` and bridge `file_path` delivery use HOP (`hop_submit`)
+with the derived `//allowance//bulletin//chat` signer. The deployed
+`BOT_SEED_HEX` can derive and use that account, but it cannot safely mint a
+production allowance: the People-chain claim requires the original
+mnemonic-derived Bandersnatch person proof and a live `AsResources`
+transaction extension. Keep that proof off the VPS. `/health` reports the
+allowance account and whether an upload node is configured.
 
 ### Paseo testnet file delivery
 
@@ -392,36 +426,98 @@ the local CLI asks the public Bulletin Paseo Next v2 testnet faucet to provision
 the derived account. It leaves sufficient capacity alone, refreshes an allowance
 near expiry, and requests a bounded allocation only when capacity is missing or
 low. No Console visit is needed for normal onboarding, and the action never
-sends the bot mnemonic or a production person proof to the faucet.
+sends the bot mnemonic or a production person proof to the faucet. The derived
+SS58 account shown by `pca info <bot>` is the target, not the bot's main chat
+wallet, and the faucet's availability and quota remain testnet operator policy.
 
 Use `pca storage <bot> status` to inspect the result. Run `grant` only if the
-status says capacity is missing, low, or expired. Each attempt leaves a local
-recovery guard if its transaction or follow-up status is uncertain. Wait for any
-pending transaction, then run `status` and `pca storage <bot> recover`.
-`recover --yes` clears only that guard after you know the old transaction cannot
-finalize; it does not submit a faucet transaction, so run `grant` separately if
-needed.
+status says capacity is missing, low, or expired. Each attempt writes a local
+recovery-guard marker, keyed to the derived allowance account, immediately
+before a transaction is submitted; a timeout or interruption leaves the marker
+in place permanently, blocking another grant so an allocation with an unknown
+effective state cannot consume a second finite allowance. Wait for any pending
+transaction, then run `status` and `pca storage <bot> recover`. `recover --yes`
+clears only that guard after you know the old transaction cannot finalize; it
+does not submit a faucet transaction, so run `grant` separately if needed.
 
 The [Bulletin Console Faucet](https://paritytech.github.io/polkadot-bulletin-chain/authorizations?tab=faucet)
-is an operational fallback, not a normal onboarding step. Public bots and
+is an operational fallback, not a normal onboarding step. After using it, check
+`status` and run `recover` if a local guard remains. Public bots and
 arbitrary `wss://` endpoints are intentionally excluded from automatic
 provisioning. Production allocation remains an explicit local operator flow.
 
 ### T3ams transport setup
 
-Create a T3ams bot with `pca create <name> --transport t3ams`. The runner needs
-the local T3ams BCTS SDK (`@t3ams/bcts`) in `bot-core/node_modules`; it is
-deliberately loaded only by the T3ams runner, so ordinary bots do not need it.
-For a local development run, `BOT_T3AMS_BCTS_MODULE` can point at an importable
-ESM build instead. A remote deployment must package the SDK with `bot-core`, not
-point at an arbitrary path on the deployer's machine.
+You need Node.js 22+ and a selected brain (`--brain echo` works for a pure
+transport check). Create a T3ams bot with `pca create <name> --transport t3ams`
+(the flag writes `BOT_TRANSPORT=t3ams`).
+
+#### The local BCTS SDK
+
+The runner needs the local T3ams BCTS SDK (`@t3ams/bcts`) in
+`bot-core/node_modules`; it is deliberately loaded only by the T3ams runner, so
+ordinary bots do not need it. The package is **not published on public npm** —
+do not run `npm install @t3ams/bcts`. Build and install it from the T3ams SPA
+checkout instead:
+
+```sh
+cd <path-to-t3ams-spa>/packages/bcts
+npm run build
+npm pack
+# Note the emitted filename, for example: t3ams-bcts-<version>.tgz
+
+cd <path-to-polkadot-chat-agents>
+npm --prefix bot-core install --no-save \
+  --package-lock=false \
+  <path-to-t3ams-spa>/packages/bcts/t3ams-bcts-<version>.tgz
+```
+
+`--no-save` is deliberate: it avoids recording a dependency npm cannot retrieve
+from the public registry. Keep `bot-core/node_modules/@t3ams/bcts` present when
+running `pca deploy` — deployment uploads that local dependency with the
+transport — and do not run `npm ci` afterwards without reinstalling the
+tarball. Rebuild, pack, reinstall, and redeploy when the local BCTS source
+changes.
+
+For a local development run only, `BOT_T3AMS_BCTS_MODULE` can point at an
+importable ESM build instead. A remote deployment must package the SDK with
+`bot-core`, not point at an arbitrary path on the deployer's machine.
 
 T3ams supports DMs and workspace channels, including threads, live replies,
-media, and files. Native ad-hoc T3ams groups are not supported yet.
+media, and files. Native ad-hoc T3ams groups are not supported yet; use a
+workspace channel for a shared bot conversation.
+
+#### Signing-key pins
 
 Private T3ams bots require immutable, out-of-band signing-key pins for their
-allowlisted people. The CLI records these through `--t3ams-peer-key`; do not
+allowlisted people, recorded with `--t3ams-peer-key`. The pin is required
+because an account-derived T3ams XID does not cryptographically prove
+ownership of a device's Ed25519 signing key, and current T3ams account
+discovery has no global account-to-device-key resolver. Obtain the value from
+a trusted T3ams client or device out of band — it is the hex encoding of that
+identity's `signingPublicKey.taggedCborData()` — and verify it with the
+account holder through a separate trusted channel before saving it. Do not
 learn or rotate a private pin from a chat message or invitation.
+
+If a person rotates their T3ams signing device, verify the replacement key out
+of band, update `t3amsTrustedSigningKeys` in the bot's mode-0600
+`config.json`, and restart or redeploy the bot. Private bots intentionally
+reject silent rekeys.
+
+#### Public admission
+
+Use `--public` only when deliberately exposing the selected AI brain to
+arbitrary senders. Public bots do not auto-accept workspace invitations by
+default; pass `--t3ams-auto-accept-workspaces` only when enrollment by
+arbitrary public senders is intended, and `--t3ams-no-auto-accept-workspaces`
+to disable automatic enrollment even for an allowlisted bot. A deliberately
+public bot uses first-contact TOFU only after that explicit enrollment opt-in.
+
+Public admission state is bounded by default: 128 remembered DM peers, eight
+workspaces, 32 new DM pairings per hour, and four new workspace enrollments
+per hour. Fresh public entries are not evicted; inactive entries become
+eligible after the one-hour admission window. Keep the defaults unless a
+capacity review supports changing them.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -429,6 +525,11 @@ learn or rotate a private pin from a chat message or invitation.
 | `BOT_T3AMS_DISPLAY_NAME` | registered username | Name shown in T3ams. |
 | `BOT_T3AMS_TRUSTED_SIGNING_KEYS` | `{}` | JSON map of allowlisted account IDs to verified tagged-CBOR signing public keys. Required for private first contact. |
 | `BOT_T3AMS_AUTO_ACCEPT_WORKSPACES` | private: `1`; public: `0` | Whether valid workspace invitations are accepted automatically. Enable it for a public bot only after a capacity review. |
+| `BOT_T3AMS_PUBLIC_PEER_CAP` | 128 | Remembered public DM peers. |
+| `BOT_T3AMS_PUBLIC_WORKSPACE_CAP` | 8 | Remembered public workspaces. |
+| `BOT_T3AMS_PUBLIC_PEER_ADMISSIONS_PER_HOUR` | 32 | New public DM pairings admitted per hour. |
+| `BOT_T3AMS_PUBLIC_WORKSPACE_ADMISSIONS_PER_HOUR` | 4 | New public workspace enrollments admitted per hour. |
+| `BOT_T3AMS_KNOWN_CHAT_CAP` | public TOFU: `BOT_T3AMS_PUBLIC_PEER_CAP`; otherwise 500 | Bound on persisted known chats and native-agent session state. Active durable ingress items are protected until they finish. |
 
 ### T3ams media and file vault
 
@@ -436,7 +537,8 @@ T3ams has a separate encrypted Bulletin/HOP path. It does **not** inherit the
 default transport's `BOT_HOP_ALLOWED_NODES`, `BOT_HOP_UPLOAD_NODE`, or
 `BOT_MEDIA_*` settings. A T3ams attachment contains an encrypted `hop:`
 capability, never a generic web URL; the transport keeps its claim ticket
-private and exposes only an opaque bridge media handle.
+private — it is never returned in a bridge item or logged — and exposes only an
+opaque bridge media handle.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -454,12 +556,12 @@ private and exposes only an opaque bridge media handle.
 | `BOT_T3AMS_HOP_ALLOW_INSECURE` | `0` | `1` permits insecure `ws://` only for a local test mock. |
 | `BOT_T3AMS_HOP_TIMEOUT_MS` | 120000 | Whole encrypted download/upload deadline. |
 | `BOT_T3AMS_HOP_RPC_FRAME_MAX_BYTES` | 4.5 MB | Largest accepted Bulletin/HOP RPC frame. |
-| `BOT_T3AMS_MEDIA_TTL_HOURS` | 48 | TTL of the private downloaded-media cache. |
+| `BOT_T3AMS_MEDIA_TTL_HOURS` | 48 | TTL of the private downloaded-media cache below `BOT_STATE_DIR/media`. |
 | `BOT_T3AMS_MEDIA_MAX_TOTAL_MB` | 512 | Total media-cache capacity. |
 | `BOT_T3AMS_MEDIA_MAX_CONCURRENT_DOWNLOADS` | 2 | Maximum concurrent encrypted downloads. |
 | `BOT_T3AMS_MEDIA_MAX_INFLIGHT_BYTES` | max(64 MiB, `2 × attachment cap + 4 MiB`) | Reservation for active download/decrypt work. It cannot be below one allowed attachment's requirement. |
 | `BOT_T3AMS_MEDIA_DOWNLOAD_QUEUE_CAP` | 100 | Queued attachment-download limit. |
-| `BOT_T3AMS_BRIDGE_MEDIA_REF_CAP` | bounded from inbound capacity | Maximum process-local opaque media handles exposed to the bridge. |
+| `BOT_T3AMS_BRIDGE_MEDIA_REF_CAP` | `max(256, min(100000, BOT_INBOUND_CAP × attachment count))` | Maximum process-local opaque media handles exposed to the bridge. |
 | `BOT_T3AMS_BRIDGE_MEDIA_REF_TTL_MS` | 3600000 | Lifetime of an opaque bridge media handle; fetching it renews its short TTL. |
 | `BOT_BRIDGE_FILE_MAX_BYTES` | `BOT_FILE_MAX_BYTES` | Maximum raw `PUT /files` bridge upload. For T3ams it cannot exceed the durable-file and attachment caps. |
 
@@ -578,6 +680,10 @@ provision and monitor the T3ams Bulletin upload allowance independently. The
 default transport's `pca storage`/Paseo faucet flow does not preflight or grant
 that T3ams allowance.
 
+The bridge token authorizes access to cached media and every file in every
+conversation vault, so do not publish the bridge port or inject that token
+into an untrusted agent process.
+
 In T3ams bridge mode, regular outbound `/send`, `/react`, and `/typing`
 requests remain bound to their active inbound `delivery_id` and `lease_id`.
 `BOT_BRIDGE_PROACTIVE_TOKEN` is a separate opt-in for a framework action that
@@ -624,6 +730,9 @@ received the operation. Reactions and typing are not model prompts.
 | `BOT_T3AMS_MESSAGE_LIFECYCLE_TTL_MS` | 21600000 (6 hours) | Retention for that reconciliation state; `0` expires it immediately. |
 | `BOT_T3AMS_MESSAGE_LIFECYCLE_MAX_BYTES` | 8 MiB | Aggregate persisted lifecycle-state budget; oldest records are evicted before it grows beyond this limit. |
 | `BOT_T3AMS_SUBSCRIPTION_CAP` | 1024 | Maximum active T3ams subscriptions. A known DM needs both its carrier and edit/delete operation route. |
+| `BOT_T3AMS_SUBSCRIPTION_REFRESH_MS` | 120000 (2 min) | Retained-subscription refresh cadence. Tune only when the Statement Store and VPS have been sized for the resulting replay traffic. |
+| `BOT_T3AMS_INGRESS_CALLBACK_CAP` | 128 | Queued subscription callbacks. A defensive limit, not a traffic target. |
+| `BOT_T3AMS_SUBMIT_QUEUE_CAP` | 128 | Queued outbound submissions. A full queue (or an exhausted allowance) leaves the prompt in the durable journal and retries with backoff; restore publishing allowance to resume those replies. |
 
 ### Ingress (poll / subscribe)
 
@@ -645,7 +754,8 @@ received the operation. Reactions and typing are not model prompts.
 
 ## Model-switching policy, resolved
 
-The `/model` command's behavior comes from two variables:
+The `/model` command's behavior comes from two variables (resolved in
+`resolveModelPolicy`, `bot-core/lib/commands.mjs`):
 
 1. `BOT_AI_ALLOWED_MODELS` set (non-empty) → **restricted** to that list, regardless of anything else.
 2. `BOT_AI_ALLOWED_MODELS=""` (explicitly empty) → **locked**.

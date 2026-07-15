@@ -1,6 +1,6 @@
 # Working on polkadot-chat-agents
 
-Read `docs/DESIGN.md` before changing transport or session code — several
+Read `docs/explanation/protocol.md` before changing transport or session code — several
 behaviors exist because of hard-won protocol facts (per-device session channels,
 ACK-or-resend, batch decoding, deterministic session rebuild).
 
@@ -66,7 +66,7 @@ pattern earns nothing by incumbency.
   `echo`-brain bot and drive it with `bot-core/test-client.mjs`. Anything
   touching session or inbound handling must also pass
   `bot-core/test-client-device.mjs`, which reproduces how the mobile app
-  actually sends (see `docs/TESTING.md`).
+  actually sends (see `docs/guide/testing.md`).
 - Do not claim a fix works without an end-to-end reproduction; log output alone
   is not verification.
 - Registration changes: the proof helper must produce byte-identical output via

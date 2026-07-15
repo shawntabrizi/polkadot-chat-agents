@@ -50,6 +50,12 @@ export default defineConfig({
             { text: "Agent frameworks", link: "/guide/harnesses" },
           ],
         },
+        {
+          text: "Contributing",
+          items: [
+            { text: "Testing without a phone", link: "/guide/testing" },
+          ],
+        },
       ],
       "/reference/": [
         {
@@ -67,6 +73,7 @@ export default defineConfig({
           items: [
             { text: "How it works", link: "/explanation/how-it-works" },
             { text: "Architecture & security", link: "/explanation/architecture" },
+            { text: "The wire protocol", link: "/explanation/protocol" },
           ],
         },
       ],
@@ -78,7 +85,7 @@ export default defineConfig({
 
     editLink: {
       pattern:
-        "https://github.com/shawntabrizi/polkadot-chat-agents/edit/master/docs-site/:path",
+        "https://github.com/shawntabrizi/polkadot-chat-agents/edit/master/docs/:path",
       text: "Edit this page on GitHub",
     },
 

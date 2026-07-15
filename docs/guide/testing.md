@@ -1,21 +1,34 @@
+---
+prev:
+  text: "Agent frameworks"
+  link: "/guide/harnesses"
+next:
+  text: "Configuration (env vars)"
+  link: "/reference/configuration"
+---
+
 # Testing a bot without a phone
 
 ## Offline, automated (no network at all)
 
 `npm test` in `bot-core/` runs the transport end-to-end against an in-memory
-statement node (`test/mock-statement-node.mjs`): round trips with poison
-batches, restart survival with dedup, owed-reply crash recovery, and the rich
-features — attachment download (against an in-memory HOP node,
-`test/mock-hop-node.mjs`), reply quotes, reactions, and call auto-decline —
-each in both ingress modes (poll-only and subscription). Single-mode tests
-cover the bridge surface (`/inbound` shape, `/media`, `reply_to`/`edit_of`/
-`/react`, `events=1`), an owed *attachment* surviving kill -9, and the
-live-reply lifecycle (placeholder → ACK-gated progress edits with stream-json
-tool actions → final-as-edit; the no-ACK plain-message fallback; bridge
-auto-upgrade + throttled harness edits). CI runs this on every push.
-`BOT_PEER_IDENTIFIER_KEYS` pins peer identifier keys so no people chain is
-needed. The device client ACKs bot requests like the app does; `--no-ack`
-simulates a peer that never fetches.
+statement node (`test/mock-statement-node.mjs`). It covers, in both ingress
+modes (poll-only and subscription):
+
+- round trips with poison batches, restart survival with dedup, and owed-reply
+  crash recovery;
+- the rich features — attachment download (against an in-memory HOP node,
+  `test/mock-hop-node.mjs`), reply quotes, reactions, and call auto-decline.
+
+Single-mode tests cover the bridge surface (`/inbound` shape, `/media`,
+`reply_to`/`edit_of`/`/react`, `events=1`), an owed *attachment* surviving
+kill -9, and the live-reply lifecycle: placeholder → ACK-gated progress edits
+with stream-json tool actions → final-as-edit, the no-ACK plain-message
+fallback, and bridge auto-upgrade with throttled harness edits.
+
+CI runs this on every push. `BOT_PEER_IDENTIFIER_KEYS` pins peer identifier
+keys so no people chain is needed. The device client ACKs bot requests like
+the app does; `--no-ack` simulates a peer that never fetches.
 
 ## Live network
 

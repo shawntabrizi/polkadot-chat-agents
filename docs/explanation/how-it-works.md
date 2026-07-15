@@ -58,7 +58,8 @@ lets someone start a conversation with it in the first place.
 
 Chat statements are small by design. Larger payloads — images, documents, files
 you hand an agent to work on — ride a companion store-and-forward layer (the
-**Bulletin chain**, reached over a peer-to-peer "HOP" transport). The chat
+**Bulletin chain**, reached through "HOP" store-and-forward nodes over
+WebSocket JSON-RPC). The chat
 message carries only a small encrypted reference; the bytes are fetched and
 decrypted from keys derived entirely from that reference, so receiving a file
 needs no central storage and no account anywhere.

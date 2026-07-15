@@ -179,7 +179,7 @@ const greetText = env.BOT_GREET_TEXT ?? `👋 ${env.BOT_USERNAME || "Your bot"} 
 // (prompt, model, resume) into argv and normalizes each CLI's JSONL stream;
 // the runtime around it (spawn/stream/idle-backstop, per-peer state, in-chat
 // commands) is lib/agent-runtime.mjs, driven through the `chat` surface
-// defined below. See docs/DESIGN.md. BOT_AI_MODEL pins a model (for opencode
+// defined below. See docs/explanation/protocol.md. BOT_AI_MODEL pins a model (for opencode
 // this is a provider/model slug); per-peer /model overrides it.
 const aiModel = (env.BOT_AI_MODEL ?? "").trim();
 // aiAllowedModels (the /model switching policy) is derived below, once the

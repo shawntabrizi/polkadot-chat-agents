@@ -47,9 +47,9 @@ never turns a supplied stale lease into a valid one.
 | `GET /media/<id>` | Authenticated attachment bytes. For T3ams, `<id>` is an opaque, short-lived bridge handle and a fetch can materialize the encrypted media on demand. |
 | `GET /files/<chat_id>` | List durable files for one chat. Add `?prefix=<path>` to narrow the list. |
 | `GET /files/<chat_id>/<path>` | Stream one durable file. |
-| `PUT /files/<chat_id>/<path>` | Save raw request bytes in that chat's vault. Set `Content-Type`; add `?overwrite=1` to replace a file. |
+| `PUT /files/<chat_id>/<path>` | Save raw request bytes in that chat's vault, subject to the bot's per-file, per-peer, and global caps. Set `Content-Type`; add `?overwrite=1` to replace a file. |
 | `DELETE /files/<chat_id>/<path>` | Remove one durable file. |
-| `POST /send` `{ chat_id, text?, file_path?, reply_to?, edit_of? }` | Publish a reply, edit a bot-issued message, or send a vault file. `reply_to` renders a quote; `edit_of` rewrites one of the bot's own messages. T3ams also permits a file caption and reply target, but never an edit of a file message. |
+| `POST /send` `{ chat_id, text?, file_path?, reply_to?, edit_of? }` | Publish a reply, edit a bot-issued message, or send a vault file. `reply_to` renders a quote; `edit_of` rewrites one of the bot's own messages and cannot be combined with `reply_to`. The default transport does not combine a file with a reply or edit; T3ams permits a file caption and reply target, but never an edit of a file message. Returns `{ success, message_id }` — the outgoing message's id, which is what you keep to edit it later. |
 | `POST /react` `{ chat_id, message_id, emoji, remove? }` | Publish or remove an emoji reaction. T3ams maps this to its native reaction operation. |
 | `POST /typing` `{ chat_id }` | Best-effort typing signal. T3ams publishes it natively; a transport without a typing operation can no-op. |
 
@@ -60,6 +60,16 @@ drain. A harness renews the lease while it works and calls `/inbound/ack` only
 once the message is fully handled. If the harness crashes mid-turn, the lease
 expires and `bot-core` redelivers — so a failed handoff is retried rather than
 lost. A harness must therefore **not** acknowledge a delivery it didn't finish.
+
+## Inbound fields on the default transport
+
+On the default Polkadot-app transport, `chat_id` is the peer's account-id hex.
+Attachment rows carry
+`attachments: [{ id, kind, mime, size, width?, height?, duration_ms?, peaks?, media_id?, downloaded, url?, error? }]`,
+and a caption-less attachment message gets a synthesized text placeholder like
+`[photo, image/jpeg, 245 KB]`. With `&events=1`, non-message signals arrive
+with a `kind` of `reaction`, `coinageSend`, `leftChat`, or `contactAdded` —
+opt-in, because an unaware harness would chat-reply to a reaction.
 
 ## Allowlist, live replies, and long answers
 
@@ -74,7 +84,9 @@ placeholder while the framework works. The first ordinary `POST /send` resolves
 that placeholder into the final answer. A framework may also stream
 `edit_of` updates: bot-core coalesces and throttles them to the advertised
 safe cadence, then flushes the newest frame when the lease is acknowledged.
-Only message IDs issued by the current bot process may be edited.
+Only message IDs issued by the current bot process may be edited. When a
+thinking placeholder is finalized into the first part of an answer, the
+`message_id` returned by that `POST /send` is the placeholder's.
 
 For file delivery, store the framework's artifact with `PUT /files/<chat_id>/<path>`
 first, then send it with `POST /send` and that `file_path`. The bridge resolves
@@ -104,10 +116,11 @@ T3ams rich-text attachments arrive with safe metadata such as `id`, `kind`,
 `mime`, `size`, `filename`, optional image dimensions, and `duration_ms` for
 audio/video when supplied.
 They never expose the encrypted Bulletin/HOP claim ticket or a raw `hop:`
-reference. When Bulletin retrieval is enabled, the attachment also includes an
-opaque `media_id` and `url: /media/<media_id>`. Treat `downloaded` as a cache
-hint only: fetch the authenticated URL when the framework needs bytes, because
-the bridge can download and validate the media on demand.
+reference. A row may instead carry `attachment_error` when a reference could
+not be accepted. When Bulletin retrieval is enabled, the attachment also
+includes an opaque `media_id` and `url: /media/<media_id>`. Treat `downloaded`
+as a cache hint only: fetch the authenticated URL when the framework needs
+bytes, because the bridge can download and validate the media on demand.
 
 Those opaque media IDs are process-local, bounded, and expire according to
 `BOT_T3AMS_BRIDGE_MEDIA_REF_TTL_MS`. They are the sole bridge capability for
@@ -119,7 +132,8 @@ Every T3ams DM or channel has a separate conversation-scoped vault. The bridge
 supports `GET`, `PUT`, and `DELETE` under
 `/files/<url-encoded-chat_id>[/<path>]`. `POST /send` with a file from that
 same vault uploads a fresh encrypted T3ams attachment. It may include a text
-caption, `reply_to`, and `thread_root_id`, but cannot use `edit_of`.
+caption, `reply_to` (T3ams also accepts the `reply_to_message_id` alias), and
+`thread_root_id`, but cannot use `edit_of`.
 
 When the T3ams bot runs `BOT_BRAIN=bridge`, bind every outbound
 `POST /send`, `POST /react`, and `POST /typing` to the leased inbound work by

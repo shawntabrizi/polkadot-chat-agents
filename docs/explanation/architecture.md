@@ -10,7 +10,8 @@ This is the operator view of the system: where messages travel, what needs to
 remain private, and which boundary protects a deployed agent.
 
 The default Polkadot-app transport and T3ams share these security boundaries.
-For T3ams-specific BCTS/Bulletin media, native typing, reactions, edits, and
+Both transports support reactions and ACK-gated live edits; for the
+T3ams-native versions plus BCTS/Bulletin media, typing signals, and
 conversation-scoped files, see [Run a bot in T3ams](/guide/t3ams).
 
 ## The path a message takes

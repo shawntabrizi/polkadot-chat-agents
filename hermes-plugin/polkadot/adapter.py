@@ -8,8 +8,7 @@ bridge over HTTP. The bridge owns the on-chain Statement Store transport
   - calls       POST {bridge}/send     -> publishes a reply to a peer
 
 Mirrors the WhatsApp/Baileys Node-bridge pattern (Node bridge + Python adapter).
-NOTE: untested end-to-end — pending the bot-core bridge implementation and a
-configured Hermes install. See ../../docs/DESIGN.md (section 6b).
+See ../../docs/reference/bridge.md for the bridge contract.
 """
 
 import asyncio

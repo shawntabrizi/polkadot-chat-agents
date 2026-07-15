@@ -1427,7 +1427,7 @@ async function cmdDeploy(name, flags) {
     return deployHarnessStack(name, cfg, secret, flags, host, harness);
   }
   const spec = DEPLOY_ENGINES[cfg.brain];
-  if (!spec) fail(`deploy supports echo/claude/codex/opencode and --harness openclaw|hermes for bridge bots.\nFor "${cfg.brain}", set it up manually — see docs/HARNESSES.md.`);
+  if (!spec) fail(`deploy supports echo/claude/codex/opencode and --harness openclaw|hermes for bridge bots.\nFor "${cfg.brain}", set it up manually — see docs/guide/harnesses.md.`);
   if (mediaAnalyzerEnabled && (transport !== "t3ams" || !spec.pkg)) {
     fail("--media-analyzer requires a T3ams direct-engine deployment (claude, codex, or opencode); it has no effect for echo or bridge bots.");
   }
@@ -1662,7 +1662,7 @@ async function cmdDeploy(name, flags) {
 }
 
 // Deploy a bridge-mode bot + its agent framework as a two-container compose
-// stack — the exact topologies validated in production (see docs/HARNESSES.md).
+// stack — the exact topologies validated in production (see docs/guide/harnesses.md).
 // openclaw: fully headless if the server has Claude CLI creds (seeded into the
 // container's non-root home — no root override needed). hermes: everything but
 // the interactive codex login.
@@ -1780,7 +1780,7 @@ docker compose -p ${cn} run --rm openclaw sh -lc ${shellQuote(`openclaw plugins 
       console.log();
       warn("Hermes needs a one-time model login (interactive, can't be automated):");
       note(`ssh ${host} 'docker exec -it ${hn} hermes auth add openai-codex --type oauth --no-browser'`);
-      note(`then set the model in the hermes config — see docs/HARNESSES.md (gpt-5.5 / openai-codex).`);
+      note(`then set the model in the hermes config — see docs/guide/harnesses.md (gpt-5.5 / openai-codex).`);
     };
   }
   files["docker-compose.yml"] = compose;

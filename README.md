@@ -1,7 +1,7 @@
 <div align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs-site/public/logo-wordmark-light.svg">
-    <img src="docs-site/public/logo-wordmark-dark.svg" alt="Polkadot Chat Agents" width="420">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/public/logo-wordmark-light.svg">
+    <img src="docs/public/logo-wordmark-dark.svg" alt="Polkadot Chat Agents" width="420">
   </picture>
 
   *Run your own AI agents and talk to them from the Polkadot app — end-to-end encrypted, with no chat server.*
@@ -76,15 +76,17 @@ The full documentation lives at
 - [Configuration reference](https://www.shawntabrizi.com/polkadot-chat-agents/reference/configuration) — every env var and CLI flag
 - [How it works](https://www.shawntabrizi.com/polkadot-chat-agents/explanation/how-it-works) — the transport, sessions, and security model
 
-Contributor-facing notes — architecture invariants and test recipes — are in
-[`docs/`](docs/), starting with [DESIGN.md](docs/DESIGN.md).
+The site source lives in [`docs/`](docs/) and every page reads fine as plain
+markdown on GitHub. Contributors: the transport and session invariants are in
+[explanation/architecture.md](docs/explanation/architecture.md), and headless
+test recipes are in [guide/testing.md](docs/guide/testing.md).
 
 ## Repository layout
 
 - [`bot-core/`](bot-core/) — the transport and the `pca` CLI; this is the published npm package.
 - [`hermes-plugin/`](hermes-plugin/), [`openclaw-plugin/`](openclaw-plugin/) — agent-framework adapters.
 - [`tools/bandersnatch-cli/`](tools/bandersnatch-cli/) — Rust source of the registration-proof helper (the wasm build is vendored in `bot-core/`).
-- [`docs/`](docs/), [`docs-site/`](docs-site/) — contributor docs and the published documentation site.
+- [`docs/`](docs/) — the documentation site source (VitePress); published via GitHub Pages.
 
 ## Security
 
