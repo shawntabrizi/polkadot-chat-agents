@@ -18,6 +18,8 @@ import { createFileStore } from "../../lib/file-store.mjs";
 import { createFileCommandHandler } from "../../lib/file-commands.mjs";
 import { RUNNERS, resolveEngine, assertEngineToolPolicy, toolPolicyEnforcement } from "../../lib/runners.mjs";
 import { ToolPolicyError, hasToolCapability, toolPolicyFromEnvironment, toolPolicySummary } from "../../lib/tool-policy.mjs";
+import { assertClaudeWorkspaceSandbox } from "../../lib/claude-sandbox.mjs";
+import { isContainerRuntime } from "../../lib/runtime-topology.mjs";
 import { deriveT3amsBulletinUploadSigner, deriveT3amsIdentity } from "./t3ams-identity.mjs";
 import { createT3amsProtocol, hexToBytes, bareHex } from "./t3ams-protocol.mjs";
 import { createT3amsMedia } from "./t3ams-media.mjs";
@@ -2753,6 +2755,10 @@ const optionalPosixId = (name) => {
 };
 const aiAgentUid = optionalPosixId("BOT_AI_AGENT_UID");
 const aiAgentGid = optionalPosixId("BOT_AI_AGENT_GID");
+// Generated Docker deployments mark runtime topology so Claude applies the
+// Docker Unix-socket setting while retaining its normal Bubblewrap sandbox for
+// Bash. This is not an operator-facing tool capability.
+const aiContainerRuntime = isContainerRuntime(env);
 const defaultAiWorkspace = env.BOT_STATE_DIR
   ? path.join(path.dirname(path.resolve(stateDir)), `${path.basename(path.resolve(stateDir))}-workspace`)
   : fs.mkdtempSync(path.join(os.tmpdir(), "pca-t3ams-workspace-"));
@@ -2854,6 +2860,23 @@ if (engine != null) {
     enforcement: toolPolicyEnforcement(brain, aiToolPolicy),
   });
   fs.mkdirSync(aiWorkspace, { recursive: true, mode: 0o700 });
+  if (!customCmd) {
+    try {
+      const sandbox = assertClaudeWorkspaceSandbox({
+        engineName: brain,
+        policy: aiToolPolicy,
+        workingDirectory: aiWorkspace,
+        protectedDirectories: [stateDir, env.HOME, "/app"],
+        containerRuntime: aiContainerRuntime,
+        agentUid: aiAgentUid,
+        agentGid: aiAgentGid,
+      });
+      if (sandbox.checked) log("BOT_TOOL_SANDBOX_READY", { engine: brain, container: aiContainerRuntime, unixSockets: aiContainerRuntime ? "allowed" : "claude-default" });
+    } catch (error) {
+      console.error(error?.message ?? String(error));
+      process.exit(2);
+    }
+  }
   const workspaces = createWorkspaces({
     projects: aiProjects,
     worktreesDir: env.BOT_AI_WORKTREES_DIR ?? path.join(aiWorkspace, ".worktrees"),
@@ -2876,6 +2899,7 @@ if (engine != null) {
         attachmentDir,
         outputDir,
         workingDirectory,
+        containerRuntime: aiContainerRuntime,
         protectedPaths: [stateDir, env.HOME, "/app"],
       }),
     buildTurnEnvironment: ({ attachmentDir, outputDir, workingDirectory }) => customCmd

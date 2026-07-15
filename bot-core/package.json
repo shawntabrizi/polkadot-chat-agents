@@ -18,6 +18,7 @@
     "@noble/hashes": "2.2.0",
     "@novasamatech/statement-store": "0.7.9",
     "@novasamatech/substrate-slot-sr25519-wasm": "0.8.10",
+    "@polkadot-api/descriptors": "file:.papi/descriptors",
     "@polkadot-labs/hdkd-helpers": "0.0.30",
     "@scure/sr25519": "2.2.0",
     "polkadot-api": "2.1.7"
@@ -50,6 +51,7 @@
     "t3ams.mjs",
     "media-analyzer.mjs",
     "cli.mjs",
+    "deploy/",
     "test-client.mjs",
     "test-client-device.mjs",
     "lib/",

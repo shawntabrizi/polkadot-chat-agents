@@ -37,8 +37,10 @@ agent framework connected through a small HTTP bridge.
 - For an AI brain: the model's CLI installed and logged in on the machine the
   bot runs on. `bot-core` invokes the CLI without forwarding its own secret
   environment; a deployed CLI authenticates through its persistent OAuth home.
-  That home is not a safe boundary for a tool-enabled agent under deliberate
-  container scope, so direct agents start with no tools and the deployer chooses
-  any portable tool policy explicitly.
+  The CLI retains that home only to authenticate. Container scope deliberately
+  exposes it to selected tools; Claude workspace scope applies native path
+  rules and, for Bash, a filesystem policy that hides `/home/node`. Direct
+  agents start with no tools and the deployer chooses any portable policy
+  explicitly.
 
 Continue to [Create your first bot](/guide/first-bot).

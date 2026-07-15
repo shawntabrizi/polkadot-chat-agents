@@ -304,16 +304,23 @@ app username) or an explicit `--public` for any brain that costs money.
   receives it.
 - The bot-core transport never forwards provider API-key environment variables
   to direct agents. Deployed CLIs authenticate through their native OAuth store
-  in `/home/node`; that credential is intentionally available to the agent, but
-  the signing seed and session state are not.
+  in `/home/node`. The CLI process retains that home only to authenticate and
+  refresh its own session; it is not passed through the transport or agent
+  environment. The signing seed and session state are not available to the
+  agent.
 - A direct deployment runs the transport as root only to own `/state`, then
   spawns the CLI as uid/gid 1000 with a read-only source mount and access only to
   `/workspace`, `/home/node`, and private per-turn attachment directories. The
   container has an init reaper, no-new-privileges, and process/memory/CPU limits.
-  The container limits host exposure, but it is not a credential boundary for a
-  tool-enabled OAuth CLI: the model can otherwise reach its own login. Direct
-  deployment therefore starts with no tools. The deployer may deliberately
-  enable portable `read`, `write`, and `bash` capabilities, choose workspace
-  or container scope, and decide whether tool processes may use the network.
-  That choice applies equally to public and allowlisted bots: anyone who can
-  message a bot can direct the capabilities configured for it.
+  Tool access is separately scoped. With Claude workspace scope, native
+  permission rules constrain file tools; when Bash is enabled, its required
+  Bubblewrap filesystem policy explicitly denies `/home/node`, `/state`, and
+  `/app`. Container scope is the deliberate broad option: selected tools can
+  reach the non-root agent account's container-visible files, including its
+  OAuth home. Codex and OpenCode use their own documented workspace policies;
+  in particular, OpenCode Bash is bounded by the container rather than an OS
+  filesystem sandbox. Direct deployment starts with no tools, then the deployer
+  may deliberately enable portable `read`, `write`, and `bash` capabilities,
+  choose a scope, and decide whether tool processes may use the network. That
+  choice applies equally to public and allowlisted bots: anyone who can message
+  a bot can direct the configured capabilities.

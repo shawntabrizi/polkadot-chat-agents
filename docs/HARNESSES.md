@@ -277,16 +277,17 @@ Related settings:
 session keys, and bridge token), then spawns the agent as the non-root `node`
 user with persistent `/workspace` and `/home/node` access. The source mount is
 read-only; the container uses an init reaper, no-new-privileges, and
-process/memory/CPU ceilings. Those are useful hardening layers, but they do not
-make an OAuth home safe from the model: a tool-enabled agent can read or misuse
-its own provider credential. Therefore direct deployments start with no tools.
-The deployer can deliberately select the portable tool policy for either
-public or allowlisted bots; for a public bot this means every sender can direct
-the chosen capability. Workspace scope is the normal project boundary;
-container scope intentionally grants the non-root agent account all files it
-can see, including its OAuth home. Use the default no-tools policy or an
-external runtime when that tradeoff is not acceptable. Sessions and the
-workspace persist across redeploys.
+process/memory/CPU ceilings. The CLI retains `/home/node` to authenticate and
+refresh its own OAuth session, while tool actions use the configured
+engine-specific policy. With Claude workspace scope, native permission rules
+limit file tools; workspace Bash also runs under a Bubblewrap allow/deny
+filesystem policy that hides `/home/node`, `/state`, and `/app`. Container
+scope intentionally grants selected tools the non-root account's
+container-visible files, including its OAuth home. Codex and OpenCode have the
+enforcement reported at deploy time; OpenCode Bash remains bounded by the
+container rather than an OS filesystem sandbox. Direct deployments therefore
+start with no tools, and the deployer deliberately selects any policy for a
+public or allowlisted bot. Sessions and the workspace persist across redeploys.
 
 An AI brain spends quota, so `create` requires an allowlist or an explicit
 `--public`.

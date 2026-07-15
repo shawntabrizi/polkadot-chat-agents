@@ -66,7 +66,6 @@ const openCodeRulePath = (directory) => {
 };
 
 const pathPattern = (directory) => `${openCodeRulePath(directory)}/**`;
-const claudePathPattern = (directory) => `${claudeRulePath(directory)}/**`;
 const claudePath = (directory) => `//${claudeRulePath(directory).replace(/^\/+/, "")}/**`;
 const claudeRule = (tool, directory) => `${tool}(${claudePath(directory)})`;
 const scopedPaths = ({ policy, workingDirectory, attachmentDir, outputDir }) => {
@@ -88,13 +87,12 @@ const scopedPaths = ({ policy, workingDirectory, attachmentDir, outputDir }) => 
 const isAncestorPath = (ancestor, candidate) =>
   candidate === ancestor || candidate.startsWith(ancestor + path.sep);
 
-const protectedPaths = (paths = [], allowedPaths = []) => [...new Set(paths
+const protectedPaths = (paths = []) => [...new Set(paths
   .filter((directory) => typeof directory === "string" && directory.trim())
-  .map((directory) => absolutePath(directory, "protected path"))
-  // Claude's deny rules take precedence over path-specific tool allow rules.
-  // A local workspace commonly lives below $HOME, so denying its ancestor
-  // would accidentally make the explicitly granted workspace unusable.
-  .filter((directory) => !allowedPaths.some((allowedPath) => isAncestorPath(directory, allowedPath))))];
+  .map((directory) => absolutePath(directory, "protected path")))];
+
+const withoutAllowedDescendants = (paths, allowedPaths) => paths
+  .filter((directory) => !allowedPaths.some((allowedPath) => isAncestorPath(directory, allowedPath)));
 
 const claudeTools = (policy) => {
   const tools = [];
@@ -123,13 +121,26 @@ const claudeDeniedRules = (policy, paths) => {
   return paths.flatMap((directory) => nativeFileTools.map((tool) => claudeRule(tool, directory)));
 };
 
-const claudeSettings = (policy, { readPaths, writePaths, protectedDirectories }) => {
+const claudeSettings = (policy, {
+  readPaths,
+  writePaths,
+  protectedReadPaths,
+  protectedWritePaths,
+  containerRuntime = false,
+}) => {
   // Native Read/Edit/Write rules are sufficient when Bash is absent. Bash
   // needs Claude's Linux sandbox as the real filesystem boundary: a cwd alone
   // cannot stop `cat /home/node/...`.
   if (policy.scope !== "workspace" || !hasToolCapability(policy, "bash")) return null;
-  const allowedWritePaths = hasToolCapability(policy, "write") ? writePaths.map(claudePathPattern) : [];
-  const denied = protectedDirectories.map(claudePathPattern);
+  // Claude's permission rules use `//path/**`; its Linux sandbox does not.
+  // The sandbox passes these entries to Bubblewrap as real filesystem paths,
+  // so glob-shaped permission-rule strings would be silently skipped.
+  const sandboxReadPaths = readPaths.map((directory) => absolutePath(directory, "Claude sandbox read path"));
+  const allowedWritePaths = hasToolCapability(policy, "write")
+    ? writePaths.map((directory) => absolutePath(directory, "Claude sandbox write path"))
+    : [];
+  const deniedRead = protectedReadPaths.map((directory) => absolutePath(directory, "Claude sandbox denied-read path"));
+  const deniedWrite = protectedWritePaths.map((directory) => absolutePath(directory, "Claude sandbox denied-write path"));
   return {
     sandbox: {
       enabled: true,
@@ -137,13 +148,25 @@ const claudeSettings = (policy, { readPaths, writePaths, protectedDirectories })
       autoAllowBashIfSandboxed: false,
       allowUnsandboxedCommands: false,
       filesystem: {
-        allowRead: readPaths.map(claudePathPattern),
+        allowRead: sandboxReadPaths,
         allowWrite: allowedWritePaths,
-        denyRead: denied,
-        denyWrite: denied,
+        // Claude explicitly supports allowRead exceptions inside a denyRead
+        // region. Keep a protected ancestor such as /home/node denied while
+        // allowing the selected project below it.
+        denyRead: deniedRead,
+        // Do not rely on an allowWrite exception for a protected ancestor.
+        // Bubblewrap's explicit write mounts still limit Bash to writePaths.
+        denyWrite: deniedWrite,
       },
       network: {
         allowedDomains: policy.network === "internet" ? ["*"] : [],
+        // Docker deployments opt out of Claude's optional Unix-socket seccomp
+        // filter. `allowAllUnixSockets` leaves Unix-domain sockets visible
+        // inside the container reachable from sandboxed Bash; it does not set
+        // `enableWeakerNestedSandbox` or relax Bubblewrap's filesystem,
+        // fresh-proc, or IP-network boundaries. Generated direct-agent
+        // services mount no Docker or host socket.
+        ...(containerRuntime ? { allowAllUnixSockets: true } : {}),
       },
     },
   };
@@ -235,7 +258,7 @@ export const toolPolicyEnforcement = (engineName, policyInput = DEFAULT_TOOL_POL
   if (policy.scope === "container") return { kind: "container", detail: "selected tools run as the non-root agent across its container-visible files" };
   if (engineName === "claude") {
     return hasToolCapability(policy, "bash")
-      ? { kind: "native-sandbox", detail: "Claude workspace sandbox; startup fails if the sandbox is unavailable" }
+      ? { kind: "native-sandbox", detail: "Claude workspace sandbox; a real Bubblewrap readiness probe must pass before startup" }
       : { kind: "native-rules", detail: "Claude path-scoped file-tool rules" };
   }
   if (engineName === "codex") return { kind: "native-sandbox", detail: "Codex native workspace permission/sandbox profile" };
@@ -250,10 +273,18 @@ export const toolPolicyEnforcement = (engineName, policyInput = DEFAULT_TOOL_POL
 const claude = {
   command: "claude",
   effortLevels: ["low", "medium", "high", "xhigh", "max"],
-  buildArgs({ prompt, model, resume, policy: policyInput = DEFAULT_TOOL_POLICY, effort, attachmentDir = null, outputDir = null, workingDirectory = "/workspace", protectedPaths: protectedList = [] }) {
+  buildArgs({ prompt, model, resume, policy: policyInput = DEFAULT_TOOL_POLICY, effort, attachmentDir = null, outputDir = null, workingDirectory = "/workspace", protectedPaths: protectedList = [], containerRuntime = false }) {
     const policy = assertEngineToolPolicy("claude", policyInput);
     const scope = scopedPaths({ policy, workingDirectory, attachmentDir, outputDir });
-    const protectedDirectories = protectedPaths(protectedList, scope.readPaths);
+    const protectedDirectories = protectedPaths(protectedList);
+    // Native deny rules cannot express an allow exception: a deny for
+    // /home/node would also block /home/node/project. In dontAsk mode the
+    // generated path-specific --allowedTools list is already default-deny for
+    // native file tools, so omit only such ancestors from the redundant
+    // explicit native deny list. The Bash sandbox retains the full read deny
+    // list and re-allows the selected paths via filesystem.allowRead.
+    const nativeProtectedDirectories = withoutAllowedDescendants(protectedDirectories, scope.readPaths);
+    const protectedWriteDirectories = withoutAllowedDescendants(protectedDirectories, scope.writePaths);
     // Claude emits final-answer deltas as `stream_event` frames only when
     // this flag is present. They are intentionally kept separate from the
     // terminal assistant message below: transports can safely live-render
@@ -277,10 +308,15 @@ const claude = {
     if (tools.length) {
       const approvals = claudeApprovalRules(policy, scope);
       if (approvals.length) args.push("--allowedTools", approvals.join(","));
-      const denied = claudeDeniedRules(policy, protectedDirectories);
+      const denied = claudeDeniedRules(policy, nativeProtectedDirectories);
       if (denied.length) args.push("--disallowedTools", denied.join(","));
     }
-    const settings = claudeSettings(policy, { ...scope, protectedDirectories });
+    const settings = claudeSettings(policy, {
+      ...scope,
+      protectedReadPaths: protectedDirectories,
+      protectedWritePaths: protectedWriteDirectories,
+      containerRuntime: containerRuntime === true,
+    });
     if (settings) {
       args.push("--settings", JSON.stringify(settings));
     }

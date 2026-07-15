@@ -6,10 +6,12 @@ A bot's **brain** is what produces its replies. Pick it with `--brain` at
 Direct engines run a headless AI-agent CLI with verbatim prompts and native
 session memory (`--resume`). Claude, Codex, and OpenCode start with no tools;
 their deployer may select the same portable policy for either public or
-allowlisted bots. Workspace scope is the normal project boundary, while
-container scope deliberately exposes the non-root agent account's OAuth home.
-Use a separately isolated bridge runtime when that is not an acceptable
-credential boundary.
+allowlisted bots. The CLI retains its OAuth home only to authenticate.
+Workspace-scoped Claude tools are separately constrained by native path rules,
+and workspace Bash hides `/home/node`, `/state`, and `/app` through its
+Bubblewrap filesystem policy. Container scope deliberately exposes the
+non-root agent account's OAuth home; Codex and OpenCode have their documented
+scope boundaries.
 
 | `--brain` | Replies come from | Reaches | Authentication |
 |---|---|---|---|
@@ -37,11 +39,14 @@ sandbox. Claude requires internet for container-scoped Bash but can use `none`
 for workspace-scoped Bash; Codex can keep `none` in either scope. `pca deploy`
 validates the combination and reports the effective enforcement.
 
-The policy is not a general credential sandbox: the OAuth home is visible to
-the agent under container scope. Claude and Codex provide native workspace
-enforcement for their applicable policies; OpenCode's Bash policy remains
-bounded by the container rather than an OS filesystem sandbox. See
-[Private & public bots](/guide/access) for the boundary.
+Authentication and tool access are separate: the CLI retains its OAuth home to
+log in, while the configured scope governs model-directed tools. Claude
+workspace file tools use native path rules, and workspace Bash has an
+allow/deny Bubblewrap filesystem policy that hides `/home/node`, `/state`, and
+`/app`. Container scope deliberately exposes the home. Codex and OpenCode use
+their documented enforcement; OpenCode Bash remains bounded by the container
+rather than an OS filesystem sandbox. See [Private & public bots](/guide/access)
+for the boundary.
 
 ## Pinning a model
 

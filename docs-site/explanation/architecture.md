@@ -40,17 +40,19 @@ framework integration.
 For Claude, Codex, and OpenCode bots, `pca deploy` separates the chat transport
 from the agent CLI. The transport retains the signing seed and session state;
 the agent runs as a non-root user with its own workspace and provider-login
-home. That split protects the chat identity, but the provider-login home is
-readable by the same agent that needs it to authenticate. It is not a safe
-credential boundary once that agent has filesystem or shell tools.
+home. The CLI process retains that home only to authenticate and refresh its
+session; tool access is governed separately by the selected engine and scope.
+With Claude workspace scope, native file-tool rules are path-scoped and
+workspace Bash runs under an allow/deny Bubblewrap filesystem policy that hides
+`/home/node`, `/state`, and `/app`.
 
 Direct Claude, Codex, and OpenCode start with no tools. Their deployer may
 select portable `read`, `write`, and `bash` capabilities, workspace or container
 scope, and tool-process network access for either public or allowlisted bots.
-Container scope deliberately exposes the non-root agent account's OAuth home;
-use a bridge runtime when a separately isolated tool-and-credential boundary is
-required. See [Private & public bots](/guide/access) for the deployment
-profiles.
+Container scope deliberately exposes the non-root agent account's OAuth home.
+Codex and OpenCode use their documented workspace enforcement; OpenCode Bash
+remains container-bounded rather than OS-filesystem-sandboxed. See
+[Private & public bots](/guide/access) for the deployment profiles.
 
 ## Files and attachments
 
@@ -79,7 +81,8 @@ The [Bridge HTTP API](/reference/bridge) documents the integration contract.
 
 - Keep the bot's state volume and `bot.env` private and backed up.
 - Restrict message senders before they can spend model quota or deliberately
-  enabled tools; do not treat a mounted OAuth home as a tool sandbox.
+  enabled tools; apply the selected engine's documented scope rather than
+  assuming one universal credential boundary.
 - Keep the bridge token and provider login separate from source control.
 - Treat a public bot as an internet-facing workload: use a dedicated container
   or VM, disk limits, a low-cost model, and trusted attachment nodes.

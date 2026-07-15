@@ -191,11 +191,15 @@ To let a direct public bot inspect verified attachment bytes, deploy it with
 the current turn and removes it afterwards. Add `write` when the bot should
 also create returnable files, and add `bash` only when it should run commands.
 This is still an operator choice, not a claim that the bot has no valuable
-state: the direct CLI's OAuth/session files remain in its container. Workspace
-scope has engine-specific enforcement; container scope intentionally exposes
-the non-root agent account's visible files. Use the default no-tools policy for
-the narrowest direct profile, or `--media-analyzer` when you prefer a separate
-API-only attachment-analysis container instead.
+state: the direct CLI retains its OAuth/session home to authenticate. That does
+not give workspace-scoped Claude tool actions access to it: Claude's native
+file-tool rules are path-scoped, and its workspace Bash filesystem policy hides
+`/home/node`, `/state`, and `/app`. Container scope intentionally exposes the
+non-root agent account's visible files. Codex and OpenCode follow their own
+reported enforcement; OpenCode Bash remains container-bounded rather than an
+OS filesystem sandbox. Use the default no-tools policy for the narrowest direct
+profile, or `--media-analyzer` when you prefer a separate API-only
+attachment-analysis container instead.
 
 For a public bot, do not mount a valuable host repository, credentials, Docker
 socket, or home directory into the agent container. Run it under a separate
@@ -284,7 +288,7 @@ the directory is sensitive even if no model session has been created.
 | Variable | Default | Purpose |
 |---|---|---|
 | `BOT_AI_TOOL_CAPABILITIES` | `""` | Comma-separated portable direct-agent outcomes: `read`, `write`, `bash`. Empty disables tools; `write` includes `read`, and `bash` includes both. **gen (run/deploy)** |
-| `BOT_AI_TOOL_SCOPE` | `workspace` | `workspace` scopes normal work to the selected project and current staged attachments; `container` deliberately grants the non-root agent account all of its container-visible files. **gen (run/deploy)** |
+| `BOT_AI_TOOL_SCOPE` | `workspace` | `workspace` scopes normal work to the selected project and current staged attachments; for Claude workspace Bash, the sandbox also denies `/home/node`, `/state`, and `/app`. `container` deliberately grants the non-root agent account all of its container-visible files. **gen (run/deploy)** |
 | `BOT_AI_TOOL_NETWORK` | `none` | `none` or `internet` for tool-process egress. `internet` requires `bash`; enforcement depends on the selected engine. **gen (run/deploy)** |
 | `BOT_AI_AGENT_UID` / `BOT_AI_AGENT_GID` | unset | Drop the spawned agent to this uid/gid so it can't read `/state` or the seed. **gen (deploy: 1000)** |
 | `BOT_AI_IDLE_TIMEOUT_MS` | 600000 | Kill a turn that has emitted nothing for this long (wedge backstop). |
@@ -304,7 +308,7 @@ returns a direct bot to the no-tools default.
 |---|---|
 | *(no tool flag)* | No direct-agent tools. The generated policy is empty capabilities, workspace scope, and no tool network. |
 | `--allowed-tools read,write,bash` | Exact lowercase portable capabilities for Claude, Codex, and OpenCode. `write` includes `read`; `bash` includes both. A `read`-capable turn can inspect its staged inbound attachment, and a `write`-capable turn can create a returnable artifact. |
-| `--tool-scope workspace` | Default. The agent works in the selected project; per-turn attachments are readable when `read` is enabled. Claude and Codex provide native workspace enforcement for their applicable policies. |
+| `--tool-scope workspace` | Default. The agent works in the selected project; per-turn attachments are readable when `read` is enabled. Claude and Codex provide native workspace enforcement for their applicable policies; Claude workspace Bash additionally runs with `/home/node`, `/state`, and `/app` denied by its filesystem sandbox. |
 | `--tool-scope container` | Deliberately broad: selected tools can reach the non-root agent account's container-visible files, including its OAuth home. |
 | `--tool-network none` / `internet` | Default `none` requests no tool-process network egress. `internet` requires `bash`. Claude and Codex enforce the workspace/network policy natively where available; OpenCode's Bash policy remains bounded by the container rather than an OS filesystem sandbox. |
 
@@ -313,6 +317,47 @@ requires `--tool-network internet` because it has no network sandbox; Claude
 requires it for container-scoped Bash but can use `none` for workspace-scoped
 Bash; Codex can keep `none` in either scope. The deploy report names the
 effective enforcement level.
+
+Authentication and tool access are separate. A direct CLI retains its mounted
+OAuth home only to log in and refresh its own session. In workspace scope,
+Claude's native path rules constrain file tools; workspace Bash also has an
+allow/deny Bubblewrap filesystem policy that hides `/home/node`, `/state`, and
+`/app`. Container scope deliberately exposes the non-root agent account's
+container-visible files, including that home. Do not generalize Claude's
+filesystem guarantee to every engine: Codex and OpenCode use the enforcement
+named in the deploy report, and OpenCode Bash is container-bounded.
+
+##### Claude workspace Bash in Docker
+
+When a Docker-deployed Claude bot has workspace-scoped Bash, run this explicit
+one-time host preparation before deploying it:
+
+```bash
+pca prepare-host --host root@your-server
+```
+
+It installs PCA's versioned, confined AppArmor profile on that Linux host. The
+generated compose service then uses a pinned derivative of Docker's default
+seccomp policy and retains `no-new-privileges`; it does not use privileged
+containers, add `CAP_SYS_ADMIN` to the outer Docker container, use
+`userns=host`, or use an unconfined Docker/AppArmor profile. Before replacing
+the live bot, `pca deploy` runs a real non-root Bubblewrap probe and fails
+closed if the host is not ready. The Claude CLI remains in the direct-agent
+container; each sandboxed Bash subprocess has a fresh `/proc`, an AppArmor
+payload profile that denies capability use, and a read-only root. Its writes
+follow the configured filesystem policy, including the selected workspace and,
+when enabled, PCA's per-turn output directory. The workspace policy explicitly
+denies the CLI OAuth home at `/home/node` (as well as `/state` and `/app`) to
+sandboxed Bash.
+
+Docker mode sets Claude's `allowAllUnixSockets: true`, opting out of its
+optional Unix-socket seccomp filter. It does not enable
+`enableWeakerNestedSandbox`: sandboxed Bash retains Bubblewrap's normal
+filesystem, fresh-`/proc`, and IP-network boundaries. Sandboxed Bash has no IP
+egress with `--tool-network none`, but it can still reach any Unix-domain socket
+visible inside the container. Generated direct-agent services mount no Docker or
+host socket—do not add one. If the container must expose a sensitive Unix socket,
+use a separate worker container.
 
 The policy works for public and allowlisted **Claude, Codex, and OpenCode**
 direct bots. For a public bot, every sender can direct the capability the

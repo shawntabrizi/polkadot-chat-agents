@@ -80,6 +80,8 @@ import { createFileCommandHandler } from "./lib/file-commands.mjs";
 import { createLiveReplies, createProgressTracker } from "./lib/live-reply.mjs";
 import { RUNNERS, resolveEngine, ENGINES, assertEngineToolPolicy, toolPolicyEnforcement } from "./lib/runners.mjs";
 import { ToolPolicyError, hasToolCapability, toolPolicyFromEnvironment, toolPolicySummary } from "./lib/tool-policy.mjs";
+import { assertClaudeWorkspaceSandbox } from "./lib/claude-sandbox.mjs";
+import { isContainerRuntime } from "./lib/runtime-topology.mjs";
 import { createKeyedDispatcher } from "./lib/keyed-dispatcher.mjs";
 import { createClient as createPapiClient } from "polkadot-api";
 import { getWsProvider, WsEvent } from "polkadot-api/ws";
@@ -210,6 +212,10 @@ const optionalPosixId = (name) => {
 };
 const aiAgentUid = optionalPosixId("BOT_AI_AGENT_UID");
 const aiAgentGid = optionalPosixId("BOT_AI_AGENT_GID");
+// Generated Docker deployments mark runtime topology so Claude applies the
+// Docker Unix-socket setting while retaining its normal Bubblewrap sandbox for
+// Bash. This is not an operator-facing tool capability.
+const aiContainerRuntime = isContainerRuntime(env);
 // The agent workspace is intentionally outside state/secrets. A deployment can
 // grant its unprivileged agent user this directory without exposing the seed,
 // session keys, or the bridge token kept in BOT_STATE_DIR.
@@ -268,6 +274,7 @@ const buildEngineArgs = ({ prompt, model, resume, effort, attachmentDir, outputD
     attachmentDir,
     outputDir,
     workingDirectory,
+    containerRuntime: aiContainerRuntime,
     protectedPaths: [env.BOT_STATE_DIR, env.HOME, "/app"],
   });
 };
@@ -1065,6 +1072,23 @@ if (engine && !customCmd) log("BOT_TOOL_POLICY", {
   ...toolPolicySummary(aiToolPolicy),
   enforcement: toolPolicyEnforcement(brain, aiToolPolicy),
 });
+if (engine && !customCmd) {
+  try {
+    const sandbox = assertClaudeWorkspaceSandbox({
+      engineName: brain,
+      policy: aiToolPolicy,
+      workingDirectory: aiWorkspace,
+      protectedDirectories: [env.BOT_STATE_DIR, env.HOME, "/app"],
+      containerRuntime: aiContainerRuntime,
+      agentUid: aiAgentUid,
+      agentGid: aiAgentGid,
+    });
+    if (sandbox.checked) log("BOT_TOOL_SANDBOX_READY", { engine: brain, container: aiContainerRuntime, unixSockets: aiContainerRuntime ? "allowed" : "claude-default" });
+  } catch (error) {
+    console.error(error?.message ?? String(error));
+    process.exit(2);
+  }
+}
 
 const agentRuntime = engine ? createAgentRuntime({
   engine,

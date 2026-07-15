@@ -168,12 +168,40 @@ lowercase capabilities with `--allowed-tools read,write,bash`, chooses
 The default is no capabilities, workspace scope, and no tool network. `read`
 also lets a direct agent inspect a verified attachment staged for its current
 turn, while `write` lets it produce returnable files. Workspace scope is the
-normal project boundary; container scope deliberately grants the non-root
-agent account access to all of its container-visible files, including its
-OAuth home. See [the configuration guide](docs/CONFIGURATION.md#tool-policy)
+normal project boundary. Authentication is separate from tool access: the CLI
+keeps its OAuth home only to authenticate and refresh its own session. With
+Claude workspace scope, native path rules constrain file tools; workspace Bash
+also runs under a Bubblewrap allow/deny filesystem policy that hides
+`/home/node`, `/state`, and `/app`. `container` is the deliberate broad scope:
+selected tools can reach the non-root agent account's container-visible files,
+including its OAuth home. See [the configuration guide](docs/CONFIGURATION.md#tool-policy)
 for engine enforcement and boundary tradeoffs. In particular, OpenCode Bash
-requires `--tool-network internet`; Claude needs it for container-scoped Bash
+requires `--tool-network internet` and remains bounded by the container rather
+than an OS filesystem sandbox; Claude needs internet for container-scoped Bash
 but not workspace-scoped Bash, while Codex can keep `none` in either scope.
+
+For a Docker-deployed Claude bot with workspace Bash, prepare the Linux host
+once with `pca prepare-host --host root@server`. PCA installs a confined,
+versioned AppArmor profile; deploy then supplies a pinned Docker seccomp profile
+and runs a real non-root Bubblewrap probe before it replaces the live bot. It
+keeps `no-new-privileges`, never adds `CAP_SYS_ADMIN` to the outer Docker
+container, and never uses privileged mode, `userns=host`, or an unconfined
+security profile. The Claude CLI stays in that direct-agent container; each sandboxed
+Bash subprocess runs in Bubblewrap's private namespaces with a fresh `/proc`,
+a read-only root, and no effective Linux capabilities. Its writes follow the
+configured filesystem policy, including the selected workspace and, when
+enabled, PCA's per-turn output directory; the stacked AppArmor payload profile
+is a second capability boundary. In workspace scope, that policy explicitly
+hides the CLI OAuth home at `/home/node` from sandboxed Bash.
+
+In Docker, PCA sets Claude's `allowAllUnixSockets: true`, opting out of
+Claude's optional Unix-socket seccomp filter. This does not enable
+`enableWeakerNestedSandbox`: sandboxed Bash retains Bubblewrap's normal
+filesystem, fresh-`/proc`, and IP-network boundaries. `--tool-network none`
+blocks IP egress from sandboxed Bash only; it does not block Unix-domain
+sockets visible inside the container. Generated direct-agent services mount no
+Docker or host sockets—do not add one. If a sensitive Unix socket must be
+exposed, use a separate worker container.
 
 **Projects.** `pca project <bot> add <alias> <path>` registers a directory the
 agent can work in (repeat for more). In chat, `/project <alias>` points your

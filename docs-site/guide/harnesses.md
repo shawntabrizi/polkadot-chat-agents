@@ -269,15 +269,15 @@ directories. The source mount is read-only; the container uses an init reaper,
 no-new-privileges, and process/memory/CPU ceilings. This protects the chat
 identity from the agent process.
 
-It is not a safe provider-credential boundary for a tool-enabled agent. The
-same non-root agent must read its OAuth home in `/home/node` to authenticate,
-and container scope deliberately exposes that home to selected tools. Workspace
-scope is the normal project boundary. Claude and Codex provide native workspace
-enforcement for their applicable policies; OpenCode's Bash policy remains
-bounded by the container rather than an OS filesystem sandbox. For a public
-bot, every sender can direct the policy the deployer selected. Use a bridge
-harness when a separately designed tool-and-credential boundary is required.
-Sessions and the workspace persist across redeploys.
+The CLI retains `/home/node` only to authenticate and refresh its own OAuth
+session; tool access is separately scoped. Claude workspace file tools use
+native path rules, while workspace Bash has an allow/deny Bubblewrap filesystem
+policy that hides `/home/node`, `/state`, and `/app`. Container scope
+deliberately exposes the home to selected tools. Codex and OpenCode use their
+documented enforcement; OpenCode Bash remains bounded by the container rather
+than an OS filesystem sandbox. For a public bot, every sender can direct the
+policy the deployer selected. Sessions and the workspace persist across
+redeploys.
 
 An AI brain spends quota, so `create` requires an allowlist or an explicit
 `--public`.

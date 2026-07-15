@@ -67,7 +67,17 @@ test("claude compiles portable capabilities to scoped native tools", () => {
   assert.equal(settings.sandbox.failIfUnavailable, true);
   assert.equal(settings.sandbox.allowUnsandboxedCommands, false);
   assert.deepEqual(settings.sandbox.network.allowedDomains, []);
-  assert.ok(settings.sandbox.filesystem.allowWrite.includes("/tmp/pca-stage/output/**"));
+  assert.deepEqual(settings.sandbox.filesystem.allowRead, [
+    "/workspace/project",
+    "/tmp/pca-stage/attachment",
+    "/tmp/pca-stage/output",
+  ]);
+  assert.deepEqual(settings.sandbox.filesystem.allowWrite, [
+    "/workspace/project",
+    "/tmp/pca-stage/output",
+  ]);
+  assert.deepEqual(settings.sandbox.filesystem.denyRead, ["/home/node", "/state", "/app"]);
+  assert.deepEqual(settings.sandbox.filesystem.denyWrite, ["/home/node", "/state", "/app"]);
   // prompt is always last, after `--` (leading-dash safety)
   assert.equal(fresh.at(-2), "--");
   assert.equal(fresh.at(-1), "hi");
@@ -92,7 +102,7 @@ test("claude read policy exposes staged attachments without shell or edits", () 
   assert.equal(args.includes("Edit"), false, "no write tool is exposed");
 });
 
-test("claude does not deny a local workspace through its protected home ancestor", () => {
+test("claude keeps a protected home denied to Bash while permitting a local workspace", () => {
   const args = RUNNERS.claude.buildArgs({
     prompt: "inspect",
     policy: policy(["bash"]),
@@ -100,10 +110,39 @@ test("claude does not deny a local workspace through its protected home ancestor
     protectedPaths: ["/home/node", "/state"],
   });
   const denied = args[args.indexOf("--disallowedTools") + 1];
+  const allowed = args[args.indexOf("--allowedTools") + 1];
   assert.doesNotMatch(denied, /home\/node/);
   assert.match(denied, /state/);
+  assert.match(allowed, /Read\(\/\/home\/node\/projects\/demo\/\*\*\)/);
+  assert.doesNotMatch(allowed, /Read\(\/\/home\/node\/\*\*\)/);
   const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
-  assert.deepEqual(settings.sandbox.filesystem.denyRead, ["/state/**"]);
+  assert.deepEqual(settings.sandbox.filesystem.denyRead, ["/home/node", "/state"]);
+  assert.deepEqual(settings.sandbox.filesystem.denyWrite, ["/state"]);
+  assert.deepEqual(settings.sandbox.filesystem.allowRead, ["/home/node/projects/demo"]);
+  assert.deepEqual(settings.sandbox.filesystem.allowWrite, ["/home/node/projects/demo"]);
+});
+
+test("claude keeps the normal Bubblewrap sandbox and permits visible Unix sockets only for a Docker runtime", () => {
+  const direct = RUNNERS.claude.buildArgs({
+    prompt: "hi",
+    policy: policy(["bash"]),
+    workingDirectory: "/workspace",
+    protectedPaths: ["/state", "/home/node"],
+    containerRuntime: true,
+  });
+  const settings = JSON.parse(direct[direct.indexOf("--settings") + 1]);
+  assert.equal(settings.sandbox.network.allowAllUnixSockets, true);
+  assert.equal("enableWeakerNestedSandbox" in settings.sandbox, false);
+
+  const local = RUNNERS.claude.buildArgs({
+    prompt: "hi",
+    policy: policy(["bash"]),
+    workingDirectory: "/workspace",
+    protectedPaths: ["/state", "/home/node"],
+  });
+  const localSettings = JSON.parse(local[local.indexOf("--settings") + 1]);
+  assert.equal("allowAllUnixSockets" in localSettings.sandbox.network, false);
+  assert.equal("enableWeakerNestedSandbox" in localSettings.sandbox, false);
 });
 
 test("claude rejects paths that could alter native permission rules", () => {
@@ -297,6 +336,7 @@ test("reasoning effort maps to each engine's own flag", () => {
 
 test("runner reports the scope enforcement it actually provides", () => {
   assert.equal(toolPolicyEnforcement("claude", policy(["bash"])).kind, "native-sandbox");
+  assert.match(toolPolicyEnforcement("claude", policy(["bash"])).detail, /Bubblewrap readiness probe/);
   assert.equal(toolPolicyEnforcement("codex", policy(["read", "write"])).kind, "native-sandbox");
   const openCode = toolPolicyEnforcement("opencode", policy(["bash"], "workspace", "internet"));
   assert.equal(openCode.kind, "permission-policy");

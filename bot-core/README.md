@@ -25,6 +25,9 @@ Highlights:
 
 - `pca deploy mybot --host root@server` ships the bot to any Docker+SSH box,
   including two-container agent-framework stacks (`--harness openclaw|hermes`).
+  For Docker Claude workspace Bash, run the explicit one-time
+  `pca prepare-host --host root@server` first; deploy verifies the confined
+  Bubblewrap sandbox before it replaces a bot.
 - In-chat commands (`/help`, `/reset`, `/model`, `/project`, `/ping`), a
   "thinking" acknowledgement for slow replies, and per-bot model pinning
   (`--model`).

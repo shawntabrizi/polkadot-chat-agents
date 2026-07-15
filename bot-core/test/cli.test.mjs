@@ -430,8 +430,9 @@ test("direct deployment uses one portable tool policy across every direct engine
       assert.match(result.stdout, /^BOT_AI_TOOL_CAPABILITIES=$/m);
       assert.match(result.stdout, /^BOT_AI_TOOL_SCOPE=workspace$/m);
       assert.match(result.stdout, /^BOT_AI_TOOL_NETWORK=none$/m);
+      assert.match(result.stdout, /^BOT_AI_RUNTIME_CONTAINER=1$/m);
       assert.match(result.stdout, /Tool policy: none; scope=workspace; tool network=none/);
-      assert.doesNotMatch(result.stdout, /BOT_AI_ALLOWED_TOOLS=|BOT_AI_SAFE_MODE=|BOT_AI_SKIP_PERMISSIONS=|BOT_T3AMS_PUBLIC_ATTACHMENT_READ=/);
+      assert.doesNotMatch(result.stdout, /BOT_AI_ALLOWED_TOOLS=|BOT_AI_SAFE_MODE=|BOT_AI_SKIP_PERMISSIONS=|BOT_T3AMS_PUBLIC_ATTACHMENT_READ=|apparmor=pca-agent-sandbox-v1|seccomp=\.\/pca-agent-sandbox-v1\.seccomp\.json/);
     }
 
     let result = runCli(botsDir, ["deploy", "privateclaude", "--host", "root@example.test", "--allowed-tools", "write", "--dry-run"]);
@@ -445,6 +446,9 @@ test("direct deployment uses one portable tool policy across every direct engine
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /^BOT_AI_TOOL_CAPABILITIES=read,write,bash$/m);
     assert.match(result.stdout, /^BOT_AI_TOOL_NETWORK=none$/m);
+    assert.match(result.stdout, /apparmor=pca-agent-sandbox-v1/);
+    assert.match(result.stdout, /seccomp=\.\/pca-agent-sandbox-v1\.seccomp\.json/);
+    assert.match(result.stdout, /pca prepare-host --host root@example\.test/);
 
     result = runCli(botsDir, ["deploy", "publicclaude", "--host", "root@example.test", "--allowed-tools", "bash", "--tool-scope", "container", "--dry-run"]);
     assert.equal(result.status, 1);
@@ -460,6 +464,7 @@ test("direct deployment uses one portable tool policy across every direct engine
     assert.match(result.stdout, /^BOT_AI_TOOL_CAPABILITIES=read,write,bash$/m);
     assert.match(result.stdout, /^BOT_AI_TOOL_SCOPE=container$/m);
     assert.match(result.stdout, /^BOT_AI_TOOL_NETWORK=none$/m);
+    assert.doesNotMatch(result.stdout, /apparmor=pca-agent-sandbox-v1|pca-agent-sandbox-v1\.seccomp/);
 
     result = runCli(botsDir, ["deploy", "publicopencode", "--host", "root@example.test", "--allowed-tools", "bash", "--dry-run"]);
     assert.equal(result.status, 1);
@@ -469,6 +474,11 @@ test("direct deployment uses one portable tool policy across every direct engine
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /^BOT_AI_TOOL_NETWORK=internet$/m);
     assert.match(result.stdout, /OpenCode Bash follows the container boundary/i);
+
+    result = runCli(botsDir, ["prepare-host", "--host", "root@example.test", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /PCA Linux sandbox host preparation/);
+    assert.match(result.stdout, /pca-agent-sandbox-v1/);
 
     result = runCli(botsDir, ["run", "publicopencode", "--allowed-tools", "bash"]);
     assert.equal(result.status, 1);
