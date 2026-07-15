@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   DEFAULT_T3AMS_ATTACHMENT_MAX_BYTES,
+  DEFAULT_T3AMS_ATTACHMENT_MAX_PEAKS,
   T3amsAttachmentValidationError,
   isT3amsAttachmentMimeAllowed,
   normalizeT3amsAttachmentRef,
@@ -100,7 +101,7 @@ test("accepts a generic opaque document so clients can carry ordinary files", ()
   assert.equal(normalizeT3amsAttachmentRef(ref).kind, "document");
 });
 
-test("normalizes the T3ams composer's paired empty browser MIME as an opaque file", () => {
+test("normalizes the T3ams composer's paired browser unknown-type form as an opaque file", () => {
   // Browser File.type is allowed to be empty for an unknown extension. The
   // SPA preserves that value in both locations, so accept only the paired
   // form and expose a useful conventional MIME to downstream brains.
@@ -129,7 +130,7 @@ test("normalizes the T3ams composer's paired empty browser MIME as an opaque fil
     validationCode("T3AMS_ATTACHMENT_MIME"),
   );
 
-  // This is compatibility for one browser representation, not a way to make
+  // This is the current browser unknown-type form, not a way to make
   // either side of the authenticated metadata optional or mismatched.
   assert.throws(
     () => normalizeT3amsAttachmentRef({ ...ref, mimeType: "application/octet-stream" }),
@@ -233,6 +234,41 @@ test("accepts arbitrary valid file types by default and keeps the size cap", () 
   assert.throws(
     () => parseT3amsHopReference(imageHop({ size: DEFAULT_T3AMS_ATTACHMENT_MAX_BYTES + 1 })),
     validationCode("T3AMS_ATTACHMENT_TOO_LARGE"),
+  );
+});
+
+test("preserves bounded audio duration and waveform metadata from the SPA descriptor", () => {
+  const peaks = [0, 0.08, 0.42, 0.91, 1];
+  const storageUrl = imageHop({
+    mime: "audio/webm",
+    name: "voice.webm",
+    durationMs: 12_345,
+    peaks,
+  });
+  const voice = normalizeT3amsAttachmentRef(imageRef({
+    storageUrl,
+    mimeType: "audio/webm",
+    filename: "voice.webm",
+    durationMs: 12_345,
+  }));
+  assert.equal(voice.kind, "audio");
+  assert.equal(voice.durationMs, 12_345);
+  assert.deepEqual(voice.peaks, peaks);
+  assert.deepEqual(parseT3amsHopReference(storageUrl).peaks, peaks);
+  assert.throws(
+    () => parseT3amsHopReference(imageHop({ mime: "audio/webm", peaks: Array(DEFAULT_T3AMS_ATTACHMENT_MAX_PEAKS + 1).fill(0) })),
+    validationCode("T3AMS_ATTACHMENT_PEAKS"),
+  );
+  assert.throws(
+    () => parseT3amsHopReference(imageHop({ peaks: [0.5] })), validationCode("T3AMS_ATTACHMENT_PEAKS"));
+  assert.throws(
+    () => normalizeT3amsAttachmentRef(imageRef({
+      storageUrl,
+      mimeType: "audio/webm",
+      filename: "voice.webm",
+      durationMs: 12_346,
+    })),
+    validationCode("T3AMS_ATTACHMENT_METADATA_MISMATCH"),
   );
 });
 

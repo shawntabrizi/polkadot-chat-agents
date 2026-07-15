@@ -49,8 +49,6 @@
     "index.mjs",
     "t3ams.mjs",
     "media-analyzer.mjs",
-    "t3ams.mjs",
-    "media-analyzer.mjs",
     "cli.mjs",
     "test-client.mjs",
     "test-client-device.mjs",

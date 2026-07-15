@@ -4,7 +4,7 @@
 // `storageUrl` is not a network URL.  The SPA encodes an encrypted Bulletin
 // reference as `hop:` + base64url(JSON):
 //
-//   { v: 1, id, key, mime, size, name?, w?, h? }
+//   { v: 1, id, key, mime, size, name?, w?, h?, durationMs?, peaks? }
 //
 // `key` is the per-file claim/decryption ticket.  Callers may persist the
 // normalized result in the bot's private state in order to resume a download,
@@ -22,6 +22,10 @@ export const DEFAULT_T3AMS_ATTACHMENT_MAX_URL_BYTES = 4096;
 export const DEFAULT_T3AMS_ATTACHMENT_MAX_FILENAME_BYTES = 255;
 export const DEFAULT_T3AMS_ATTACHMENT_MAX_DIMENSION = 100_000;
 export const DEFAULT_T3AMS_ATTACHMENT_MAX_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
+// The SPA voice recorder emits normalized waveform buckets. Keep a little
+// headroom for browser-provided waveform buckets without accepting unbounded
+// descriptor data.
+export const DEFAULT_T3AMS_ATTACHMENT_MAX_PEAKS = 64;
 
 // This is a chat attachment policy, not an execution allowlist: downloaded
 // files are staged as inert regular files and never opened or executed by the
@@ -39,7 +43,7 @@ const BASE64_URL_RE = /^[A-Za-z0-9_-]+$/;
 const MIME_RE = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/;
 const MIME_TYPE_RE = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/;
 const UNSAFE_FILENAME_RE = /[\u0000-\u001f\u007f\\/]/;
-const HOP_FIELDS = new Set(["v", "id", "key", "mime", "size", "name", "w", "h"]);
+const HOP_FIELDS = new Set(["v", "id", "key", "mime", "size", "name", "w", "h", "durationMs", "peaks"]);
 const bareHex = (value) => String(value ?? "").trim().replace(/^0x/i, "").toLowerCase();
 
 export class T3amsAttachmentValidationError extends Error {
@@ -75,9 +79,9 @@ const normalizeMime = (value, label) => {
 
 // Browsers are allowed to expose File.type as an empty string for an unknown
 // extension. The T3ams composer preserves that value in both its HOP
-// descriptor and BCTS AttachmentRef. Treat only that exact, paired legacy
-// representation as the conventional opaque-file type; whitespace, a missing
-// value, and a one-sided empty/non-empty pair remain invalid below.
+// descriptor and BCTS AttachmentRef. Treat only that exact paired current
+// browser unknown-type form as the conventional opaque-file type; whitespace,
+// a missing value, and a one-sided empty/non-empty pair remain invalid below.
 const EMPTY_BROWSER_MIME_FALLBACK = "application/octet-stream";
 
 const normalizeAllowedMime = (value) => {
@@ -180,6 +184,21 @@ const optionalDuration = (value, label, maxDurationMs) => {
   return value;
 };
 
+const optionalPeaks = (value, label, maxPeaks) => {
+  if (value == null) return null;
+  if (!Array.isArray(value) || value.length > maxPeaks) {
+    invalid("T3AMS_ATTACHMENT_PEAKS", `${label} waveform peaks are invalid`);
+  }
+  const peaks = [];
+  for (const peak of value) {
+    if (typeof peak !== "number" || !Number.isFinite(peak) || peak < 0 || peak > 1) {
+      invalid("T3AMS_ATTACHMENT_PEAKS", `${label} waveform peaks are invalid`);
+    }
+    peaks.push(peak);
+  }
+  return peaks;
+};
+
 const normalizeDimensions = ({ width, height, label, maxDimension }) => {
   const normalizedWidth = optionalDimension(width, label, maxDimension);
   const normalizedHeight = optionalDimension(height, label, maxDimension);
@@ -195,6 +214,7 @@ const makeConfig = (options = {}) => ({
   maxFilenameBytes: safeLimit(options.maxFilenameBytes, DEFAULT_T3AMS_ATTACHMENT_MAX_FILENAME_BYTES, "maxFilenameBytes", { min: 1, max: 4096 }),
   maxDimension: safeLimit(options.maxDimension, DEFAULT_T3AMS_ATTACHMENT_MAX_DIMENSION, "maxDimension", { min: 1, max: 10_000_000 }),
   maxDurationMs: safeLimit(options.maxDurationMs, DEFAULT_T3AMS_ATTACHMENT_MAX_DURATION_MS, "maxDurationMs", { min: 0, max: 31 * 24 * 60 * 60 * 1000 }),
+  maxPeaks: safeLimit(options.maxPeaks, DEFAULT_T3AMS_ATTACHMENT_MAX_PEAKS, "maxPeaks", { min: 0, max: 256 }),
   allowedMimeTypes: normalizeAllowedMimes(options.allowedMimeTypes ?? DEFAULT_T3AMS_ATTACHMENT_MIME_TYPES),
 });
 
@@ -241,6 +261,11 @@ const parseT3amsHopReferenceInternal = (storageUrl, options = {}, { allowEmptyMi
   }
   const filename = parsed.name == null ? null : normalizeFilename(parsed.name, "Hop reference", config.maxFilenameBytes);
   const dimensions = normalizeDimensions({ width: parsed.w, height: parsed.h, label: "Hop reference", maxDimension: config.maxDimension });
+  const durationMs = optionalDuration(parsed.durationMs, "Hop reference", config.maxDurationMs);
+  const peaks = optionalPeaks(parsed.peaks, "Hop reference", config.maxPeaks);
+  if (peaks != null && !mime.startsWith("audio/")) {
+    invalid("T3AMS_ATTACHMENT_PEAKS", "Hop reference waveform peaks require an audio MIME type");
+  }
   return {
     hopId: parsed.id,
     claimTicketHex: parsed.key,
@@ -248,6 +273,8 @@ const parseT3amsHopReferenceInternal = (storageUrl, options = {}, { allowEmptyMi
     size: parsed.size,
     filename,
     ...dimensions,
+    ...(durationMs == null ? {} : { durationMs }),
+    ...(peaks == null ? {} : { peaks }),
     mimeWasEmpty,
   };
 };
@@ -268,6 +295,8 @@ export const encodeT3amsHopReference = ({
   filename = null,
   width = null,
   height = null,
+  durationMs = null,
+  peaks = null,
 } = {}, options = {}) => {
   const payload = {
     v: T3AMS_HOP_REF_VERSION,
@@ -278,6 +307,8 @@ export const encodeT3amsHopReference = ({
     ...(filename == null ? {} : { name: filename }),
     ...(width == null ? {} : { w: width }),
     ...(height == null ? {} : { h: height }),
+    ...(durationMs == null ? {} : { durationMs }),
+    ...(peaks == null ? {} : { peaks }),
   };
   const storageUrl = `hop:${Buffer.from(JSON.stringify(payload), "utf8").toString("base64url")}`;
   // Validate our own output so callers cannot create a ref which the inbound
@@ -331,7 +362,11 @@ export const normalizeT3amsAttachmentRef = (attachment, options = {}) => {
   if (hop.width != null && dimensions.width != null && (hop.width !== dimensions.width || hop.height !== dimensions.height)) {
     invalid("T3AMS_ATTACHMENT_METADATA_MISMATCH", "attachment dimensions do not match its Hop reference");
   }
-  const durationMs = optionalDuration(attachment.durationMs, "attachment", config.maxDurationMs);
+  const attachmentDurationMs = optionalDuration(attachment.durationMs, "attachment", config.maxDurationMs);
+  if (hop.durationMs != null && attachmentDurationMs != null && hop.durationMs !== attachmentDurationMs) {
+    invalid("T3AMS_ATTACHMENT_METADATA_MISMATCH", "attachment duration metadata does not match its Hop reference");
+  }
+  const durationMs = hop.durationMs ?? attachmentDurationMs;
   const width = hop.width ?? dimensions.width;
   const height = hop.height ?? dimensions.height;
   const kind = mime.startsWith("image/")
@@ -355,6 +390,7 @@ export const normalizeT3amsAttachmentRef = (attachment, options = {}) => {
     filename,
     ...(width != null ? { width, height } : {}),
     ...(durationMs == null ? {} : { durationMs }),
+    ...(hop.peaks == null ? {} : { peaks: hop.peaks }),
   };
 };
 

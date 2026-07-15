@@ -75,3 +75,23 @@ test("serialized submitter rejects bounded queue overflow before retaining more 
   assert.equal(await first, "first");
   assert.deepEqual(submit.stats(), { pending: 0, cap: 1 });
 });
+
+test("serialized submitter rechecks a queued direct ingress before network send", async () => {
+  const sent = [];
+  let release;
+  let current = true;
+  const firstGate = new Promise((resolve) => { release = resolve; });
+  const submit = createSerializedSubmitter(async (value) => {
+    if (value === "first") await firstGate;
+    sent.push(value);
+  });
+
+  const first = submit("first");
+  const stale = submit("stale-direct-reply", { beforeSend: () => current });
+  await Promise.resolve();
+  current = false; // an edit/delete superseded the queued ingress revision
+  release();
+  await first;
+  await assert.rejects(stale, (error) => error?.code === "T3AMS_OUTBOUND_FENCED");
+  assert.deepEqual(sent, ["first"]);
+});

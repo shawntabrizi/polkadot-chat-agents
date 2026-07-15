@@ -286,7 +286,7 @@ test("agent children receive a minimal environment with no bot or provider secre
       HOME: "/agent-home",
       BOT_SEED_HEX: "bot-signing-seed",
       BOT_STATE_DIR: "/private/bot-state",
-      FAUCET_CHAT_SERVICE_SECRET: "legacy-signing-seed",
+      EXTRA_SECRET: "unrelated-secret",
       ANTHROPIC_API_KEY: "anthropic-secret",
       OPENAI_API_KEY: "openai-secret",
       OPENROUTER_API_KEY: "openrouter-secret",
@@ -297,13 +297,13 @@ test("agent children receive a minimal environment with no bot or provider secre
   assert.equal(env.PATH, process.env.PATH);
   assert.equal(env.HOME, "/agent-home");
   assert.equal(env.SAFE_AGENT_MODE, "test");
-  for (const key of ["BOT_SEED_HEX", "BOT_STATE_DIR", "FAUCET_CHAT_SERVICE_SECRET", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"]) assert.equal(env[key], undefined);
+  for (const key of ["BOT_SEED_HEX", "BOT_STATE_DIR", "EXTRA_SECRET", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"]) assert.equal(env[key], undefined);
   assert.deepEqual(events.map((e) => e.key), ["OPENAI_API_KEY", "BOT_STATE_DIR"]);
 
   const h = makeRuntime({
     parentEnv: { ...env, BOT_SEED_HEX: "must-not-reach-child", OPENAI_API_KEY: "must-not-reach-child" },
     agentEnv: { SAFE_AGENT_MODE: "test" },
-    script: 'test -z "$BOT_SEED_HEX" && test -z "$BOT_STATE_DIR" && test -z "$FAUCET_CHAT_SERVICE_SECRET" && test -z "$ANTHROPIC_API_KEY" && test -z "$OPENAI_API_KEY" && test "$SAFE_AGENT_MODE" = test && printf \'{"type":"result","result":"clean"}\\n\'',
+    script: 'test -z "$BOT_SEED_HEX" && test -z "$BOT_STATE_DIR" && test -z "$EXTRA_SECRET" && test -z "$ANTHROPIC_API_KEY" && test -z "$OPENAI_API_KEY" && test "$SAFE_AGENT_MODE" = test && printf \'{"type":"result","result":"clean"}\\n\'',
   });
   await h.runtime.handleMessage("peer", { text: "hi", messageId: "M1", kind: "text" });
   assert.match(h.delivered[0], /^clean/);

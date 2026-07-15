@@ -27,6 +27,8 @@ test("channel context is opt-in and rejects malformed or oversized records", () 
   });
   assert.equal(store.append("not-a-channel", message(1, 1)).reason, "invalid-chat");
   assert.equal(store.append(chat(1), { ...message(1, 1), messageId: "nope" }).reason, "invalid-record");
+  const { messageId, ...noncanonicalRecord } = message(3, 1);
+  assert.equal(store.append(chat(1), { ...noncanonicalRecord, id: messageId }).reason, "invalid-record");
   assert.equal(store.append(chat(1), message(2, 1, "x".repeat(1_000))).reason, "record-too-large");
   assert.equal(store.stats().records, 0);
 });

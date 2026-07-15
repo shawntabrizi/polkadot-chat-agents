@@ -38,6 +38,8 @@ import {
   toT3amsBridgeInbound,
 } from "./t3ams-routing.mjs";
 import { createSerializedSubmitter, createT3amsPriorityClock } from "./t3ams-submission.mjs";
+import { createT3amsLiveRevocation } from "./t3ams-live-revocation.mjs";
+import { installT3amsSubscriptionRouteSet } from "./t3ams-subscription-set.mjs";
 import { createT3amsKnownChats } from "./t3ams-known-chats.mjs";
 import { deliverAgentReplyBeforeArtifacts } from "./t3ams-agent-turn.mjs";
 import {
@@ -57,7 +59,7 @@ const enc = new TextEncoder();
 const DEFAULT_ENDPOINT = "wss://paseo-people-next-system-rpc.polkadot.io";
 const DEFAULT_BULLETIN_ENDPOINT = "wss://paseo-bulletin-next-rpc.polkadot.io";
 const endpoint = (env.BOT_ENDPOINT ?? DEFAULT_ENDPOINT).trim();
-const seedHex = (env.BOT_SEED_HEX ?? env.FAUCET_CHAT_SERVICE_SECRET ?? "").trim();
+const seedHex = (env.BOT_SEED_HEX ?? "").trim();
 const transportName = (env.BOT_TRANSPORT ?? "").trim().toLowerCase();
 if (transportName !== "t3ams") {
   console.error("t3ams.mjs requires BOT_TRANSPORT=t3ams");
@@ -87,7 +89,16 @@ try {
   process.exit(2);
 }
 const stateStore = createStateStore(path.join(stateDir, "t3ams-state.json"));
-const restored = stateStore.load();
+const loadedState = stateStore.load();
+const restored = loadedState != null
+  && typeof loadedState === "object"
+  && !Array.isArray(loadedState)
+  && loadedState.v === 1
+  ? loadedState
+  : null;
+if (loadedState != null && restored == null) {
+  log("T3AMS_STATE_SNAPSHOT_DISCARDED", { reason: "version" });
+}
 // Generated direct-agent files are copied here before any network upload.
 // This is deliberately inside the transport's private state directory rather
 // than the agent-writable PCA_OUTPUT_DIR, so a retried handoff has immutable
@@ -152,8 +163,8 @@ if (bridgeProactiveToken && bridgeProactiveToken === bridgeToken) {
   process.exit(2);
 }
 const brain = (env.BOT_BRAIN ?? "bridge").trim().toLowerCase();
-if (!new Set(["echo", "claude", "codex", "opencode", "bridge", "hermes"]).has(brain)) {
-  console.error("BOT_BRAIN must be echo, claude, codex, opencode, bridge, or hermes");
+if (!new Set(["echo", "claude", "codex", "opencode", "bridge"]).has(brain)) {
+  console.error("BOT_BRAIN must be echo, claude, codex, opencode, or bridge");
   process.exit(2);
 }
 // A slow turn should visibly make progress in the T3ams client. The native
@@ -650,6 +661,12 @@ for (const raw of Array.isArray(restored?.ingress) ? restored.ingress.slice(-ing
   const restoredReplyOutbox = kind === "turn"
     ? restoreAgentReplyOutbox(raw.agentReplyOutbox, revision)
     : { outbox: null, invalid: false };
+  // A completed direct turn persists its reply and artifact manifests in one
+  // journal mutation. An artifact-only record belongs to a pre-atomic schema;
+  // do not resume it by re-running tools or mixing it with a new final reply.
+  const incompleteTurnOutbox = kind === "turn"
+    && restoredOutbox.outbox != null
+    && restoredReplyOutbox.outbox == null;
   const restoredMediaAnalysis = kind === "turn" && raw.mediaAnalysisRevision === revision
     ? restoreMediaAnalysis(raw.mediaAnalysis)
     : null;
@@ -664,9 +681,9 @@ for (const raw of Array.isArray(restored?.ingress) ? restored.ingress.slice(-ing
     completedAt: Number.isSafeInteger(raw.completedAt) && raw.completedAt > 0 ? raw.completedAt : 0,
     revision,
     artifactOutbox: restoredOutbox.outbox,
-    artifactOutboxInvalid: restoredOutbox.invalid,
+    artifactOutboxInvalid: restoredOutbox.invalid || incompleteTurnOutbox,
     replyOutbox: restoredReplyOutbox.outbox,
-    replyOutboxInvalid: restoredReplyOutbox.invalid,
+    replyOutboxInvalid: restoredReplyOutbox.invalid || incompleteTurnOutbox,
     mediaAnalysis: restoredMediaAnalysis,
     mediaAnalysisRevision: restoredMediaAnalysis == null ? null : revision,
     // A process restart intentionally releases all harness leases. The next
@@ -762,6 +779,7 @@ const scheduleIngressDurabilityRetry = () => {
       }
       while (deferredIngressUnpins.length > 0) protocol.unpinConversation(deferredIngressUnpins.shift());
       cleanupDeferredAgentArtifactOutboxes();
+      liveRevocation.flush();
       ingressDurable = true;
       wakeBridge();
       pumpIngress();
@@ -808,6 +826,7 @@ const beginMediaAnalysisForIngress = async (entryId, revision, senderXid) => mut
 const subscriptions = new Map();
 const subscriptionRetryTimers = new Map();
 const subscriptionRetryAttempts = new Map();
+let subscriptionReconcileTimer = null;
 // A known DM needs both its carrier and ops route so user redactions/edits
 // reconcile before dispatch. Leave room for the default known-chat roster as
 // well as workspace control/channel routes.
@@ -840,7 +859,7 @@ drainInboundCallbacks = () => {
       });
   }
 };
-const rawSubscriberModule = await import("./vendor/lib/statement-ingress-supervisor.mjs");
+const rawSubscriberModule = await import("../../vendor/lib/statement-ingress-supervisor.mjs");
 const subscribePages = rawSubscriberModule.createRawStatementPageSubscriber({ getClient: () => lazyClient.getClient() });
 const asBytes = (data) => {
   try { return typeof data === "string" ? hexToBytes(data) : data; }
@@ -853,6 +872,17 @@ const clearSubscriptionRetry = (id) => {
   if (timer != null) clearTimeout(timer);
   subscriptionRetryTimers.delete(id);
   subscriptionRetryAttempts.delete(id);
+};
+// A subscriber can fail while opening a retained view, before it has returned
+// an unsubscribe handle. Reconcile the desired topology as a whole so a DM or
+// workspace route set cannot remain only partly installed.
+const scheduleSubscriptionReconcile = () => {
+  if (subscriptionReconcileTimer != null) return;
+  subscriptionReconcileTimer = setTimeout(() => {
+    subscriptionReconcileTimer = null;
+    syncSubscriptions();
+  }, 500);
+  subscriptionReconcileTimer.unref?.();
 };
 const scheduleSubscriptionRetry = (id, token) => {
   if (subscriptions.get(id)?.token !== token || subscriptionRetryTimers.has(id)) return;
@@ -869,25 +899,84 @@ const scheduleSubscriptionRetry = (id, token) => {
   subscriptionRetryTimers.set(id, timer);
   log("T3AMS_SUBSCRIPTION_RETRY_SCHEDULED", { id, attempt, delayMs: delay });
 };
-const subscription = (id, topic, callback, accepts = () => true, { force = false } = {}) => {
+const subscription = (id, topic, callback, accepts = () => true, { force = false, defer = false } = {}) => {
   const existing = subscriptions.get(id);
-  if (!force && existing?.topicHex === Buffer.from(topic).toString("hex")) return;
-  clearSubscriptionRetry(id);
-  existing?.unsubscribe?.();
+  let topicHex;
+  try {
+    topicHex = Buffer.from(topic).toString("hex");
+  } catch (error) {
+    log("T3AMS_SUBSCRIPTION_INSTALL_FAILED", { id, error: String(error?.message ?? error) });
+    scheduleSubscriptionReconcile();
+    return { ok: existing != null, changed: false };
+  }
+  if (!force && existing?.topicHex === topicHex) return { ok: true, changed: false };
   const token = Symbol(id);
-  const unsubscribe = subscribePages({ matchAll: [topic] }, (page) => {
-    subscriptionRetryAttempts.delete(id);
-    for (const statement of page.statements ?? []) {
-      const data = asBytes(statement.data);
-      if (!(data instanceof Uint8Array)) continue;
-      if (!accepts(statement)) continue;
-      enqueueInboundCallback(id, () => callback(data, statement));
+  let unsubscribe;
+  let state = "staging";
+  let installationError = null;
+  try {
+    unsubscribe = subscribePages({ matchAll: [topic] }, (page) => {
+      subscriptionRetryAttempts.delete(id);
+      for (const statement of page.statements ?? []) {
+        const data = asBytes(statement.data);
+        if (!(data instanceof Uint8Array)) continue;
+        if (!accepts(statement)) continue;
+        enqueueInboundCallback(id, () => callback(data, statement));
+      }
+    }, (error) => {
+      // A subscriber may report a failure synchronously while it is being
+      // created. Do not replace the old retained view with that failed route.
+      if (state === "staging") {
+        installationError = error;
+        return;
+      }
+      if (state !== "active") return;
+      log("T3AMS_SUBSCRIPTION_FAILED", { id, error: String(error?.message ?? error) });
+      scheduleSubscriptionRetry(id, token);
+    });
+    if (typeof unsubscribe !== "function") throw new TypeError("subscription did not return an unsubscribe function");
+  } catch (error) {
+    // Keep the previous retained view active unless its replacement was
+    // constructed successfully. A failed route install is retried through a
+    // topology-wide reconciliation, preserving DM/workspace route pairs.
+    log("T3AMS_SUBSCRIPTION_INSTALL_FAILED", { id, error: String(error?.message ?? error) });
+    scheduleSubscriptionReconcile();
+    return { ok: existing != null, changed: false };
+  }
+  if (installationError != null) {
+    try { unsubscribe(); } catch { /* best effort: the old route remains active */ }
+    log("T3AMS_SUBSCRIPTION_INSTALL_FAILED", { id, error: String(installationError?.message ?? installationError) });
+    scheduleSubscriptionReconcile();
+    return { ok: existing != null, changed: false };
+  }
+
+  // A route set prepares every new subscriber first. Only its commit removes
+  // an active predecessor, which keeps a live DM/workspace pair intact if a
+  // sibling cannot be installed.
+  const discard = () => {
+    if (state !== "staging") return;
+    state = "discarded";
+    try { unsubscribe(); } catch { /* best effort */ }
+  };
+  const commit = () => {
+    if (state === "active") return true;
+    if (state !== "staging") return false;
+    clearSubscriptionRetry(id);
+    try {
+      existing?.unsubscribe?.();
+    } catch (error) {
+      // The replacement is already live. Prefer it over a duplicate retained
+      // route and surface the cleanup fault for the operator.
+      log("T3AMS_SUBSCRIPTION_REPLACE_CLEANUP_FAILED", { id, error: String(error?.message ?? error) });
     }
-  }, (error) => {
-    log("T3AMS_SUBSCRIPTION_FAILED", { id, error: String(error?.message ?? error) });
-    scheduleSubscriptionRetry(id, token);
-  });
-  subscriptions.set(id, { topicHex: Buffer.from(topic).toString("hex"), unsubscribe, token });
+    subscriptions.set(id, { topicHex, unsubscribe, token });
+    state = "active";
+    return true;
+  };
+  const installed = { ok: true, changed: true, commit, discard };
+  if (defer) return installed;
+  commit();
+  return { ok: true, changed: true };
 };
 
 const dispatcher = createKeyedDispatcher({
@@ -918,15 +1007,17 @@ const turnContextForRouted = (routed) => createTurnContext(
   routed?.message?.threadRootId ?? routed?.replyTarget?.threadRootId ?? null,
 );
 // The direct runtime receives an opaque, immutable context with each turn.
-// Keep callbacks backwards compatible (a transport that does not pass one
-// simply uses the top-level lane), but never let a malformed caller select a
-// different thread's live reply or durable artifact handoff.
+// An omitted context means a deliberate top-level delivery; a malformed
+// supplied context is rejected instead of silently falling back to that lane.
 const turnContextFor = (chatId, supplied = null) => {
-  if (supplied?.chatId === chatId) {
-    const laneKey = ingressLaneKeyForT3ams(chatId, supplied.threadRootId);
-    if (laneKey != null && supplied.laneKey === laneKey) return supplied;
+  if (supplied == null) return createTurnContext(chatId);
+  const laneKey = supplied.chatId === chatId
+    ? ingressLaneKeyForT3ams(chatId, supplied.threadRootId)
+    : null;
+  if (laneKey == null || supplied.laneKey !== laneKey) {
+    throw new Error("invalid T3ams delivery context");
   }
-  return createTurnContext(chatId);
+  return supplied;
 };
 // Agent callbacks retain the delivery chat ID for transport submission, but
 // their presentation and outbox state are lane-scoped. That is what makes it
@@ -1041,10 +1132,14 @@ const sendT3amsAttachment = async (chatId, {
   if (typeof beforeSend === "function") await beforeSend(uploaded);
   const body = typeof text === "string" ? text : uploaded.attachment.filename;
   const root = threadRootId === undefined ? replyThreadFor(chatId, turnContext) : threadRootId;
+  // Artifact callbacks only retain their delivery lane. If that lane belongs
+  // to an active direct-agent ingress turn, fence the rich send to its exact
+  // journal revision so an edit or delete cannot publish stale output.
+  const submissionGuard = guard ?? directIngressSubmissionGuard(chatId, turnContext);
   const sent = await protocol.sendRichText(chatId, body, {
     ...(root == null ? {} : { threadRootId: root }),
     attachments: [uploaded.ref],
-    guard,
+    guard: submissionGuard,
   });
   noteBotIssuedMessage(chatId, sent.messageId, createTurnContext(chatId, root));
   log("T3AMS_SENT_FILE", { chatId, mime: uploaded.attachment.mime, bytes: uploaded.attachment.size });
@@ -1322,6 +1417,9 @@ const prepareAgentTurnOutbox = async (context, { text, artifacts }) => {
     if (current.replyOutbox.revision !== context.revision) throw artifactHandoffSuperseded();
     return { artifacts: current.artifactOutbox, reply: current.replyOutbox };
   }
+  if (current.artifactOutbox != null) {
+    throw artifactOutboxError("T3AMS_AGENT_OUTBOX_CORRUPT", "generated turn is missing its atomic reply manifest");
+  }
   if (typeof text !== "string" || Buffer.byteLength(text, "utf8") > agentReplyOutboxMaxBytes) {
     throw artifactOutboxError("T3AMS_REPLY_OUTBOX_INVALID", "generated reply is invalid or too large");
   }
@@ -1333,43 +1431,36 @@ const prepareAgentTurnOutbox = async (context, { text, artifacts }) => {
   const reply = { revision: context.revision, text, parts, nextPart: 0 };
   const replyReservation = await reserveAgentReplyOutboxCapacity(context, replyOutboxByteCost(reply));
   if (replyReservation === "superseded") throw artifactHandoffSuperseded();
-  let outbox = current.artifactOutbox;
+  let outbox = null;
   let createdOutbox = false;
   let reservedCapacity = false;
   try {
-    if (outbox != null) {
-      if (outbox.revision !== context.revision) throw artifactHandoffSuperseded();
-      // A legacy artifact-only manifest can be upgraded into a complete final
-      // turn. Files already uploaded/sent intentionally do not need to exist.
-      for (const file of outbox.files) if (!file.sent && file.uploaded == null) assertOutboxFile(context.id, file);
-    } else {
-      const totalBytes = validateAgentArtifactBatch(artifacts);
-      if (artifacts.length > 0) {
-        let reservation = null;
+    const totalBytes = validateAgentArtifactBatch(artifacts);
+    if (artifacts.length > 0) {
+      let reservation = null;
+      try {
+        reservation = await reserveAgentArtifactOutboxCapacity(context, artifacts.length, totalBytes);
+      } catch (error) {
+        if (error?.code !== "T3AMS_ARTIFACT_OUTBOX_FULL") throw error;
+        // Preserve the text answer when storage pressure prevents optional
+        // generated files. The agent has already completed; retrying its tools
+        // cannot free capacity and would turn a full outbox into a loop.
+        log("T3AMS_AGENT_ARTIFACTS_SKIPPED", { id: context.id, count: artifacts.length, bytes: totalBytes, reason: "outbox-full" });
+      }
+      if (reservation === "superseded") throw artifactHandoffSuperseded();
+      if (reservation === true) {
+        reservedCapacity = true;
+        const files = [];
         try {
-          reservation = await reserveAgentArtifactOutboxCapacity(context, artifacts.length, totalBytes);
+          for (const [index, artifact] of artifacts.entries()) files.push(copyAgentArtifactToOutbox(context.id, artifact, index));
+          const directory = artifactOutboxDirectory(context.id);
+          if (directory != null) fsyncDirectory(directory);
         } catch (error) {
-          if (error?.code !== "T3AMS_ARTIFACT_OUTBOX_FULL") throw error;
-          // Preserve the text answer when storage pressure prevents optional
-          // generated files. The agent has already completed; retrying its tools
-          // cannot free capacity and would turn a full outbox into a loop.
-          log("T3AMS_AGENT_ARTIFACTS_SKIPPED", { id: context.id, count: artifacts.length, bytes: totalBytes, reason: "outbox-full" });
+          removeAgentArtifactOutbox(context.id);
+          throw error;
         }
-        if (reservation === "superseded") throw artifactHandoffSuperseded();
-        if (reservation === true) {
-          reservedCapacity = true;
-          const files = [];
-          try {
-            for (const [index, artifact] of artifacts.entries()) files.push(copyAgentArtifactToOutbox(context.id, artifact, index));
-            const directory = artifactOutboxDirectory(context.id);
-            if (directory != null) fsyncDirectory(directory);
-          } catch (error) {
-            removeAgentArtifactOutbox(context.id);
-            throw error;
-          }
-          outbox = { revision: context.revision, files };
-          createdOutbox = true;
-        }
+        outbox = { revision: context.revision, files };
+        createdOutbox = true;
       }
     }
     const saved = await mutateAgentTurnOutbox(context, async (entry) => {
@@ -1447,6 +1538,9 @@ const deliverPersistedAgentArtifacts = async (chatId, context, outbox) => {
       beforeSend: async () => {
         if (!ingressEntryCurrent(context.id, context.revision)) throw artifactHandoffSuperseded();
       },
+      // The upload can outlive its ingress revision. The protocol rechecks
+      // this guard in the serialized submit queue immediately before publish.
+      guard: () => ingressEntryCurrent(context.id, context.revision),
     });
     await markAgentArtifactSent(context, outbox, file, sent.messageId);
   }
@@ -1489,42 +1583,10 @@ const deliverAgentTurn = async (chatId, { text, artifacts = [] } = {}, suppliedT
   const turnContext = turnContextFor(chatId, suppliedTurnContext);
   const context = activeAgentArtifactDeliveries.get(turnContext.laneKey) ?? null;
   if (context == null) {
-    // Keep the generic runtime surface usable outside the journal. T3ams's
-    // deployed direct brains always take the durable branch below.
-    for (const artifact of artifacts) {
-      await sendT3amsAttachment(chatId, {
-        filePath: artifact.filePath,
-        filename: artifact.filename,
-        size: artifact.size,
-        mime: mimeForT3amsFilename(artifact.filename),
-        text: `Generated file: ${artifact.filename}`,
-        turnContext,
-      });
-    }
-    await deliverAgentReply(chatId, text, turnContext);
-    return;
+    throw new Error("T3ams direct-agent delivery requires an active durable ingress turn");
   }
   const prepared = await prepareAgentTurnOutbox(context, { text, artifacts });
   await deliverPersistedAgentTurn(chatId, context, prepared);
-};
-const deliverAgentArtifacts = async (chatId, artifacts, suppliedTurnContext = null) => {
-  // Legacy callback retained for an embedding that has not moved to
-  // deliverTurn(). The T3ams runtime itself advertises deliverTurn, so this
-  // path never participates in a durable direct-agent ingress turn.
-  const turnContext = turnContextFor(chatId, suppliedTurnContext);
-  if (activeAgentArtifactDeliveries.has(turnContext.laneKey)) {
-    throw new Error("direct agent artifact delivery requires atomic deliverTurn");
-  }
-  for (const artifact of artifacts) {
-    await sendT3amsAttachment(chatId, {
-      filePath: artifact.filePath,
-      filename: artifact.filename,
-      size: artifact.size,
-      mime: mimeForT3amsFilename(artifact.filename),
-      text: `Generated file: ${artifact.filename}`,
-      turnContext,
-    });
-  }
 };
 // A crash can happen after copying a file but before its journal row reaches
 // disk. Reclaim those unreferenced directories on boot, and prune source bytes
@@ -1624,8 +1686,8 @@ const handleT3amsFileCommand = async (chatId, message, suppliedTurnContext = nul
 
 // ---------- live replies and typing ----------
 // T3ams ops are independently retained and the SPA buffers an edit which
-// arrives before its original message. Unlike the legacy session slot, an
-// explicit peer ACK is not required before we may edit the placeholder.
+// arrives before its original message. Unlike the default transport's session
+// slot, an explicit peer ACK is not required before we may edit the placeholder.
 const liveReplyTargets = new Map(); // laneKey -> immutable { chatId, threadRootId }
 const bindLiveReplyTarget = (supplied) => {
   const context = turnContextFor(supplied?.chatId, supplied);
@@ -1724,6 +1786,11 @@ const takeLivePlaceholder = async (chatId, supplied = null) => {
   disposeProgressTracker(context.laneKey);
   return placeholder;
 };
+const liveRevocation = createT3amsLiveRevocation({
+  disarm: (turnContext) => disarmThinking(turnContext.chatId, turnContext),
+  take: (turnContext) => takeLivePlaceholder(turnContext.chatId, turnContext),
+  log,
+});
 const peekLivePlaceholder = (chatId, supplied = null) => livePlaceholders.get(turnContextFor(chatId, supplied).laneKey) ?? null;
 const bestEffortTyping = (chatId, { guard = null } = {}) => {
   if (guard != null && !guard()) return;
@@ -1778,7 +1845,10 @@ const sendAgentReply = async (chatId, text, suppliedTurnContext = null) => {
   const turnContext = turnContextFor(chatId, suppliedTurnContext);
   disarmThinking(chatId, turnContext);
   const root = replyThreadFor(chatId, turnContext);
-  const sent = await protocol.sendText(chatId, text, { threadRootId: root });
+  const sent = await protocol.sendText(chatId, text, {
+    threadRootId: root,
+    guard: directIngressSubmissionGuard(chatId, turnContext),
+  });
   noteBotIssuedMessage(chatId, sent.messageId, createTurnContext(chatId, root));
   return sent;
 };
@@ -1800,9 +1870,12 @@ const deliverAgentReply = async (chatId, text, suppliedTurnContext = null) => {
 };
 const beginTurnProgress = (chatId, suppliedTurnContext = null) => {
   const turnContext = bindLiveReplyTarget(turnContextFor(chatId, suppliedTurnContext));
-  bestEffortTyping(chatId);
+  // Keep any placeholder, progress edit, and its eventual finalization bound
+  // to the same active ingress revision as the direct agent's final reply.
+  const guard = directIngressSubmissionGuard(chatId, turnContext);
+  bestEffortTyping(chatId, { guard });
   const tracker = progressTrackerFor(turnContext.laneKey);
-  armThinking(chatId, { turnContext });
+  armThinking(chatId, { guard, turnContext });
   if (!liveProgress) return null;
   const onAction = (title) => tracker.add(title);
   // Claude's stream-json deltas contain user-visible final prose, not hidden
@@ -1873,7 +1946,7 @@ const admitIngress = async (event, routed) => mutateIngress(async () => {
   if (ingress.length >= ingressCap) return { admitted: false, reason: "journal-full" };
   const entry = {
     id: randomUUID(),
-    kind: brain === "bridge" || brain === "hermes" ? "bridge" : "turn",
+    kind: brain === "bridge" ? "bridge" : "turn",
     routed,
     createdAt: Date.now(),
     attempts: 0,
@@ -1950,7 +2023,7 @@ const routeOneInbound = async (event, { historyOnly = false } = {}) => {
     attachmentError: event.attachmentError,
   }, { xid: selfXidHex, aliases: [username, displayName] });
   if (!routed.accepted || historyOnly) {
-    // Unmentioned group traffic remains passive. If the operator enabled the
+    // Unmentioned workspace-channel traffic remains passive. If the operator enabled the
     // bounded local context buffer, retain only ordinary text from the live
     // primary statement (never carrier priors or attachment capabilities).
     if (!historyOnly && routed.reason === "unmentioned-channel-message"
@@ -2025,9 +2098,7 @@ const routeInbound = async (event) => {
   await routeOneInbound(primary);
 };
 
-const rerouteEditedIngress = (routed, text) => {
-  const legacyMentionGate = routed.message.legacyMentionGate === true;
-  const rerouted = normalizeT3amsInbound({
+const rerouteEditedIngress = (routed, text) => normalizeT3amsInbound({
     conversationType: routed.message.conversationType,
     senderXid: routed.message.senderXid,
     senderName: routed.message.senderName,
@@ -2040,17 +2111,7 @@ const rerouteEditedIngress = (routed, text) => {
     attachments: routed.message.attachments ?? [],
     attachmentError: routed.message.attachmentError,
     channelContext: routed.message.channelContext ?? [],
-  }, { xid: selfXidHex, aliases: [username, displayName] }, {
-    // Old durable channel rows predate persisted structured mentions. They
-    // reached the queue only after an earlier process accepted them, so keep
-    // their existing routing eligibility through an edit rather than turning a
-    // rolling upgrade into a silent cancellation. New entries retain mentions
-    // and are still mention-gated normally.
-    requireMentionInChannels: !legacyMentionGate,
-  });
-  if (rerouted.accepted && legacyMentionGate) rerouted.message.legacyMentionGate = true;
-  return rerouted;
-};
+  }, { xid: selfXidHex, aliases: [username, displayName] });
 
 // Reconcile a retained edit/delete into work that has not finished yet. This
 // runs under the same journal mutation queue as admission/ACKs, so an edited
@@ -2076,12 +2137,22 @@ const reconcileQueuedIngressOperation = async (operation, lifecycle) => mutateIn
     stoppedSessionKeys.add(sessionKey);
     // Kill an already-started CLI process before waiting for the journal write
     // below. The outer reconciliation call repeats this harmlessly after a
-    // successful persistence boundary for compatibility with older embeds.
+  // successful persistence boundary.
     agentRuntime?.stop(entry.routed.conversationKey, sessionKey);
   };
   const removed = [];
   const invalidatedOutboxes = [];
   const revokedBridgeLanes = new Map();
+  const revokedDirectLanes = new Map();
+  const revokeDirectLiveTurn = (entry, status) => {
+    if (entry.kind !== "turn") return;
+    const turnContext = turnContextForRouted(entry.routed);
+    revokedDirectLanes.set(turnContext.laneKey, {
+      turnContext,
+      status,
+      event: "T3AMS_DIRECT_REVOKE_FINALIZE_FAILED",
+    });
+  };
   for (let index = ingress.length - 1; index >= 0; index -= 1) {
     const entry = ingress[index];
     const message = entry?.routed?.message;
@@ -2089,6 +2160,11 @@ const reconcileQueuedIngressOperation = async (operation, lifecycle) => mutateIn
         || message?.senderXid !== operation.senderXid || Number(entry.completedAt) > 0) continue;
     if (lifecycle.deleted) {
       noteStoppedTurn(entry);
+      revokeDirectLiveTurn(entry, "🗑️ Message deleted.");
+      if (entry.kind === "bridge" && entry.leaseId != null) {
+        const turnContext = turnContextForRouted(entry.routed);
+        revokedBridgeLanes.set(turnContext.laneKey, { turnContext, status: "🗑️ Message deleted." });
+      }
       ingress.splice(index, 1);
       removed.push(entry);
       changed = true;
@@ -2097,6 +2173,7 @@ const reconcileQueuedIngressOperation = async (operation, lifecycle) => mutateIn
     const rerouted = rerouteEditedIngress(entry.routed, lifecycle.text ?? "");
     if (!rerouted.accepted) {
       noteStoppedTurn(entry);
+      revokeDirectLiveTurn(entry, "✎ Message updated — no longer addressed to this bot.");
       ingress.splice(index, 1);
       removed.push(entry);
       changed = true;
@@ -2119,6 +2196,7 @@ const reconcileQueuedIngressOperation = async (operation, lifecycle) => mutateIn
     // handing old text/files to a command, engine, or echo response.
     entry.revision = (Number(entry.revision) || 0) + 1;
     entry.retryAt = 0;
+    revokeDirectLiveTurn(entry, "✎ Message updated — restarting.");
     // A bridge worker only owns a specific leased version of an inbound row.
     // Releasing the old lease forces a new poll of the edited prompt and, in
     // combination with claim-bound /send below, prevents an old worker from
@@ -2138,26 +2216,18 @@ const reconcileQueuedIngressOperation = async (operation, lifecycle) => mutateIn
     for (const entry of removed) protocol.unpinConversation(entry.routed.conversationKey);
     for (const entry of removed) removeAgentArtifactOutbox(entry.id);
     for (const id of invalidatedOutboxes) removeAgentArtifactOutbox(id);
-    for (const entry of removed) {
-      if (entry.kind === "bridge" && entry.leaseId != null) {
-        const turnContext = turnContextForRouted(entry.routed);
-        revokedBridgeLanes.set(turnContext.laneKey, { turnContext, status: "🗑️ Message deleted." });
-      }
-    }
-    for (const { turnContext, status } of revokedBridgeLanes.values()) {
-      const { chatId } = turnContext;
+    for (const { turnContext } of revokedBridgeLanes.values()) {
       bridgeReplyThreads.delete(turnContext.laneKey);
       cancelBridgePendingEdit(turnContext.laneKey);
-      disarmThinking(chatId, turnContext);
-      void takeLivePlaceholder(chatId, turnContext).then((placeholder) => {
-        if (placeholder == null) return;
-        // This status belongs to the transport after it durably revoked the
-        // worker's claim, not to that old worker. Explicitly bypass the
-        // placeholder's lease guard so the stale turn cannot leave a forever
-        // spinning message behind.
-        return placeholder.handle.finalize(status, { guard: null });
-      }).catch((error) => log("T3AMS_BRIDGE_REVOKE_FINALIZE_FAILED", { chatId, lane: turnContext.laneKey, error: String(error?.message ?? error) }));
     }
+    liveRevocation.queue([
+      ...[...revokedBridgeLanes.values()].map((entry) => ({
+        ...entry,
+        event: "T3AMS_BRIDGE_REVOKE_FINALIZE_FAILED",
+      })),
+      ...revokedDirectLanes.values(),
+    ]);
+    liveRevocation.flush();
     knownChats.trim();
     ingressDurable = true;
     wakeBridge();
@@ -2171,6 +2241,13 @@ const reconcileQueuedIngressOperation = async (operation, lifecycle) => mutateIn
       ...removed.map((entry) => entry.id),
       ...invalidatedOutboxes,
     );
+    liveRevocation.queue([
+      ...[...revokedBridgeLanes.values()].map((entry) => ({
+        ...entry,
+        event: "T3AMS_BRIDGE_REVOKE_FINALIZE_FAILED",
+      })),
+      ...revokedDirectLanes.values(),
+    ]);
     ingressDurable = false;
     scheduleIngressDurabilityRetry();
   }
@@ -2210,12 +2287,7 @@ const routeInboundOperation = async (operation) => {
     if (!saved) log("T3AMS_MESSAGE_LIFECYCLE_PERSIST_PENDING", { chatId: operation.chatId, messageId: operation.messageId });
   }
   if (reconciled.stopped && agentRuntime != null) {
-    // Older snapshots/embedders may not supply the newer session-key list;
-    // retain the base-chat fallback for that compatibility edge.
-    const sessionKeys = reconciled.stoppedSessionKeys?.length
-      ? reconciled.stoppedSessionKeys
-      : [operation.chatId];
-    for (const sessionKey of sessionKeys) agentRuntime.stop(operation.chatId, sessionKey);
+    for (const sessionKey of reconciled.stoppedSessionKeys) agentRuntime.stop(operation.chatId, sessionKey);
   }
   log("T3AMS_INBOUND_OPERATION_APPLIED", {
     kind: operation.kind,
@@ -2235,32 +2307,44 @@ const syncSubscriptions = ({ forceIds = new Set() } = {}) => {
       omitted += 1;
       return false;
     }
+    const installed = subscription(id, topic, callback, accepts, { force: forceIds.has(id) });
+    if (!installed.ok) {
+      omitted += 1;
+      return false;
+    }
     desired.add(id);
-    subscription(id, topic, callback, accepts, { force: forceIds.has(id) });
     return true;
   };
   // Some protocol features are only safe when their retained routes arrive as
   // a set. In particular a DM carrier without its edit/delete slot makes a
   // redaction race permanent, and a workspace discovery plane without its
   // notification route can strand membership/key updates. Admit a whole
-  // group or none of it instead of consuming the final slot mid-pair.
+  // route set or none of it instead of consuming the final slot mid-pair.
   const subscribeGroup = (routes) => {
-    const unique = [];
-    const seen = new Set();
-    for (const route of routes) {
-      if (route == null || typeof route.id !== "string" || seen.has(route.id)) continue;
-      seen.add(route.id);
-      if (!desired.has(route.id)) unique.push(route);
-    }
-    if (desired.size + unique.length > subscriptionCap) {
-      omitted += unique.length;
-      return false;
-    }
-    for (const route of routes) {
-      if (route == null || typeof route.id !== "string") continue;
-      subscribe(route.id, route.topic, route.callback, route.accepts);
-    }
-    return true;
+    const outcome = installT3amsSubscriptionRouteSet({
+      routes,
+      desired,
+      cap: subscriptionCap,
+      install: (route, callback) => subscription(
+        route.id,
+        route.topic,
+        callback,
+        route.accepts,
+        { force: forceIds.has(route.id), defer: true },
+      ),
+      isActive: (id) => subscriptions.has(id),
+      reconcile: scheduleSubscriptionReconcile,
+      flush: (stagedRoute, args) => {
+        Promise.resolve()
+          .then(() => stagedRoute.callback(...args))
+          .catch((error) => log("T3AMS_INGRESS_FAILED", {
+            id: stagedRoute.id,
+            error: String(error?.message ?? error),
+          }));
+      },
+    });
+    omitted += outcome.omitted;
+    return outcome.ok;
   };
   const inbox = bcts.derivePersonalInboxChannel(identity.xid);
   subscribe("inbox", inbox, async (data) => {
@@ -2506,8 +2590,8 @@ if (t3amsMediaAnalyzer.enabled) {
   });
 }
 // Durable files are deliberately distinct from the evictable media cache.
-// They are scoped to a T3ams conversation, allowing a group to intentionally
-// share a vault while preventing any cross-DM/channel lookup.
+// They are scoped to a T3ams conversation, allowing a workspace channel to
+// intentionally share a vault while preventing any cross-DM/channel lookup.
 const fileMaxBytes = numberEnv("BOT_FILE_MAX_BYTES", attachmentMaxBytes, { min: 1, max: attachmentMaxBytes });
 const fileMaxTotalMb = numberEnv(
   "BOT_FILE_MAX_TOTAL_MB",
@@ -2550,7 +2634,7 @@ if (!new Set(["0", "1"]).has(channelContextSetting)) {
   console.error("BOT_T3AMS_CHANNEL_CONTEXT must be 0 or 1");
   process.exit(2);
 }
-// Passive group context is intentionally opt-in and memory-only.  Unmentioned
+// Passive workspace-channel context is intentionally opt-in and memory-only. Unmentioned
 // channel traffic is never sent to a brain; it only becomes a small immutable
 // snapshot when someone explicitly invokes the bot in that same channel.
 const channelContext = createT3amsChannelContext({
@@ -2577,8 +2661,8 @@ messageLifecycle = createT3amsMessageLifecycle({
 });
 // Top-level channel prompts share the channel's native session; each thread
 // has its own derived session. Let ordinary members invoke the bot, but do not
-// let one member silently reset or reconfigure a group-visible channel/thread
-// session. `/stop` remains available to the group as a liveness lever.
+// let one member silently reset or reconfigure a channel-visible session.
+// `/stop` remains available to the workspace channel as a liveness lever.
 const channelControlRole = (env.BOT_T3AMS_CHANNEL_CONTROL_ROLE ?? "admin").trim().toLowerCase();
 if (!new Set(["all", "mod", "admin"]).has(channelControlRole)) {
   console.error("BOT_T3AMS_CHANNEL_CONTROL_ROLE must be all, mod, or admin");
@@ -2822,7 +2906,6 @@ if (engine != null) {
     chat: {
       sendText: sendAgentReply,
       deliver: deliverAgentReply,
-      deliverArtifacts: deliverAgentArtifacts,
       deliverTurn: deliverAgentTurn,
       beginTurn: beginTurnProgress,
     },
@@ -2840,7 +2923,7 @@ if (engine != null) {
     ? restored.agentIntroduced.slice(-(knownChatCap + ingressCap))
     : []);
   // A current snapshot contains at most the bounded known-chat index plus
-  // its bounded durable ingress overflow. Cap legacy/corrupt state too.
+// its bounded durable ingress overflow. Cap corrupt state too.
   const restoredAgentPeers = Array.isArray(restored?.agentPeers)
     ? restored.agentPeers.slice(-(knownChatCap + ingressCap))
     : [];
@@ -2861,7 +2944,23 @@ const runningIngress = new Set();
 // request is only one cancellation point: /stop or an authenticated
 // edit/delete must also fence the tiny gap between a completed media request
 // and a later CLI dispatch.
-const activeIngressTurns = new Map(); // ingress id -> { controller, chatId, sessionKey }
+const activeIngressTurns = new Map(); // ingress id -> { controller, chatId, sessionKey, revision }
+// Direct-agent callbacks retain an immutable delivery lane but not the
+// ingress ID. Resolve that active row and bind its outbound text/artifacts to
+// the exact journal revision. The protocol invokes this guard immediately
+// before the serialized submitter writes to the network.
+const directIngressSubmissionGuard = (chatId, suppliedTurnContext = null) => {
+  const turnContext = turnContextFor(chatId, suppliedTurnContext);
+  const artifact = activeAgentArtifactDeliveries.get(turnContext.laneKey);
+  if (artifact?.turnContext?.chatId === chatId) {
+    return () => ingressEntryCurrent(artifact.id, artifact.revision);
+  }
+  for (const [entryId, active] of activeIngressTurns) {
+    if (active.chatId !== chatId || active.sessionKey !== turnContext.laneKey) continue;
+    return () => !active.controller.signal.aborted && ingressEntryCurrent(entryId, active.revision);
+  }
+  return null;
+};
 const abortIngressTurn = (entryId, reason = "ingress turn cancelled") => {
   const active = activeIngressTurns.get(entryId);
   if (active == null) return false;
@@ -3094,6 +3193,7 @@ const executeIngressTurn = async (entry, expectedRevision) => {
     controller: turnController,
     chatId: routed.conversationKey,
     sessionKey: message.sessionKey,
+    revision: expectedRevision,
   });
   const turnCurrent = () => !turnController.signal.aborted && ingressEntryCurrent(entry.id, expectedRevision);
   const hadPrevious = activeReplyThreads.has(turnContext.laneKey);
@@ -3429,7 +3529,7 @@ const finalizeBridgeEdits = async (claims) => {
     if (placeholder != null && bareHex(placeholder.handle.messageId) !== bareHex(edit.messageId)) {
       // The framework chose to stream an earlier bot message rather than the
       // current placeholder. Retire the placeholder so it never dangles.
-      // This is transport cleanup for a mismatched older placeholder, not a
+      // This is transport cleanup for a mismatched prior placeholder, not a
       // frame authored by the current/old bridge worker. Its original lease
       // may already be stale after a re-lease, so it must not retain that
       // default guard and leave the bubble dangling.
@@ -3555,7 +3655,7 @@ const authorized = (request) => {
 };
 // This is intentionally *not* an alternative Authorization header: an
 // operator must grant both normal bridge access and this narrowly-scoped
-// proactive-send capability. It is only consulted when a bridge/hermes
+// proactive-send capability. It is only consulted when a bridge
 // request has no delivery lease at all.
 const proactiveAuthorized = (request) => bridgeProactiveToken.length > 0
   && tokenMatches(requestHeader(request, "x-bridge-proactive-token"), bridgeProactiveToken);
@@ -3572,7 +3672,7 @@ const validateBridgeOutboundClaim = (body, chatId, request) => {
   if (hasDelivery !== hasLease || (hasDelivery && (typeof deliveryId !== "string" || typeof leaseId !== "string"))) {
     return { valid: false, status: 400, error: "delivery_id and lease_id must be provided together" };
   }
-  const claimRequired = brain === "bridge" || brain === "hermes";
+  const claimRequired = brain === "bridge";
   if (!claimRequired && !hasDelivery) return { valid: true };
   // A proactive capability only authorizes a request which did not claim a
   // delivery. A stale/malformed claim must never silently downgrade to this
@@ -3622,7 +3722,7 @@ const bridge = http.createServer(async (request, response) => {
         } : {}),
         bridge: {
           queued: bridgeQueued(),
-          claimBoundSends: brain === "bridge" || brain === "hermes",
+          claimBoundSends: brain === "bridge",
           proactiveOutbound: bridgeProactiveToken.length > 0,
         },
         media: {
@@ -4064,6 +4164,7 @@ const shutdown = async (code = 0) => {
   if (ingressDurabilityRetryTimer != null) clearTimeout(ingressDurabilityRetryTimer);
   if (ingressPumpTimer != null) clearTimeout(ingressPumpTimer);
   if (ingressReplayTimer != null) clearTimeout(ingressReplayTimer);
+  if (subscriptionReconcileTimer != null) clearTimeout(subscriptionReconcileTimer);
   clearInterval(subscriptionRefreshTimer);
   clearInterval(mediaSweepTimer);
   for (const timer of inboundRetryTimers.values()) clearTimeout(timer);

@@ -19,8 +19,26 @@ const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES = 32 * 1024 * 1024;
 const MAX_OUTBOUND_MEDIA_PER_REPLY = 4;
 const DISPATCH_SHUTDOWN_WAIT_MS = 30_000;
+const T3AMS_THREAD_ROOT_RE = /^[0-9a-f]{64}$/i;
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+// bot-core leases and serializes each T3ams thread independently. Resolve
+// OpenClaw's route on the base conversation, then scope memory and dispatch
+// ordering to the thread so unrelated threads never block or share context.
+export const normalizeT3amsThreadRootId = (value: unknown): string | null => {
+  if (typeof value !== "string") return null;
+  const root = value.trim().replace(/^0x/i, "");
+  return T3AMS_THREAD_ROOT_RE.test(root) ? root.toLowerCase() : null;
+};
+
+export const t3amsThreadSessionKey = (routeSessionKey: string, threadRootId?: unknown): string => {
+  const root = normalizeT3amsThreadRootId(threadRootId);
+  return root == null ? routeSessionKey : `${routeSessionKey}:thread:${root}`;
+};
+
+export const t3amsDispatchKey = (chatId: unknown, threadRootId?: unknown): string =>
+  JSON.stringify(["polkadot", String(chatId || "invalid"), normalizeT3amsThreadRootId(threadRootId)]);
 
 type DispatchHandle = { done: Promise<void> };
 type QueuedDispatch = { run: () => Promise<void>; resolve: () => void; reject: (error: unknown) => void };
@@ -250,25 +268,35 @@ const cleanupAttachments = async ({ tempDir }: MaterializedAttachments): Promise
   await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
 };
 
-// OpenClaw ReplyPayload carries outgoing artifacts as mediaUrl/mediaUrls (with
-// mediaPath/mediaPaths accepted for older dispatchers). The bridge purposefully
-// does not accept those host paths directly: copy each regular local file into
-// the authenticated, conversation-scoped vault first, then reference only that
-// vault path from /send. Remote URLs are intentionally not fetched here; doing
-// so would turn a model-generated reply into an SSRF capability inside the
-// private bridge network.
+// OpenClaw ReplyPayload carries outgoing artifacts as mediaUrl/mediaUrls. The
+// bridge purposefully does not accept those host paths directly: copy each
+// regular local file into the authenticated, conversation-scoped vault first,
+// then reference only that vault path from /send. Remote URLs are intentionally
+// not fetched here; doing so would turn a model-generated reply into an SSRF
+// capability inside the private bridge network.
 type OutboundReplyPayload = {
   text?: unknown;
+  // OpenClaw uses this for hidden chain-of-thought payloads. Never turn it
+  // into a visible progress frame or a normal chat reply.
+  isReasoning?: unknown;
+  // A framework may already own a preview message. Carry that immutable edit
+  // target through the T3ams bridge.
+  editOf?: unknown;
   mediaUrl?: unknown;
   mediaUrls?: unknown;
-  // Older OpenClaw dispatchers used the context-style spelling. Accept it as
-  // a local-file alias so plugin upgrades do not silently drop artifacts.
-  mediaPath?: unknown;
-  mediaPaths?: unknown;
   mediaType?: unknown;
   mimeType?: unknown;
   mediaMimeType?: unknown;
   contentType?: unknown;
+};
+
+const outboundEditOf = (payload: OutboundReplyPayload): string | null => {
+  if (!Object.prototype.hasOwnProperty.call(payload, "editOf")) return null;
+  const value = payload.editOf;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error("polkadot live edit requires a non-empty editOf message id");
+  }
+  return value.trim();
 };
 
 type PreparedOutboundMedia = {
@@ -318,9 +346,7 @@ const mimeForOutboundMedia = (payload: OutboundReplyPayload, sourcePath: string)
 const mediaReferences = (payload: OutboundReplyPayload): string[] => {
   const listed = Array.isArray(payload.mediaUrls) && payload.mediaUrls.length > 0
     ? payload.mediaUrls
-    : Array.isArray(payload.mediaPaths) && payload.mediaPaths.length > 0
-      ? payload.mediaPaths
-      : null;
+    : null;
   if (listed != null) {
     if (listed.some((value) => typeof value !== "string" || !value.trim())) {
       throw new Error("polkadot reply contains an invalid mediaUrls entry");
@@ -331,8 +357,216 @@ const mediaReferences = (payload: OutboundReplyPayload): string[] => {
     return listed.map((value) => value.trim());
   }
   if (typeof payload.mediaUrl === "string" && payload.mediaUrl.trim()) return [payload.mediaUrl.trim()];
-  if (typeof payload.mediaPath === "string" && payload.mediaPath.trim()) return [payload.mediaPath.trim()];
   return [];
+};
+
+// OpenClaw's buffered dispatcher calls a channel delivery function for tool,
+// block, and final payloads. Keep the live state local to one leased inbound
+// turn: the first accepted status message becomes the only editable bubble,
+// while the final answer retains a normal-send fallback.
+type OutboundDeliveryInfo = { kind?: unknown };
+type T3amsLiveReply = {
+  typing: () => Promise<boolean>;
+  update: (payload: OutboundReplyPayload, info?: OutboundDeliveryInfo) => Promise<boolean>;
+  deliverFinal: (payload: OutboundReplyPayload) => Promise<boolean>;
+  // Buffered dispatchers may deliberately absorb delivery errors for progress
+  // frames. Surface a terminal failure after they settle so the leased message
+  // is not ACKed before an answer has actually landed.
+  assertTerminalDelivery: () => void;
+};
+
+const MAX_LIVE_UPDATE_CODE_POINTS = 4_096;
+
+const outboundText = (payload: OutboundReplyPayload): string => {
+  if (payload.isReasoning === true || typeof payload.text !== "string") return "";
+  return payload.text.trim();
+};
+
+const visibleLiveText = (payload: OutboundReplyPayload): string => {
+  const text = outboundText(payload);
+  if (!text) return "";
+  const codePoints = Array.from(text);
+  return codePoints.length <= MAX_LIVE_UPDATE_CODE_POINTS
+    ? text
+    : `${codePoints.slice(0, MAX_LIVE_UPDATE_CODE_POINTS).join("")}…`;
+};
+
+const isIntermediateDelivery = (info: OutboundDeliveryInfo | undefined): boolean =>
+  typeof info?.kind === "string" && info.kind !== "final";
+
+const liveTextForDelivery = (
+  payload: OutboundReplyPayload,
+  info: OutboundDeliveryInfo | undefined,
+): string => {
+  if (payload.isReasoning === true) return "";
+  // Tool frames may contain arguments, output, or provider detail. Keep the
+  // transcript useful without exposing raw tool payloads.
+  if (info?.kind === "tool") return "Working with a tool…";
+  // Block payloads are response prose; unknown intermediate kinds remain
+  // conservative until their display semantics are defined.
+  return info?.kind === "block" ? visibleLiveText(payload) : "Working…";
+};
+
+export const createT3amsLiveReply = ({
+  bridge,
+  account,
+  chatId,
+  replyTo,
+  threadRootId,
+  deliveryId,
+  leaseId,
+  log,
+}: {
+  bridge: BridgeClient;
+  account: ResolvedPolkadotAccount;
+  chatId: string;
+  replyTo: string;
+  threadRootId?: string;
+  deliveryId?: string;
+  leaseId?: string;
+  log?: (message: string) => void;
+}): T3amsLiveReply => {
+  let liveMessageId: string | undefined;
+  let liveEditsUnavailable = false;
+  let terminal = false;
+  let terminalFailure: unknown = null;
+  let typingRequest: Promise<boolean> | null = null;
+  let liveCapability: "unknown" | "supported" | "unavailable" = "unknown";
+  let queued: Promise<void> = Promise.resolve();
+
+  const enqueue = <T>(operation: () => Promise<T>): Promise<T> => {
+    const result = queued.then(operation, operation);
+    // A failed best-effort progress frame must not block terminal delivery.
+    queued = result.then(() => undefined, () => undefined);
+    return result;
+  };
+
+  const typing = async (): Promise<boolean> => {
+    if (liveCapability === "unavailable" || typeof bridge.typing !== "function") return false;
+    if (typingRequest != null) return typingRequest;
+    typingRequest = bridge.typing(chatId, { deliveryId, leaseId }).then(() => {
+      liveCapability = "supported";
+      return true;
+    }).catch((error) => {
+      // The first response is a capability probe. If it is unsupported, keep
+      // intermediate output hidden and still send a normal final response.
+      if (liveCapability === "unknown") liveCapability = "unavailable";
+      log?.(`polkadot typing update unavailable: ${String(error)}`);
+      return false;
+    }).finally(() => { typingRequest = null; });
+    return typingRequest;
+  };
+
+  const publishLiveText = async (text: string): Promise<boolean> => {
+    const result = liveMessageId == null
+      ? await bridge.send(chatId, text, { replyTo, threadRootId, deliveryId, leaseId })
+      : await bridge.send(chatId, text, { editOf: liveMessageId, threadRootId, deliveryId, leaseId });
+    if (!result.success) {
+      // A definitive bridge response means a later final answer must use the
+      // normal delivery path rather than rely on another edit.
+      liveEditsUnavailable = true;
+      log?.(`polkadot live reply unavailable: ${String(result.error ?? "unknown bridge error")}`);
+      return false;
+    }
+    if (liveMessageId == null) {
+      const messageId = typeof result.message_id === "string" ? result.message_id.trim() : "";
+      if (!messageId) {
+        liveEditsUnavailable = true;
+        log?.("polkadot live reply did not return a message id");
+        return false;
+      }
+      liveMessageId = messageId;
+    }
+    return true;
+  };
+
+  const deliverNormally = async (payload: OutboundReplyPayload): Promise<boolean> =>
+    await deliverOutboundReply({
+      bridge,
+      account,
+      chatId,
+      replyTo,
+      threadRootId,
+      deliveryId,
+      leaseId,
+      payload,
+    });
+
+  return {
+    typing,
+
+    update: async (payload, info) => {
+      // Preserve an explicit framework-owned preview target. Only a visible
+      // block can carry one; raw tool payloads must never select an edit target.
+      const explicitEditOf = info?.kind === "block" ? outboundEditOf(payload) : null;
+      if (explicitEditOf != null) {
+        void typing();
+        return enqueue(async () => {
+          if (terminal) return false;
+          try {
+            const visibleReplySent = await deliverNormally(payload);
+            if (visibleReplySent) liveMessageId = explicitEditOf;
+            return visibleReplySent;
+          } catch (error) {
+            log?.(`polkadot explicit live reply update failed: ${String(error)}`);
+            return false;
+          }
+        });
+      }
+      const text = liveTextForDelivery(payload, info);
+      if (!text || terminal) return false;
+      void typing();
+      return enqueue(async () => {
+        if (terminal || liveEditsUnavailable) return false;
+        if (liveMessageId == null && !(await typing())) return false;
+        try {
+          return await publishLiveText(text);
+        } catch (error) {
+          // A thrown request is ambiguous. Keep final delivery retryable.
+          log?.(`polkadot live reply update failed: ${String(error)}`);
+          return false;
+        }
+      });
+    },
+
+    deliverFinal: async (payload) => await enqueue(async () => {
+      if (terminal || payload.isReasoning === true) return false;
+      terminal = true;
+      try {
+        if (outboundEditOf(payload) != null) return await deliverNormally(payload);
+
+        const text = outboundText(payload);
+        const hasMedia = mediaReferences(payload).length > 0;
+        if (
+          liveMessageId != null
+          && !liveEditsUnavailable
+          && !hasMedia
+          && text
+          && Array.from(text).length <= MAX_LIVE_UPDATE_CODE_POINTS
+        ) {
+          const result = await bridge.send(chatId, text, {
+            editOf: liveMessageId,
+            threadRootId,
+            deliveryId,
+            leaseId,
+          });
+          if (result.success) return true;
+          // A non-success response proves the edit was not accepted. Fall
+          // back to one ordinary final response.
+          liveEditsUnavailable = true;
+          log?.(`polkadot final live edit unavailable: ${String(result.error ?? "unknown bridge error")}`);
+        }
+        return await deliverNormally(payload);
+      } catch (error) {
+        terminalFailure = error;
+        throw error;
+      }
+    }),
+
+    assertTerminalDelivery: () => {
+      if (terminalFailure != null) throw terminalFailure;
+    },
+  };
 };
 
 const localMediaPath = (reference: string): string => {
@@ -415,7 +649,7 @@ const readPreparedMedia = async (media: PreparedOutboundMedia, maxBytes: number)
   }
 };
 
-const deliverOutboundReply = async ({
+export const deliverOutboundReply = async ({
   bridge,
   account,
   chatId,
@@ -435,6 +669,18 @@ const deliverOutboundReply = async ({
   payload: OutboundReplyPayload;
 }): Promise<boolean> => {
   const text = String(payload.text ?? "").trim();
+  const editOf = outboundEditOf(payload);
+
+  if (editOf != null) {
+    if (!text) throw new Error("polkadot live edit requires non-empty text");
+    if (mediaReferences(payload).length > 0) throw new Error("polkadot live edit cannot include outbound media");
+    // Do not add replyTo: bot-core correctly rejects a reply target paired
+    // with an edit, and the active delivery lease already binds this edit to
+    // its thread lane.
+    const result = await bridge.send(chatId, text, { editOf, threadRootId, deliveryId, leaseId });
+    if (!result.success) throw new Error(`polkadot /send edit failed: ${result.error ?? "unknown"}`);
+    return true;
+  }
   const media = await prepareOutboundMedia(payload, account.outboundFileMaxBytes);
 
   // Preserve the exact text-only behavior used before file delivery existed.
@@ -498,7 +744,10 @@ export async function startPolkadotGatewayAccount(ctx: any): Promise<void> {
       }
       for (const msg of batch) {
         if (ctx.abortSignal?.aborted) break;
-        const chatKey = String(msg.chat_id || "invalid");
+        // Align OpenClaw dispatch lanes with bot-core's per-thread leases.
+        // A slow turn in one workspace-channel thread must not mix with or
+        // serialize an unrelated thread in the same conversation.
+        const chatKey = t3amsDispatchKey(msg.chat_id, msg.thread_root_id);
         const { done } = await dispatcher.submit(
           chatKey,
           () => processDelivery(ctx, channelRuntime, account, bridge, msg, dispatcher.signal),
@@ -588,7 +837,7 @@ async function acknowledgeWithRetry(bridge: BridgeClient, deliveryId: string, le
   throw lastError ?? new Error("inbound acknowledgement failed");
 }
 
-async function dispatchInbound(
+export async function dispatchInbound(
   ctx: any,
   channelRuntime: any,
   account: ResolvedPolkadotAccount,
@@ -609,7 +858,21 @@ async function dispatchInbound(
       accountId: account.accountId,
       peer: { kind: "direct", id: chatId },
     });
+    const routeSessionKey = t3amsThreadSessionKey(route.sessionKey, threadRootId);
     const storePath = channelRuntime.session.resolveStorePath(ctx.cfg.session?.store, { agentId: route.agentId });
+    const liveReply = createT3amsLiveReply({
+      bridge,
+      account,
+      chatId,
+      replyTo: msg.message_id,
+      threadRootId,
+      deliveryId: msg.delivery_id,
+      leaseId: msg.lease_id,
+      log: (message) => ctx.log?.warn?.(message),
+    });
+    // Keep the operation visible when OpenClaw begins work before it emits its
+    // first buffered callback. The capability probe is strictly best-effort.
+    void liveReply.typing();
 
     await channelRuntime.inbound.run({
       channel: POLKADOT_CHANNEL_ID,
@@ -638,8 +901,8 @@ async function dispatchInbound(
             route: {
               agentId: route.agentId,
               accountId: account.accountId,
-              routeSessionKey: route.sessionKey,
-              dispatchSessionKey: route.sessionKey,
+              routeSessionKey,
+              dispatchSessionKey: routeSessionKey,
             },
             reply: { to: `polkadot:${chatId}`, replyToId: input.id },
             message: { rawBody: input.rawText, bodyForAgent: input.textForAgent, commandBody: input.textForCommands },
@@ -649,25 +912,21 @@ async function dispatchInbound(
             channel: POLKADOT_CHANNEL_ID,
             accountId: account.accountId,
             agentId: route.agentId,
-            routeSessionKey: route.sessionKey,
+            routeSessionKey,
             storePath,
             ctxPayload,
             recordInboundSession: channelRuntime.session.recordInboundSession,
             dispatchReplyWithBufferedBlockDispatcher: channelRuntime.reply.dispatchReplyWithBufferedBlockDispatcher,
-            // The single seam where the agent's generated reply reaches the bridge.
+            // Buffered delivery emits tool, block, and final payloads. Keep
+            // progress in one leased bridge-owned bubble, then edit it in
+            // place for the terminal response when the operation plane permits.
             delivery: {
-              deliver: async (payload: any) => {
+              deliver: async (payload: any, info?: OutboundDeliveryInfo) => {
                 if (signal.aborted) throw new Error("polkadot dispatcher stopped");
-                const visibleReplySent = await deliverOutboundReply({
-                  bridge,
-                  account,
-                  chatId,
-                  replyTo: msg.message_id,
-                  threadRootId,
-                  deliveryId: msg.delivery_id,
-                  leaseId: msg.lease_id,
-                  payload: (payload ?? {}) as OutboundReplyPayload,
-                });
+                const outbound = (payload ?? {}) as OutboundReplyPayload;
+                const visibleReplySent = isIntermediateDelivery(info)
+                  ? await liveReply.update(outbound, info)
+                  : await liveReply.deliverFinal(outbound);
                 return { visibleReplySent };
               },
               onError: (error: unknown) => ctx.log?.warn?.(`polkadot deliver failed: ${String(error)}`),
@@ -677,6 +936,10 @@ async function dispatchInbound(
         },
       },
     });
+    // OpenClaw's buffered dispatcher may catch delivery errors so one failed
+    // progress frame does not abort its stream. A failed final is different:
+    // leave the lease unacknowledged for a safe redelivery.
+    liveReply.assertTerminalDelivery();
   } finally {
     await cleanupAttachments(materialized);
   }

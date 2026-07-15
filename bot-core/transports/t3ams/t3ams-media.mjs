@@ -239,6 +239,7 @@ export const createT3amsMedia = ({
       size: stat.size,
       filename: safeName,
       ...(width == null ? {} : { width, height }),
+      ...(durationMs == null ? {} : { durationMs }),
     }, attachmentOptions);
     const ref = {
       id: bcts.generateARID(),

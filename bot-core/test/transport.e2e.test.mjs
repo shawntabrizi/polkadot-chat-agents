@@ -144,6 +144,40 @@ const attachSpecOf = (file, bytes, mime = "image/jpeg") => JSON.stringify({
 // concurrently. 8 keeps the process count (bot + client per test) tame.
 describe("transport e2e", { concurrency: 8 }, () => {
 
+  test("public built-in direct brains start without an allowlist", async () => {
+    const node = await startMockStatementNode();
+    const bots = [];
+    const stateDirs = [];
+    try {
+      for (const brain of ["codex", "opencode"]) {
+        const stateDir = tmpState();
+        stateDirs.push(stateDir);
+        const bot = await startBot({
+          endpoint: node.url,
+          stateDir,
+          extraEnv: {
+            BOT_SUBSCRIBE: "0",
+            BOT_BRAIN: brain,
+            BOT_ALLOWED_PEERS: "",
+            BOT_AI_CMD: "",
+            BOT_AI_ARGS: "",
+            BOT_AI_ALLOWED_MODELS: "",
+            BOT_AI_MODEL_SWITCHING: "locked",
+            BOT_AI_TOOL_CAPABILITIES: "",
+            BOT_AI_TOOL_SCOPE: "workspace",
+            BOT_AI_TOOL_NETWORK: "none",
+          },
+        });
+        bots.push(bot);
+        assert.ok(bot.bridgePort > 0, `${brain} public direct bot did not start its bridge`);
+      }
+    } finally {
+      await Promise.all(bots.map((bot) => bot.stop()));
+      await node.close();
+      for (const stateDir of stateDirs) fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
   // The transport matrix runs the same scenarios in both ingress modes.
   for (const [mode, extraEnv] of [
     ["poll", { BOT_SUBSCRIBE: "0" }],

@@ -13,17 +13,18 @@ T3ams is a first-class chat transport for the same direct brains and bridge
 frameworks. People discover the bot by its registered DotNS username, DM it,
 or invite it into a workspace/channel. The bot uses the normal T3ams encryption
 and membership flows; it does not bypass a private channel's key grants.
+It supports DMs and workspace channels, including threads, live replies, media,
+and files. Native ad-hoc T3ams groups are not supported yet.
 
-Use `--transport t3ams` when you create the bot. Existing bots remain on the
-default Polkadot-app transport unless they are created with that option.
+Use `--transport t3ams` when you create the bot. Every current bot config
+records its chosen transport explicitly.
 
 ## Create a bot
 
 The T3ams runner requires the local `@t3ams/bcts` SDK package in the
-`bot-core` checkout used for the run or deployment. `pca create` checks for it
-and refuses to make a T3ams bot when it is absent. Install the package supplied
-by the T3ams project into `bot-core` before creating or deploying the bot; see
-[T3ams transport setup](/reference/configuration#t3ams-transport-setup).
+`bot-core` checkout used for the run or deployment. Install the package
+supplied by the T3ams project into `bot-core` before running or deploying the
+bot; see [T3ams transport setup](/reference/configuration#t3ams-transport-setup).
 
 A private bot needs a verified T3ams signing public-key pin for every allowed
 person. Obtain that tagged-CBOR key out of band, then create the bot:
@@ -63,7 +64,7 @@ authenticated text without making the bot listen or reply to every room message.
 For a slow direct-brain turn, the bot emits a native typing signal and then a
 thinking message. Tool/activity progress edits that same message in place, and
 the final answer replaces it; a long answer continues in ordered follow-up
-messages. This gives the group one evolving reply instead of an orphaned
+messages. This gives the conversation one evolving reply instead of an orphaned
 thinking bubble followed by a separate answer.
 
 Bridge frameworks receive the same lifecycle. They can use `POST /send` with
@@ -72,7 +73,7 @@ reactions, and `POST /typing` for a native typing signal. The authenticated
 bridge's `GET /health.live` describes the current support. See
 [Agent frameworks](/guide/harnesses#t3ams-bridge-behavior).
 
-For `BOT_BRAIN=bridge` or `hermes`, a framework also includes the leased
+For `BOT_BRAIN=bridge`, a framework also includes the leased
 `delivery_id` and `lease_id` on each outbound `POST /send`, `POST /react`, and
 `POST /typing`. Editing or deleting a prompt revokes that claim, so a stale
 worker cannot publish an answer or live activity for old text.
@@ -154,4 +155,4 @@ full flow.
   can observe active and queued work plus the configured caps.
 
 The [configuration reference](/reference/configuration#t3ams-media-and-file-vault)
-lists the transport-specific limits, cache controls, and group settings.
+lists the transport-specific limits, cache controls, and channel settings.

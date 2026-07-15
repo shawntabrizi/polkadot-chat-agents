@@ -1,6 +1,6 @@
 // Thin HTTP client for the bot-core bridge (the Polkadot transport daemon).
 // Contract: authenticated GET /health, leased GET /inbound?wait=<secs>,
-// POST /inbound/ack, POST /send {chat_id,text?,file_path?,reply_to?,thread_root_id?,delivery_id?,lease_id?},
+// POST /inbound/ack, POST /send {chat_id,text?,file_path?,reply_to?,edit_of?,thread_root_id?,delivery_id?,lease_id?},
 // GET/PUT/DELETE /files/:chat/:path (peer-scoped artifact vault), and GET
 // /media/:id (authenticated attachment retrieval, cached or on-demand).
 
@@ -15,6 +15,7 @@ export type InboundAttachment = {
   width?: number;
   height?: number;
   duration_ms?: number;
+  peaks?: number[];
   downloaded: boolean;
   url?: string;
   error?: string;
@@ -36,7 +37,7 @@ export type InboundMsg = {
   // present for non-plain-text kinds: "richText" | "reply" | "edited"
   kind?: string;
   reply_to?: string;
-  // T3ams carries this for a threaded prompt. It is optional on the legacy
+  // T3ams carries this for a threaded prompt. It is optional on the
   // Polkadot-app transport and safe for adapters to forward unchanged.
   thread_root_id?: string;
   conversation_type?: "dm" | "channel";
@@ -61,11 +62,22 @@ export type ProactiveRequestOptions = {
   // gateway replies continue to send their delivery/lease pair instead.
   proactive?: boolean;
 };
+export type BridgeLeaseOptions = {
+  // Bind a bridge activity signal to the currently leased inbound delivery.
+  // T3ams requires the pair for worker activity; non-leased calls omit both.
+  deliveryId?: string;
+  leaseId?: string;
+};
+export type BridgeActivityOptions = BridgeLeaseOptions & ProactiveRequestOptions;
 export type SendOptions = {
   replyTo?: string;
+  // Replace a prior bot-issued text message. The bridge rejects an edit paired
+  // with a reply target or a file, but exposing the field lets a framework
+  // forward live frames without hand-rolling requests.
+  editOf?: string;
   threadRootId?: string | null;
   // Bind a reply to the currently leased inbound delivery. Both values are
-  // omitted for non-leased/legacy sends; the bridge validates an active pair.
+  // omitted for non-leased sends; the bridge validates an active pair.
   deliveryId?: string;
   leaseId?: string;
   // A vault-relative path previously written with putFile for this exact chat.
@@ -158,11 +170,18 @@ export function createBridge(baseUrl: string, token: string, proactiveToken = ""
     },
 
     send: async (chatId: string, text: string, options: SendOptions = {}): Promise<SendResult> => {
+      if (typeof options.editOf === "string" && typeof options.replyTo === "string") {
+        throw new Error("polkadot bridge edits cannot include replyTo");
+      }
+      if (typeof options.editOf === "string" && typeof options.filePath === "string") {
+        throw new Error("polkadot bridge edits cannot include filePath");
+      }
       const body = {
         chat_id: chatId,
         text,
         ...(typeof options.filePath === "string" ? { file_path: options.filePath } : {}),
         ...(typeof options.replyTo === "string" ? { reply_to: options.replyTo } : {}),
+        ...(typeof options.editOf === "string" ? { edit_of: options.editOf } : {}),
         ...(typeof options.threadRootId === "string" ? { thread_root_id: options.threadRootId } : {}),
         ...(typeof options.deliveryId === "string" ? { delivery_id: options.deliveryId } : {}),
         ...(typeof options.leaseId === "string" ? { lease_id: options.leaseId } : {}),
@@ -210,21 +229,32 @@ export function createBridge(baseUrl: string, token: string, proactiveToken = ""
       messageId: string,
       emoji: string,
       remove = false,
-      options: ProactiveRequestOptions = {},
+      options: BridgeActivityOptions = {},
     ): Promise<void> => {
       const res = await fetch(`${base}/react`, {
         method: "POST",
         headers: { ...headers, ...proactiveHeaders(options.proactive === true), "content-type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId, message_id: messageId, emoji, remove }),
+        body: JSON.stringify({
+          chat_id: chatId,
+          message_id: messageId,
+          emoji,
+          remove,
+          ...(typeof options.deliveryId === "string" ? { delivery_id: options.deliveryId } : {}),
+          ...(typeof options.leaseId === "string" ? { lease_id: options.leaseId } : {}),
+        }),
       });
       await requireSuccess(res, "reaction");
     },
 
-    typing: async (chatId: string, options: ProactiveRequestOptions = {}): Promise<void> => {
+    typing: async (chatId: string, options: BridgeActivityOptions = {}): Promise<void> => {
       const res = await fetch(`${base}/typing`, {
         method: "POST",
         headers: { ...headers, ...proactiveHeaders(options.proactive === true), "content-type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId }),
+        body: JSON.stringify({
+          chat_id: chatId,
+          ...(typeof options.deliveryId === "string" ? { delivery_id: options.deliveryId } : {}),
+          ...(typeof options.leaseId === "string" ? { lease_id: options.leaseId } : {}),
+        }),
       });
       await requireSuccess(res, "typing");
     },

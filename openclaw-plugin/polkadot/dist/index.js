@@ -124,11 +124,18 @@ function createBridge(baseUrl, token, proactiveToken = "") {
       if (data.renewed !== 1) throw new Error("inbound lease renewal lost its lease");
     },
     send: async (chatId, text, options = {}) => {
+      if (typeof options.editOf === "string" && typeof options.replyTo === "string") {
+        throw new Error("polkadot bridge edits cannot include replyTo");
+      }
+      if (typeof options.editOf === "string" && typeof options.filePath === "string") {
+        throw new Error("polkadot bridge edits cannot include filePath");
+      }
       const body = {
         chat_id: chatId,
         text,
         ...typeof options.filePath === "string" ? { file_path: options.filePath } : {},
         ...typeof options.replyTo === "string" ? { reply_to: options.replyTo } : {},
+        ...typeof options.editOf === "string" ? { edit_of: options.editOf } : {},
         ...typeof options.threadRootId === "string" ? { thread_root_id: options.threadRootId } : {},
         ...typeof options.deliveryId === "string" ? { delivery_id: options.deliveryId } : {},
         ...typeof options.leaseId === "string" ? { lease_id: options.leaseId } : {}
@@ -166,7 +173,14 @@ function createBridge(baseUrl, token, proactiveToken = "") {
       const res = await fetch(`${base}/react`, {
         method: "POST",
         headers: { ...headers, ...proactiveHeaders(options.proactive === true), "content-type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId, message_id: messageId, emoji, remove })
+        body: JSON.stringify({
+          chat_id: chatId,
+          message_id: messageId,
+          emoji,
+          remove,
+          ...typeof options.deliveryId === "string" ? { delivery_id: options.deliveryId } : {},
+          ...typeof options.leaseId === "string" ? { lease_id: options.leaseId } : {}
+        })
       });
       await requireSuccess(res, "reaction");
     },
@@ -174,7 +188,11 @@ function createBridge(baseUrl, token, proactiveToken = "") {
       const res = await fetch(`${base}/typing`, {
         method: "POST",
         headers: { ...headers, ...proactiveHeaders(options.proactive === true), "content-type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId })
+        body: JSON.stringify({
+          chat_id: chatId,
+          ...typeof options.deliveryId === "string" ? { delivery_id: options.deliveryId } : {},
+          ...typeof options.leaseId === "string" ? { lease_id: options.leaseId } : {}
+        })
       });
       await requireSuccess(res, "typing");
     },
@@ -196,7 +214,18 @@ var MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 var MAX_TOTAL_ATTACHMENT_BYTES = 32 * 1024 * 1024;
 var MAX_OUTBOUND_MEDIA_PER_REPLY = 4;
 var DISPATCH_SHUTDOWN_WAIT_MS = 3e4;
+var T3AMS_THREAD_ROOT_RE = /^[0-9a-f]{64}$/i;
 var delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+var normalizeT3amsThreadRootId = (value) => {
+  if (typeof value !== "string") return null;
+  const root = value.trim().replace(/^0x/i, "");
+  return T3AMS_THREAD_ROOT_RE.test(root) ? root.toLowerCase() : null;
+};
+var t3amsThreadSessionKey = (routeSessionKey, threadRootId) => {
+  const root = normalizeT3amsThreadRootId(threadRootId);
+  return root == null ? routeSessionKey : `${routeSessionKey}:thread:${root}`;
+};
+var t3amsDispatchKey = (chatId, threadRootId) => JSON.stringify(["polkadot", String(chatId || "invalid"), normalizeT3amsThreadRootId(threadRootId)]);
 var BoundedKeyedDispatcher = class {
   constructor(maxConcurrent, maxPending) {
     this.maxConcurrent = maxConcurrent;
@@ -398,6 +427,14 @@ var cleanupAttachments = async ({ tempDir }) => {
   if (!tempDir) return;
   await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => void 0);
 };
+var outboundEditOf = (payload) => {
+  if (!Object.prototype.hasOwnProperty.call(payload, "editOf")) return null;
+  const value = payload.editOf;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error("polkadot live edit requires a non-empty editOf message id");
+  }
+  return value.trim();
+};
 var MIME_BY_EXTENSION = {
   ".avif": "image/avif",
   ".bmp": "image/bmp",
@@ -435,7 +472,7 @@ var mimeForOutboundMedia = (payload, sourcePath) => {
   return MIME_BY_EXTENSION[path.extname(sourcePath).toLowerCase()] ?? "application/octet-stream";
 };
 var mediaReferences = (payload) => {
-  const listed = Array.isArray(payload.mediaUrls) && payload.mediaUrls.length > 0 ? payload.mediaUrls : Array.isArray(payload.mediaPaths) && payload.mediaPaths.length > 0 ? payload.mediaPaths : null;
+  const listed = Array.isArray(payload.mediaUrls) && payload.mediaUrls.length > 0 ? payload.mediaUrls : null;
   if (listed != null) {
     if (listed.some((value) => typeof value !== "string" || !value.trim())) {
       throw new Error("polkadot reply contains an invalid mediaUrls entry");
@@ -446,8 +483,150 @@ var mediaReferences = (payload) => {
     return listed.map((value) => value.trim());
   }
   if (typeof payload.mediaUrl === "string" && payload.mediaUrl.trim()) return [payload.mediaUrl.trim()];
-  if (typeof payload.mediaPath === "string" && payload.mediaPath.trim()) return [payload.mediaPath.trim()];
   return [];
+};
+var MAX_LIVE_UPDATE_CODE_POINTS = 4096;
+var outboundText = (payload) => {
+  if (payload.isReasoning === true || typeof payload.text !== "string") return "";
+  return payload.text.trim();
+};
+var visibleLiveText = (payload) => {
+  const text = outboundText(payload);
+  if (!text) return "";
+  const codePoints = Array.from(text);
+  return codePoints.length <= MAX_LIVE_UPDATE_CODE_POINTS ? text : `${codePoints.slice(0, MAX_LIVE_UPDATE_CODE_POINTS).join("")}\u2026`;
+};
+var isIntermediateDelivery = (info) => typeof info?.kind === "string" && info.kind !== "final";
+var liveTextForDelivery = (payload, info) => {
+  if (payload.isReasoning === true) return "";
+  if (info?.kind === "tool") return "Working with a tool\u2026";
+  return info?.kind === "block" ? visibleLiveText(payload) : "Working\u2026";
+};
+var createT3amsLiveReply = ({
+  bridge,
+  account,
+  chatId,
+  replyTo,
+  threadRootId,
+  deliveryId,
+  leaseId,
+  log
+}) => {
+  let liveMessageId;
+  let liveEditsUnavailable = false;
+  let terminal = false;
+  let terminalFailure = null;
+  let typingRequest = null;
+  let liveCapability = "unknown";
+  let queued = Promise.resolve();
+  const enqueue = (operation) => {
+    const result = queued.then(operation, operation);
+    queued = result.then(() => void 0, () => void 0);
+    return result;
+  };
+  const typing = async () => {
+    if (liveCapability === "unavailable" || typeof bridge.typing !== "function") return false;
+    if (typingRequest != null) return typingRequest;
+    typingRequest = bridge.typing(chatId, { deliveryId, leaseId }).then(() => {
+      liveCapability = "supported";
+      return true;
+    }).catch((error) => {
+      if (liveCapability === "unknown") liveCapability = "unavailable";
+      log?.(`polkadot typing update unavailable: ${String(error)}`);
+      return false;
+    }).finally(() => {
+      typingRequest = null;
+    });
+    return typingRequest;
+  };
+  const publishLiveText = async (text) => {
+    const result = liveMessageId == null ? await bridge.send(chatId, text, { replyTo, threadRootId, deliveryId, leaseId }) : await bridge.send(chatId, text, { editOf: liveMessageId, threadRootId, deliveryId, leaseId });
+    if (!result.success) {
+      liveEditsUnavailable = true;
+      log?.(`polkadot live reply unavailable: ${String(result.error ?? "unknown bridge error")}`);
+      return false;
+    }
+    if (liveMessageId == null) {
+      const messageId = typeof result.message_id === "string" ? result.message_id.trim() : "";
+      if (!messageId) {
+        liveEditsUnavailable = true;
+        log?.("polkadot live reply did not return a message id");
+        return false;
+      }
+      liveMessageId = messageId;
+    }
+    return true;
+  };
+  const deliverNormally = async (payload) => await deliverOutboundReply({
+    bridge,
+    account,
+    chatId,
+    replyTo,
+    threadRootId,
+    deliveryId,
+    leaseId,
+    payload
+  });
+  return {
+    typing,
+    update: async (payload, info) => {
+      const explicitEditOf = info?.kind === "block" ? outboundEditOf(payload) : null;
+      if (explicitEditOf != null) {
+        void typing();
+        return enqueue(async () => {
+          if (terminal) return false;
+          try {
+            const visibleReplySent = await deliverNormally(payload);
+            if (visibleReplySent) liveMessageId = explicitEditOf;
+            return visibleReplySent;
+          } catch (error) {
+            log?.(`polkadot explicit live reply update failed: ${String(error)}`);
+            return false;
+          }
+        });
+      }
+      const text = liveTextForDelivery(payload, info);
+      if (!text || terminal) return false;
+      void typing();
+      return enqueue(async () => {
+        if (terminal || liveEditsUnavailable) return false;
+        if (liveMessageId == null && !await typing()) return false;
+        try {
+          return await publishLiveText(text);
+        } catch (error) {
+          log?.(`polkadot live reply update failed: ${String(error)}`);
+          return false;
+        }
+      });
+    },
+    deliverFinal: async (payload) => await enqueue(async () => {
+      if (terminal || payload.isReasoning === true) return false;
+      terminal = true;
+      try {
+        if (outboundEditOf(payload) != null) return await deliverNormally(payload);
+        const text = outboundText(payload);
+        const hasMedia = mediaReferences(payload).length > 0;
+        if (liveMessageId != null && !liveEditsUnavailable && !hasMedia && text && Array.from(text).length <= MAX_LIVE_UPDATE_CODE_POINTS) {
+          const result = await bridge.send(chatId, text, {
+            editOf: liveMessageId,
+            threadRootId,
+            deliveryId,
+            leaseId
+          });
+          if (result.success) return true;
+          liveEditsUnavailable = true;
+          log?.(`polkadot final live edit unavailable: ${String(result.error ?? "unknown bridge error")}`);
+        }
+        return await deliverNormally(payload);
+      } catch (error) {
+        terminalFailure = error;
+        throw error;
+      }
+    }),
+    assertTerminalDelivery: () => {
+      if (terminalFailure != null) throw terminalFailure;
+    }
+  };
 };
 var localMediaPath = (reference) => {
   if (reference.startsWith("file:")) {
@@ -527,6 +706,14 @@ var deliverOutboundReply = async ({
   payload
 }) => {
   const text = String(payload.text ?? "").trim();
+  const editOf = outboundEditOf(payload);
+  if (editOf != null) {
+    if (!text) throw new Error("polkadot live edit requires non-empty text");
+    if (mediaReferences(payload).length > 0) throw new Error("polkadot live edit cannot include outbound media");
+    const result = await bridge.send(chatId, text, { editOf, threadRootId, deliveryId, leaseId });
+    if (!result.success) throw new Error(`polkadot /send edit failed: ${result.error ?? "unknown"}`);
+    return true;
+  }
   const media = await prepareOutboundMedia(payload, account.outboundFileMaxBytes);
   if (media.length === 0) {
     if (!text) return false;
@@ -576,7 +763,7 @@ async function startPolkadotGatewayAccount(ctx) {
       }
       for (const msg of batch) {
         if (ctx.abortSignal?.aborted) break;
-        const chatKey = String(msg.chat_id || "invalid");
+        const chatKey = t3amsDispatchKey(msg.chat_id, msg.thread_root_id);
         const { done } = await dispatcher.submit(
           chatKey,
           () => processDelivery(ctx, channelRuntime, account, bridge, msg, dispatcher.signal)
@@ -667,7 +854,19 @@ async function dispatchInbound(ctx, channelRuntime, account, bridge, msg, signal
       accountId: account.accountId,
       peer: { kind: "direct", id: chatId }
     });
+    const routeSessionKey = t3amsThreadSessionKey(route.sessionKey, threadRootId);
     const storePath = channelRuntime.session.resolveStorePath(ctx.cfg.session?.store, { agentId: route.agentId });
+    const liveReply = createT3amsLiveReply({
+      bridge,
+      account,
+      chatId,
+      replyTo: msg.message_id,
+      threadRootId,
+      deliveryId: msg.delivery_id,
+      leaseId: msg.lease_id,
+      log: (message) => ctx.log?.warn?.(message)
+    });
+    void liveReply.typing();
     await channelRuntime.inbound.run({
       channel: POLKADOT_CHANNEL_ID,
       accountId: account.accountId,
@@ -695,8 +894,8 @@ async function dispatchInbound(ctx, channelRuntime, account, bridge, msg, signal
             route: {
               agentId: route.agentId,
               accountId: account.accountId,
-              routeSessionKey: route.sessionKey,
-              dispatchSessionKey: route.sessionKey
+              routeSessionKey,
+              dispatchSessionKey: routeSessionKey
             },
             reply: { to: `polkadot:${chatId}`, replyToId: input.id },
             message: { rawBody: input.rawText, bodyForAgent: input.textForAgent, commandBody: input.textForCommands }
@@ -706,25 +905,19 @@ async function dispatchInbound(ctx, channelRuntime, account, bridge, msg, signal
             channel: POLKADOT_CHANNEL_ID,
             accountId: account.accountId,
             agentId: route.agentId,
-            routeSessionKey: route.sessionKey,
+            routeSessionKey,
             storePath,
             ctxPayload,
             recordInboundSession: channelRuntime.session.recordInboundSession,
             dispatchReplyWithBufferedBlockDispatcher: channelRuntime.reply.dispatchReplyWithBufferedBlockDispatcher,
-            // The single seam where the agent's generated reply reaches the bridge.
+            // Buffered delivery emits tool, block, and final payloads. Keep
+            // progress in one leased bridge-owned bubble, then edit it in
+            // place for the terminal response when the operation plane permits.
             delivery: {
-              deliver: async (payload) => {
+              deliver: async (payload, info) => {
                 if (signal.aborted) throw new Error("polkadot dispatcher stopped");
-                const visibleReplySent = await deliverOutboundReply({
-                  bridge,
-                  account,
-                  chatId,
-                  replyTo: msg.message_id,
-                  threadRootId,
-                  deliveryId: msg.delivery_id,
-                  leaseId: msg.lease_id,
-                  payload: payload ?? {}
-                });
+                const outbound = payload ?? {};
+                const visibleReplySent = isIntermediateDelivery(info) ? await liveReply.update(outbound, info) : await liveReply.deliverFinal(outbound);
                 return { visibleReplySent };
               },
               onError: (error) => ctx.log?.warn?.(`polkadot deliver failed: ${String(error)}`)
@@ -734,6 +927,7 @@ async function dispatchInbound(ctx, channelRuntime, account, bridge, msg, signal
         }
       }
     });
+    liveReply.assertTerminalDelivery();
   } finally {
     await cleanupAttachments(materialized);
   }
@@ -799,6 +993,20 @@ var polkadotPlugin = createChatChannelPlugin({
           })
         };
       }
+    }
+  },
+  // Scheduled framework activity has no inbound lease. Only send a typing
+  // signal when the operator deliberately configured the narrower proactive
+  // capability; regular replies carry their leased delivery pair in gateway.
+  heartbeat: {
+    sendTyping: async ({ cfg, to, accountId }) => {
+      const account = resolvePolkadotAccount({ cfg, accountId });
+      if (!account.bridgeProactiveToken) return;
+      await createBridge(
+        account.bridgeUrl,
+        account.bridgeToken,
+        account.bridgeProactiveToken
+      ).typing(to, { proactive: true });
     }
   }
 });

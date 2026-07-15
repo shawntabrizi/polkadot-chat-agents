@@ -25,7 +25,7 @@ every command, including `project`, `model`, and `storage`.
 
 | Flag | Applies to | Meaning |
 |---|---|---|
-| `--brain <b>` | create | `echo`, `claude`, `codex`, `opencode`, `bridge`/`hermes`. |
+| `--brain <b>` | create | `echo`, `claude`, `codex`, `opencode`, `bridge`. |
 | `--owner <who>` | create | Lock to one account (username, SS58, or hex). |
 | `--allow a,b` | create | Allowlist several accounts. |
 | `--public` | create | Allow anyone to message it (required for a paid brain left open). |
@@ -37,14 +37,14 @@ every command, including `project`, `model`, and `storage`.
 | `--wait <seconds>` | create, register | How long to wait for on-chain registration confirmation. |
 | `--host <ssh>` | deploy, logs, status, stop | Target server (saved after first deploy). |
 | `--harness openclaw or hermes` | deploy | Agent framework for a bridge bot. |
-| `--allowed-tools <read,write,bash>` | deploy | Select exact lowercase portable direct-agent capabilities. `write` includes `read`; `bash` includes both. |
-| `--tool-scope workspace\|container` | deploy | Scope direct-agent tools to the selected workspace (default) or deliberately to all files visible to the non-root agent account in its container. |
-| `--tool-network none\|internet` | deploy | Request no tool-process network egress (default) or internet access. `internet` requires `bash`; engine enforcement is reported at deploy time. |
+| `--allowed-tools <read,write,bash>` | run, deploy | Select exact lowercase portable direct-agent capabilities. `write` includes `read`; `bash` includes both. |
+| `--tool-scope workspace\|container` | run, deploy | Scope direct-agent tools to the selected workspace (default) or deliberately to all files visible to the non-root agent account in its container. |
+| `--tool-network none\|internet` | run, deploy | Request no tool-process network egress (default) or internet access. `internet` requires `bash`; engine enforcement is reported at startup/deploy time. |
 | `--dry-run` | deploy | Print the generated files without deploying. |
 
 Bots live in `~/.pca/bots/<name>/` (override with `PCA_BOTS_DIR`).
 
-Direct Claude, Codex, and OpenCode deployments start with no tools: empty
+Direct Claude, Codex, and OpenCode runs and deployments start with no tools: empty
 capabilities, workspace scope, and no tool network. The same portable policy
 is available to public and allowlisted bots, so every sender of a public bot
 can direct whatever capabilities its deployer selects. A `read`-capable turn

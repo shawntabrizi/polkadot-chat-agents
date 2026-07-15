@@ -26,7 +26,7 @@ The token can manage every peer's saved-file vault as well as send messages.
 Treat a framework that receives it as part of the bot's trusted computing base;
 do not expose the bridge port or token to an untrusted process.
 
-T3ams bridge/Hermes mode adds a lease fence for outbound chat operations:
+T3ams bridge mode adds a lease fence for outbound chat operations:
 normally `/send`, `/react`, and `/typing` carry the active `delivery_id` and
 `lease_id`. If an operator explicitly needs a framework-originated action with
 no inbound delivery, they may configure a distinct 32+ character
@@ -121,7 +121,7 @@ supports `GET`, `PUT`, and `DELETE` under
 same vault uploads a fresh encrypted T3ams attachment. It may include a text
 caption, `reply_to`, and `thread_root_id`, but cannot use `edit_of`.
 
-When the T3ams bot runs `BOT_BRAIN=bridge` or `hermes`, bind every outbound
+When the T3ams bot runs `BOT_BRAIN=bridge`, bind every outbound
 `POST /send`, `POST /react`, and `POST /typing` to the leased inbound work by
 including its `delivery_id` and `lease_id`. An authenticated edit or delete
 revokes the old claim, preventing a stale worker from replying to the

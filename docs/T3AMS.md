@@ -4,8 +4,8 @@
 it discovers a bot by its registered DotNS username, handles its normal DM and
 workspace flows, and carries encrypted messages through the Statement Store.
 
-This is an optional transport. Existing bots continue to use `polkadot-app`
-unless they were created with `--transport t3ams`.
+This is an optional transport. Choose it explicitly with `--transport t3ams`
+when creating a bot; every current bot config records its transport.
 
 ## Prerequisites
 
@@ -105,6 +105,11 @@ and restart/redeploy the bot. Private bots intentionally reject silent rekeys.
 
 ## T3ams onboarding
 
+The supported T3ams conversation surface is DMs and workspace channels,
+including their threads, live replies, media, and files. Native ad-hoc T3ams
+groups are not supported yet; use a workspace channel for a shared bot
+conversation.
+
 1. Search for the bot's registered DotNS username in T3ams and send it a DM.
    A verified, allowed DM pair is accepted automatically; no manual accept step
    is required from the bot operator. This first pairing is also required
@@ -163,8 +168,9 @@ queued, and configured capacity without exposing it to chat users.
 
 ## Current scope
 
-- Text DMs, channel messages, and authenticated rich-text attachment references
-  are supported.
+- DMs and workspace channels support text, threads, live replies, authenticated
+  rich-text attachments, media, and files.
+- Native ad-hoc T3ams groups are not supported yet.
 - Thread-root context is retained; replies to a threaded prompt are sent in the
   same thread.
 - Every DM and every workspace channel has its own AI session identity.
@@ -214,8 +220,8 @@ placeholder. A framework may stream `edit_of` updates as frequently as it
 wants; bot-core coalesces them to the safe live-edit cadence and flushes the
 latest update when the matching lease is acknowledged. `edit_of` is restricted
 to a message issued by the current bot process, and it cannot be combined with
-`reply_to`. Preserve an inbound `thread_root_id` on sends to keep a group reply
-in the same T3ams thread.
+`reply_to`. Preserve an inbound `thread_root_id` on sends to keep a
+workspace-channel reply in the same T3ams thread.
 
 ## Attachments, Bulletin media, and files
 
@@ -289,7 +295,7 @@ for a valid attachment only when Bulletin retrieval is enabled; the original
 attachment id is metadata, not a fetch credential. The opaque id is bounded and
 expires, while `GET/PUT/DELETE /files/<chat_id>[/<path>]` stays scoped to that
 one conversation. A bridge `POST /send` may deliver a vault `file_path` with a
-caption or reply target, but never as an edit. In bridge/Hermes mode it must
+caption or reply target, but never as an edit. In bridge mode it must
 also include the active inbound `delivery_id` and `lease_id`; the same claim is
 required for bridge `POST /react` and `POST /typing`. An edit or delete revokes
 the old claim before a stale worker can reply or emit stale live activity. See

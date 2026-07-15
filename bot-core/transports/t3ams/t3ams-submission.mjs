@@ -57,14 +57,28 @@ export function createSerializedSubmitter(send, { maxPending = 128 } = {}) {
     : 128;
   let tail = Promise.resolve();
   let pending = 0;
-  const submit = (statement) => {
+  const submit = (statement, { beforeSend = null } = {}) => {
     if (pending >= cap) {
       const error = new Error("T3ams statement submit queue is full");
       error.code = "T3AMS_SUBMIT_QUEUE_FULL";
       return Promise.reject(error);
     }
     pending += 1;
-    const next = tail.then(() => send(statement), () => send(statement));
+    const run = async () => {
+      if (beforeSend != null) {
+        if (typeof beforeSend !== "function") throw new TypeError("beforeSend must be a function");
+        // A job can wait behind another RPC submission while its ingress
+        // revision or delivery lease changes. Recheck at the irreversible
+        // network-write boundary, rather than only when it is enqueued.
+        if (await beforeSend() === false) {
+          const error = new Error("T3ams statement is no longer permitted to send");
+          error.code = "T3AMS_OUTBOUND_FENCED";
+          throw error;
+        }
+      }
+      return send(statement);
+    };
+    const next = tail.then(run, run);
     // Keep the queue live after a rejected RPC submission. The caller still
     // receives that rejection through `next`.
     tail = next.catch(() => {});

@@ -100,6 +100,8 @@ the one login command it cannot automate. See [docs/HARNESSES.md](docs/HARNESSES
 T3ams is an optional transport for bots that should receive DMs and workspace
 mentions from the T3ams SPA. Create one with `--transport t3ams`; it uses the
 same brains, account, and Statement Store connection as the default transport.
+Native ad-hoc T3ams groups are not supported yet; use a workspace channel for a
+shared bot conversation.
 The BCTS SDK is currently a **local package**, not a public npm dependency: build
 and pack it from `t3ams-spa/packages/bcts`, install that tarball into
 `bot-core`, then run or deploy the bot. Do not use `npm install @t3ams/bcts`.
@@ -130,7 +132,7 @@ prompts, native session memory (`--resume`), and deployer-selected portable
 | `codex` | the `codex` CLI | OpenAI models | ChatGPT/Codex login |
 | `opencode` | the `opencode` CLI | many providers via `--model provider/model` | `opencode auth login` |
 | `echo` | bot-core itself (repeats the message) | — | none |
-| `hermes` / `bridge` | an agent framework over the HTTP bridge | — | the framework's |
+| `bridge` | an agent framework over the HTTP bridge | — | the framework's |
 
 `opencode` is the many-models path — one engine reaches Anthropic, OpenAI,
 Google, xAI, OpenRouter, local models, etc. In-chat: `/stop` cancels the current
@@ -159,7 +161,7 @@ manage it. File return needs an operator-pinned HOP node and an active Bulletin
 allowance. The named private Paseo profile provisions its testnet allowance
 locally; other networks need separate operator provisioning.
 
-Direct T3ams agents start with no tools. A deployer opts into portable,
+Direct T3ams agents start with no tools. An operator opts into portable,
 lowercase capabilities with `--allowed-tools read,write,bash`, chooses
 `--tool-scope workspace|container`, and chooses
 `--tool-network none|internet`. `write` includes `read`; `bash` includes both.
@@ -191,7 +193,7 @@ with `BOT_GREET_TEXT`.
 
 ## Agent frameworks
 
-For a bot with memory, tools, and a persona, run `--brain hermes` and let a
+For a bot with memory, tools, and a persona, run `--brain bridge` and let a
 framework drive the conversation through bot-core's authenticated HTTP bridge
 (a bounded long-poll `GET /inbound`, lease renewal/ACK endpoints, and `POST /send`). Two
 integrations are included and validated:

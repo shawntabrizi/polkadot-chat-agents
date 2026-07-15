@@ -18,7 +18,7 @@
 // Reuses ONLY the generic transport codec (vendor/) + a papi client for the
 // on-chain identifier-key lookup. No faucet-specific code (coinage/stripe/etc.).
 //
-// Env: BOT_SEED_HEX (root mini-secret; or FAUCET_CHAT_SERVICE_SECRET),
+// Env: BOT_SEED_HEX (root mini-secret),
 //   BOT_ENDPOINT (default Paseo), BOT_BRIDGE_PORT (8799), BOT_BRIDGE_HOST (127.0.0.1),
 //   BOT_ACK_TEXT, BOT_ALLOWED_PEERS (comma-sep peer account hexes; empty = allow all),
 //   BOT_REQUEST_LOOKBACK_DAYS (7), BOT_REQUEST_FUTURE_DAYS (2), BOT_POLL_MS (2000),
@@ -127,7 +127,7 @@ const numberEnv = (name, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER, int
 };
 const DEFAULT_ENDPOINT = "wss://paseo-people-next-system-rpc.polkadot.io";
 const endpoint = env.BOT_ENDPOINT ?? DEFAULT_ENDPOINT;
-const seedHex = (env.BOT_SEED_HEX ?? env.FAUCET_CHAT_SERVICE_SECRET ?? "").trim();
+const seedHex = (env.BOT_SEED_HEX ?? "").trim();
 const bridgePort = numberEnv("BOT_BRIDGE_PORT", 8799, { min: 0, max: 65_535 });
 // The bridge exposes decrypted inbound messages and can publish as the bot.
 // Require an explicit shared secret even on loopback so a local co-tenant cannot
@@ -138,8 +138,12 @@ if (bridgeToken.length < 32) {
   console.error("BOT_BRIDGE_TOKEN must be set to a 32+ character random secret");
   process.exit(2);
 }
-const brain = (env.BOT_BRAIN ?? "bridge").trim().toLowerCase(); // bridge | hermes | echo | claude | codex | opencode
-const ackText = env.BOT_ACK_TEXT ?? (brain === "bridge" || brain === "hermes" ? "Connecting you to the agent…" : "");
+const brain = (env.BOT_BRAIN ?? "bridge").trim().toLowerCase(); // bridge | echo | claude | codex | opencode
+if (!new Set(["echo", "claude", "codex", "opencode", "bridge"]).has(brain)) {
+  console.error("BOT_BRAIN must be echo, claude, codex, opencode, or bridge");
+  process.exit(2);
+}
+const ackText = env.BOT_ACK_TEXT ?? (brain === "bridge" ? "Connecting you to the agent…" : "");
 // If a reply hasn't gone out within BOT_THINKING_AFTER_MS of receiving a message,
 // send a "thinking" ack so a slow answer (AI call, Hermes round-trip) doesn't feel
 // like the message was lost. Fast replies cancel it. Empty text disables it.
@@ -167,7 +171,7 @@ const replyChunkBytes = numberEnv("BOT_REPLY_CHUNK_BYTES", 4000, { min: 128, max
 // doesn't have to find and message the bot first. Only allowlisted peers are
 // ever greeted; an open bot has no owner to greet.
 const greet = env.BOT_GREET === "1" || env.BOT_GREET === "true";
-const greetText = env.BOT_GREET_TEXT ?? `👋 ${env.BOT_USERNAME || env.FAUCET_CHAT_SERVICE_USERNAME || "Your bot"} here — I'm alive! Say hi, or /help for what I can do.`;
+const greetText = env.BOT_GREET_TEXT ?? `👋 ${env.BOT_USERNAME || "Your bot"} here — I'm alive! Say hi, or /help for what I can do.`;
 
 // Direct engine "brains": bot-core runs a headless coding-agent CLI (claude /
 // codex / opencode) as an autonomous agent — verbatim prompt and native
@@ -225,7 +229,7 @@ if (env.BOT_AI_PROJECTS) {
 // Escape hatch: BOT_AI_CMD=<bin> [+ BOT_AI_ARGS=<JSON array> with "__PROMPT__"]
 // runs a custom CLI that speaks claude-shaped stream-json (also how the offline
 // e2e drives the loop with a mock `sh` script). Otherwise the engine is the
-// named brain (claude/codex/opencode); null for echo/bridge/hermes.
+// named brain (claude/codex/opencode); null for echo/bridge.
 const customCmd = (env.BOT_AI_CMD ?? "").trim();
 let customArgsTmpl = null;
 if (customCmd && env.BOT_AI_ARGS) {
@@ -305,15 +309,6 @@ const SEEN_CAP = 5000; // bound the persisted dedup set
 const allowedPeers = new Set(
   String(env.BOT_ALLOWED_PEERS ?? "").split(",").map((s) => s.trim().replace(/^0x/i, "").toLowerCase()).filter(Boolean),
 );
-// Public direct bots default to no tools. Claude is the built-in engine that
-// supports that no-tools profile; other engines need an explicit custom or
-// bridge runtime before they can be publicly exposed. BOT_AI_CMD is an
-// operator integration and owns its own sandbox policy.
-const publicBuiltInDirectAgent = engine != null && !customCmd && allowedPeers.size === 0;
-if (publicBuiltInDirectAgent && brain !== "claude") {
-  console.error("Public direct bots currently support only Claude's direct runtime; use a private allowlist or an externally isolated bridge runtime for other engines");
-  process.exit(2);
-}
 // /model switching policy: explicit BOT_AI_ALLOWED_MODELS always wins (empty
 // string = a deliberate lock). Unconfigured bots are locked. An operator may
 // set BOT_AI_MODEL_SWITCHING=open only for a bot with an explicit peer
@@ -332,7 +327,7 @@ const aiAllowedModels = resolveModelPolicy({
   isPublic: allowedPeers.size === 0,
   allowOpen: modelSwitching === "open",
 });
-if (!seedHex) { console.error("BOT_SEED_HEX (or FAUCET_CHAT_SERVICE_SECRET) is required"); process.exit(2); }
+if (!seedHex) { console.error("BOT_SEED_HEX is required"); process.exit(2); }
 
 const hexToBytes = (hex) => {
   const clean = String(hex).trim().replace(/^0x/i, "");
@@ -563,7 +558,7 @@ const identifierKey = p256PublicKeyFromPrivateKey(p256PrivateKey);
 const accountId = wallet.publicKey;
 const accountIdHex = norm(bytesToHex(accountId));
 const hopUploadAccountIdHex = norm(bytesToHex(hopUploadPair.publicKey));
-const username = env.FAUCET_CHAT_SERVICE_USERNAME ?? env.BOT_USERNAME ?? "";
+const username = env.BOT_USERNAME ?? "";
 if (hopUploadNode) {
   log("BOT_HOP_UPLOAD_CONFIGURED", {
     account: `0x${hopUploadAccountIdHex}`,
@@ -1154,7 +1149,7 @@ const handleInbound = async (peerHex, msg, owedId = null, { reservedBridge = fal
     return;
   }
   if (agentRuntime) return agentRuntime.handleMessage(peerHex, msg);
-  // bridge / hermes / unknown: hand off to an external agent via the HTTP bridge.
+  // bridge: hand off to an external agent via the HTTP bridge.
   // The agent replies via POST /send -> sendMessage, which disarms the ack.
   armThinking(peerHex);
   try {
@@ -1563,10 +1558,7 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
       && typeof m.text === "string" && (m.text.length > 0 || attachments.length > 0);
     if (isBrainKind) {
       const id = messageDedupId(peerHex, decoded.requestId, `${m.kind}:${m.text}`, m.messageId);
-      // Also honor the legacy plaintext key so entries persisted before this
-      // change still count as seen — but never add new plaintext keys.
-      const legacyKey = `${decoded.requestId}:${m.text}`;
-      const alreadySeen = seenRequests.has(id) || seenRequests.has(legacyKey) || batchSeen.has(id);
+      const alreadySeen = seenRequests.has(id) || batchSeen.has(id);
       if (alreadySeen) continue;
       batchSeen.add(id); newlySeen.push(id);
       fresh.push({
@@ -2260,7 +2252,7 @@ log("BOT_LISTENING", { account: `0x${accountIdHex}`, identifierKey: `0x${norm(by
 // file crash startup or allocate unbounded collections.
 const normalizeRestoredState = (raw) => {
   if (raw == null) return null;
-  if (typeof raw !== "object" || Array.isArray(raw) || ![1, 2].includes(raw.v)) {
+  if (typeof raw !== "object" || Array.isArray(raw) || raw.v !== 2) {
     log("BOT_STATE_INCOMPATIBLE", { version: raw?.v ?? null });
     return null;
   }

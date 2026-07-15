@@ -12,6 +12,7 @@ import {
   stateDocSupersedes,
   t3amsConversationKey,
 } from "../../transports/t3ams/t3ams-protocol.mjs";
+import { createSerializedSubmitter } from "../../transports/t3ams/t3ams-submission.mjs";
 
 test("hex helpers canonicalize prefixes and round-trip bytes", () => {
   assert.equal(bareHex(" 0XDeAdBEEF "), "deadbeef");
@@ -731,7 +732,7 @@ test("outbound operation guards fence a revoked claim immediately before stateme
   assert.equal(fixture.submitted.length, 0, "a revoked claim must not enter the shared submitter");
 });
 
-function outboundDmWakeFixture({ established = true, rejectWake = false } = {}) {
+function outboundDmWakeFixture({ established = true, rejectWake = false, submit: submitOverride = null } = {}) {
   const self = bytes(0xa1);
   const peer = bytes(0xb2);
   const messageId = bytes(0xc3);
@@ -768,7 +769,8 @@ function outboundDmWakeFixture({ established = true, rejectWake = false } = {}) 
       signingPublicKey: { taggedCborData: () => Uint8Array.of(0x99) },
     },
     displayName: "Atlas",
-    submit: async (statement) => {
+    submit: async (statement, options) => {
+      if (submitOverride != null) return submitOverride(statement, options);
       submitted.push(statement);
       if (rejectWake && statement.channel.startsWith("inbox:")) throw new Error("wake submit failed");
     },
@@ -834,4 +836,30 @@ test("rich-text guard fences a revoked claim before the primary carrier and inbo
   );
   assert.equal(checked, 1);
   assert.equal(fixture.submitted.length, 0);
+});
+
+test("rich-text guard rechecks a stale direct ingress after queued submission", async () => {
+  const sent = [];
+  let release;
+  let current = true;
+  const firstGate = new Promise((resolve) => { release = resolve; });
+  const submit = createSerializedSubmitter(async (statement) => {
+    if (statement.kind === "block") {
+      await firstGate;
+      return;
+    }
+    sent.push(statement);
+  });
+
+  const first = submit({ kind: "block" });
+  const fixture = outboundDmWakeFixture({ submit });
+  const stale = fixture.protocol.sendText(fixture.chatId, "old direct-agent final", {
+    guard: () => current,
+  });
+  await Promise.resolve();
+  current = false; // the inbound message was edited or deleted while queued
+  release();
+  await first;
+  await assert.rejects(stale, (error) => error?.code === "T3AMS_OUTBOUND_FENCED");
+  assert.deepEqual(sent, []);
 });

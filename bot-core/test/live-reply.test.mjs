@@ -250,6 +250,29 @@ test("finalizeExisting flushes the bridge's final edit and cancels queued progre
   assert.equal(h.sent.at(-1).text, "final answer", "the queued progress frame must not overwrite the terminal edit");
 });
 
+test("finalizeExisting retries a transient terminal submit instead of stranding progress", async () => {
+  const clock = makeClock();
+  const sent = [];
+  let attempts = 0;
+  const live = createLiveReplies({
+    send: async ({ peerHex, text, editOf }) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("temporary submit outage");
+      sent.push({ peerHex, text, editOf: editOf ?? null });
+      return { messageId: editOf ?? "MSG-1", delivered: "REQ-1" };
+    },
+    awaitAck: async () => true,
+    now: clock.now,
+    timers: clock.timers,
+  });
+
+  await assert.rejects(live.finalizeExisting("peer", "TARGET-1", "final answer"), /temporary submit outage/);
+  const result = await live.finalizeExisting("peer", "TARGET-1", "final answer");
+  assert.deepEqual(result, { messageId: "TARGET-1", edited: true });
+  assert.equal(attempts, 2);
+  assert.deepEqual(sent, [{ peerHex: "peer", text: "final answer", editOf: "TARGET-1" }]);
+});
+
 test("cancelExisting and a guard fence discard a revoked queued bridge edit", async () => {
   const h = makeHarness({ minIntervalMs: 1000 });
   let active = true;

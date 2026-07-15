@@ -295,7 +295,7 @@ function normalizeBackfill(raw) {
   let scanned = 0;
   let total = 0;
   // Live state is maintained newest-first below. Bound the defensive restore
-  // scan as well, so a legacy/corrupt snapshot cannot monopolize startup.
+  // scan as well, so a malformed snapshot cannot monopolize startup.
   for (const conversationKey in source) {
     if (scanned >= T3AMS_BACKFILL_RESTORE_SCAN_CAP || conversations >= T3AMS_BACKFILL_CONVERSATION_CAP) break;
     scanned += 1;
@@ -304,7 +304,7 @@ function normalizeBackfill(raw) {
     const cost = backfillListCost(entries);
     if (entries.length === 0) continue;
     // Preserve recency over breadth: once the global relay budget is full,
-    // older conversations are discarded rather than retaining a sparse,
+    // least-recent conversations are discarded rather than retaining a sparse,
     // unbounded map of empty or oversized entries.
     if (total + cost > T3AMS_BACKFILL_TOTAL_BUDGET_BYTES) break;
     normalized[conversationKey] = entries;
@@ -661,13 +661,15 @@ export function createT3amsProtocol({
   const inboundClaims = new Set();
   const workspaceJoinInFlight = new Set();
   const persist = () => onStateChange(jsonClone(state));
-  const submitStatement = async (statement) => submit(statement);
+  const submitStatement = async (statement, options = undefined) => submit(statement, options);
   // All outbound paths share the serialized submitter owned by the transport.
   // Keep its transient failure classification in one place so live edits,
   // typing, and final replies behave consistently under allowance pressure.
-  const submitOutboundStatement = async (statement) => {
+  const submitOutboundStatement = async (statement, guard = null) => {
     try {
-      await submitStatement(statement);
+      await submitStatement(statement, guard == null ? undefined : {
+        beforeSend: () => assertOutboundGuard(guard),
+      });
     } catch (error) {
       if (error?.code === "T3AMS_SUBMIT_QUEUE_FULL") {
         // The in-process queue drains on its own. Callers that need a durable
@@ -1783,7 +1785,7 @@ export function createT3amsProtocol({
       channel: operationChannel,
       topics: bcts.createDMTopics(operationChannel, identity.xid, true),
       data: bcts.envelopeToBytes(sealed),
-    });
+    }, guard);
   };
 
   const submitWorkspaceOperation = async (conversation, expression, channelFor, operation, guard = null) => {
@@ -1796,7 +1798,7 @@ export function createT3amsProtocol({
       channel: channelFor(route.channelEntry, route.channelId),
       topics: route.topics,
       data: bcts.envelopeToBytes(sealed),
-    });
+    }, guard);
   };
 
   const editText = async (chatId, messageId, text, { guard = null } = {}) => {
@@ -1960,7 +1962,7 @@ export function createT3amsProtocol({
       messageId = bareHex(bcts.formatXID(bcts.extractParameter(expression, "id").extractBytes()));
     }
     assertOutboundGuard(options.guard);
-    await submitOutboundStatement(statement);
+    await submitOutboundStatement(statement, options.guard);
     // Match the SPA's best-effort re-onboard wake: launch it only after the
     // pairwise carrier was accepted, and never make the primary reply await
     // or depend on a second inbox submission.

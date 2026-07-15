@@ -17,7 +17,7 @@ credential boundary.
 | `codex` | the `codex` CLI | OpenAI models | ChatGPT / Codex login |
 | `opencode` | the `opencode` CLI | many providers via `--model provider/model` | `opencode auth login` |
 | `echo` | bot-core itself (repeats the message) | — | none |
-| `hermes` / `bridge` | an agent framework over the HTTP bridge | — | the framework's |
+| `bridge` | an agent framework over the HTTP bridge | — | the framework's |
 
 `opencode` is the many-models path — one engine reaches Anthropic, OpenAI,
 Google, xAI, OpenRouter, local models, and more.

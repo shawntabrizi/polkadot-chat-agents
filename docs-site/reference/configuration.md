@@ -39,7 +39,7 @@ BOT_USERNAME=codebot.61         # registered network username (display/search); 
 BOT_ALLOWED_PEERS=40d4fd…,7015… # peer account hexes allowed to message it. EMPTY = public (anyone)
 
 # brain
-BOT_BRAIN=claude                # claude|codex|opencode (direct CLI) · bridge/hermes (external) · echo (test)
+BOT_BRAIN=claude                # claude|codex|opencode (direct CLI) · bridge (external) · echo (test)
 
 # state & workspace (paths inside the container)
 BOT_STATE_DIR=/state            # session keys, dedup set, owed-reply journal, bot.pid, and saved peer files. Root-owned; survives restarts
@@ -68,7 +68,7 @@ environment that strips every secret-shaped variable (including `*_API_KEY`), so
 a direct engine cannot be given provider credentials through the environment;
 log in the CLI once against the mounted home instead.
 
-## Example: bridge bot (`hermes` / `openclaw`)
+## Example: bridge bot (Hermes or OpenClaw)
 
 ```sh
 BOT_SEED_HEX=0x…
@@ -222,9 +222,9 @@ variables `pca deploy` writes into `bot.env` automatically.
 | Variable | Default | Purpose |
 |---|---|---|
 | `BOT_TRANSPORT` | `polkadot-app` | `polkadot-app` or `t3ams`. Set by `pca create --transport …`; selects the matching runner. **gen** |
-| `BOT_SEED_HEX` | — (required) | Root mini-secret; all keys derive from it. `FAUCET_CHAT_SERVICE_SECRET` is an accepted alias. **gen** |
+| `BOT_SEED_HEX` | — (required) | Root mini-secret; all keys derive from it. **gen** |
 | `BOT_ENDPOINT` | Paseo people-next wss | Statement-store RPC node to poll and publish to. **gen** |
-| `BOT_USERNAME` | `""` | Registered network username (display/search only). `FAUCET_CHAT_SERVICE_USERNAME` alias. **gen** |
+| `BOT_USERNAME` | `""` | Registered network username (display/search only). **gen** |
 | `BOT_PEER_IDENTIFIER_KEYS` | `""` | `peerhex=keyhex,…` — pin identifier keys, skipping the on-chain lookup (tests / fixed fleets). |
 
 ### Access control
@@ -237,8 +237,8 @@ variables `pca deploy` writes into `bot.env` automatically.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BOT_BRAIN` | `bridge` | `claude`\|`codex`\|`opencode` (direct CLI), `bridge`/`hermes` (external harness), `echo` (test). **gen** |
-| `BOT_ACK_TEXT` | "Connecting you to the agent…" (bridge/hermes) | First-contact acknowledgement text. |
+| `BOT_BRAIN` | `bridge` | `claude`\|`codex`\|`opencode` (direct CLI), `bridge` (external harness), `echo` (test). **gen** |
+| `BOT_ACK_TEXT` | "Connecting you to the agent…" (bridge) | First-contact acknowledgement text. |
 | `BOT_GREET` | `0` | `1` = message allowlisted owners once on startup (proof of life). **gen when --greet** |
 | `BOT_GREET_TEXT` | auto | Custom greeting text. |
 
@@ -258,7 +258,7 @@ variables `pca deploy` writes into `bot.env` automatically.
 | Variable | Default | Purpose |
 |---|---|---|
 | `BOT_BRIDGE_TOKEN` | — (required) | 32+ char shared secret; every request must present it (`Authorization: Bearer` or `x-bridge-token`). Process exits if unset/short. **gen** |
-| `BOT_BRIDGE_PROACTIVE_TOKEN` | unset | T3ams bridge/Hermes only: optional, distinct 32+ char outbound capability. An otherwise authenticated unleased `POST /send`, `/react`, or `/typing` must present it in `x-bridge-proactive-token`; it does not replace `BOT_BRIDGE_TOKEN`. |
+| `BOT_BRIDGE_PROACTIVE_TOKEN` | unset | T3ams bridge mode only: optional, distinct 32+ char outbound capability. An otherwise authenticated unleased `POST /send`, `/react`, or `/typing` must present it in `x-bridge-proactive-token`; it does not replace `BOT_BRIDGE_TOKEN`. |
 | `BOT_BRIDGE_PORT` | 8799 | Port the bridge listens on. **gen** |
 | `BOT_BRIDGE_HOST` | `127.0.0.1` | Bind address. Deploy sets `0.0.0.0` for harness stacks (compose network only). **gen for bridge** |
 | `BOT_BRIDGE_BODY_MAX_BYTES` | 1000000 | Max request body. |
@@ -282,9 +282,9 @@ variables `pca deploy` writes into `bot.env` automatically.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BOT_AI_TOOL_CAPABILITIES` | `""` | Comma-separated portable direct-agent outcomes: `read`, `write`, `bash`. Empty disables tools; `write` includes `read`, and `bash` includes both. **gen (deploy)** |
-| `BOT_AI_TOOL_SCOPE` | `workspace` | `workspace` scopes normal work to the selected project and current staged attachments; `container` deliberately grants the non-root agent account all of its container-visible files. **gen (deploy)** |
-| `BOT_AI_TOOL_NETWORK` | `none` | `none` or `internet` for tool-process egress. `internet` requires `bash`; enforcement depends on the selected engine. **gen (deploy)** |
+| `BOT_AI_TOOL_CAPABILITIES` | `""` | Comma-separated portable direct-agent outcomes: `read`, `write`, `bash`. Empty disables tools; `write` includes `read`, and `bash` includes both. **gen (run/deploy)** |
+| `BOT_AI_TOOL_SCOPE` | `workspace` | `workspace` scopes normal work to the selected project and current staged attachments; `container` deliberately grants the non-root agent account all of its container-visible files. **gen (run/deploy)** |
+| `BOT_AI_TOOL_NETWORK` | `none` | `none` or `internet` for tool-process egress. `internet` requires `bash`; enforcement depends on the selected engine. **gen (run/deploy)** |
 | `BOT_AI_AGENT_UID` / `BOT_AI_AGENT_GID` | unset | Drop the spawned agent to this uid/gid so it can't read `/state` or the seed. **gen (deploy: 1000)** |
 | `BOT_AI_IDLE_TIMEOUT_MS` | 600000 | Kill a turn that has emitted nothing for this long (wedge backstop). |
 | `BOT_AI_MAX_MS` | 3600000 | Hard per-turn wall-clock cap. |
@@ -293,7 +293,7 @@ variables `pca deploy` writes into `bot.env` automatically.
 | `BOT_AI_MAX_OUTPUT_BYTES` | 1000000 | Cap on captured agent output per turn. |
 | `BOT_AI_CMD` / `BOT_AI_ARGS` | unset | Escape hatch: a custom CLI speaking claude-shaped stream-json (`BOT_AI_ARGS` is a JSON array; `__PROMPT__` is substituted). |
 
-For Bash, deploy validates the engine-specific network combination: OpenCode
+For Bash, run and deploy validate the engine-specific network combination: OpenCode
 requires `--tool-network internet` because it has no network sandbox; Claude
 requires it for container-scoped Bash but can use `none` for workspace-scoped
 Bash; Codex can keep `none` in either scope. The deploy report names the
@@ -409,6 +409,9 @@ deliberately loaded only by the T3ams runner, so ordinary bots do not need it.
 For a local development run, `BOT_T3AMS_BCTS_MODULE` can point at an importable
 ESM build instead. A remote deployment must package the SDK with `bot-core`, not
 point at an arbitrary path on the deployer's machine.
+
+T3ams supports DMs and workspace channels, including threads, live replies,
+media, and files. Native ad-hoc T3ams groups are not supported yet.
 
 Private T3ams bots require immutable, out-of-band signing-key pins for their
 allowlisted people. The CLI records these through `--t3ams-peer-key`; do not
@@ -561,7 +564,7 @@ provision and monitor the T3ams Bulletin upload allowance independently. The
 default transport's `pca storage`/Paseo faucet flow does not preflight or grant
 that T3ams allowance.
 
-In T3ams bridge/Hermes mode, regular outbound `/send`, `/react`, and `/typing`
+In T3ams bridge mode, regular outbound `/send`, `/react`, and `/typing`
 requests remain bound to their active inbound `delivery_id` and `lease_id`.
 `BOT_BRIDGE_PROACTIVE_TOKEN` is a separate opt-in for a framework action that
 has no inbound lease at all (such as a generic attached result). It must be a

@@ -16,10 +16,10 @@ bot-core invokes a model CLI itself.
 Polkadot app <-> Statement Store <-> bot-core <-> HTTP bridge <-> framework plugin <-> agent
 ```
 
-Bridge mode is selected with the `hermes` brain:
+Bridge mode is selected with the `bridge` brain:
 
 ```bash
-pca create mybot --brain hermes --owner yourname.42
+pca create mybot --brain bridge --owner yourname.42
 pca run mybot
 ```
 
@@ -64,7 +64,8 @@ status.
 ### T3ams bridge behavior
 
 With `--transport t3ams`, the same poll loop drives DMs and workspace channels.
-T3ams chat IDs begin with `t3ams:` and inbound rows include the conversation
+Native ad-hoc T3ams groups are not supported yet. T3ams chat IDs begin with
+`t3ams:` and inbound rows include the conversation
 type, sender XID/name, channel/workspace IDs where applicable, and
 `thread_root_id` for a threaded message. Send that thread root back with the
 reply when the framework should stay in the same thread.
@@ -88,7 +89,7 @@ not an inbound message to answer independently. See the
 [T3ams files](/guide/files#t3ams-photos-media-and-documents) for the
 transport-specific limits and allowance requirements.
 
-For `BOT_BRAIN=bridge` or `hermes`, normal `/send`, `/react`, and `/typing`
+For `BOT_BRAIN=bridge`, normal `/send`, `/react`, and `/typing`
 calls carry the active inbound `delivery_id` and `lease_id`; a prompt edit or
 delete revokes that claim. A framework action with no inbound turn (such as an
 OpenClaw attached result) can instead use the opt-in, distinct

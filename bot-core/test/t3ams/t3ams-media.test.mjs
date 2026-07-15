@@ -9,7 +9,7 @@ import { createT3amsMedia } from "../../transports/t3ams/t3ams-media.mjs";
 import { parseT3amsHopReference } from "../../transports/t3ams/t3ams-attachments.mjs";
 import { deriveT3amsBulletinUploadSignerFromSeed } from "../../transports/t3ams/t3ams-identity.mjs";
 import { deriveSr25519PairFromSeed } from "../../vendor/lib/wallet-keys.mjs";
-import { startMockHopNode } from "./mock-hop-node.mjs";
+import { startMockHopNode } from "../mock-hop-node.mjs";
 
 const nodes = [];
 const startNode = async () => {

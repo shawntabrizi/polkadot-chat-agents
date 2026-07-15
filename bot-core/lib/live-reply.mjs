@@ -149,22 +149,31 @@ export const createLiveReplies = ({
     lane.pendingText = null;
     lane.pendingGuard = null;
     if (lane.inFlight) await lane.inFlight.catch(noop);
-    const ack = await settleAck(lane);
-    if (guard != null && !guard()) {
-      const error = new Error("live edit fence is no longer active");
-      error.code = "LIVE_EDIT_FENCED";
+    try {
+      const ack = await settleAck(lane);
+      if (guard != null && !guard()) {
+        const error = new Error("live edit fence is no longer active");
+        error.code = "LIVE_EDIT_FENCED";
+        throw error;
+      }
+      if (ack === "acked" || ack === "assumed") {
+        if (text === lane.lastSentText) return { messageId: lane.messageId, edited: true };
+        await send({ peerHex: lane.peerHex, text, editOf: lane.messageId, guard });
+        return { messageId: lane.messageId, edited: true };
+      }
+      // Peer never fetched the placeholder: send the answer as a plain message
+      // that supersedes it, so the slot ends up holding only the answer.
+      log("BOT_LIVE_FALLBACK", { to: lane.peerHex, placeholder: lane.messageId });
+      const sent = await send({ peerHex: lane.peerHex, text, supersedes: [lane.messageId], guard });
+      return { messageId: sent.messageId, edited: false };
+    } catch (error) {
+      // An ordinary terminal transport failure remains retryable through the
+      // bridge ACK path. A deliberate authorization fence stays terminal.
+      if (error?.code !== "LIVE_EDIT_FENCED" && error?.code !== "T3AMS_OUTBOUND_FENCED") {
+        lane.finalized = false;
+      }
       throw error;
     }
-    if (ack === "acked" || ack === "assumed") {
-      if (text === lane.lastSentText) return { messageId: lane.messageId, edited: true };
-      await send({ peerHex: lane.peerHex, text, editOf: lane.messageId, guard });
-      return { messageId: lane.messageId, edited: true };
-    }
-    // Peer never fetched the placeholder: send the answer as a plain message
-    // that supersedes it, so the slot ends up holding only the answer.
-    log("BOT_LIVE_FALLBACK", { to: lane.peerHex, placeholder: lane.messageId });
-    const sent = await send({ peerHex: lane.peerHex, text, supersedes: [lane.messageId], guard });
-    return { messageId: sent.messageId, edited: false };
   };
 
   return {

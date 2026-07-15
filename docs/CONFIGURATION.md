@@ -36,7 +36,7 @@ BOT_USERNAME=codebot.61         # registered network username (display/search); 
 BOT_ALLOWED_PEERS=40d4fd…,7015… # peer account hexes allowed to message it. EMPTY = public (anyone)
 
 # brain
-BOT_BRAIN=claude                # claude|codex|opencode (direct CLI) · bridge/hermes (external) · echo (test)
+BOT_BRAIN=claude                # claude|codex|opencode (direct CLI) · bridge (external) · echo (test)
 
 # state & workspace (paths inside the container)
 BOT_STATE_DIR=/state            # session keys, dedup set, owed-reply journal, bot.pid. Root-owned; survives restarts
@@ -65,7 +65,7 @@ environment that strips every secret-shaped variable (including `*_API_KEY`), so
 a direct engine cannot be given provider credentials through the environment;
 log in the CLI once against the mounted home instead.
 
-## Example: bridge bot (`hermes` / `openclaw`)
+## Example: bridge bot (Hermes or OpenClaw)
 
 ```sh
 BOT_SEED_HEX=0x…
@@ -113,7 +113,7 @@ BOT_AI_TOOL_NETWORK=none
 BOT_AI_MAX_CONCURRENT_TURNS=2
 BOT_AI_MAX_QUEUED_TURNS=20
 
-# Durable files for a small, trusted group. Size these to the actual /state volume.
+# Durable files for a small, trusted team. Size these to the actual /state volume.
 BOT_FILE_MAX_BYTES=104857600
 BOT_FILE_MAX_TOTAL_MB=2048
 BOT_FILE_MAX_PEER_MB=1024
@@ -158,7 +158,7 @@ BOT_AI_TOOL_CAPABILITIES=
 BOT_AI_TOOL_SCOPE=workspace
 BOT_AI_TOOL_NETWORK=none
 # This no-tools profile can answer text but cannot inspect staged file bytes.
-# To enable work deliberately, deploy with --allowed-tools read,write
+# To enable work deliberately, run or deploy with --allowed-tools read,write
 # plus a scope and tool-network choice appropriate to the bot.
 BOT_AI_MAX_CONCURRENT_TURNS=2
 BOT_AI_MAX_QUEUED_TURNS=20
@@ -216,9 +216,9 @@ variables `pca deploy` writes into `bot.env` automatically.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BOT_SEED_HEX` | — (required) | Root mini-secret; all keys derive from it. `FAUCET_CHAT_SERVICE_SECRET` is an accepted alias. **gen** |
+| `BOT_SEED_HEX` | — (required) | Root mini-secret; all keys derive from it. **gen** |
 | `BOT_ENDPOINT` | Paseo people-next wss | Statement-store RPC node to poll and publish to. **gen** |
-| `BOT_USERNAME` | `""` | Registered network username (display/search only). `FAUCET_CHAT_SERVICE_USERNAME` alias. **gen** |
+| `BOT_USERNAME` | `""` | Registered network username (display/search only). **gen** |
 | `BOT_PEER_IDENTIFIER_KEYS` | `""` | `peerhex=keyhex,…` — pin identifier keys, skipping the on-chain lookup (tests / fixed fleets). |
 
 ### Access control
@@ -231,8 +231,8 @@ variables `pca deploy` writes into `bot.env` automatically.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BOT_BRAIN` | `bridge` | `claude`\|`codex`\|`opencode` (direct CLI), `bridge`/`hermes` (external harness), `echo` (test). **gen** |
-| `BOT_ACK_TEXT` | "Connecting you to the agent…" (bridge/hermes) | First-contact acknowledgement text. |
+| `BOT_BRAIN` | `bridge` | `claude`\|`codex`\|`opencode` (direct CLI), `bridge` (external harness), `echo` (test). **gen** |
+| `BOT_ACK_TEXT` | "Connecting you to the agent…" (bridge) | First-contact acknowledgement text. |
 | `BOT_GREET` | `0` | `1` = message allowlisted owners once on startup (proof of life). **gen when --greet** |
 | `BOT_GREET_TEXT` | auto | Custom greeting text. |
 
@@ -259,7 +259,7 @@ the directory is sensitive even if no model session has been created.
 | Variable | Default | Purpose |
 |---|---|---|
 | `BOT_BRIDGE_TOKEN` | — (required) | 32+ char shared secret; every request must present it (`Authorization: Bearer` or `x-bridge-token`). Process exits if unset/short. **gen** |
-| `BOT_BRIDGE_PROACTIVE_TOKEN` | unset | T3ams bridge/Hermes only: optional, distinct 32+ char outbound capability. An otherwise authenticated unleased `POST /send`, `/react`, or `/typing` must present it in `x-bridge-proactive-token`; it does not replace `BOT_BRIDGE_TOKEN`. |
+| `BOT_BRIDGE_PROACTIVE_TOKEN` | unset | T3ams bridge mode only: optional, distinct 32+ char outbound capability. An otherwise authenticated unleased `POST /send`, `/react`, or `/typing` must present it in `x-bridge-proactive-token`; it does not replace `BOT_BRIDGE_TOKEN`. |
 | `BOT_BRIDGE_PORT` | 8799 | Port the bridge listens on. **gen** |
 | `BOT_BRIDGE_HOST` | `127.0.0.1` | Bind address. Deploy sets `0.0.0.0` for harness stacks (compose network only). **gen for bridge** |
 | `BOT_BRIDGE_BODY_MAX_BYTES` | 1000000 | Max request body. |
@@ -283,9 +283,9 @@ the directory is sensitive even if no model session has been created.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BOT_AI_TOOL_CAPABILITIES` | `""` | Comma-separated portable direct-agent outcomes: `read`, `write`, `bash`. Empty disables tools; `write` includes `read`, and `bash` includes both. **gen (deploy)** |
-| `BOT_AI_TOOL_SCOPE` | `workspace` | `workspace` scopes normal work to the selected project and current staged attachments; `container` deliberately grants the non-root agent account all of its container-visible files. **gen (deploy)** |
-| `BOT_AI_TOOL_NETWORK` | `none` | `none` or `internet` for tool-process egress. `internet` requires `bash`; enforcement depends on the selected engine. **gen (deploy)** |
+| `BOT_AI_TOOL_CAPABILITIES` | `""` | Comma-separated portable direct-agent outcomes: `read`, `write`, `bash`. Empty disables tools; `write` includes `read`, and `bash` includes both. **gen (run/deploy)** |
+| `BOT_AI_TOOL_SCOPE` | `workspace` | `workspace` scopes normal work to the selected project and current staged attachments; `container` deliberately grants the non-root agent account all of its container-visible files. **gen (run/deploy)** |
+| `BOT_AI_TOOL_NETWORK` | `none` | `none` or `internet` for tool-process egress. `internet` requires `bash`; enforcement depends on the selected engine. **gen (run/deploy)** |
 | `BOT_AI_AGENT_UID` / `BOT_AI_AGENT_GID` | unset | Drop the spawned agent to this uid/gid so it can't read `/state` or the seed. **gen (deploy: 1000)** |
 | `BOT_AI_IDLE_TIMEOUT_MS` | 600000 | Kill a turn that has emitted nothing for this long (wedge backstop). |
 | `BOT_AI_MAX_MS` | 3600000 | Hard per-turn wall-clock cap. |
@@ -296,9 +296,9 @@ the directory is sensitive even if no model session has been created.
 
 #### Tool policy
 
-`pca deploy` regenerates `bot.env`, so make the selected tool policy part of
-the deploy command or release script. Omitting `--allowed-tools` on a later
-deploy intentionally returns a direct bot to the no-tools default.
+`pca run` and `pca deploy` both select a tool policy explicitly. Make it part
+of the command or release script. Omitting `--allowed-tools` intentionally
+returns a direct bot to the no-tools default.
 
 | Deploy selection | Effective capability |
 |---|---|
@@ -308,7 +308,7 @@ deploy intentionally returns a direct bot to the no-tools default.
 | `--tool-scope container` | Deliberately broad: selected tools can reach the non-root agent account's container-visible files, including its OAuth home. |
 | `--tool-network none` / `internet` | Default `none` requests no tool-process network egress. `internet` requires `bash`. Claude and Codex enforce the workspace/network policy natively where available; OpenCode's Bash policy remains bounded by the container rather than an OS filesystem sandbox. |
 
-For Bash, deploy validates the engine-specific network combination: OpenCode
+For Bash, run and deploy validate the engine-specific network combination: OpenCode
 requires `--tool-network internet` because it has no network sandbox; Claude
 requires it for container-scoped Bash but can use `none` for workspace-scoped
 Bash; Codex can keep `none` in either scope. The deploy report names the
@@ -448,6 +448,9 @@ public sender must not be able to spend a finite upload allowance by default.
 
 ### T3ams attachments, media, and file vault
 
+T3ams supports DMs and workspace channels, including threads, live replies,
+media, and files. Native ad-hoc T3ams groups are not supported yet.
+
 `BOT_TRANSPORT=t3ams` has a separate encrypted Bulletin/HOP data path. Its
 settings deliberately do **not** inherit `BOT_HOP_ALLOWED_NODES`,
 `BOT_MEDIA_*`, or `BOT_HOP_UPLOAD_NODE` from the default Polkadot-app
@@ -567,10 +570,10 @@ T3ams uses the shared `BOT_FILE_MAX_BYTES`, `BOT_FILE_MAX_TOTAL_MB`,
 `BOT_FILE_MAX_ENTRIES`, `BOT_FILE_MAX_PEER_MB`, and
 `BOT_FILE_MAX_PEER_ENTRIES` settings for a conversation-scoped durable vault
 under `BOT_STATE_DIR/files`. For this transport, `BOT_FILE_MAX_BYTES` defaults
-to `BOT_T3AMS_ATTACHMENT_MAX_BYTES` and cannot exceed it. A DM and a channel
-are different vault namespaces; a group channel intentionally shares one vault
-among its members. `/file put` requires exactly one successfully downloaded
-attachment, and `/file get` uploads the saved regular file as a new encrypted
+to `BOT_T3AMS_ATTACHMENT_MAX_BYTES` and cannot exceed it. A DM and a workspace
+channel are different vault namespaces; each workspace channel intentionally
+shares one vault among its members. `/file put` requires exactly one
+successfully downloaded attachment, and `/file get` uploads the saved regular file as a new encrypted
 T3ams attachment. The bridge can access the same private namespace with its
 authenticated `/files` routes and can send only a vault `file_path`, never an
 arbitrary host path.
@@ -604,7 +607,7 @@ The bridge token authorizes access to cached media and every file in every
 conversation vault, so do not publish the bridge port or inject that token into
 an untrusted agent process.
 
-In T3ams bridge/Hermes mode, regular outbound `/send`, `/react`, and `/typing`
+In T3ams bridge mode, regular outbound `/send`, `/react`, and `/typing`
 requests remain bound to their active inbound `delivery_id` and `lease_id`.
 `BOT_BRIDGE_PROACTIVE_TOKEN` is a separate opt-in for a framework action that
 has no inbound lease at all (such as a generic attached result). It must be a
@@ -612,7 +615,7 @@ different random secret, is required in the `x-bridge-proactive-token` header
 in addition to normal bridge authentication, and never makes a stale supplied
 lease valid. Leave it unset unless that explicit proactive behavior is needed.
 
-### T3ams group-channel context (optional)
+### T3ams workspace-channel context (optional)
 
 T3ams remains mention-gated by default: unmentioned channel traffic is never
 sent to a brain. Set `BOT_T3AMS_CHANNEL_CONTEXT=1` only when a later explicit

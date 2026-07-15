@@ -23,7 +23,7 @@ test("conversation keys are stable, escaped, and scoped to a DM or channel", () 
   // thread contained the prompt; separate channels never share one.
   assert.equal(
     conversationKeyFor({ conversationType: "channel", workspaceId: "team", channelId: "general", senderXid: "alice", threadRootId: "root-1" }),
-    conversationKeyFor({ conversationType: "group", workspaceId: "team", channelId: "general", senderXid: "bob", threadRootId: "root-2" }),
+    "t3ams:channel:team:general",
   );
   assert.notEqual(
     conversationKeyFor({ conversationType: "channel", workspaceId: "team", channelId: "general" }),
@@ -37,6 +37,8 @@ test("conversation keys reject incomplete or hostile IDs", () => {
   assert.equal(conversationKeyFor({ conversationType: "dm", senderXid: " alice" }), null);
   assert.equal(conversationKeyFor({ conversationType: "dm", senderXid: `a\u0000b` }), null);
   assert.equal(conversationKeyFor({ conversationType: "dm", senderXid: "x".repeat(513) }), null);
+  assert.equal(conversationKeyFor({ conversationType: "direct", senderXid: "alice" }), null);
+  assert.equal(conversationKeyFor({ conversationType: "group", workspaceId: "team", channelId: "general" }), null);
 });
 
 test("mention detection accepts verified structured mentions and bounded text tokens", () => {
@@ -77,6 +79,7 @@ test("a restored durable channel command retains its command candidate", () => {
       threadRootId: null,
       senderXid,
       senderName: "Alice",
+      mentions: [],
     },
   });
   assert.equal(restored?.message.commandText, "/help");
@@ -95,17 +98,18 @@ test("a restored durable channel command retains its command candidate", () => {
       threadRootId: null,
       senderXid,
       senderName: "Alice",
+      mentions: [],
     },
   });
   assert.equal(invalidCommand?.message.commandText, undefined);
 });
 
-test("a legacy durable channel row without mention metadata remains eligible after restore", () => {
+test("durable ingress requires mention metadata and preserves an empty current list", () => {
   const workspaceId = "a1".repeat(32);
   const channelId = "b2".repeat(32);
   const senderXid = "c3".repeat(32);
   const messageId = "d4".repeat(32);
-  const restored = restoreT3amsIngressRoute({
+  const noncurrent = restoreT3amsIngressRoute({
     accepted: true,
     conversationKey: `t3ams:channel:${workspaceId}:${channelId}`,
     message: {
@@ -120,23 +124,42 @@ test("a legacy durable channel row without mention metadata remains eligible aft
       senderName: "Alice",
     },
   });
-  assert.equal(restored?.message.legacyMentionGate, true);
-  assert.equal(restored?.message.mentions, undefined);
+  assert.equal(noncurrent, null);
+
+  const current = restoreT3amsIngressRoute({
+    accepted: true,
+    conversationKey: `t3ams:channel:${workspaceId}:${channelId}`,
+    message: {
+      kind: "text",
+      messageId,
+      text: "@dotbot summarize this",
+      conversationType: "channel",
+      workspaceId,
+      channelId,
+      threadRootId: null,
+      senderXid,
+      senderName: "Alice",
+      mentions: [],
+    },
+  });
+  assert.deepEqual(current?.message.mentions, []);
 });
 
-test("reply target preserves a thread root and always addresses the triggering message", () => {
+test("reply target accepts only canonical camelCase fields", () => {
   assert.deepEqual(replyTargetFor({ messageId: "m-1" }), { replyToMessageId: "m-1", threadRootId: null });
   assert.deepEqual(
-    replyTargetFor({ message_id: "m-2", thread_root_id: "root-1" }),
+    replyTargetFor({ messageId: "m-2", threadRootId: "root-1" }),
     { replyToMessageId: "m-2", threadRootId: "root-1" },
   );
+  assert.equal(replyTargetFor({ message_id: "m-2", thread_root_id: "root-1" }), null);
   assert.equal(replyTargetFor({ messageId: "\n" }), null);
 });
 
 test("DMs reach the brain without a mention and retain transport-neutral context", () => {
   const routed = normalizeT3amsInbound({
-    conversationType: "direct",
-    sender: { xid: "alice-xid", name: "Alice" },
+    conversationType: "dm",
+    senderXid: "alice-xid",
+    senderName: "Alice",
     messageId: "dm-1",
     text: "hello bot",
   }, bot);
@@ -153,7 +176,57 @@ test("DMs reach the brain without a mention and retain transport-neutral context
     threadRootId: null,
     senderXid: "alice-xid",
     senderName: "Alice",
+    mentions: [],
   });
+});
+
+test("routing rejects noncanonical inbound field aliases", () => {
+  assert.deepEqual(normalizeT3amsInbound({
+    conversation_type: "dm",
+    sender_xid: "alice-xid",
+    message_id: "dm-1",
+    text: "hello bot",
+  }, bot), { accepted: false, reason: "invalid-conversation" });
+  assert.deepEqual(normalizeT3amsInbound({
+    conversationType: "dm",
+    sender: { xid: "alice-xid", name: "Alice" },
+    messageId: "dm-1",
+    text: "hello bot",
+  }, bot), { accepted: false, reason: "invalid-conversation" });
+});
+
+test("restoring a durable ingress entry rejects noncanonical channel-context aliases", () => {
+  const workspaceId = "a1".repeat(32);
+  const channelId = "b2".repeat(32);
+  const senderXid = "c3".repeat(32);
+  const messageId = "d4".repeat(32);
+  const priorId = "e5".repeat(32);
+  const priorSender = "f6".repeat(32);
+  const message = {
+    kind: "text",
+    messageId,
+    text: "@dotbot summarize this",
+    conversationType: "channel",
+    workspaceId,
+    channelId,
+    threadRootId: null,
+    senderXid,
+    senderName: "Alice",
+    mentions: [],
+  };
+  const restore = (candidate) => restoreT3amsIngressRoute({
+    accepted: true,
+    conversationKey: `t3ams:channel:${workspaceId}:${channelId}`,
+    message: candidate,
+  });
+  assert.equal(restore({
+    ...message,
+    channel_context: [{ messageId: priorId, senderXid: priorSender, text: "Old field", threadRootId: null }],
+  }), null);
+  assert.equal(restore({
+    ...message,
+    channelContext: [{ id: priorId, senderXid: priorSender, text: "Old field", threadRootId: null }],
+  }), null);
 });
 
 test("channel traffic invokes a bot only on mention, and preserves thread routing", () => {
@@ -309,4 +382,46 @@ test("routing retains safe audio/video metadata for a bridge or direct brain", (
     duration_ms: 45_000,
   }]);
   assert.equal(restoreT3amsIngressRoute(routed)?.message.attachments[0].durationMs, 45_000);
+});
+
+test("routing retains bounded audio waveform metadata for a bridge or direct brain", () => {
+  const ws = "a1".repeat(32);
+  const channel = "b2".repeat(32);
+  const sender = "c3".repeat(32);
+  const messageId = "d4".repeat(32);
+  const attachmentId = "e5".repeat(32);
+  const peaks = [0, 0.11, 0.58, 1];
+  const routed = normalizeT3amsInbound({
+    conversationType: "channel",
+    workspaceId: ws,
+    channelId: channel,
+    senderXid: sender,
+    messageId,
+    text: "@Atlas review this voice note",
+    attachments: [{
+      id: attachmentId,
+      hopId: attachmentId,
+      claimTicketHex: "f6".repeat(32),
+      contentHashHex: "07".repeat(32),
+      attachmentIdHex: "08".repeat(32),
+      kind: "audio",
+      mime: "audio/webm",
+      size: 1234,
+      filename: "voice.webm",
+      durationMs: 45_000,
+      peaks,
+    }],
+  }, bot);
+  assert.equal(routed.accepted, true);
+  assert.deepEqual(routed.message.attachments[0].peaks, peaks);
+  assert.deepEqual(toT3amsBridgeInbound(routed).attachments, [{
+    id: attachmentId,
+    kind: "audio",
+    mime: "audio/webm",
+    size: 1234,
+    filename: "voice.webm",
+    duration_ms: 45_000,
+    peaks,
+  }]);
+  assert.deepEqual(restoreT3amsIngressRoute(routed)?.message.attachments[0].peaks, peaks);
 });

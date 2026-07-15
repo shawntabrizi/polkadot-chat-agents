@@ -7,14 +7,14 @@ message into OpenClaw's agent, acknowledges the lease after a successful
 handoff, and sends replies back with `POST /send`.
 
 ```
-Polkadot app ⇄ bot-core (--brain hermes) ⇄ HTTP bridge ⇄ this plugin ⇄ OpenClaw agent
+Polkadot app ⇄ bot-core (--brain bridge) ⇄ HTTP bridge ⇄ this plugin ⇄ OpenClaw agent
 ```
 
 ## Setup
 
 1. Run `bot-core` in bridge mode so it exposes the bridge:
    ```bash
-   pca create mybot --brain hermes --owner <your-address>   # "hermes" = external-agent bridge mode
+   pca create mybot --brain bridge --owner <your-address>   # "bridge" = external-agent bridge mode
    pca run mybot                                             # bridge on http://127.0.0.1:8799
    ```
 2. Install this channel plugin into OpenClaw:
@@ -46,13 +46,17 @@ gates senders before they reach the bridge.
 in the gateway secret store or `POLKADOT_BRIDGE_TOKEN`, not in a checked-in
 configuration file.
 
-For a T3ams bridge/Hermes bot, ordinary gateway replies carry their leased
+For a T3ams bridge bot, ordinary gateway replies carry their leased
 `delivery_id` and `lease_id`, so they do not need another credential.
 `bridgeProactiveToken` is optional and is used only by OpenClaw's generic
 attached-results sender, which can run outside such a delivery. It must match
 the distinct 32+ character `BOT_BRIDGE_PROACTIVE_TOKEN` secret and is sent as
 `x-bridge-proactive-token` alongside the normal bridge authorization. Leave it
 unset unless those proactive results are needed.
+
+In T3ams mode, the bridge supports DMs and workspace channels, including
+threads, live replies, media, and files. Native ad-hoc T3ams groups are not
+supported yet.
 
 ## Status
 

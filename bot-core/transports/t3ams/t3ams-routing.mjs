@@ -1,11 +1,10 @@
 // T3ams routing policy for events that have already been decrypted and
 // authenticated by a transport.  This module deliberately contains no BCTS,
 // Statement Store, or brain-runtime dependency: it gives a transport one
-// stable conversation key, one answer target, and the group-mention gate that
+// stable conversation key, one answer target, and the channel-mention gate that
 // makes it safe to hand an event to a brain.
 //
-// Accepted input shape (camelCase is preferred; the corresponding snake_case
-// fields are accepted to make bridge adapters trivial):
+// Accepted input shape:
 // {
 //   conversationType: "dm" | "channel", senderXid, senderName,
 //   workspaceId, channelId, messageId, text, threadRootId, mentions
@@ -14,11 +13,14 @@
 // by a rich-text decoder.  Structured mentions take precedence over the plain
 // text fallback, which recognizes `@alias` tokens.
 
+import { DEFAULT_T3AMS_ATTACHMENT_MAX_PEAKS } from "./t3ams-attachments.mjs";
+
 export const MAX_T3AMS_ID_LENGTH = 512;
 export const MAX_T3AMS_TEXT_BYTES = 64 * 1024;
 export const MAX_T3AMS_ATTACHMENT_COUNT = 16;
 export const MAX_T3AMS_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 export const MAX_T3AMS_ATTACHMENT_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
+export const MAX_T3AMS_ATTACHMENT_PEAKS = DEFAULT_T3AMS_ATTACHMENT_MAX_PEAKS;
 export const MAX_T3AMS_CHANNEL_CONTEXT_RECORDS = 64;
 export const MAX_T3AMS_CHANNEL_CONTEXT_BYTES = 64 * 1024;
 
@@ -40,29 +42,27 @@ const optionalName = (value) => {
   return trimmed;
 };
 
-const firstDefined = (...values) => values.find((value) => value !== undefined && value !== null);
-
 const conversationTypeOf = (event = {}) => {
-  const value = firstDefined(event.conversationType, event.conversation_type, event.conversation?.type);
-  if (value === "dm" || value === "direct") return "dm";
-  if (value === "channel" || value === "group") return "channel";
+  const value = event?.conversationType;
+  if (value === "dm") return "dm";
+  if (value === "channel") return "channel";
   return null;
 };
 
 const fieldsOf = (event = {}) => ({
   conversationType: conversationTypeOf(event),
-  senderXid: id(firstDefined(event.senderXid, event.sender_xid, event.sender?.xid)),
-  senderName: optionalName(firstDefined(event.senderName, event.sender_name, event.sender?.name)),
-  workspaceId: id(firstDefined(event.workspaceId, event.workspace_id, event.conversation?.workspaceId, event.conversation?.workspace_id)),
-  channelId: id(firstDefined(event.channelId, event.channel_id, event.conversation?.channelId, event.conversation?.channel_id)),
-  messageId: id(firstDefined(event.messageId, event.message_id, event.id)),
-  threadRootId: id(firstDefined(event.threadRootId, event.thread_root_id, event.thread?.rootId, event.thread?.root_id)),
-  text: typeof event.text === "string" ? event.text : null,
-  kind: firstDefined(event.kind, event.contentType, event.content_type, "text"),
-  mentions: Array.isArray(event.mentions) ? event.mentions : [],
-  attachments: Array.isArray(event.attachments) ? event.attachments : [],
-  attachmentError: typeof event.attachmentError === "string" ? event.attachmentError : null,
-  channelContext: event.channelContext ?? event.channel_context ?? null,
+  senderXid: id(event?.senderXid),
+  senderName: optionalName(event?.senderName),
+  workspaceId: id(event?.workspaceId),
+  channelId: id(event?.channelId),
+  messageId: id(event?.messageId),
+  threadRootId: id(event?.threadRootId),
+  text: typeof event?.text === "string" ? event.text : null,
+  kind: event?.kind ?? "text",
+  mentions: Array.isArray(event?.mentions) ? event.mentions : [],
+  attachments: Array.isArray(event?.attachments) ? event.attachments : [],
+  attachmentError: typeof event?.attachmentError === "string" ? event.attachmentError : null,
+  channelContext: event?.channelContext ?? null,
 });
 
 const segment = (value) => encodeURIComponent(value);
@@ -92,14 +92,18 @@ const normalizeAttachment = (raw) => {
   const width = raw.width == null ? null : Number(raw.width);
   const height = raw.height == null ? null : Number(raw.height);
   const durationMs = raw.durationMs == null ? null : Number(raw.durationMs);
+  const peaks = raw.peaks == null ? null : raw.peaks;
   if ((width == null) !== (height == null)
       || (width != null && (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1 || width > 100_000 || height > 100_000))) return null;
   if (durationMs != null && (!Number.isSafeInteger(durationMs) || durationMs < 0 || durationMs > MAX_T3AMS_ATTACHMENT_DURATION_MS)) return null;
+  if (peaks != null && (raw.kind !== "audio" || !Array.isArray(peaks) || peaks.length > MAX_T3AMS_ATTACHMENT_PEAKS
+      || peaks.some((peak) => typeof peak !== "number" || !Number.isFinite(peak) || peak < 0 || peak > 1))) return null;
   return {
     id, hopId, claimTicketHex: ticket, contentHashHex: contentHash, attachmentIdHex: attachmentId,
     kind: raw.kind, mime, size, filename,
     ...(width == null ? {} : { width, height }),
     ...(durationMs == null ? {} : { durationMs }),
+    ...(peaks == null ? {} : { peaks: [...peaks] }),
   };
 };
 
@@ -134,7 +138,7 @@ const normalizeChannelContext = (raw, conversationType) => {
   let bytes = 0;
   for (const item of raw) {
     if (item == null || typeof item !== "object" || Array.isArray(item)) return null;
-    const messageId = bareHex(item.messageId ?? item.id);
+    const messageId = bareHex(item.messageId);
     const senderXid = bareHex(item.senderXid);
     const text = typeof item.text === "string" ? item.text : null;
     const threadRootId = item.threadRootId == null ? null : bareHex(item.threadRootId);
@@ -288,7 +292,7 @@ const ignored = (reason) => ({ accepted: false, reason });
 // Normalize a single already-verified inbound event for the direct runtime or
 // HTTP bridge.  Authorization (workspace membership / allowlist) remains the
 // transport's responsibility; this function only enforces message shape and
-// the product rule that group messages need an explicit bot mention.
+// the product rule that workspace-channel messages need an explicit bot mention.
 export const normalizeT3amsInbound = (event, bot, {
   requireMentionInChannels = true,
   allowTextMentions = true,
@@ -339,7 +343,9 @@ export const normalizeT3amsInbound = (event, bot, {
       threadRootId: fields.threadRootId,
       senderXid: fields.senderXid,
       senderName: fields.senderName,
-      ...(mentions.length > 0 ? { mentions } : {}),
+      // Persist even an empty list. Durable ingress must carry the exact
+      // mention metadata that was used for its original routing decision.
+      mentions,
       ...(attachments.length > 0 ? { attachments } : {}),
       ...(attachmentError == null ? {} : { attachmentError }),
       ...(channelContext.length > 0 ? { channelContext } : {}),
@@ -350,12 +356,13 @@ export const normalizeT3amsInbound = (event, bot, {
 // Restore a durable direct-runtime ingress entry without trusting any stored
 // routing metadata. The original inbound event was authenticated before it was
 // journaled, but the journal can outlive a process and must still be bounded
-// and self-consistent before it reaches a brain. `commandText` is optional for
-// backwards compatibility with entries saved before mentioned commands were
-// added; when present, only a leading slash is a valid command candidate.
+// and self-consistent before it reaches a brain. Current ingress rows always
+// include structured mention metadata; a row without it is not a current
+// schema record and is not safe to restore.
 export const restoreT3amsIngressRoute = (raw) => {
   const message = raw?.message;
   if (raw?.accepted !== true || message == null || typeof message !== "object") return null;
+  if (Object.prototype.hasOwnProperty.call(message, "channel_context")) return null;
   const conversationType = message.conversationType;
   const senderXid = bareHex(message.senderXid);
   const messageId = bareHex(message.messageId);
@@ -364,13 +371,8 @@ export const restoreT3amsIngressRoute = (raw) => {
   const threadRootId = message.threadRootId == null ? null : bareHex(message.threadRootId);
   const attachments = normalizeAttachments(message.attachments ?? []);
   const attachmentError = safeAttachmentError(message.attachmentError);
-  // Versions before structured mentions were persisted did not include this
-  // field at all.  Such a row was already accepted by the old process, so an
-  // edit after upgrade must not silently cancel it merely because we cannot
-  // reconstruct the original mention metadata.  New rows always carry an
-  // array when relevant and continue to be re-gated on every edit.
-  const hasStoredMentions = Object.prototype.hasOwnProperty.call(message, "mentions");
-  const mentions = normalizeMentions(hasStoredMentions ? message.mentions : []);
+  if (!Object.prototype.hasOwnProperty.call(message, "mentions")) return null;
+  const mentions = normalizeMentions(message.mentions);
   if (!isT3amsHexId(senderXid) || !isT3amsHexId(messageId) || typeof message.text !== "string"
       || Buffer.byteLength(message.text, "utf8") > MAX_T3AMS_TEXT_BYTES
       || attachments == null
@@ -380,7 +382,7 @@ export const restoreT3amsIngressRoute = (raw) => {
   if ((message.kind != null && message.kind !== "text" && message.kind !== "richText")
       || (conversationType !== "dm" && conversationType !== "channel")) return null;
   if (conversationType === "channel" && (!isT3amsHexId(workspaceId) || !isT3amsHexId(channelId))) return null;
-  const channelContext = normalizeChannelContext(message.channelContext ?? message.channel_context ?? null, conversationType);
+  const channelContext = normalizeChannelContext(message.channelContext ?? null, conversationType);
   if (channelContext == null) return null;
   const conversationKey = conversationType === "dm"
     ? `t3ams:dm:${senderXid}`
@@ -409,7 +411,7 @@ export const restoreT3amsIngressRoute = (raw) => {
       threadRootId,
       senderXid,
       senderName,
-      ...(hasStoredMentions ? { mentions } : { legacyMentionGate: true }),
+      mentions,
       ...(attachments.length > 0 ? { attachments } : {}),
       ...(attachmentError == null ? {} : { attachmentError }),
       ...(channelContext.length > 0 ? { channelContext } : {}),
@@ -446,6 +448,7 @@ export const toT3amsBridgeInbound = (routed) => {
         filename: attachment.filename,
         ...(attachment.width == null ? {} : { width: attachment.width, height: attachment.height }),
         ...(attachment.durationMs == null ? {} : { duration_ms: attachment.durationMs }),
+        ...(attachment.peaks == null ? {} : { peaks: attachment.peaks }),
       })),
     } : {}),
     ...(message.attachmentError ? { attachment_error: message.attachmentError } : {}),

@@ -82,7 +82,7 @@ const publicRecord = (record) => ({
  * Create an in-memory bounded channel-context store.
  *
  * `append(chatId, record)` accepts records shaped as:
- * `{ messageId | id, senderXid, senderName?, text, threadRootId? }`.
+ * `{ messageId, senderXid, senderName?, text, threadRootId? }`.
  * Receipt time and sequence are assigned locally; sender-provided timestamps
  * are intentionally ignored for expiry and ordering.
  *
@@ -225,7 +225,7 @@ export function createT3amsChannelContext({
 
   const normalizeRecord = (raw, receivedAt) => {
     if (raw == null || typeof raw !== "object" || Array.isArray(raw)) return { record: null, reason: "invalid-record" };
-    const messageId = normalizeXid(raw.messageId ?? raw.id);
+    const messageId = normalizeXid(raw.messageId);
     const senderXid = normalizeXid(raw.senderXid);
     const threadRootId = raw.threadRootId == null ? null : normalizeXid(raw.threadRootId);
     if (messageId == null || senderXid == null || (raw.threadRootId != null && threadRootId == null) || typeof raw.text !== "string") {

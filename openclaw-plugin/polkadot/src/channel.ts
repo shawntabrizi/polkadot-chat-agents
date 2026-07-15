@@ -85,4 +85,19 @@ export const polkadotPlugin: ChannelPlugin<ResolvedPolkadotAccount> = createChat
       },
     },
   },
+
+  // Scheduled framework activity has no inbound lease. Only send a typing
+  // signal when the operator deliberately configured the narrower proactive
+  // capability; regular replies carry their leased delivery pair in gateway.
+  heartbeat: {
+    sendTyping: async ({ cfg, to, accountId }: { cfg: unknown; to: string; accountId?: string | null }) => {
+      const account = resolvePolkadotAccount({ cfg, accountId });
+      if (!account.bridgeProactiveToken) return;
+      await createBridge(
+        account.bridgeUrl,
+        account.bridgeToken,
+        account.bridgeProactiveToken,
+      ).typing(to, { proactive: true });
+    },
+  },
 });

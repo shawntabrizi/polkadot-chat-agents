@@ -5,23 +5,53 @@ import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { entrypointForTransport } from "../lib/transport-entrypoint.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CLI = path.join(HERE, "..", "cli.mjs");
+const T3AMS_BCTS_LOADER = path.join(HERE, "fixtures", "t3ams", "bcts-loader.mjs");
 const ACCOUNT = "ab".repeat(32);
-const HAS_LOCAL_T3AMS_SDK = fs.existsSync(
-  path.join(HERE, "..", "node_modules", "@t3ams", "bcts", "package.json"),
-);
 
-const runCli = (botsDir, args, extraEnv = {}) => spawnSync(process.execPath, [CLI, ...args], {
+const runCli = (botsDir, args, extraEnv = {}, nodeArgs = []) => spawnSync(process.execPath, [...nodeArgs, CLI, ...args], {
   cwd: path.join(HERE, ".."),
   encoding: "utf8",
   env: { ...process.env, ...extraEnv, PCA_BOTS_DIR: botsDir, NO_COLOR: "1" },
 });
 
+const currentBotConfig = (name, overrides = {}) => {
+  const config = {
+    name,
+    endpoint: "ws://127.0.0.1:9944",
+    backendUrl: "https://backend.example.test",
+    brain: "echo",
+    transport: "polkadot-app",
+    allow: [],
+    allowLabels: {},
+    bridgePort: 8799,
+    bridgeToken: "a-long-enough-bridge-token-for-tests",
+    account: `0x${ACCOUNT}`,
+    address: "5FakePcaAddress",
+    identifierKey: `0x${"11".repeat(32)}`,
+    username: null,
+    registered: false,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    ...overrides,
+  };
+  if (!Object.hasOwn(overrides, "allowLabels")) {
+    config.allowLabels = Object.fromEntries(config.allow.map((account) => [account, account]));
+  }
+  return config;
+};
+
 const writeBot = (botsDir, name, config) => {
+  const dir = path.join(botsDir, name);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "config.json"), `${JSON.stringify(currentBotConfig(name, config))}\n`);
+  fs.writeFileSync(path.join(dir, "secret.json"), `${JSON.stringify({ seedHex: `0x${"11".repeat(32)}` })}\n`);
+};
+
+const writeRawBot = (botsDir, name, config) => {
   const dir = path.join(botsDir, name);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "config.json"), `${JSON.stringify(config)}\n`);
@@ -30,10 +60,100 @@ const writeBot = (botsDir, name, config) => {
 
 const readBot = (botsDir, name) => JSON.parse(fs.readFileSync(path.join(botsDir, name, "config.json"), "utf8"));
 
-test("transport entrypoints keep legacy bots on index and route T3ams to its runtime", () => {
+test("transport entrypoints route each supported transport to its runtime", () => {
   assert.equal(entrypointForTransport("polkadot-app"), "index.mjs");
   assert.equal(entrypointForTransport("t3ams"), "t3ams.mjs");
   assert.throws(() => entrypointForTransport("unknown"), /Unsupported transport entrypoint/);
+});
+
+test("commands require the current config contract without adding defaults", () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
+  try {
+    const missingTransport = currentBotConfig("missingtransport");
+    delete missingTransport.transport;
+    writeRawBot(botsDir, "missingtransport", missingTransport);
+
+    let result = runCli(botsDir, ["deploy", "missingtransport", "--host", "root@example.test", "--dry-run"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Invalid config\.json.*transport must be one of/i);
+    assert.deepEqual(readBot(botsDir, "missingtransport"), missingTransport);
+
+    const missingToken = currentBotConfig("missingtoken");
+    delete missingToken.bridgeToken;
+    writeRawBot(botsDir, "missingtoken", missingToken);
+
+    result = runCli(botsDir, ["deploy", "missingtoken", "--host", "root@example.test", "--dry-run"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Invalid config\.json.*bridgeToken must be a 32\+ character secret/i);
+    assert.deepEqual(readBot(botsDir, "missingtoken"), missingToken);
+
+    const retiredHermesAlias = currentBotConfig("retiredhermes", { brain: "hermes" });
+    writeRawBot(botsDir, "retiredhermes", retiredHermesAlias);
+    result = runCli(botsDir, ["info", "retiredhermes"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Invalid config\.json.*brain must be one of: echo, claude, codex, opencode, bridge/i);
+    assert.deepEqual(readBot(botsDir, "retiredhermes"), retiredHermesAlias);
+  } finally {
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
+});
+
+test("T3ams deployment preflight accepts an importable BCTS SDK without native-group APIs", () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
+  try {
+    writeBot(botsDir, "t3amssdk", { transport: "t3ams" });
+    const genericSdk = path.join(botsDir, "generic-bcts.mjs");
+    fs.writeFileSync(genericSdk, "export const sdk = 'generic';\n");
+    const loaderArgs = ["--experimental-loader", T3AMS_BCTS_LOADER];
+
+    let result = runCli(
+      botsDir,
+      ["deploy", "t3amssdk", "--host", "root@example.test", "--dry-run"],
+      { PCA_TEST_T3AMS_BCTS_MODULE: pathToFileURL(genericSdk).href },
+      loaderArgs,
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /native[ -]?group/i);
+
+    writeBot(botsDir, "t3amsharnesssdk", { brain: "bridge", transport: "t3ams" });
+    result = runCli(
+      botsDir,
+      ["deploy", "t3amsharnesssdk", "--host", "root@example.test", "--harness", "openclaw", "--dry-run"],
+      { PCA_TEST_T3AMS_BCTS_MODULE: pathToFileURL(genericSdk).href },
+      loaderArgs,
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /native[ -]?group/i);
+
+    const brokenSdk = path.join(botsDir, "broken-bcts.mjs");
+    fs.writeFileSync(brokenSdk, "throw new Error('synthetic BCTS import failure');\n");
+    const before = readBot(botsDir, "t3amssdk");
+    result = runCli(
+      botsDir,
+      ["deploy", "t3amssdk", "--host", "root@example.test"],
+      { PCA_TEST_T3AMS_BCTS_MODULE: pathToFileURL(brokenSdk).href },
+      loaderArgs,
+    );
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Could not import the local @t3ams\/bcts package required for T3ams deployment/i);
+    assert.match(result.stderr, /synthetic BCTS import failure/i);
+    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /Checking root@example\.test|ssh root@example\.test/i);
+    assert.deepEqual(readBot(botsDir, "t3amssdk"), before);
+
+    const harnessBefore = readBot(botsDir, "t3amsharnesssdk");
+    result = runCli(
+      botsDir,
+      ["deploy", "t3amsharnesssdk", "--host", "root@example.test", "--harness", "openclaw"],
+      { PCA_TEST_T3AMS_BCTS_MODULE: pathToFileURL(brokenSdk).href },
+      loaderArgs,
+    );
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Could not import the local @t3ams\/bcts package required for T3ams deployment/i);
+    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /Checking root@example\.test|ssh root@example\.test/i);
+    assert.deepEqual(readBot(botsDir, "t3amsharnesssdk"), harnessBefore);
+  } finally {
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
 });
 
 test("private T3ams creation requires and persists a trusted device signing-key pin", () => {
@@ -97,23 +217,6 @@ test("create persists the selected transport and deployment passes it to the run
     assert.equal(result.status, 0, result.stderr);
     assert.doesNotMatch(result.stdout, /BOT_T3AMS_BCTS_MODULE=/);
 
-    // The repository deliberately installs BCTS from a local tarball. Exercise
-    // the missing-SDK guard only in a checkout where that optional package is
-    // absent; a developer checkout with it present must not try real SSH just
-    // to assert a condition that cannot occur there.
-    if (!HAS_LOCAL_T3AMS_SDK) {
-      result = runCli(botsDir, ["deploy", "t3amsbot", "--host", "root@example.test"]);
-      assert.equal(result.status, 1);
-      assert.match(result.stderr, /T3ams transport requires a local T3ams SDK package/);
-      assert.match(result.stderr, /npm install \/path\/to\/t3ams-bcts-\*\.tgz/);
-
-      result = runCli(botsDir, ["deploy", "t3amsbot", "--host", "root@example.test"], {
-        BOT_T3AMS_BCTS_MODULE: moduleOverride,
-      });
-      assert.equal(result.status, 1);
-      assert.match(result.stderr, /T3ams transport requires a local T3ams SDK package/);
-    }
-
     result = runCli(botsDir, ["deploy", "t3amsbot", "--host", "root@example.test", "--dry-run"]);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /^BOT_TRANSPORT=t3ams$/m);
@@ -174,18 +277,6 @@ test("create persists the selected transport and deployment passes it to the run
     assert.equal(readBot(botsDir, "defaultbot").transport, "polkadot-app");
 
     result = runCli(botsDir, ["deploy", "defaultbot", "--host", "root@example.test", "--dry-run"]);
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /^BOT_TRANSPORT=polkadot-app$/m);
-
-    writeBot(botsDir, "legacybot", {
-      name: "legacybot",
-      endpoint: "ws://127.0.0.1:9944",
-      brain: "echo",
-      allow: [],
-      bridgePort: 8799,
-      bridgeToken: "a-long-enough-bridge-token-for-tests",
-    });
-    result = runCli(botsDir, ["deploy", "legacybot", "--host", "root@example.test", "--dry-run"]);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /^BOT_TRANSPORT=polkadot-app$/m);
 
@@ -379,6 +470,10 @@ test("direct deployment uses one portable tool policy across every direct engine
     assert.match(result.stdout, /^BOT_AI_TOOL_NETWORK=internet$/m);
     assert.match(result.stdout, /OpenCode Bash follows the container boundary/i);
 
+    result = runCli(botsDir, ["run", "publicopencode", "--allowed-tools", "bash"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /OpenCode Bash has no network sandbox/i);
+
     for (const [args, pattern] of [
       [["--allowed-tools", "Read"], /unsupported capability/i],
       [["--allowed-tools", "read,read"], /duplicate capability/i],
@@ -405,6 +500,10 @@ test("direct deployment uses one portable tool policy across every direct engine
     result = runCli(botsDir, ["deploy", "bridgebot", "--host", "root@example.test", "--harness", "openclaw", "--allowed-tools", "read", "--dry-run"]);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /require a built-in direct engine/i);
+
+    result = runCli(botsDir, ["run", "bridgebot", "--allowed-tools", "read"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /bridge has no direct-agent tools/i);
 
     writeBot(botsDir, "publicmedia", {
       name: "publicmedia",
