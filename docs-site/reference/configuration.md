@@ -125,13 +125,16 @@ BOT_FILE_MAX_PEER_ENTRIES=2000
 `BOT_AI_TOOL_CAPABILITIES=read,write` gives a direct agent the normal file
 outcomes; `write` includes `read`. Add `bash` when the bot should run commands;
 it includes both file capabilities.
-Workspace scope is the default native file-tool scope; container scope deliberately grants the
-non-root agent account all of its container-visible files, including its OAuth
-home. The CLI retains that home so it can authenticate; container-scoped native
-file tools and Bash can access it. Workspace scope applies to native file tools;
-Bash uses the agent process boundary in either scope. In a deployment that is
-the dedicated bot container; with `pca run`, it is the local process account.
-Every sender of a public bot can direct the policy the deployer chose.
+
+- Workspace scope is the default native file-tool scope. Container scope
+  deliberately grants the non-root agent account all of its container-visible
+  files, including its OAuth home — the CLI retains that home so it can
+  authenticate, and container-scoped native file tools and Bash can access it.
+- Workspace scope applies to native file tools; Bash uses the agent process
+  boundary in either scope. In a deployment that is the dedicated bot
+  container; with `pca run`, it is the local process account.
+- Every sender of a public bot can direct the policy the deployer chose.
+
 For a production HOP configuration, pin the download and upload nodes you
 trust, and provision its allowance through the appropriate operator flow. The
 generated framework deployment exposes its bridge only to the private Compose
@@ -476,16 +479,22 @@ or a host port; it is the only container with the provider API key.
 
 Enabling analysis sends supported attachment bytes and the accompanying user
 request to the configured Anthropic API. Do not turn it on for content that
-must stay entirely on the VPS. Supported semantic inputs are JPEG/PNG/GIF/WebP
-images, PDFs, UTF-8 plain text/Markdown/CSV/TSV/XML/RTF/JSON/NDJSON, and common
-Office XML files (`.docx`, `.xlsx`, `.pptx`). Office files go through a bounded
-ZIP/XML text projection, never a shell or desktop converter. Audio/video,
-legacy Office binaries, archives, and arbitrary binary files still transfer as
-normal downloadable T3ams attachments but remain metadata-only to the brain.
-Plain-text and Office projections are capped at 256 KiB before the provider
-call even when the encrypted attachment itself is within the larger file limit.
-Images above 40 megapixels, encrypted PDFs, and PDFs with more than 50 visible
-page markers are metadata-only too.
+must stay entirely on the VPS.
+
+Supported semantic inputs are JPEG/PNG/GIF/WebP images, PDFs, UTF-8 plain
+text/Markdown/CSV/TSV/XML/RTF/JSON/NDJSON, and common Office XML files
+(`.docx`, `.xlsx`, `.pptx`). Office files go through a bounded ZIP/XML text
+projection, never a shell or desktop converter. Audio/video, legacy Office
+binaries, archives, and arbitrary binary files still transfer as normal
+downloadable T3ams attachments but remain metadata-only to the brain.
+
+Two further bounds keep the provider call small:
+
+- Plain-text and Office projections are capped at 256 KiB before the provider
+  call, even when the encrypted attachment itself is within the larger file
+  limit.
+- Images above 40 megapixels, encrypted PDFs, and PDFs with more than 50
+  visible page markers are metadata-only too.
 
 | Transport variable | Default | Purpose |
 |---|---|---|
@@ -547,12 +556,14 @@ turn only when generated-file delivery is enabled. The agent may write bounded,
 top-level regular files there; bot-core uploads them as new native T3ams
 attachments and removes the directory after handoff. Nested files and symlinks
 are ignored, and generated files must satisfy the same attachment size and MIME
-policy as any other outbound file. Before any upload or final-answer statement,
-bot-core persists the generated-file snapshot and every final-reply chunk in a
-private durable turn outbox. A normal delivery retry drains that exact turn
-rather than regenerating an image, document, or answer; it also reuses a
-persisted Bulletin reference after upload. If Bulletin upload, attachment count,
-or generic-file MIME delivery is disabled, `PCA_OUTPUT_DIR` is withheld so text
+policy as any other outbound file.
+
+Delivery is durable. Before any upload or final-answer statement, bot-core
+persists the generated-file snapshot and every final-reply chunk in a private
+durable turn outbox. A normal delivery retry drains that exact turn rather
+than regenerating an image, document, or answer; it also reuses a persisted
+Bulletin reference after upload. If Bulletin upload, attachment count, or
+generic-file MIME delivery is disabled, `PCA_OUTPUT_DIR` is withheld so text
 replies cannot be trapped behind an undeliverable artifact.
 
 Bulletin upload and Statement Store submission do not provide a transactional

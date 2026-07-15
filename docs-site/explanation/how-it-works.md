@@ -66,19 +66,27 @@ needs no central storage and no account anywhere.
 ## Your agent and its keys
 
 The bot itself is just a process you run. It holds its own signing key — the
-key *is* the identity. In a deployed direct bot, the transport keeps that key
-and the session state while the AI-agent CLI runs as a non-root user in its own
-container. The agent does not receive the signing key or chat session state.
-Its CLI retains its provider-login home inside that bot container so it can
-authenticate; container-scoped native file tools and Bash can access it. Direct
-Claude, Codex, and OpenCode therefore start with no tools; their deployer
-explicitly chooses portable capabilities and a workspace or container scope for
-either public or allowlisted bots. Workspace scopes native file tools; Bash is
-bounded by the agent process in either scope. For a deployment that is the bot's
-dedicated container; local `pca run` uses the local process account, so treat a
-Bash-enabled local bot as a trusted-machine tool. Do not mount unrelated host
-repositories, credentials, Docker sockets, or home directories into a deployed
-bot container.
+key *is* the identity.
+
+In a deployed direct bot, the transport and the AI-agent CLI are deliberately
+separated. The transport keeps the signing key and the chat session state; the
+agent CLI runs as a non-root user in its own container and receives neither.
+The CLI does retain its provider-login home inside that bot container so it can
+authenticate, and container-scoped native file tools and Bash can access it.
+
+Direct Claude, Codex, and OpenCode therefore start with no tools. Their
+deployer explicitly chooses portable capabilities and a scope for them, whether
+the bot is public or allowlisted:
+
+- **Workspace scope** confines native file tools to the bot's working area.
+- **Container scope** exposes what the non-root agent account can see.
+- **Bash** is bounded by the agent process in either scope: for a deployment
+  that is the bot's dedicated container, while local `pca run` uses the local
+  process account — so treat a Bash-enabled local bot as a trusted-machine
+  tool.
+
+Do not mount unrelated host repositories, credentials, Docker sockets, or home
+directories into a deployed bot container.
 
 ## How the promises map to the mechanism
 

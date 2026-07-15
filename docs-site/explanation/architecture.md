@@ -45,12 +45,16 @@ session; container-scoped native file tools and Bash can access it inside that
 bot container.
 
 Direct Claude, Codex, and OpenCode start with no tools. Their deployer may
-select portable `read`, `write`, and `bash` capabilities, workspace or container
-scope for either public or allowlisted bots. Workspace scopes native file tools
-to the normal working area; container scope deliberately exposes all files
-visible to the non-root agent account. Bash uses the agent process boundary in
-either scope: the bot's dedicated container for a deployment, or the local
-process account for `pca run`. Treat local Bash bots as trusted-machine tools.
+select portable `read`, `write`, and `bash` capabilities and a scope, for
+either public or allowlisted bots:
+
+- **Workspace scope** confines native file tools to the normal working area.
+- **Container scope** deliberately exposes all files visible to the non-root
+  agent account.
+- **Bash** uses the agent process boundary in either scope: the bot's dedicated
+  container for a deployment, or the local process account for `pca run`.
+  Treat local Bash bots as trusted-machine tools.
+
 Do not mount unrelated host repositories, credentials, Docker sockets, or home
 directories into a deployed bot container. See [Private & public bots](/guide/access)
 for the deployment profiles.

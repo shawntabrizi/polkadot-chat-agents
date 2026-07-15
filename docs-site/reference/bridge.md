@@ -125,12 +125,14 @@ When the T3ams bot runs `BOT_BRAIN=bridge`, bind every outbound
 `POST /send`, `POST /react`, and `POST /typing` to the leased inbound work by
 including its `delivery_id` and `lease_id`. An authenticated edit or delete
 revokes the old claim, preventing a stale worker from replying to the
-superseded prompt or publishing stale live activity. For the deliberate
-exception of a framework action that has no inbound delivery, configure the
-separate `BOT_BRIDGE_PROACTIVE_TOKEN` and send it in
-`x-bridge-proactive-token` alongside the normal bridge token. The header is
-accepted only for an entirely unleased `/send`, `/react`, or `/typing` request;
-a request that supplies a lease must still have an active matching lease.
+superseded prompt or publishing stale live activity.
+
+There is one deliberate exception: a framework action with no inbound
+delivery. For that, configure the separate `BOT_BRIDGE_PROACTIVE_TOKEN` and
+send it in `x-bridge-proactive-token` alongside the normal bridge token. The
+header is accepted only for an entirely unleased `/send`, `/react`, or
+`/typing` request; a request that supplies a lease must still have an active
+matching lease.
 
 T3ams supports `POST /send` edits, `POST /react`, and `POST /typing` as real
 chat operations. `GET /health` advertises the exact support under

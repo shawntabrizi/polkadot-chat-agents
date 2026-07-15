@@ -268,13 +268,16 @@ no-new-privileges, and process/memory/CPU ceilings. This protects the chat
 identity from the agent process.
 
 The CLI retains `/home/node` only to authenticate and refresh its own OAuth
-session; container-scoped native file tools and Bash can access it. Workspace
-scopes native file tools to the selected project; Bash uses the agent process
-boundary in either scope. A deployed bot has a dedicated container; local
-`pca run` uses the local process account and should be treated as a
-trusted-machine tool. Container scope deliberately exposes the home to native
-file tools. For a public bot, every sender can direct the policy the deployer
-selected. Sessions and the workspace persist across redeploys.
+session; container-scoped native file tools and Bash can access it.
+
+- Workspace scope confines native file tools to the selected project;
+  container scope deliberately exposes the home to native file tools.
+- Bash uses the agent process boundary in either scope: a deployed bot has a
+  dedicated container, while local `pca run` uses the local process account and
+  should be treated as a trusted-machine tool.
+- For a public bot, every sender can direct the policy the deployer selected.
+
+Sessions and the workspace persist across redeploys.
 
 An AI brain spends quota, so `create` requires an allowlist or an explicit
 `--public`.

@@ -76,14 +76,18 @@ chmod 600 /root/pca-bots/<bot>/media.env
 pca deploy mycoolbot --host root@your-server --media-analyzer
 ```
 
-The generated worker has no published port and does not mount `/state`, the
-agent workspace, any direct-engine OAuth home, or the bot's bridge token. It receives
-only verified, bounded attachment bytes, then returns a small untrusted
-summary for the brain. It supports common images, PDFs, text documents, and
-`.docx`/`.xlsx`/`.pptx`; other file types continue to be delivered/downloadable
-but are not semantically inspected. The worker sends supported files to the
-Anthropic API, so do not enable it for material that must remain entirely on
-your server. See [Configuration](/reference/configuration#optional-isolated-photo-and-document-analysis)
+The generated worker is tightly isolated: it has no published port and does
+not mount `/state`, the agent workspace, any direct-engine OAuth home, or the
+bot's bridge token. It receives only verified, bounded attachment bytes, then
+returns a small untrusted summary for the brain.
+
+It supports common images, PDFs, text documents, and `.docx`/`.xlsx`/`.pptx`.
+Other file types continue to be delivered and downloadable, but are not
+semantically inspected.
+
+The worker sends supported files to the Anthropic API, so do not enable it for
+material that must remain entirely on your server. See
+[Configuration](/reference/configuration#optional-isolated-photo-and-document-analysis)
 for limits, cancellation, at-most-once recovery behavior, and egress guidance.
 
 ## Bridge bots

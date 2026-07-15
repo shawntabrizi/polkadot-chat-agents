@@ -46,12 +46,16 @@ Bots live in `~/.pca/bots/<name>/` (override with `PCA_BOTS_DIR`).
 Direct Claude, Codex, and OpenCode runs and deployments start with no tools:
 empty capabilities and workspace scope. The same portable policy is available
 to public and allowlisted bots, so every sender of a public bot can direct
-whatever capabilities its deployer selects. A `read`-capable turn can inspect
-its staged inbound attachment; a `write`-capable turn can produce a returnable
-file. Workspace scope applies to native file tools; Bash uses the agent process
-boundary. A deployment uses its dedicated bot container; local `pca run` uses
-the local process account, so treat it as a trusted-machine tool. See [Private &
-public bots](/guide/access) for the trust boundary.
+whatever capabilities its deployer selects.
+
+- A `read`-capable turn can inspect its staged inbound attachment; a
+  `write`-capable turn can produce a returnable file.
+- Workspace scope applies to native file tools; Bash uses the agent process
+  boundary.
+- A deployment uses its dedicated bot container; local `pca run` uses the
+  local process account, so treat it as a trusted-machine tool.
+
+See [Private & public bots](/guide/access) for the trust boundary.
 
 ## Private Paseo file allowance
 

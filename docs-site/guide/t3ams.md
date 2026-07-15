@@ -101,35 +101,53 @@ tune the threshold with `BOT_T3AMS_CHANNEL_CONTROL_ROLE`.
 ## Photos, documents, audio, video, and other files
 
 T3ams uses encrypted Bulletin/HOP attachments. By default, a rich-text message
-can carry up to eight valid MIME-typed attachments, 25 MiB each, including
-photos, documents, audio, video, and application files. The bot validates the
-encrypted reference, size, hash, metadata, and MIME policy before fetching it.
-It never treats an attachment as an arbitrary URL, and neither a direct brain
-nor a bridge framework receives the decryption ticket.
+can carry up to eight valid MIME-typed attachments of 25 MiB each — photos,
+documents, audio, video, and application files.
 
-Operators can narrow the policy with exact MIME types or `type/*` patterns in
-`BOT_T3AMS_ATTACHMENT_MIME_TYPES`; `*/*` is the broad default. Image dimensions
-and audio/video duration are available as safe metadata when present. A direct
-brain with the portable `read` capability can inspect a temporary staged copy
-for the turn; the default no-tools policy cannot. A bridge gets an opaque,
+Attachments are authenticated before anything touches them:
+
+- The bot validates the encrypted reference, size, hash, metadata, and MIME
+  policy before fetching.
+- An attachment is never treated as an arbitrary URL.
+- Neither a direct brain nor a bridge framework ever receives the decryption
+  ticket.
+
+What a brain can do with a fetched attachment depends on its capabilities. A
+direct brain with the portable `read` capability can inspect a temporary staged
+copy for the turn; the default no-tools policy cannot. A bridge gets an opaque,
 authenticated `/media/<id>` URL that can materialize the bytes on demand.
-`BOT_T3AMS_ATTACHMENT_MAX_DURATION_MS` bounds declared duration metadata to
-seven days by default.
 
-A direct turn with the portable `write` capability can also return a generated
-file. The bot gives that turn a private `PCA_OUTPUT_DIR`; files written directly
-at its top level are uploaded as native attachments and then removed locally.
-The default no-tools policy cannot produce those files. The limit is
-`BOT_T3AMS_AGENT_OUTPUT_MAX_ARTIFACTS` (the attachment-count limit by default);
-`BOT_T3AMS_AGENT_OUTPUT_MAX_TOTAL_BYTES` also caps the total batch. Nested files
-and symlinks are ignored, and the normal outbound size and MIME policy still
-applies. Before upload, accepted files are copied into a private durable turn
-outbox together with the final reply chunks, so a transient delivery retry
-reuses the same immutable answer and bytes rather than rerunning the agent. The
-independent `BOT_T3AMS_AGENT_OUTBOX_*` and `BOT_T3AMS_REPLY_OUTBOX_*` budgets
-bound retained file and reply state. If Bulletin upload or generic-file MIME
-delivery is unavailable, `PCA_OUTPUT_DIR` is withheld and the bot still returns
-text normally.
+Operators tune the inbound policy with two settings:
+
+- `BOT_T3AMS_ATTACHMENT_MIME_TYPES` narrows accepted types with exact MIME
+  types or `type/*` patterns; `*/*` is the broad default.
+- `BOT_T3AMS_ATTACHMENT_MAX_DURATION_MS` bounds declared duration metadata,
+  seven days by default.
+
+Image dimensions and audio/video duration are available as safe metadata when
+present.
+
+### Returning generated files
+
+A direct turn with the portable `write` capability can also return files it
+creates. The bot gives that turn a private `PCA_OUTPUT_DIR`; files written
+directly at its top level are uploaded as native attachments and then removed
+locally. Nested files and symlinks are ignored, and the default no-tools
+policy cannot produce those files.
+
+Limits and delivery guarantees:
+
+- `BOT_T3AMS_AGENT_OUTPUT_MAX_ARTIFACTS` caps the file count (the
+  attachment-count limit by default), and
+  `BOT_T3AMS_AGENT_OUTPUT_MAX_TOTAL_BYTES` caps the total batch. The normal
+  outbound size and MIME policy still applies.
+- Before upload, accepted files are copied into a private durable turn outbox
+  together with the final reply chunks, so a transient delivery retry reuses
+  the same immutable answer and bytes rather than rerunning the agent. The
+  independent `BOT_T3AMS_AGENT_OUTBOX_*` and `BOT_T3AMS_REPLY_OUTBOX_*`
+  budgets bound that retained state.
+- If Bulletin upload or generic-file MIME delivery is unavailable,
+  `PCA_OUTPUT_DIR` is withheld and the bot still returns text normally.
 
 Use `/file put <path>` with one successfully fetched attachment to retain it in
 that T3ams conversation's vault, and `/file get <path>` to return it as a fresh

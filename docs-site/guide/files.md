@@ -52,10 +52,15 @@ A direct turn with the portable `write` capability can return its own generated
 files too. bot-core gives a turn a private `PCA_OUTPUT_DIR` and attaches only
 bounded, top-level regular files written there; it ignores symlinks and nested
 paths, then deletes the directory after delivery. The default no-tools policy
-cannot write those files. Set
-`BOT_T3AMS_AGENT_OUTPUT_MAX_ARTIFACTS=0` to disable that return path.
-`BOT_T3AMS_AGENT_OUTPUT_MAX_TOTAL_BYTES` caps the batch as well as the normal
-per-file attachment limit. The transport first copies accepted output into a
+cannot write those files.
+
+Two settings bound the return path:
+
+- `BOT_T3AMS_AGENT_OUTPUT_MAX_ARTIFACTS=0` disables it entirely.
+- `BOT_T3AMS_AGENT_OUTPUT_MAX_TOTAL_BYTES` caps the batch, on top of the normal
+  per-file attachment limit.
+
+Delivery is retry-safe. The transport first copies accepted output into a
 private durable turn outbox with the final reply chunks, so a retry can deliver
 the same answer, image, or document without asking the agent to recreate it.
 The outbox uses separate global file and reply budgets
