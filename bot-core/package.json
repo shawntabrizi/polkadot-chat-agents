@@ -1,6 +1,6 @@
 {
   "name": "polkadot-chat-agents",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "description": "Run AI coding agents as chat bots in the Polkadot app — Claude Code, Codex, opencode, or agent frameworks (Hermes, OpenClaw) over the Statement Store. E2E-encrypted, serverless: a bot is just a process with an outbound RPC connection.",
   "bin": {
