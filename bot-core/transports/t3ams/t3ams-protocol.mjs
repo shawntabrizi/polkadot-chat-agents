@@ -78,7 +78,27 @@ const emptyT3amsState = () => ({
   seen: [],
   admissions: { publicPeers: [], publicWorkspaces: [] },
   pendingTrust: {},
+  greeted: {},
 });
+
+// Outstanding self-initiated first contacts (greet): XID → last request time.
+// The marker is what lets the returning dmAccept be treated as an expected
+// first contact instead of an unsolicited accept. Bounded like the allowlist.
+const T3AMS_GREETED_CAP = 128;
+// The T3ams host keeps inbox statements for ~24h; re-greet an unpaired peer
+// only when the previous request is about to age out of that replay window.
+export const T3AMS_GREET_RESEND_MS = 20 * 60 * 60 * 1000;
+function normalizeGreeted(raw) {
+  const result = {};
+  for (const [xidHex, at] of Object.entries(raw)) {
+    if (Object.keys(result).length >= T3AMS_GREETED_CAP) break;
+    if (!/^[0-9a-f]{64}$/.test(xidHex)) continue;
+    const value = Number(at);
+    if (!Number.isSafeInteger(value) || value <= 0) continue;
+    result[xidHex] = value;
+  }
+  return result;
+}
 
 // Parked first-contact DM requests from allowlisted-but-unpinned accounts,
 // awaiting out-of-band key verification (`pca trust`). Bounded hard: only
@@ -135,6 +155,7 @@ export function normalizeT3amsState(raw) {
       publicWorkspaces: normalizeAdmissionHistory(admissions.publicWorkspaces),
     },
     pendingTrust: normalizePendingTrust(object(raw.pendingTrust)),
+    greeted: normalizeGreeted(object(raw.greeted)),
   };
 }
 
@@ -1344,9 +1365,14 @@ export function createT3amsProtocol({
     }
     if (decoded.kind === "request" || decoded.kind === "accept") {
       if (decoded.signingPubKeyHex == null || decoded.verified !== true) return null;
-      // An accept completes a request we already saw; it is never a safe
-      // first-contact mechanism because it carries a self-asserted key.
-      if (decoded.kind === "accept" && state.peers[senderXidHex] == null) {
+      // An accept completes a request one side already sent. Inbound, that is
+      // either a request we saw (peer exists) or a greet we initiated (the
+      // greeted marker); anything else carries a self-asserted key with no
+      // request behind it and is never a safe first-contact mechanism.
+      const greetedFirstContact = decoded.kind === "accept"
+        && state.peers[senderXidHex] == null
+        && state.greeted[senderXidHex] != null;
+      if (decoded.kind === "accept" && state.peers[senderXidHex] == null && !greetedFirstContact) {
         log("T3AMS_UNSOLICITED_DM_ACCEPT", { sender: senderXidHex });
         return null;
       }
@@ -1356,7 +1382,7 @@ export function createT3amsProtocol({
         // presented key waits for out-of-band operator verification (`pca
         // trust`), and the retained carrier lets the approval replay the
         // handshake. The key stays self-asserted until approved — never TOFU.
-        if (decoded.kind === "request" && parkPendingTrust(senderXidHex, decoded, data)) {
+        if ((decoded.kind === "request" || greetedFirstContact) && parkPendingTrust(senderXidHex, decoded, data)) {
           log("T3AMS_TRUST_PENDING", {
             sender: senderXidHex,
             presentedKey: bareHex(decoded.signingPubKeyHex),
@@ -1396,6 +1422,17 @@ export function createT3amsProtocol({
         const signed = bcts.signGSTPRequest(envelope, identity.signingPrivateKey);
         await submitStatement({ channel: inbox, topics: [inbox], data: bcts.envelopeToBytes(signed) });
         peer.handshakeAcceptedAt = now();
+        persist();
+      }
+      if (decoded.kind === "accept" && !Number.isSafeInteger(Number(peer.handshakeAcceptedAt))) {
+        // The accept completes a pairing we initiated (greet). Nothing goes
+        // back — both sides already derive the same pairwise channels.
+        peer.handshakeAcceptedAt = now();
+        persist();
+      }
+      if (state.greeted[senderXidHex] != null) {
+        // Paired (either direction) — the outstanding-greet marker is done.
+        delete state.greeted[senderXidHex];
         persist();
       }
       // dmMessageRequest carries the first sealed message in the inbox.  The
@@ -2038,6 +2075,48 @@ export function createT3amsProtocol({
   };
   const sendText = (chatId, text, options = {}) => sendRichText(chatId, text, options);
 
+  // Bot-initiated first contact (greet). Mirrors the T3ams app's own new-DM
+  // flow: a bare signed dmNotification to the peer's personal inbox (no sealed
+  // first message — the app only previews sealed payloads on its re-onboard
+  // path), which the peer's client accepts automatically and answers with a
+  // dmAccept carrying their signing key. The greeting text itself rides the
+  // pairwise DM channel, where the peer's client subscribes on accept and the
+  // host replays the statement. The greeted marker makes the returning accept
+  // an expected first contact; the peer's key still goes through the normal
+  // pin/approval gates on arrival.
+  const greetPeer = async (peerXidHex, text) => {
+    const key = bareHex(peerXidHex);
+    if (!/^[0-9a-f]{64}$/.test(key) || key === selfXidHex) return false;
+    if (Number.isSafeInteger(Number(state.peers[key]?.handshakeAcceptedAt))) return false;
+    const greetedAt = Number(state.greeted[key]);
+    if (Number.isSafeInteger(greetedAt) && now() - greetedAt < T3AMS_GREET_RESEND_MS) return false;
+    if (state.greeted[key] == null && Object.keys(state.greeted).length >= T3AMS_GREETED_CAP) return false;
+    const peer = hexToBytes(key);
+    const expression = bcts.dmNotificationExpression(
+      identity.xid,
+      displayName,
+      bcts.derivePersonalDMChannel(identity.xid, peer),
+      bcts.PERSONAL_SCOPE,
+      now(),
+      null,
+      null,
+      identity.signingPublicKey.taggedCborData(),
+    );
+    const { envelope } = bcts.createGSTPRequest(expression);
+    const signed = bcts.signGSTPRequest(envelope, identity.signingPrivateKey);
+    const inbox = bcts.derivePersonalInboxChannel(peer);
+    await submitStatement({ channel: inbox, topics: [inbox], data: bcts.envelopeToBytes(signed) });
+    state.greeted[key] = now();
+    persist();
+    if (typeof text === "string" && text.trim() !== "") {
+      const conversation = { kind: "dm", peerXidHex: key };
+      const chatId = t3amsConversationKey(conversation);
+      rememberConversation({ chatId, conversation, threadRootId: null });
+      await sendRichText(chatId, text);
+    }
+    return true;
+  };
+
   // Once the operator pins a parked key (config change + restart), the retained
   // carrier replays through the normal inbox path — the same gates run again,
   // now passing — so the handshake completes without waiting for the peer's
@@ -2090,6 +2169,7 @@ export function createT3amsProtocol({
     addPeer,
     pendingTrust: () => jsonClone(state.pendingTrust),
     replayPendingTrust,
+    greetPeer,
     claimInbound,
     pinConversation,
     unpinConversation,

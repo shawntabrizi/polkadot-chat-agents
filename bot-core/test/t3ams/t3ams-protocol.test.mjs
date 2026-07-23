@@ -426,6 +426,7 @@ test("state normalization returns a fresh empty current-version state for invali
     seen: [],
     admissions: { publicPeers: [], publicWorkspaces: [] },
     pendingTrust: {},
+    greeted: {},
   };
   for (const raw of [null, [], "not-json", { v: T3AMS_STATE_VERSION - 1 }, { v: T3AMS_STATE_VERSION + 1 }]) {
     assert.deepEqual(normalizeT3amsState(raw), expected);
@@ -985,4 +986,118 @@ test("state normalization keeps well-formed pending-trust entries and drops the 
     },
   });
   assert.deepEqual(state.pendingTrust, { [peerXid]: [good] });
+});
+
+// Bot-initiated first contact (greet): a signed bare dmNotification to the
+// peer's inbox plus the greeting on the pairwise DM channel; the peer's app
+// auto-accepts and its dmAccept comes back through the normal trust gates.
+function greetFixture({ pins = {}, state = null } = {}) {
+  const self = bytes(0xa1);
+  const peer = bytes(0xb2);
+  const signingKey = bytes(0x5c);
+  const acceptSigned = {
+    expression: {
+      functionName: "dmAccept",
+      parameters: {
+        senderXid: parameter(peer),
+        senderName: parameter("Peer"),
+        timestamp: parameter(2),
+        signingPubKey: parameter(signingKey),
+      },
+    },
+  };
+  const submitted = [];
+  const events = [];
+  const bcts = {
+    PERSONAL_SCOPE: "personal",
+    formatXID: xid,
+    envelopeFromBytes: () => acceptSigned,
+    parseGSTPMessage: (value) => ({ type: "request", body: value.expression }),
+    extractFunctionName: (value) => value.functionName,
+    extractParameter: (value, name) => value.parameters[name] ?? null,
+    verifyGSTPRequestSignature: () => true,
+    SigningPublicKey: { fromTaggedCborData: () => ({}) },
+    derivePersonalInboxChannel: (to) => `inbox:${to instanceof Uint8Array ? xid(to) : to}`,
+    derivePersonalDMChannel: (from, to) => `dm:${xid(from)}:${xid(to)}`,
+    dmNotificationExpression: (...args) => ({ functionName: "dmNotification", args }),
+    dmAcceptExpression: (...args) => ({ functionName: "dmAccept", args }),
+    createGSTPRequest: (expression) => ({ envelope: { expression } }),
+    signGSTPRequest: (envelope) => ({ signed: envelope }),
+    envelopeToBytes: () => Uint8Array.of(9),
+    buildChatMessage: (message) => ({ ...message, id: bytes(0xc3), timestamp: 123 }),
+    createEncryptedDMMessage: (message) => ({ envelope: { kind: "encrypted", message }, topics: ["dm-topic"] }),
+    buildMessageCarrier: (message, prior) => ({ kind: "carrier", message, prior }),
+  };
+  const protocol = createT3amsProtocol({
+    bcts,
+    identity: {
+      xid: self,
+      signingPrivateKey: bytes(0xd4),
+      signingPublicKey: { taggedCborData: () => Uint8Array.of(0x99) },
+    },
+    displayName: "Atlas",
+    state,
+    submit: async (statement) => { submitted.push(statement); },
+    trustedPeerSigningKeys: pins,
+    requireTrustedPeers: true,
+    log: (event, extra) => events.push({ event, ...extra }),
+  });
+  return { protocol, self, peer, signingKey, submitted, events };
+}
+
+test("greet sends a signed request to the peer inbox and the greeting on the DM channel", async () => {
+  const { protocol, self, peer, submitted } = greetFixture();
+  assert.equal(await protocol.greetPeer(xid(peer), "hi, I'm alive"), true);
+
+  assert.equal(submitted.length, 2);
+  assert.equal(submitted[0].channel, `inbox:${xid(peer)}`, "first contact goes to the peer's personal inbox");
+  assert.equal(submitted[1].channel, `dm:${xid(self)}:${xid(peer)}`, "the greeting rides the pairwise DM channel");
+  assert.ok(Number.isSafeInteger(protocol.snapshot().greeted[xid(peer)]));
+
+  // Within the resend window a second greet is a no-op, so a crash-restart
+  // loop cannot spam the owner's inbox.
+  assert.equal(await protocol.greetPeer(xid(peer), "hi again"), false);
+  assert.equal(submitted.length, 2);
+});
+
+test("a greeted peer's accept parks its key when unpinned and pairs after approval", async () => {
+  const first = greetFixture();
+  assert.equal(await first.protocol.greetPeer(xid(first.peer), null), true);
+  assert.equal(await first.protocol.receiveInbox(Uint8Array.of(8)), null);
+  assert.ok(first.events.some((entry) => entry.event === "T3AMS_TRUST_PENDING"));
+  assert.deepEqual(first.protocol.peerIds(), [], "the accept key is parked, not trusted");
+
+  // Operator approves the key (config pin + restart); the parked accept
+  // replays and completes the pairing without any outbound acknowledgement.
+  const second = greetFixture({
+    pins: { [xid(first.peer)]: xid(first.signingKey) },
+    state: first.protocol.snapshot(),
+  });
+  await second.protocol.replayPendingTrust();
+  const peerState = second.protocol.snapshot().peers[xid(first.peer)];
+  assert.ok(Number.isSafeInteger(peerState.handshakeAcceptedAt), "the pairing must complete");
+  assert.equal(second.submitted.length, 0, "an accept is never acknowledged back");
+  assert.equal(second.protocol.snapshot().greeted[xid(first.peer)], undefined, "the greet marker is consumed");
+});
+
+test("a greeted peer's accept pairs immediately when its key was pinned up front", async () => {
+  // The fixture's peer and signing key are deterministic byte fills.
+  const peerXid = "b2".repeat(32);
+  const pinnedKey = "5c".repeat(32);
+  const { protocol, submitted } = greetFixture({ pins: { [peerXid]: pinnedKey } });
+  assert.equal(await protocol.greetPeer(peerXid, null), true);
+  assert.equal(submitted.length, 1, "a text-less greet submits only the inbox request");
+
+  const routed = await protocol.receiveInbox(Uint8Array.of(8));
+  assert.deepEqual(routed, { kind: "peer", peerXidHex: peerXid });
+  assert.ok(Number.isSafeInteger(protocol.snapshot().peers[peerXid].handshakeAcceptedAt));
+  assert.equal(submitted.length, 1, "an accept is never acknowledged back");
+  assert.equal(protocol.snapshot().greeted[peerXid], undefined, "the greet marker is consumed");
+});
+
+test("an accept with no greet behind it is still rejected as unsolicited", async () => {
+  const { protocol, events } = greetFixture();
+  assert.equal(await protocol.receiveInbox(Uint8Array.of(8)), null);
+  assert.ok(events.some((entry) => entry.event === "T3AMS_UNSOLICITED_DM_ACCEPT"));
+  assert.equal(Object.keys(protocol.pendingTrust()).length, 0, "nothing parks without a request behind it");
 });

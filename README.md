@@ -65,7 +65,8 @@ The project currently targets the Paseo testnet. From a source checkout, run
 
 The same flow works for [T3ams](https://www.shawntabrizi.com/polkadot-chat-agents/guide/t3ams)
 bots with `--transport t3ams` — one extra setup command (`pca t3ams setup`)
-installs the T3ams SDK, and the first DM gets a one-time `pca trust` approval.
+installs the T3ams SDK, `--greet` works there too, and first contact gets a
+one-time `pca trust` approval.
 
 ## Documentation
 

@@ -493,9 +493,10 @@ a chat message or invitation.
 A pin can be established two ways:
 
 - **Deferred (default):** create the bot without `--t3ams-peer-key`. The
-  transport parks an unpinned allowlisted account's first DM request —
-  nothing from that account is accepted or answered — and logs
-  `T3AMS_TRUST_PENDING` with the presented key. `pca trust <bot>` lists the
+  transport parks an unpinned allowlisted account's first contact (their DM
+  request, or the accept answering the bot's `--greet`) — nothing from that
+  account is accepted or answered — and logs `T3AMS_TRUST_PENDING` with the
+  presented key. `pca trust <bot>` lists the
   parked keys; compare one against the key shown in the account holder's own
   T3ams app (a separate trusted channel, not the chat itself), then approve it
   with `pca trust <bot> <owner> <key>`. The approval writes the pin to the

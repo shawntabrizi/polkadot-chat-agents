@@ -11,7 +11,8 @@ next:
 
 T3ams is a first-class chat transport for the same direct brains and bridge
 frameworks. People discover the bot by its registered DotNS username, DM it,
-or invite it into a workspace/channel. The bot uses the normal T3ams encryption
+or invite it into a workspace/channel — or the bot greets its owner first
+(`--greet`). The bot uses the normal T3ams encryption
 and membership flows; it does not bypass a private channel's key grants.
 It supports DMs and workspace channels, including threads, live replies, media,
 and files. Native ad-hoc T3ams groups are not supported yet; use a workspace
@@ -30,20 +31,25 @@ public npm.
 pca t3ams setup <path-to-t3ams-spa>    # once: build + install the T3ams SDK
 
 pca create teamhelper --transport t3ams --brain claude --owner yourname.42
-pca run teamhelper
+pca run teamhelper --greet
 ```
 
-Search for the bot's username in T3ams and send it a DM. The bot parks that
-first request — nothing is answered yet — and logs the signing key it
-presented. Approve it after comparing with the key your own T3ams app shows:
+`--greet` makes the bot message you first: your T3ams client pairs with it
+automatically and the conversation appears with a greeting — no need to search
+for the bot. (Without `--greet`, find the bot by its username in T3ams and DM
+it instead.)
+
+Either way, first contact needs one approval before the bot answers: the bot
+parks the signing key your account presented and logs it. Compare it with the
+key your own T3ams app shows, then approve:
 
 ```bash
 pca trust teamhelper                        # list the pending key
 pca trust teamhelper yourname.42 <the-key>  # approve it
 ```
 
-Restart `pca run teamhelper` and the parked handshake replays: the chat opens
-and the bot answers from then on.
+Restart the bot and the parked handshake replays: the bot answers from then
+on.
 
 ## Create a bot
 
@@ -55,13 +61,16 @@ A private bot accepts a person's first contact only against a verified T3ams
 signing public-key pin. There are two ways to establish it:
 
 - **Deferred (the quick start above):** create without pins. The bot parks
-  each allowlisted account's first DM request until you approve the presented
-  key with `pca trust`, comparing it out of band against that person's own
-  device. The parked account cannot get anything accepted or answered until
-  then — this is deferred verification, not trust-on-first-use.
+  each allowlisted account's first contact — their DM request, or the accept
+  that answers the bot's `--greet` — until you approve the presented key with
+  `pca trust`, comparing it out of band against that person's own device. The
+  parked account cannot get anything accepted or answered until then — this is
+  deferred verification, not trust-on-first-use.
 - **Up front:** obtain the tagged-CBOR key out of band (see
   [signing-key pins](/reference/configuration#signing-key-pins)) and pass it
-  at create time — first contact then completes with no approval step:
+  at create time — first contact then completes with no approval step, and
+  `--greet` becomes fully automatic (the bot messages its owner and pairing
+  finishes without any command):
 
 ```bash
 pca create teamhelper --transport t3ams --brain claude \

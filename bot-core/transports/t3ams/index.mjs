@@ -4187,9 +4187,26 @@ syncSubscriptions();
 publishWorkspacePresence();
 pumpIngress();
 // Complete any handshakes whose parked key was pinned since the last run
-// (`pca trust` approval). Best-effort: a failed replay stays logged and the
-// peer's app resend path still works.
-void protocol.replayPendingTrust();
+// (`pca trust` approval), then greet: BOT_GREET opens the chat with each
+// still-unpaired allowlisted owner (bot-initiated first contact; their app
+// accepts automatically). Greet runs after the replay so a restart-after-
+// approval pairs from the parked handshake instead of greeting again.
+const greet = env.BOT_GREET === "1" || env.BOT_GREET === "true";
+const greetText = env.BOT_GREET_TEXT ?? `👋 ${username || "Your bot"} here — I'm alive! Say hi, or /help for what I can do.`;
+void protocol.replayPendingTrust().then(async () => {
+  if (!greet) return;
+  if (allowedXids.size === 0) {
+    log("BOT_GREET_SKIPPED", { note: "no allowlist — an open bot has no owner to greet" });
+    return;
+  }
+  for (const xid of allowedXids) {
+    try {
+      if (await protocol.greetPeer(xid, greetText)) log("BOT_GREETED", { to: xid });
+    } catch (error) {
+      log("BOT_GREET_FAILED", { to: xid, error: String(error?.message ?? error) });
+    }
+  }
+});
 bridge.listen(bridgePort, bridgeHost, () => {
   log("BOT_LISTENING", { transport: "t3ams", endpoint, account: material.accountIdHex, xid: selfXidHex, username, brain });
 });
