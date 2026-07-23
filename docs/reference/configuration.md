@@ -457,27 +457,20 @@ transport check). Create a T3ams bot with `pca create <name> --transport t3ams`
 The runner needs the local T3ams BCTS SDK (`@t3ams/bcts`) in
 `bot-core/node_modules`; it is deliberately loaded only by the T3ams runner, so
 ordinary bots do not need it. The package is **not published on public npm** —
-do not run `npm install @t3ams/bcts`. Build and install it from the T3ams SPA
-checkout instead:
+do not run `npm install @t3ams/bcts`. Install it from a T3ams SPA checkout with
+one command:
 
 ```sh
-cd <path-to-t3ams-spa>/packages/bcts
-npm run build
-npm pack
-# Note the emitted filename, for example: t3ams-bcts-<version>.tgz
-
-cd <path-to-polkadot-chat-agents>
-npm --prefix bot-core install --no-save \
-  --package-lock=false \
-  <path-to-t3ams-spa>/packages/bcts/t3ams-bcts-<version>.tgz
+pca t3ams setup <path-to-t3ams-spa>
 ```
 
-`--no-save` is deliberate: it avoids recording a dependency npm cannot retrieve
-from the public registry. Keep `bot-core/node_modules/@t3ams/bcts` present when
-running `pca deploy` — deployment uploads that local dependency with the
-transport — and do not run `npm ci` afterwards without reinstalling the
-tarball. Rebuild, pack, reinstall, and redeploy when the local BCTS source
-changes.
+This builds `packages/bcts` inside the checkout, packs it, installs the tarball
+into `bot-core` with `--no-save` (deliberate: it avoids recording a dependency
+npm cannot retrieve from the public registry), and verifies the SDK imports.
+Keep `bot-core/node_modules/@t3ams/bcts` present when running `pca deploy` —
+deployment uploads that local dependency with the transport. Re-run the command
+when the local BCTS source changes (then redeploy) and after `npm ci` in
+`bot-core`.
 
 For a local development run only, `BOT_T3AMS_BCTS_MODULE` can point at an
 importable ESM build instead. A remote deployment must package the SDK with
@@ -489,15 +482,29 @@ workspace channel for a shared bot conversation.
 
 #### Signing-key pins
 
-Private T3ams bots require immutable, out-of-band signing-key pins for their
-allowlisted people, recorded with `--t3ams-peer-key`. The pin is required
-because an account-derived T3ams XID does not cryptographically prove
-ownership of a device's Ed25519 signing key, and current T3ams account
-discovery has no global account-to-device-key resolver. Obtain the value from
-a trusted T3ams client or device out of band — it is the hex encoding of that
-identity's `signingPublicKey.taggedCborData()` — and verify it with the
-account holder through a separate trusted channel before saving it. Do not
-learn or rotate a private pin from a chat message or invitation.
+Private T3ams bots accept a person's first contact only against a verified
+signing-key pin. The pin is required because an account-derived T3ams XID does
+not cryptographically prove ownership of a device's Ed25519 signing key, and
+current T3ams account discovery has no global account-to-device-key resolver.
+The pin value is the hex encoding of that identity's
+`signingPublicKey.taggedCborData()`. Do not learn or rotate a private pin from
+a chat message or invitation.
+
+A pin can be established two ways:
+
+- **Deferred (default):** create the bot without `--t3ams-peer-key`. The
+  transport parks an unpinned allowlisted account's first DM request —
+  nothing from that account is accepted or answered — and logs
+  `T3AMS_TRUST_PENDING` with the presented key. `pca trust <bot>` lists the
+  parked keys; compare one against the key shown in the account holder's own
+  T3ams app (a separate trusted channel, not the chat itself), then approve it
+  with `pca trust <bot> <owner> <key>`. The approval writes the pin to the
+  bot's mode-0600 `config.json`; on the next start the parked handshake
+  replays and the pairing completes. Parked state is bounded (only allowlisted
+  accounts park; a few keys per account) and survives restarts.
+- **Up front:** record a key you have already verified out of band with
+  `--t3ams-peer-key` at create time; first contact then needs no approval
+  step.
 
 If a person rotates their T3ams signing device, verify the replacement key out
 of band, update `t3amsTrustedSigningKeys` in the bot's mode-0600
@@ -523,7 +530,7 @@ capacity review supports changing them.
 |---|---|---|
 | `BOT_T3AMS_BCTS_MODULE` | `@t3ams/bcts` | SDK module to import. A custom path is for a local development run only. |
 | `BOT_T3AMS_DISPLAY_NAME` | registered username | Name shown in T3ams. |
-| `BOT_T3AMS_TRUSTED_SIGNING_KEYS` | `{}` | JSON map of allowlisted account IDs to verified tagged-CBOR signing public keys. Required for private first contact. |
+| `BOT_T3AMS_TRUSTED_SIGNING_KEYS` | `{}` | JSON map of allowlisted account IDs to verified tagged-CBOR signing public keys. An allowlisted account without one has its first contact parked for `pca trust` approval. |
 | `BOT_T3AMS_AUTO_ACCEPT_WORKSPACES` | private: `1`; public: `0` | Whether valid workspace invitations are accepted automatically. Enable it for a public bot only after a capacity review. |
 | `BOT_T3AMS_PUBLIC_PEER_CAP` | 128 | Remembered public DM peers. |
 | `BOT_T3AMS_PUBLIC_WORKSPACE_CAP` | 8 | Remembered public workspaces. |

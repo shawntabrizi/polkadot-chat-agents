@@ -63,6 +63,10 @@ The project currently targets the Paseo testnet. From a source checkout, run
 `npm install` at the repo root and use `npm run pca -- <command>` in place of
 `pca <command>`.
 
+The same flow works for [T3ams](https://www.shawntabrizi.com/polkadot-chat-agents/guide/t3ams)
+bots with `--transport t3ams` — one extra setup command (`pca t3ams setup`)
+installs the T3ams SDK, and the first DM gets a one-time `pca trust` approval.
+
 ## Documentation
 
 The full documentation lives at
