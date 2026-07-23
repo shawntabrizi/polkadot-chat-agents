@@ -1964,6 +1964,68 @@ function cmdStop(name, flags) {
   else fail(`Could not stop "${name}" (exit ${r.status}).`);
 }
 
+// T3ams bots need the local @t3ams/bcts SDK, which is not on public npm — it
+// is built inside a T3ams SPA checkout and installed into bot-core as a
+// tarball. This automates that dance (build → pack → install → verify) so the
+// manual four-step recipe in the docs becomes one command.
+async function cmdT3ams(args) {
+  const [sub, spaPath] = args;
+  if (sub !== "setup") fail(`Unknown t3ams subcommand "${sub ?? ""}". Use: pca t3ams setup <path-to-t3ams-spa>`);
+  if (!spaPath) fail("Where is your T3ams SPA checkout? Use: pca t3ams setup <path-to-t3ams-spa>");
+  const root = path.resolve(String(spaPath));
+  // Accept the SPA root or the bcts package dir itself.
+  const bctsDir = [path.join(root, "packages", "bcts"), root].find((dir) => {
+    try { return JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")).name === "@t3ams/bcts"; }
+    catch { return false; }
+  });
+  if (!bctsDir) fail(`${root} doesn't look like a T3ams SPA checkout (expected packages/bcts to hold the @t3ams/bcts package).`);
+  // The SPA is an npm workspace: the bcts build tool is hoisted to the
+  // workspace root. Ask for an installed checkout instead of mutating it.
+  const wsRoot = path.basename(path.dirname(bctsDir)) === "packages" ? path.dirname(path.dirname(bctsDir)) : bctsDir;
+  if (!fs.existsSync(path.join(wsRoot, "node_modules")) && !fs.existsSync(path.join(bctsDir, "node_modules"))) {
+    fail(`That checkout has no dependencies installed yet. Run (cd ${wsRoot} && npm install) once, then re-run this command.`);
+  }
+
+  step("Building the T3ams SDK (@t3ams/bcts)…");
+  const build = spawnSync("npm", ["run", "build"], { cwd: bctsDir, encoding: "utf8" });
+  if (build.status !== 0) {
+    const tail = `${build.stdout ?? ""}\n${build.stderr ?? ""}`.trim().split("\n").slice(-12).join("\n  ");
+    fail(`The @t3ams/bcts build failed:\n  ${tail}`);
+  }
+
+  const packDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-bcts-"));
+  try {
+    const pack = spawnSync("npm", ["pack", "--pack-destination", packDir], { cwd: bctsDir, encoding: "utf8" });
+    const tarballName = (pack.stdout ?? "").trim().split("\n").at(-1);
+    if (pack.status !== 0 || !tarballName?.endsWith(".tgz")) {
+      fail(`Could not pack @t3ams/bcts: ${(pack.stderr ?? "").trim().split("\n").at(-1) ?? "npm pack failed"}`);
+    }
+
+    step("Installing it into bot-core…");
+    // --no-save on purpose: the tarball isn't retrievable from the registry, so
+    // recording it as a dependency would break npm ci for everyone else.
+    const install = spawnSync(
+      "npm",
+      ["--prefix", HERE, "install", "--no-save", "--package-lock=false", path.join(packDir, tarballName)],
+      { encoding: "utf8" },
+    );
+    if (install.status !== 0) {
+      const tail = (install.stderr ?? "").trim().split("\n").slice(-6).join("\n  ");
+      fail(`Could not install the SDK into ${HERE}:\n  ${tail}`);
+    }
+  } finally {
+    fs.rmSync(packDir, { recursive: true, force: true });
+  }
+
+  // Importing is the real requirement (same check deploy uses): a packed SDK
+  // whose transitive dependency fails to load must fail here, not at run time.
+  const check = await inspectT3amsSdkForDeploy("t3ams");
+  if (!check.ok) fail(check.message);
+  const version = JSON.parse(fs.readFileSync(path.join(HERE, "node_modules", "@t3ams", "bcts", "package.json"), "utf8")).version;
+  ok(`T3ams SDK ready (@t3ams/bcts ${version}). pca run and pca deploy will pick it up from here.`);
+  note("Re-run this command after updating the T3ams checkout, or after npm ci in bot-core.");
+}
+
 function usage() {
   console.log(`pca — Polkadot Chat Agents
 
@@ -1981,6 +2043,7 @@ function usage() {
                                        (in chat: /project <alias>[@branch] — branches get isolated git worktrees)
   pca model <name> [show|set|allow|lock|open]            inspect or set a direct bot's model policy
   pca storage <name> [status|grant|recover]  check, provision, or recover the private Paseo testnet file allowance
+  pca t3ams setup <path-to-t3ams-spa>  build + install the local T3ams SDK (once, before the first T3ams bot)
   pca info <name>                      show address + how to message it
 
 create flags:
@@ -2045,7 +2108,7 @@ const COMMAND_FLAGS = {
   status: ["host"],
   stop: ["host"],
   delete: ["yes"],
-  list: [], info: [], help: [], project: [], model: [], storage: ["yes"],
+  list: [], info: [], help: [], project: [], model: [], storage: ["yes"], t3ams: [],
 };
 
 const { flags, positional } = parseFlags(process.argv.slice(2));
@@ -2078,6 +2141,7 @@ try {
     case "project": cmdProject(positional.slice(1)); break;
     case "model": cmdModel(positional.slice(1)); break;
     case "storage": await cmdStorage(positional.slice(1), flags); break;
+    case "t3ams": await cmdT3ams(positional.slice(1)); break;
     case "info": await cmdInfo(arg); break;
     case "help": usage(); break;
     default: usage(); if (command != null) process.exit(1);

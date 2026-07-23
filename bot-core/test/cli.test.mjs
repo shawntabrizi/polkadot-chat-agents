@@ -598,3 +598,46 @@ test("Paseo private-bot onboarding configures a testnet file-delivery profile", 
     fs.rmSync(botsDir, { recursive: true, force: true });
   }
 });
+
+test("pca t3ams setup validates its target before touching anything", () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
+  try {
+    // Wrong/missing subcommand and missing path all fail fast with usage hints.
+    let result = runCli(botsDir, ["t3ams"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /pca t3ams setup <path-to-t3ams-spa>/);
+
+    result = runCli(botsDir, ["t3ams", "setup"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Where is your T3ams SPA checkout/);
+
+    // A directory without the @t3ams/bcts package is rejected by name check,
+    // not by guessing from the path shape.
+    const notSpa = fs.mkdtempSync(path.join(os.tmpdir(), "pca-not-spa-"));
+    try {
+      fs.mkdirSync(path.join(notSpa, "packages", "bcts"), { recursive: true });
+      fs.writeFileSync(path.join(notSpa, "packages", "bcts", "package.json"), JSON.stringify({ name: "something-else" }));
+      result = runCli(botsDir, ["t3ams", "setup", notSpa]);
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /doesn't look like a T3ams SPA checkout/);
+    } finally {
+      fs.rmSync(notSpa, { recursive: true, force: true });
+    }
+
+    // A real-looking checkout without installed dependencies gets the npm
+    // install hint instead of a confusing downstream build failure.
+    const spa = fs.mkdtempSync(path.join(os.tmpdir(), "pca-spa-"));
+    try {
+      fs.mkdirSync(path.join(spa, "packages", "bcts"), { recursive: true });
+      fs.writeFileSync(path.join(spa, "packages", "bcts", "package.json"), JSON.stringify({ name: "@t3ams/bcts", version: "0.0.0" }));
+      result = runCli(botsDir, ["t3ams", "setup", spa]);
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /no dependencies installed yet/);
+      assert.match(result.stderr, /npm install/);
+    } finally {
+      fs.rmSync(spa, { recursive: true, force: true });
+    }
+  } finally {
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
+});
