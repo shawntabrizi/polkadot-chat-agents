@@ -459,7 +459,10 @@ function configuredT3amsTrustedSigningKeys(cfg, transport = configuredTransport(
   const allow = cfg.allow.map((account) => toAccountHex(account));
   const missing = allow.filter((account) => keys[account] == null);
   if (missing.length > 0) {
-    fail(`Private T3ams bot "${cfg.name ?? "this bot"}" needs an immutable tagged-CBOR signing-key pin for every allowlisted account. Recreate it with --t3ams-peer-key <owner>=<tagged-key>, or add t3amsTrustedSigningKeys to its private config.json.`);
+    // Not fatal: the transport parks these accounts' first DM requests until
+    // the operator approves the presented key (`pca trust`). Surface it every
+    // time so an operator can't mistake a parked owner for a broken bot.
+    warn(`No verified T3ams signing-key pin yet for ${missing.length} allowlisted account${missing.length > 1 ? "s" : ""}. Their first DM waits for approval — review with:  pca trust ${cfg.name ?? "<bot>"}`);
   }
   return keys;
 }
@@ -832,10 +835,10 @@ async function cmdCreate(name, flags) {
   const t3amsTrustedSigningKeys = transport === "t3ams"
     ? await requestedT3amsTrustedSigningKeys(flags["t3ams-peer-key"], backendUrl)
     : {};
-  const missingT3amsPins = allow.filter((account) => t3amsTrustedSigningKeys[account] == null);
-  if (transport === "t3ams" && missingT3amsPins.length > 0) {
-    fail("A private T3ams bot requires a tagged-CBOR signing-key pin for every --owner/--allow account. Add --t3ams-peer-key <owner>=<tagged-key>; account-derived XIDs alone are not an authenticated first-contact binding.");
-  }
+  // Accounts without a --t3ams-peer-key pin aren't rejected: their first DM
+  // is parked by the bot until the operator verifies the presented key out of
+  // band and approves it with `pca trust` (deferred pinning, never TOFU).
+  const missingT3amsPins = transport === "t3ams" ? allow.filter((account) => t3amsTrustedSigningKeys[account] == null) : [];
   const isPublic = flags.public === true;
   // Safety: a paid brain left open to everyone can burn the deployer's quota.
   if (allow.length === 0 && !isPublic && PAID_BRAINS.has(brain)) {
@@ -917,11 +920,14 @@ async function cmdCreate(name, flags) {
     : null;
 
   console.log();
-  console.log(allow.length ? `Locked to ${allow.length} allowlisted address${allow.length > 1 ? "es" : ""}${transport === "t3ams" ? " with pinned T3ams signing keys" : ""} — only they can message it.`
+  console.log(allow.length ? `Locked to ${allow.length} allowlisted address${allow.length > 1 ? "es" : ""}${transport === "t3ams" && missingT3amsPins.length === 0 ? " with pinned T3ams signing keys" : ""} — only they can message it.`
                    : "Open — anyone can message it.");
   if (transport === "t3ams") {
     console.log("Message your bot in T3ams:");
     printT3amsReachLine(config);
+    if (missingT3amsPins.length > 0) {
+      note(`First contact needs a one-time approval: run the bot, send it a DM, then confirm the key with  pca trust ${name}`);
+    }
   } else {
     console.log("Message your bot in the Polkadot app:");
     console.log(`  ${c(deeplink(accountIdHex), "36")}`);
@@ -1964,6 +1970,80 @@ function cmdStop(name, flags) {
   else fail(`Could not stop "${name}" (exit ${r.status}).`);
 }
 
+// Deferred T3ams pinning. A private T3ams bot parks the first DM request from
+// an allowlisted account that has no verified signing-key pin yet (the
+// transport writes it to t3ams-state.json in the bot dir). `pca trust <bot>`
+// lists those parked keys; the operator compares one against the key the
+// account holder's own T3ams device shows, then approves it — which writes the
+// pin to config.json. The next `pca run` replays the parked handshake.
+const t3amsAccountXid = (accountHex) => createHash("sha256")
+  .update(Buffer.concat([Buffer.from("bcts:xid:v2:acct:"), Buffer.from(accountHex, "hex")]))
+  .digest("hex");
+
+function readT3amsPendingTrust(name) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(botDir(name), "t3ams-state.json"), "utf8"));
+    const pending = raw?.t3ams?.pendingTrust;
+    return isRecord(pending) ? pending : {};
+  } catch { return {}; }
+}
+
+async function cmdTrust(args) {
+  const [name, owner, keyArg] = args;
+  const cfg = readConfig(name);
+  if (configuredTransport(cfg) !== "t3ams") fail(`"${name}" is not a T3ams bot — signing-key approval only applies to --transport t3ams.`);
+  if (cfg.allow.length === 0) fail(`"${name}" is a public bot; it has no allowlist to pin keys for.`);
+  const pins = {};
+  for (const [account, key] of Object.entries(isRecord(cfg.t3amsTrustedSigningKeys) ? cfg.t3amsTrustedSigningKeys : {})) {
+    pins[toAccountHex(account)] = normalizeT3amsSigningKey(key, `T3ams signing key for ${account}`);
+  }
+  const pending = readT3amsPendingTrust(name);
+
+  if (owner == null) {
+    let pendingShown = 0;
+    for (const account of cfg.allow) {
+      const label = cfg.allowLabels[account] ?? shortAllowEntry(account);
+      if (pins[account] != null) { ok(`${label} — signing key pinned`); continue; }
+      const entries = (pending[t3amsAccountXid(account)] ?? []).filter((entry) => typeof entry?.keyHex === "string");
+      if (entries.length === 0) {
+        step(`${label} — no pin and no pending request yet. Run the bot and have them DM it in T3ams first.`);
+        continue;
+      }
+      step(`${label} — pending DM request${entries.length > 1 ? "s" : ""}:`);
+      for (const entry of entries) {
+        const when = Number(entry.at) > 0 ? ` (received ${new Date(Number(entry.at)).toISOString()})` : "";
+        note(`key ${entry.keyHex}${when}`);
+        pendingShown += 1;
+      }
+    }
+    if (pendingShown > 0) {
+      console.log();
+      console.log("Compare a key with the one shown in that person's own T3ams app before approving.");
+      console.log(`Approve:  pca trust ${name} <owner> <key-or-first-12+-chars>`);
+      if (pendingShown > 1) warn("More than one key is pending — if you didn't expect that, approve only the one the account holder confirms.");
+    }
+    return;
+  }
+
+  const account = await resolvePeer(owner, cfg.backendUrl);
+  if (!cfg.allow.includes(account)) fail(`${owner} isn't on "${name}"'s allowlist.`);
+  if (keyArg == null) fail(`Which key? List the pending requests first:  pca trust ${name}`);
+  const wanted = String(keyArg).trim().replace(/^0x/i, "").toLowerCase();
+  if (!/^[0-9a-f]{12,}$/.test(wanted)) fail("Give the pending key, or at least its first 12 hex characters.");
+  if (pins[account] != null) {
+    if (pins[account].startsWith(wanted)) { ok(`${owner}'s signing key is already pinned.`); return; }
+    fail(`${owner} already has a different pinned key. Key rotation is deliberate: verify the new key out of band, edit t3amsTrustedSigningKeys in ${configPath(name)}, and restart the bot.`);
+  }
+  const matches = (pending[t3amsAccountXid(account)] ?? [])
+    .filter((entry) => typeof entry?.keyHex === "string" && entry.keyHex.startsWith(wanted));
+  if (matches.length === 0) fail(`No pending request from ${owner} matches that key. List them with:  pca trust ${name}`);
+  if (matches.length > 1) fail("That prefix matches more than one pending key — paste more of it.");
+  const key = normalizeT3amsSigningKey(matches[0].keyHex, `T3ams signing key for ${owner}`);
+  saveConfig(name, { ...cfg, t3amsTrustedSigningKeys: { ...(isRecord(cfg.t3amsTrustedSigningKeys) ? cfg.t3amsTrustedSigningKeys : {}), [account]: key } });
+  ok(`Pinned ${owner}'s T3ams signing key.`);
+  note(`Restart the bot (pca run ${name}) — the parked request replays and the chat opens.`);
+}
+
 // T3ams bots need the local @t3ams/bcts SDK, which is not on public npm — it
 // is built inside a T3ams SPA checkout and installed into bot-core as a
 // tarball. This automates that dance (build → pack → install → verify) so the
@@ -2044,6 +2124,7 @@ function usage() {
   pca model <name> [show|set|allow|lock|open]            inspect or set a direct bot's model policy
   pca storage <name> [status|grant|recover]  check, provision, or recover the private Paseo testnet file allowance
   pca t3ams setup <path-to-t3ams-spa>  build + install the local T3ams SDK (once, before the first T3ams bot)
+  pca trust <name> [<owner> <key>]     list a T3ams bot's pending first-contact keys, or approve one
   pca info <name>                      show address + how to message it
 
 create flags:
@@ -2051,7 +2132,8 @@ create flags:
   --owner <who>    lock the bot to you — your app username (myname.42), address, or 0x hex (recommended)
   --allow a,b      allowlist several owners (usernames/addresses/hex, comma-separated)
   --t3ams-peer-key owner=hex[,owner=hex]
-                   required for each private T3ams owner: immutable tagged-CBOR signing-key pin
+                   pre-verified tagged-CBOR signing-key pin for a private T3ams owner; without it,
+                   that owner's first DM waits for a one-time "pca trust" approval
   --t3ams-display-name <name>
                    name shown by a T3ams bot (defaults to its registered username)
   --t3ams-auto-accept-workspaces
@@ -2108,7 +2190,7 @@ const COMMAND_FLAGS = {
   status: ["host"],
   stop: ["host"],
   delete: ["yes"],
-  list: [], info: [], help: [], project: [], model: [], storage: ["yes"], t3ams: [],
+  list: [], info: [], help: [], project: [], model: [], storage: ["yes"], t3ams: [], trust: [],
 };
 
 const { flags, positional } = parseFlags(process.argv.slice(2));
@@ -2142,6 +2224,7 @@ try {
     case "model": cmdModel(positional.slice(1)); break;
     case "storage": await cmdStorage(positional.slice(1), flags); break;
     case "t3ams": await cmdT3ams(positional.slice(1)); break;
+    case "trust": await cmdTrust(positional.slice(1)); break;
     case "info": await cmdInfo(arg); break;
     case "help": usage(); break;
     default: usage(); if (command != null) process.exit(1);

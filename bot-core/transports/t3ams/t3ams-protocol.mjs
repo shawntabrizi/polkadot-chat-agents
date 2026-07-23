@@ -77,7 +77,43 @@ const emptyT3amsState = () => ({
   backfill: {},
   seen: [],
   admissions: { publicPeers: [], publicWorkspaces: [] },
+  pendingTrust: {},
 });
+
+// Parked first-contact DM requests from allowlisted-but-unpinned accounts,
+// awaiting out-of-band key verification (`pca trust`). Bounded hard: only
+// allowlisted XIDs can park (the allowlist gate runs first), but a sender can
+// present arbitrarily many self-asserted keys, so cap keys per XID and the
+// retained carrier size. The carrier is kept so an approval can replay the
+// handshake instead of waiting for the app to resend.
+const T3AMS_PENDING_TRUST_XID_CAP = 32;
+const T3AMS_PENDING_TRUST_KEYS_PER_XID = 4;
+const T3AMS_PENDING_TRUST_DATA_MAX_BYTES = 32 * 1024;
+const validPendingTrustKey = (value) => typeof value === "string" && /^[0-9a-f]{2,4096}$/.test(value) && value.length % 2 === 0;
+function normalizePendingTrust(raw) {
+  const result = {};
+  for (const [xid, list] of Object.entries(raw)) {
+    if (Object.keys(result).length >= T3AMS_PENDING_TRUST_XID_CAP) break;
+    if (!/^[0-9a-f]{64}$/.test(xid) || !Array.isArray(list)) continue;
+    const entries = [];
+    for (const item of list) {
+      if (item == null || typeof item !== "object" || Array.isArray(item)) continue;
+      const keyHex = typeof item.keyHex === "string" ? item.keyHex : "";
+      const dataHex = typeof item.dataHex === "string" ? item.dataHex : "";
+      if (!validPendingTrustKey(keyHex)) continue;
+      if (!/^(?:[0-9a-f]{2})+$/.test(dataHex) || dataHex.length > T3AMS_PENDING_TRUST_DATA_MAX_BYTES * 2) continue;
+      if (entries.some((entry) => entry.keyHex === keyHex)) continue;
+      entries.push({
+        keyHex,
+        dataHex,
+        senderName: typeof item.senderName === "string" ? item.senderName.slice(0, 128) : "",
+        at: Number.isSafeInteger(Number(item.at)) ? Number(item.at) : 0,
+      });
+    }
+    if (entries.length > 0) result[xid] = entries.slice(-T3AMS_PENDING_TRUST_KEYS_PER_XID);
+  }
+  return result;
+}
 
 export function normalizeT3amsState(raw) {
   if (raw == null || typeof raw !== "object" || Array.isArray(raw) || raw.v !== T3AMS_STATE_VERSION) {
@@ -98,6 +134,7 @@ export function normalizeT3amsState(raw) {
       publicPeers: normalizeAdmissionHistory(admissions.publicPeers),
       publicWorkspaces: normalizeAdmissionHistory(admissions.publicWorkspaces),
     },
+    pendingTrust: normalizePendingTrust(object(raw.pendingTrust)),
   };
 }
 
@@ -865,6 +902,21 @@ export function createT3amsProtocol({
       }
     }
   };
+  const parkPendingTrust = (xidHex, decoded, data) => {
+    if (!(data instanceof Uint8Array) || data.length === 0 || data.length > T3AMS_PENDING_TRUST_DATA_MAX_BYTES) return false;
+    const keyHex = bareHex(decoded.signingPubKeyHex);
+    if (!validPendingTrustKey(keyHex)) return false;
+    const existing = state.pendingTrust[xidHex];
+    if (existing == null && Object.keys(state.pendingTrust).length >= T3AMS_PENDING_TRUST_XID_CAP) return false;
+    // Re-presenting a parked key refreshes its carrier; distinct keys queue up
+    // to the per-XID cap (newest win) so a spoofer cannot crowd out the real
+    // device's request, only sit beside it until the operator compares keys.
+    const list = (Array.isArray(existing) ? existing : []).filter((entry) => entry?.keyHex !== keyHex);
+    list.push({ keyHex, dataHex: bytesToHex(data), senderName: String(decoded.senderName ?? "").slice(0, 128), at: now() });
+    state.pendingTrust[xidHex] = list.slice(-T3AMS_PENDING_TRUST_KEYS_PER_XID);
+    persist();
+    return true;
+  };
   const addPeer = (peerXidHex, details = {}) => {
     const key = bareHex(peerXidHex);
     if (!/^[0-9a-f]{64}$/.test(key) || key === selfXidHex) return null;
@@ -1300,7 +1352,19 @@ export function createT3amsProtocol({
       }
       const trustedKey = trustedPeers.get(senderXidHex) ?? null;
       if (requireTrustedPeers && trustedKey == null) {
-        log("T3AMS_INBOX_PIN_REQUIRED", { sender: senderXidHex });
+        // An allowlisted first contact with no pin is parked, not dropped: the
+        // presented key waits for out-of-band operator verification (`pca
+        // trust`), and the retained carrier lets the approval replay the
+        // handshake. The key stays self-asserted until approved — never TOFU.
+        if (decoded.kind === "request" && parkPendingTrust(senderXidHex, decoded, data)) {
+          log("T3AMS_TRUST_PENDING", {
+            sender: senderXidHex,
+            presentedKey: bareHex(decoded.signingPubKeyHex),
+            senderName: decoded.senderName ?? "",
+          });
+        } else {
+          log("T3AMS_INBOX_PIN_REQUIRED", { sender: senderXidHex });
+        }
         return null;
       }
       if (trustedKey != null && bareHex(decoded.signingPubKeyHex) !== trustedKey) {
@@ -1974,6 +2038,27 @@ export function createT3amsProtocol({
   };
   const sendText = (chatId, text, options = {}) => sendRichText(chatId, text, options);
 
+  // Once the operator pins a parked key (config change + restart), the retained
+  // carrier replays through the normal inbox path — the same gates run again,
+  // now passing — so the handshake completes without waiting for the peer's
+  // app to resend. Entries for a pinned XID that do not match its pin are
+  // stale or spoofed and are discarded.
+  const replayPendingTrust = async () => {
+    for (const [xid, entries] of Object.entries(state.pendingTrust)) {
+      const trustedKey = trustedPeers.get(xid);
+      if (trustedKey == null) continue;
+      const match = (Array.isArray(entries) ? entries : []).find((entry) => entry?.keyHex === trustedKey);
+      delete state.pendingTrust[xid];
+      persist();
+      if (match == null) {
+        log("T3AMS_TRUST_PENDING_DISCARDED", { sender: xid });
+        continue;
+      }
+      try { await receiveInbox(hexToBytes(match.dataHex)); }
+      catch (error) { log("T3AMS_TRUST_REPLAY_FAILED", { sender: xid, error: String(error?.message ?? error) }); }
+    }
+  };
+
   return {
     selfXidHex,
     snapshot: () => jsonClone(state),
@@ -2003,6 +2088,8 @@ export function createT3amsProtocol({
       return canPostWorkspaceChannel(workspace, stateChannel(workspace, channelIdHex), selfXidHex);
     },
     addPeer,
+    pendingTrust: () => jsonClone(state.pendingTrust),
+    replayPendingTrust,
     claimInbound,
     pinConversation,
     unpinConversation,

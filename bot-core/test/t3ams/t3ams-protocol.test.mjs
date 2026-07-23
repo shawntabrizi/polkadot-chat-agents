@@ -425,6 +425,7 @@ test("state normalization returns a fresh empty current-version state for invali
     backfill: {},
     seen: [],
     admissions: { publicPeers: [], publicWorkspaces: [] },
+    pendingTrust: {},
   };
   for (const raw of [null, [], "not-json", { v: T3AMS_STATE_VERSION - 1 }, { v: T3AMS_STATE_VERSION + 1 }]) {
     assert.deepEqual(normalizeT3amsState(raw), expected);
@@ -862,4 +863,126 @@ test("rich-text guard rechecks a stale direct ingress after queued submission", 
   await first;
   await assert.rejects(stale, (error) => error?.code === "T3AMS_OUTBOUND_FENCED");
   assert.deepEqual(sent, []);
+});
+
+// Deferred pinning: a private bot parks an allowlisted-but-unpinned first
+// contact (presented key + raw carrier) instead of dropping it, and replays
+// the carrier once the operator pins the key. Never processed before approval.
+function pendingTrustFixture({ pins = {}, state = null } = {}) {
+  const self = bytes(0xa1);
+  const peer = bytes(0xb2);
+  const signingKey = bytes(0x5c);
+  const signed = {
+    expression: {
+      functionName: "dmMessageRequest",
+      parameters: {
+        senderXid: parameter(peer),
+        senderName: parameter("Peer"),
+        timestamp: parameter(1),
+        signingPubKey: parameter(signingKey),
+        sealed: parameter(Uint8Array.of(7)),
+      },
+    },
+  };
+  const submitted = [];
+  const events = [];
+  const bcts = {
+    formatXID: xid,
+    // Decode by content, not object identity: the replay path re-decodes the
+    // parked carrier from persisted hex, which is a fresh Uint8Array.
+    envelopeFromBytes: () => signed,
+    parseGSTPMessage: (value) => ({ type: "request", body: value.expression }),
+    extractFunctionName: (value) => value.functionName,
+    extractParameter: (value, name) => value.parameters[name] ?? null,
+    verifyGSTPRequestSignature: () => true,
+    SigningPublicKey: { fromTaggedCborData: () => ({}) },
+    derivePersonalInboxChannel: (to) => `inbox:${to instanceof Uint8Array ? xid(to) : to}`,
+    dmAcceptExpression: (...args) => ({ functionName: "dmAccept", args }),
+    createGSTPRequest: (expression) => ({ envelope: { expression } }),
+    signGSTPRequest: (envelope) => ({ signed: envelope }),
+    envelopeToBytes: () => Uint8Array.of(9),
+  };
+  const protocol = createT3amsProtocol({
+    bcts,
+    identity: {
+      xid: self,
+      signingPrivateKey: bytes(0xd4),
+      signingPublicKey: { taggedCborData: () => Uint8Array.of(0x99) },
+    },
+    displayName: "Atlas",
+    state,
+    submit: async (statement) => { submitted.push(statement); },
+    trustedPeerSigningKeys: pins,
+    requireTrustedPeers: true,
+    log: (event, extra) => events.push({ event, ...extra }),
+  });
+  return { protocol, peer, signingKey, submitted, events };
+}
+
+test("an unpinned allowlisted DM request is parked for approval, never processed", async () => {
+  const { protocol, peer, signingKey, submitted, events } = pendingTrustFixture();
+  assert.equal(await protocol.receiveInbox(Uint8Array.of(8)), null);
+  assert.equal(submitted.length, 0, "no handshake accept may go out before approval");
+  assert.deepEqual(protocol.peerIds(), [], "no peer may be admitted before approval");
+
+  const pendingEvent = events.find((entry) => entry.event === "T3AMS_TRUST_PENDING");
+  assert.ok(pendingEvent, "the operator-facing pending event must fire");
+  assert.equal(pendingEvent.presentedKey, xid(signingKey));
+
+  const entries = protocol.pendingTrust()[xid(peer)];
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].keyHex, xid(signingKey));
+  assert.equal(entries[0].dataHex, "08", "the raw carrier is retained for replay");
+
+  // Re-presenting the same key refreshes the parked entry, not a duplicate.
+  assert.equal(await protocol.receiveInbox(Uint8Array.of(8)), null);
+  assert.equal(protocol.pendingTrust()[xid(peer)].length, 1);
+});
+
+test("pinning a parked key replays the retained handshake on the next start", async () => {
+  const first = pendingTrustFixture();
+  assert.equal(await first.protocol.receiveInbox(Uint8Array.of(8)), null);
+
+  // Same persisted state, now constructed with the operator-approved pin —
+  // exactly what a config change plus restart produces.
+  const second = pendingTrustFixture({
+    pins: { [xid(first.peer)]: xid(first.signingKey) },
+    state: first.protocol.snapshot(),
+  });
+  await second.protocol.replayPendingTrust();
+
+  assert.equal(Object.keys(second.protocol.pendingTrust()).length, 0);
+  const peerState = second.protocol.snapshot().peers[xid(first.peer)];
+  assert.ok(Number.isSafeInteger(peerState.handshakeAcceptedAt), "the handshake must complete");
+  assert.equal(second.submitted.length, 1, "the accept goes to the peer's inbox");
+  assert.ok(String(second.submitted[0].channel).startsWith("inbox:"));
+});
+
+test("a parked key that does not match the operator's pin is discarded, not accepted", async () => {
+  const first = pendingTrustFixture();
+  assert.equal(await first.protocol.receiveInbox(Uint8Array.of(8)), null);
+
+  const second = pendingTrustFixture({
+    pins: { [xid(first.peer)]: "22" },
+    state: first.protocol.snapshot(),
+  });
+  await second.protocol.replayPendingTrust();
+
+  assert.equal(second.submitted.length, 0);
+  assert.ok(second.events.some((entry) => entry.event === "T3AMS_TRUST_PENDING_DISCARDED"));
+  assert.equal(Object.keys(second.protocol.pendingTrust()).length, 0);
+});
+
+test("state normalization keeps well-formed pending-trust entries and drops the rest", () => {
+  const peerXid = "a".repeat(64);
+  const good = { keyHex: "aabbccddeeff", dataHex: "0807", senderName: "Peer", at: 5 };
+  const state = normalizeT3amsState({
+    v: T3AMS_STATE_VERSION,
+    pendingTrust: {
+      [peerXid]: [good, { keyHex: "odd", dataHex: "08" }, { keyHex: "22", dataHex: "xyz" }, null],
+      "not-an-xid": [good],
+      [`${"b".repeat(64)}`]: "not-a-list",
+    },
+  });
+  assert.deepEqual(state.pendingTrust, { [peerXid]: [good] });
 });

@@ -156,16 +156,18 @@ test("T3ams deployment preflight accepts an importable BCTS SDK without native-g
   }
 });
 
-test("private T3ams creation requires and persists a trusted device signing-key pin", () => {
+test("private T3ams creation persists a supplied pin and defers a missing one to pca trust", () => {
   const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
   try {
+    // No pin is no longer fatal: the bot parks first contact until the
+    // operator approves the presented key with `pca trust`.
     let result = runCli(botsDir, [
-      "create", "pinnedbot", "--brain", "echo", "--transport", "t3ams",
+      "create", "unpinnedbot", "--brain", "echo", "--transport", "t3ams",
       "--owner", `0x${ACCOUNT}`, "--no-register",
     ]);
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /requires a tagged-CBOR signing-key pin/i);
-    assert.equal(fs.existsSync(path.join(botsDir, "pinnedbot")), false);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal("t3amsTrustedSigningKeys" in readBot(botsDir, "unpinnedbot"), false);
+    assert.match(result.stdout, /pca trust unpinnedbot/);
 
     result = runCli(botsDir, [
       "create", "pinnedbot", "--brain", "echo", "--transport", "t3ams",
@@ -637,6 +639,77 @@ test("pca t3ams setup validates its target before touching anything", () => {
     } finally {
       fs.rmSync(spa, { recursive: true, force: true });
     }
+  } finally {
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
+});
+
+test("pca trust lists parked T3ams keys and pins exactly the approved one", () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
+  const accountXid = createHash("sha256")
+    .update(Buffer.concat([Buffer.from("bcts:xid:v2:acct:"), Buffer.from(ACCOUNT, "hex")]))
+    .digest("hex");
+  const parkedKey = "aabbccddeeff00112233";
+  try {
+    writeBot(botsDir, "trustbot", {
+      name: "trustbot",
+      transport: "t3ams",
+      allow: [ACCOUNT],
+    });
+
+    // Trust is a T3ams concept; other transports get a clear refusal.
+    writeBot(botsDir, "appbot", { name: "appbot", allow: [ACCOUNT] });
+    let result = runCli(botsDir, ["trust", "appbot"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /not a T3ams bot/);
+
+    // Before any DM arrives there is nothing to approve, and that is said.
+    result = runCli(botsDir, ["trust", "trustbot"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /no pin and no pending request yet/);
+
+    // The transport parked a first-contact request (state written by the bot).
+    fs.writeFileSync(path.join(botsDir, "trustbot", "t3ams-state.json"), JSON.stringify({
+      v: 1,
+      t3ams: { pendingTrust: { [accountXid]: [{ keyHex: parkedKey, dataHex: "08", senderName: "Owner", at: 1 }] } },
+    }));
+    result = runCli(botsDir, ["trust", "trustbot"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, new RegExp(`key ${parkedKey}`));
+    assert.match(result.stdout, /Compare a key/);
+
+    // Approval needs a meaningful prefix and a matching parked entry.
+    result = runCli(botsDir, ["trust", "trustbot", `0x${ACCOUNT}`, "aabb"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /first 12 hex characters/);
+
+    result = runCli(botsDir, ["trust", "trustbot", `0x${ACCOUNT}`, "ffffffffffff"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /No pending request/);
+
+    result = runCli(botsDir, ["trust", "trustbot", `0x${"cd".repeat(32)}`, parkedKey]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /isn't on "trustbot"'s allowlist/);
+
+    // A 12-char prefix of the parked key approves it and persists the pin.
+    result = runCli(botsDir, ["trust", "trustbot", `0x${ACCOUNT}`, parkedKey.slice(0, 12)]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(readBot(botsDir, "trustbot").t3amsTrustedSigningKeys, { [ACCOUNT]: parkedKey });
+    assert.match(result.stdout, /Restart the bot/);
+
+    // Re-approving is idempotent; a different key is a deliberate rotation.
+    result = runCli(botsDir, ["trust", "trustbot", `0x${ACCOUNT}`, parkedKey]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /already pinned/);
+
+    result = runCli(botsDir, ["trust", "trustbot", `0x${ACCOUNT}`, "ffffffffffff"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Key rotation is deliberate/);
+
+    // The pinned account now shows as such, and run/deploy would see the pin.
+    result = runCli(botsDir, ["trust", "trustbot"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /signing key pinned/);
   } finally {
     fs.rmSync(botsDir, { recursive: true, force: true });
   }

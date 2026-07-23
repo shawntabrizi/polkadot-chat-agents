@@ -367,10 +367,14 @@ for (const [rawAccount, rawKey] of Object.entries(configuredTrustedSigningKeys))
   catch { console.error(`BOT_T3AMS_TRUSTED_SIGNING_KEYS has an invalid tagged-CBOR signing key for ${account}`); process.exit(2); }
   trustedPeerSigningKeys[accountXid(account)] = signingKey;
 }
-const missingTrustedPeers = [...allowedXids].filter((xid) => trustedPeerSigningKeys[xid] == null);
-if (missingTrustedPeers.length > 0) {
-  console.error("Private T3ams bots require a configured tagged-CBOR signing-key pin for every BOT_ALLOWED_PEERS account");
-  process.exit(2);
+// An allowlisted account without a verified signing-key pin is not fatal: the
+// protocol parks that account's first DM request (presented key + carrier)
+// until the operator verifies the key out of band and pins it (`pca trust`).
+// Nothing from the account is accepted or answered meanwhile — deferred
+// pinning, not TOFU.
+const unpinnedAllowedAccounts = allowedAccountIds.filter((account) => trustedPeerSigningKeys[accountXid(account)] == null);
+if (unpinnedAllowedAccounts.length > 0) {
+  log("T3AMS_TRUST_PENDING_ACCOUNTS", { accounts: unpinnedAllowedAccounts });
 }
 const isAllowed = (xid) => allowedXids.size === 0 || allowedXids.has(bareHex(xid));
 const workspaceAutoAcceptSetting = (env.BOT_T3AMS_AUTO_ACCEPT_WORKSPACES ?? "").trim();
@@ -4182,6 +4186,10 @@ process.once("SIGTERM", () => { void shutdown(0); });
 syncSubscriptions();
 publishWorkspacePresence();
 pumpIngress();
+// Complete any handshakes whose parked key was pinned since the last run
+// (`pca trust` approval). Best-effort: a failed replay stays logged and the
+// peer's app resend path still works.
+void protocol.replayPendingTrust();
 bridge.listen(bridgePort, bridgeHost, () => {
   log("BOT_LISTENING", { transport: "t3ams", endpoint, account: material.accountIdHex, xid: selfXidHex, username, brain });
 });
