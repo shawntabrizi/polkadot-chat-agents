@@ -15,8 +15,8 @@ pca stop mycoolbot
 the container with a persistent state volume, and waits for the bot to come
 online. Add `--dry-run` to preview the generated files without deploying.
 
-For a private bot on the default Paseo profile, or the explicit Products
-Devnet profile, a normal (non-dry-run) deploy also checks the separate account
+For a private bot on the default Products Devnet profile, or the explicit Paseo
+profile, a normal (non-dry-run) deploy also checks the separate account
 used for returning saved files and refreshes its matching testnet allowance
 when needed. That happens in your local CLI before the bot runs on the server;
 it does not require a Console visit. The persistent state volume includes the

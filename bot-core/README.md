@@ -14,10 +14,10 @@ pca run mycoolbot --greet
 ```
 
 `create` generates the bot's identity, registers a username on the default
-Paseo Next v2 network, and locks the bot to your account. Polkadot Products
-Devnet remains available with `--network devnet`; Devnet username writes
-require a single-use enrollment voucher from the network operator. With
-`--greet`, the bot messages you first — watch your phone.
+Polkadot Products Devnet, and locks the bot to your account. `pca`
+automatically obtains Devnet's bearer session by proving possession of the
+bot's wallet key. Paseo Next v2 remains available with `--network paseo`.
+With `--greet`, the bot messages you first — watch your phone.
 
 Requirements: Node 22+, and for an AI brain the model's CLI installed and
 logged in (for example [Claude Code](https://claude.com/claude-code)). Use

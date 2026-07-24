@@ -5,7 +5,7 @@
 // (override with PCA_BOTS_DIR). Blockchain details (keys, addresses, topics)
 // are handled for you; you just pick a name and a brain.
 //
-//   pca create <botname> [--brain echo|claude|codex|opencode|bridge] [--transport polkadot-app|t3ams] [--network paseo] [--allow 0x..,0x..]
+//   pca create <botname> [--brain echo|claude|codex|opencode|bridge] [--transport polkadot-app|t3ams] [--network devnet] [--allow 0x..,0x..]
 //   pca run <name>                  start the bot locally (foreground)
 //   pca deploy <name> --host <ssh>  ship it to a server and run it in Docker
 //   pca list                        list your bots
@@ -212,21 +212,11 @@ const saveSecret = (name, secret) => {
   }
 };
 
-function requiresIdentityRegistrationAuth(config) {
+function usesAutomaticIdentityRegistration(config) {
   const profile = configuredNetworkProfile(config.networkProfile);
-  if (profile?.identityRegistrationAuth !== "voucher") return false;
+  if (profile?.identityRegistrationAuth !== "client-proof") return false;
   try { return new URL(config.backendUrl).href === new URL(profile.identityBackendUrl).href; }
   catch { return false; }
-}
-
-const hasIdentityRegistrationCredential = () => Boolean(
-  process.env.PCA_IDENTITY_TOKEN?.trim() || process.env.PCA_IDENTITY_VOUCHER?.trim(),
-);
-
-function identityCredentialMessage() {
-  return "Products Devnet username registration requires an enrollment credential. "
-    + "Set PCA_IDENTITY_VOUCHER to a single-use voucher from the Devnet operator, "
-    + "or PCA_IDENTITY_TOKEN to a valid identity-backend bearer token.";
 }
 
 class CurrentConfigError extends Error {}
@@ -939,10 +929,6 @@ async function cmdCreate(name, flags) {
   if (register && !/^[a-z]{6,}(\.\d{2})?$/.test(wantUsername)) {
     fail(`To register, the name/username must be 6+ lowercase letters. Pass --username <letters> (or --no-register).`);
   }
-  if (register && requiresIdentityRegistrationAuth({ networkProfile, backendUrl })
-      && !hasIdentityRegistrationCredential()) {
-    fail(`${identityCredentialMessage()}\n  Create without registering:  pca create ${name} --no-register`);
-  }
   // If a specific .NN was requested, check it's free BEFORE any crypto or
   // registration — a taken number should fail fast and friendly, not as a raw
   // backend error. (No request = the network auto-assigns a free number.)
@@ -1056,9 +1042,10 @@ async function runRegistration(name, config, { secret, wantUsername, digits, wai
     let result;
     try {
       let identitySession = null;
-      if (requiresIdentityRegistrationAuth(config)) {
+      if (usesAutomaticIdentityRegistration(config)) {
         identitySession = await acquireIdentitySession({
           backendUrl: config.backendUrl,
+          mnemonic: secret.mnemonic,
           accessToken: process.env.PCA_IDENTITY_TOKEN,
           enrollmentVoucher: process.env.PCA_IDENTITY_VOUCHER,
           savedSession: secret.identityRegistrationSession,
@@ -1067,7 +1054,6 @@ async function runRegistration(name, config, { secret, wantUsername, digits, wai
             saveSecret(name, secret);
           },
         });
-        if (!identitySession) throw new Error(identityCredentialMessage());
       } else if (process.env.PCA_IDENTITY_TOKEN?.trim()) {
         identitySession = await acquireIdentitySession({
           backendUrl: config.backendUrl,
@@ -2249,7 +2235,7 @@ async function cmdT3ams(args) {
 function usage() {
   console.log(`pca — Polkadot Chat Agents
 
-  pca create <botname> [--brain echo|claude|codex|opencode|bridge] [--transport polkadot-app|t3ams] [--owner <your username or address>] [--public] [--network paseo] [--username name]
+  pca create <botname> [--brain echo|claude|codex|opencode|bridge] [--transport polkadot-app|t3ams] [--owner <your username or address>] [--public] [--network devnet] [--username name]
   pca register <name>                  finish/retry registration for an existing bot
   pca run <name> [--model <m>] [--allowed-tools <read,write,bash>] [--tool-scope workspace|container] [--greet]
                                        start the bot locally (foreground)
@@ -2288,14 +2274,16 @@ create flags:
   --greet          (run/deploy) the bot opens the chat with its owner on first start — proof of life
   --no-register    create the identity locally without registering (finish later with pca register)
   --wait <secs>    how long to wait for on-chain confirmation (default 180)
-  --network <ep>   target People network: paseo (default), devnet, or a compatible full wss:// endpoint. Private named-testnet bots get automatic file-delivery setup and local allowance provisioning.
+  --network <ep>   target People network: devnet (default), paseo, or a compatible full wss:// endpoint. Private named-testnet bots get automatic file-delivery setup and local allowance provisioning.
 
-Products Devnet (--network devnet) username writes require a single-use operator
-voucher. Read it without adding it to shell history, then export it for create/register:
+Products Devnet registration is automatic: pca obtains a backend bearer session
+by proving possession of the bot's own wallet key. No phone or credential is
+needed while Devnet's attestation gate remains in development mode.
+If an operator later enables hard attestation, a single-use voucher can be supplied:
   read -s PCA_IDENTITY_VOUCHER
   export PCA_IDENTITY_VOUCHER
 PCA_IDENTITY_TOKEN may instead supply an already-issued backend bearer token.
-Default Paseo registration does not require either credential.
+Paseo remains available explicitly with --network paseo.
 
 model controls:  show current policy  ·  set <model> pins the default model  ·  allow <a,b>
   restricts chat-side switching  ·  lock disables it  ·  open permits it only for allowlisted bots

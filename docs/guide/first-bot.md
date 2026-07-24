@@ -30,35 +30,33 @@ pca create mycoolbot --brain claude --owner <your-app-username-or-SS58-address>
 pca run mycoolbot --greet
 ```
 
-The default network is Paseo Next v2, whose test registration service does not
-require a separate enrollment credential.
+The default network is Polkadot Products Devnet. Its identity backend requires
+a bearer token for username writes, but `pca` obtains one automatically by
+proving possession of the bot's own SR25519 wallet key. No phone, locally
+generated JWT secret, or operator voucher is needed.
 
-### Opting into Products Devnet
+### Using Paseo instead
 
-Products Devnet remains available explicitly. Ask its operator for one
-single-use enrollment voucher per bot, then keep that secret out of your shell
-history and process arguments:
+Paseo Next v2 remains a complete named profile:
 
 ```bash
-read -s PCA_IDENTITY_VOUCHER
-export PCA_IDENTITY_VOUCHER
-pca create mycoolbot --network devnet --brain claude --owner <your-app-username-or-SS58-address>
-unset PCA_IDENTITY_VOUCHER
+pca create mycoolbot --network paseo --brain claude --owner <your-app-username-or-SS58-address>
 ```
 
-`pca` exchanges the voucher for an identity-backend session, never saves the
-voucher, and removes the saved session after the username claim succeeds. If
-registration is interrupted after the exchange, retry without presenting the
-voucher again:
+During Devnet registration, `pca` temporarily saves the refreshable backend
+session in the bot's protected `secret.json`. If registration is interrupted,
+retry normally:
 
 ```bash
 pca register mycoolbot
 ```
 
-For controlled automation, `PCA_IDENTITY_TOKEN` can supply an already-issued
-Devnet bearer token instead. The dedicated
-[Products Devnet guide](/guide/devnet) covers local macOS testing, safe retries,
-and why a local emulator cannot mint a token accepted by the hosted service.
+The retry reuses or refreshes the session and does not require any credential.
+For controlled automation, `PCA_IDENTITY_TOKEN` can still override automatic
+enrollment. A single-use `PCA_IDENTITY_VOUCHER` is only a fallback if a Devnet
+operator later enables hard platform-attestation enforcement. The dedicated
+[Products Devnet guide](/guide/devnet) covers the protocol and local macOS
+testing.
 
 ::: info Keeping it running
 A local bot is only alive while the `pca run` process is — close the terminal
@@ -89,8 +87,8 @@ bot name contains digits or hyphens other than the optional `.NN` discriminator,
 provide a separate valid base such as `--username mycoolbot`; use `--no-register`
 only when you intend to register later.
 
-For a private bot on the default Paseo profile—or on Products Devnet selected
-with `--network devnet`—`create` also prepares a separate testnet account used
+For a private bot on the default Products Devnet profile—or on Paseo selected
+with `--network paseo`—`create` also prepares a separate testnet account used
 only to return saved files. The local CLI checks and provisions its allowance
 automatically; no portal visit is part of the normal setup. See
 [Files & storage](/guide/files) for the file workflow and what to do only if

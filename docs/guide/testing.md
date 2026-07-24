@@ -76,8 +76,8 @@ tool: the bug is almost certainly in device-session polling or ACKs.
 
 ## Named-testnet outbound file delivery
 
-Create an allowlisted bot on default Paseo, or add `--network devnet` to
-exercise the Products Devnet profile. Normal local
+Create an allowlisted bot on default Products Devnet, or add `--network paseo`
+to exercise the Paseo profile. Normal local
 onboarding provisions its derived allowance on the selected testnet
 automatically, including an expiry refresh when needed. Confirm it with:
 
@@ -113,27 +113,26 @@ See [Use Products Devnet](/guide/devnet) for the full enrollment flow, local
 macOS tests, retry behavior, and the boundary between a mock and the hosted
 network.
 
-Use a newly provisioned single-use voucher for each live registration test:
+No phone, voucher, or pre-generated JWT is needed for a live registration
+test. Use a disposable bot name:
 
 ```bash
-read -s PCA_IDENTITY_VOUCHER
-export PCA_IDENTITY_VOUCHER
-npm run pca -- create testagent --network devnet --brain echo --owner <your-username-or-address>
-unset PCA_IDENTITY_VOUCHER
+npm run pca -- create testagent --brain echo --owner <your-username-or-address>
 ```
 
-If the username write or network confirmation is interrupted after voucher
-exchange, do not present the voucher again. The returned session is already in
-the bot's mode-`0600` `secret.json`; run:
+`pca` requests a Devnet challenge, signs the client-proof payload with the
+bot's own wallet key, and stores the returned session in the bot's mode-`0600`
+`secret.json` only while registration is incomplete. If the username write or
+network confirmation is interrupted, run:
 
 ```bash
 npm run pca -- register testagent
 ```
 
-To test its missing-credential guard without consuming a voucher, omit both
-`PCA_IDENTITY_VOUCHER` and `PCA_IDENTITY_TOKEN`; explicit Devnet creation must
-stop before it generates the bot directory. Omit `--network` to
-regression-test the default Paseo registration behavior.
+The retry reuses or refreshes the saved session. To regression-test the
+alternate network, add `--network paseo`. `PCA_IDENTITY_TOKEN` is an optional
+controlled-automation override; `PCA_IDENTITY_VOUCHER` is only a fallback if
+the hosted environment later hard-enforces platform attestation.
 
 Optional flags exercise the rich features after the follow-ups: `--reply 1`
 (follow-ups quote the bot's last message), `--react "🔥"` (expect an ACK and no

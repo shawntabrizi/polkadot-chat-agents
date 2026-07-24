@@ -69,8 +69,8 @@ action that saves it in that chat's durable vault. `/file get` returns only a
 file from that same vault.
 
 The named private Products Devnet and Paseo profiles can provision the default
-transport's testnet allowance used for returning saved files. Paseo is the
-default; `--network devnet` selects the Products Devnet path. T3ams uses encrypted
+transport's testnet allowance used for returning saved files. Products Devnet
+is the default; `--network paseo` selects the Paseo path. T3ams uses encrypted
 Bulletin media and a separate operator-provisioned upload allowance. Public
 deployments and production allocation require deliberate operator choices.
 See [Files & storage](/guide/files).

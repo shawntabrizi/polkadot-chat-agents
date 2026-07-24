@@ -11,7 +11,7 @@ connection to a public RPC node: no public IP, no webhook, no hosting platform.
 It runs on a laptop or a small VPS.
 
 ```
-Polkadot app (phone) ⇄ Statement Store (Paseo Next v2 by default) ⇄ bot-core ⇄ brain
+Polkadot app (phone) ⇄ Statement Store (Products Devnet by default) ⇄ bot-core ⇄ brain
 ```
 
 The **brain** is either a model CLI that `bot-core` invokes directly, or an

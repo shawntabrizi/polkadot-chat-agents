@@ -59,9 +59,10 @@ and prints a link. Open it — or search for the username in the Polkadot app �
 and send a message. `--greet` makes the bot message its owner first, as a
 proof of life.
 
-The default is Paseo Next v2. Polkadot Products Devnet remains available with
-`pca create … --network devnet`; its identity backend requires a single-use
-operator enrollment voucher or bearer token for username writes. From a source
+The default is Polkadot Products Devnet. `pca` automatically obtains the bearer
+session required for username registration by proving possession of the bot's
+own wallet key—no phone, JWT secret, or operator voucher is needed. Paseo Next
+v2 remains available with `pca create … --network paseo`. From a source
 checkout, run `npm install` at the repo root and use
 `npm run pca -- <command>` in place of `pca <command>`.
 

@@ -225,13 +225,16 @@ delegation alone can never make a bot interactive.
 
 Attestation of lite persons requires a verifier holding governance-granted
 quota. This framework uses the selected named profile's identity backend—the
-Parity service on default Paseo, or the Polkadot Community Foundation service
-on Products Devnet—as that verifier. The Products Devnet backend additionally
-requires an authenticated device session for writes. A headless `pca` client
-uses the backend's out-of-band enrollment path: it presents a single-use
-operator voucher with a fresh SR25519 client proof, persists the returned JWT
-session only across an incomplete registration, and sends the access token
-with the username claim. Paseo retains its unauthenticated registration path.
+Polkadot Community Foundation service on default Products Devnet, or the Parity
+service on Paseo—as that verifier. The Products Devnet backend additionally
+requires an authenticated session for writes. While its platform-attestation
+gate is in development mode, a headless `pca` client obtains a server
+challenge, signs the client-proof payload with the bot's `//wallet` SR25519
+key, persists the returned JWT session only across an incomplete registration,
+and sends the access token with the username claim. The JWT subject is
+therefore the bot account. A single-use operator voucher remains a fallback if
+the platform-attestation gate is later hard-enforced. Paseo retains its
+unauthenticated registration path.
 
 `pca create` generates the bot's keys, produces a bandersnatch
 ring-VRF proof-of-ownership (the Rust helper in `tools/bandersnatch-cli`,

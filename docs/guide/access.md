@@ -63,7 +63,7 @@ allows in chat:
 | Who can message | Only listed accounts | Anyone |
 | Who pays | You, for trusted people | You, for everyone |
 | `/model` switching | Can be opened (`pca model <bot> open`) — trusted peers only | Never unrestricted; at most an approved set (`pca model <bot> allow a,b`) |
-| Returning saved files | Ready automatically on default Paseo or with `--network devnet` | No automatic finite-allowance profile |
+| Returning saved files | Ready automatically on default Devnet or with `--network paseo` | No automatic finite-allowance profile |
 | Sensible model | Your call | Pin a cheaper model |
 | Built-in direct-agent tools | No tools by default; deployer chooses portable capability/scope policy | Same policy; every sender can direct the selected capability |
 

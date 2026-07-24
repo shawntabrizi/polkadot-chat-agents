@@ -32,8 +32,8 @@ every command, including `project`, `model`, and `storage`.
 | `--username <u>` / `--digits NN` | create | Network username base (six or more lowercase letters) / requested discriminator. Use a separate `--username` when the bot name has digits or hyphens other than its optional `.NN` suffix. |
 | `--model <m>` | create, run, deploy | Pin the model (saved at create; overrides per run/deploy). |
 | `--greet` | run, deploy | Message allowlisted owners once on startup. |
-| `--network paseo` | create | Use Paseo Next v2 (the default). Private bots receive matching testnet file-delivery setup. |
-| `--network devnet` | create | Use Polkadot Products Devnet. Its People, identity, Bulletin, HOP, and storage settings remain available; username writes require an enrollment credential. |
+| `--network devnet` | create | Use Polkadot Products Devnet (the default). Username authentication and matching testnet file-delivery setup are automatic. |
+| `--network paseo` | create | Use Paseo Next v2. Its People, identity, Bulletin, HOP, and storage settings remain available as a complete named profile. |
 | `--no-register` | create | Create the identity locally; complete registration later with `pca register`. |
 | `--wait <seconds>` | create, register | How long to wait for on-chain registration confirmation. |
 | `--host <ssh>` | deploy, logs, status, stop | Target server (saved after first deploy). |
@@ -44,33 +44,30 @@ every command, including `project`, `model`, and `storage`.
 
 Bots live in `~/.pca/bots/<name>/` (override with `PCA_BOTS_DIR`).
 
-## Products Devnet registration credential
+## Automatic Products Devnet registration
 
 The Products Devnet identity backend requires a bearer token for username
-writes. Select it explicitly with `--network devnet`, obtain a single-use
-enrollment voucher from the Devnet operator, and pass it through the
-environment rather than a CLI flag:
+writes. `pca` automatically obtains a server challenge, derives the bot's
+`//wallet` SR25519 key, signs the backend client-proof payload, and exchanges
+that proof for an access and refresh token:
 
 ```bash
-read -s PCA_IDENTITY_VOUCHER
-export PCA_IDENTITY_VOUCHER
-pca create mycoolbot --network devnet --brain claude --owner yourname.42
-unset PCA_IDENTITY_VOUCHER
+pca create mycoolbot --brain claude --owner yourname.42
 ```
 
-`pca` proves possession of a fresh SR25519 client key, exchanges the voucher at
-`/api/v1/auth/token`, and persists the returned refreshable session in
-`secret.json` only while registration is incomplete. A retry uses that session,
-so do not redeem the voucher twice:
+No phone or separately generated JWT is involved. The JWT subject is the bot's
+wallet public key. `pca` persists the returned refreshable session in
+`secret.json` only while registration is incomplete, so a retry reuses it:
 
 ```bash
 pca register mycoolbot
 ```
 
 `PCA_IDENTITY_TOKEN` accepts an already-issued bearer token for controlled
-automation. The default Paseo profile retains its unauthenticated
-username-registration flow. See [Use Products Devnet](/guide/devnet) for the
-complete opt-in workflow and local testing options.
+automation. `PCA_IDENTITY_VOUCHER` remains an optional single-use fallback if
+the operator enables hard platform-attestation enforcement; it is not needed
+for the current Devnet. Paseo remains available with `--network paseo`. See
+[Use Products Devnet](/guide/devnet) for protocol and local testing details.
 
 Direct Claude, Codex, and OpenCode runs and deployments start with no tools:
 empty capabilities and workspace scope. The same portable policy is available
@@ -88,7 +85,7 @@ See [Private & public bots](/guide/access) for the trust boundary.
 
 ## Private named-testnet file allowance
 
-For a private bot on the default Paseo profile or the explicit Products Devnet
+For a private bot on the default Products Devnet profile or explicit Paseo
 profile, `create`, `register`, and a non-dry-run `deploy` automatically check
 the separate account that returns saved files and request an allowance from
 the matching testnet when it is needed. Normal users do not need the Bulletin

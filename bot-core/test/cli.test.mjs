@@ -524,19 +524,19 @@ test("direct deployment uses one portable tool policy across every direct engine
     fs.rmSync(botsDir, { recursive: true, force: true });
   }
 });
-test("Paseo is the default network while Devnet remains a complete named profile", () => {
+test("Devnet is the default network while Paseo remains a complete named profile", () => {
   const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
   try {
     let result = runCli(botsDir, ["create", "filebot", "--brain", "echo", "--owner", `0x${ACCOUNT}`, "--no-register"]);
     assert.equal(result.status, 0, result.stderr);
     const privateBot = readBot(botsDir, "filebot");
     const privateSecret = JSON.parse(fs.readFileSync(path.join(botsDir, "filebot", "secret.json"), "utf8"));
-    assert.equal(privateBot.networkProfile, "paseo");
-    assert.equal(privateBot.endpoint, "wss://paseo-people-next-system-rpc.polkadot.io");
-    assert.equal(privateBot.backendUrl, "https://identity-backend-next.parity-testnet.parity.io");
-    assert.deepEqual(privateBot.fileDelivery, { profile: "paseo-next-v2" });
+    assert.equal(privateBot.networkProfile, "devnet");
+    assert.equal(privateBot.endpoint, "wss://people-paseo.rotko.net");
+    assert.equal(privateBot.backendUrl, "https://polkadot-app.api.polkadotcommunity.foundation");
+    assert.deepEqual(privateBot.fileDelivery, { profile: "products-devnet" });
     assert.match(result.stdout, /Testnet file delivery:/);
-    assert.match(result.stdout, /Bulletin Paseo Next v2/);
+    assert.match(result.stdout, /Bulletin Products Devnet/);
     assert.match(result.stdout, /pca storage filebot grant/);
     assert.doesNotMatch(result.stdout, /Faucet > Authorize Account/);
     assert.match(result.stdout, /account id: 0x[0-9a-f]{64}/i);
@@ -556,37 +556,37 @@ test("Paseo is the default network while Devnet remains a complete named profile
 
     result = runCli(botsDir, ["deploy", "filebot", "--host", "root@example.test", "--dry-run"]);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /^BOT_NETWORK_PROFILE=paseo$/m);
-    assert.match(result.stdout, /^BOT_HOP_UPLOAD_NODE=wss:\/\/paseo-hop-next-0\.polkadot\.io$/m);
-    assert.match(result.stdout, /^BOT_HOP_ALLOWED_NODES=paseo-hop-next-0\.polkadot\.io,paseo-hop-next-1\.polkadot\.io$/m);
-
-    result = runCli(botsDir, [
-      "create", "devnetbot", "--brain", "echo", "--owner", `0x${ACCOUNT}`,
-      "--network", "devnet", "--no-register",
-    ]);
-    assert.equal(result.status, 0, result.stderr);
-    const devnetBot = readBot(botsDir, "devnetbot");
-    assert.equal(devnetBot.networkProfile, "devnet");
-    assert.equal(devnetBot.endpoint, "wss://people-paseo.rotko.net");
-    assert.equal(devnetBot.backendUrl, "https://polkadot-app.api.polkadotcommunity.foundation");
-    assert.deepEqual(devnetBot.fileDelivery, { profile: "products-devnet" });
-    assert.match(result.stdout, /Bulletin Products Devnet/);
-
-    result = runCli(botsDir, ["deploy", "devnetbot", "--host", "root@example.test", "--dry-run"]);
-    assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /^BOT_NETWORK_PROFILE=devnet$/m);
     assert.match(result.stdout, /^BOT_HOP_UPLOAD_NODE=wss:\/\/bullet\.sik\.rocks$/m);
     assert.match(result.stdout, /^BOT_HOP_ALLOWED_NODES=bullet\.sik\.rocks,bulletin-paseo\.tservices\.es,bullet\.tunastaking\.eu$/m);
 
-    result = runCli(botsDir, ["info", "devnetbot"]);
+    result = runCli(botsDir, [
+      "create", "paseobot", "--brain", "echo", "--owner", `0x${ACCOUNT}`,
+      "--network", "paseo", "--no-register",
+    ]);
     assert.equal(result.status, 0, result.stderr);
-    const devnetAllowanceAddress = /allowance:\s+(\S+)/.exec(result.stdout)?.[1];
-    assert.ok(devnetAllowanceAddress, "Devnet retains its derived allowance account");
+    const paseoBot = readBot(botsDir, "paseobot");
+    assert.equal(paseoBot.networkProfile, "paseo");
+    assert.equal(paseoBot.endpoint, "wss://paseo-people-next-system-rpc.polkadot.io");
+    assert.equal(paseoBot.backendUrl, "https://identity-backend-next.parity-testnet.parity.io");
+    assert.deepEqual(paseoBot.fileDelivery, { profile: "paseo-next-v2" });
+    assert.match(result.stdout, /Bulletin Paseo Next v2/);
+
+    result = runCli(botsDir, ["deploy", "paseobot", "--host", "root@example.test", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^BOT_NETWORK_PROFILE=paseo$/m);
+    assert.match(result.stdout, /^BOT_HOP_UPLOAD_NODE=wss:\/\/paseo-hop-next-0\.polkadot\.io$/m);
+    assert.match(result.stdout, /^BOT_HOP_ALLOWED_NODES=paseo-hop-next-0\.polkadot\.io,paseo-hop-next-1\.polkadot\.io$/m);
+
+    result = runCli(botsDir, ["info", "paseobot"]);
+    assert.equal(result.status, 0, result.stderr);
+    const paseoAllowanceAddress = /allowance:\s+(\S+)/.exec(result.stdout)?.[1];
+    assert.ok(paseoAllowanceAddress, "Paseo retains its derived allowance account");
 
     result = runCli(botsDir, ["create", "publicbot", "--brain", "echo", "--public", "--no-register"]);
     assert.equal(result.status, 0, result.stderr);
     const publicBot = readBot(botsDir, "publicbot");
-    assert.equal(publicBot.networkProfile, "paseo");
+    assert.equal(publicBot.networkProfile, "devnet");
     assert.equal("fileDelivery" in publicBot, false);
     assert.match(result.stdout, /outbound file delivery is disabled for this public bot/i);
 
@@ -601,12 +601,12 @@ test("Paseo is the default network while Devnet remains a complete named profile
 
     const allowanceLock = path.join(
       botsDir,
-      `.paseo-file-allowance-${createHash("sha256").update(allowanceAddress).digest("hex")}.lock`,
+      `.products-devnet-file-allowance-${createHash("sha256").update(allowanceAddress).digest("hex")}.lock`,
     );
     fs.writeFileSync(allowanceLock, `${JSON.stringify({ state: "unresolved" })}\n`);
     result = runCli(botsDir, ["storage", "filebot", "grant"]);
     assert.equal(result.status, 1, result.stderr);
-    assert.match(result.stdout, /prior Paseo Next v2 file allowance submission/);
+    assert.match(result.stdout, /prior Polkadot Products Devnet file allowance submission/);
     assert.match(result.stdout, /pca storage filebot status/);
     assert.match(result.stdout, /pca storage filebot recover/);
     fs.rmSync(allowanceLock);
@@ -627,19 +627,17 @@ test("Paseo is the default network while Devnet remains a complete named profile
   }
 });
 
-test("explicit Devnet registration fails before identity creation without an enrollment credential", () => {
+test("help documents automatic default Devnet registration and explicit Paseo fallback", () => {
   const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
   try {
-    const result = runCli(botsDir, [
-      "create", "needsvoucher", "--brain", "echo", "--owner", `0x${ACCOUNT}`, "--network", "devnet",
-    ], {
+    const result = runCli(botsDir, ["help"], {
       PCA_IDENTITY_TOKEN: "",
       PCA_IDENTITY_VOUCHER: "",
     });
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /Products Devnet username registration requires an enrollment credential/);
-    assert.match(result.stderr, /PCA_IDENTITY_VOUCHER/);
-    assert.equal(fs.existsSync(path.join(botsDir, "needsvoucher")), false);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /devnet \(default\), paseo/);
+    assert.match(result.stdout, /Products Devnet registration is automatic/);
+    assert.match(result.stdout, /Paseo remains available explicitly with --network paseo/);
   } finally {
     fs.rmSync(botsDir, { recursive: true, force: true });
   }

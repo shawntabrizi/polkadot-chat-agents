@@ -39,8 +39,8 @@ As `pca deploy` generates it (container paths shown):
 
 # identity & network
 BOT_SEED_HEX=0x2222…            # root mini-secret; wallet/chat/identifier keys derive from it (required)
-BOT_NETWORK_PROFILE=paseo       # paseo (default) | devnet; keeps matching off-chain services together
-BOT_ENDPOINT=wss://paseo-people-next-system-rpc.polkadot.io  # statement-store RPC node it polls & publishes to
+BOT_NETWORK_PROFILE=devnet      # devnet (default) | paseo; keeps matching off-chain services together
+BOT_ENDPOINT=wss://people-paseo.rotko.net  # statement-store RPC node it polls & publishes to
 BOT_USERNAME=codebot.61         # registered network username (display/search); cosmetic to the transport
 BOT_ALLOWED_PEERS=40d4fd…,7015… # peer account hexes allowed to message it. EMPTY = public (anyone)
 
@@ -77,8 +77,8 @@ log in the CLI once against the mounted home instead.
 
 ```sh
 BOT_SEED_HEX=0x…
-BOT_NETWORK_PROFILE=paseo
-BOT_ENDPOINT=wss://paseo-people-next-system-rpc.polkadot.io
+BOT_NETWORK_PROFILE=devnet
+BOT_ENDPOINT=wss://people-paseo.rotko.net
 BOT_BRAIN=bridge                # hand each message to an external agent framework over the bridge
 BOT_ALLOWED_PEERS=40d4fd…,7015…
 BOT_USERNAME=hermesbot.01
@@ -237,8 +237,8 @@ variables `pca deploy` writes into `bot.env` automatically.
 |---|---|---|
 | `BOT_TRANSPORT` | `polkadot-app` | `polkadot-app` or `t3ams`. Set by `pca create --transport …`; selects the matching runner. **gen** |
 | `BOT_SEED_HEX` | — (required) | Root mini-secret; all keys derive from it. **gen** |
-| `BOT_NETWORK_PROFILE` | `paseo` when no custom endpoint is supplied | `paseo` or `devnet`; selects the matching People descriptor, fallback RPCs, identity service, and Bulletin service. Empty means a compatible custom endpoint. **gen** |
-| `BOT_ENDPOINT` | Paseo Next v2 People wss | Statement-store RPC node to poll and publish to. **gen** |
+| `BOT_NETWORK_PROFILE` | `devnet` when no custom endpoint is supplied | `devnet` or `paseo`; selects the matching People descriptor, fallback RPCs, identity service, and Bulletin service. Empty means a compatible custom endpoint. **gen** |
+| `BOT_ENDPOINT` | Products Devnet People wss | Statement-store RPC node to poll and publish to. **gen** |
 | `BOT_USERNAME` | `""` | Registered network username (display/search only). **gen** |
 | `BOT_PEER_IDENTIFIER_KEYS` | `""` | `peerhex=keyhex,…` — pin identifier keys, skipping the on-chain lookup (tests / fixed fleets). |
 
@@ -246,22 +246,24 @@ Named profiles are deliberately complete rather than aliases for one RPC:
 
 | Profile | People RPC | Identity backend | Bulletin / HOP |
 |---|---|---|---|
-| `paseo` (default) | `wss://paseo-people-next-system-rpc.polkadot.io` | `https://identity-backend-next.parity-testnet.parity.io` | `wss://paseo-bulletin-next-rpc.polkadot.io` and the two `paseo-hop-next-*` nodes |
-| `devnet` | `wss://people-paseo.rotko.net` (with the other Products Devnet community RPCs as fallbacks) | `https://polkadot-app.api.polkadotcommunity.foundation` | `wss://bullet.sik.rocks` plus the Products Devnet HOP node set |
+| `devnet` (default) | `wss://people-paseo.rotko.net` (with the other Products Devnet community RPCs as fallbacks) | `https://polkadot-app.api.polkadotcommunity.foundation` | `wss://bullet.sik.rocks` plus the Products Devnet HOP node set |
+| `paseo` | `wss://paseo-people-next-system-rpc.polkadot.io` | `https://identity-backend-next.parity-testnet.parity.io` | `wss://paseo-bulletin-next-rpc.polkadot.io` and the two `paseo-hop-next-*` nodes |
 
-Two CLI-only environment variables authorize username registration; neither is
-passed to a running or deployed bot:
+Devnet registration normally needs no environment credential: `pca` obtains a
+challenge and proves possession of the bot's `//wallet` key to mint the
+refreshable bearer session automatically. Two CLI-only override/fallback
+variables are supported; neither is passed to a running or deployed bot:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PCA_IDENTITY_VOUCHER` | — | Single-use, base64-encoded 32-byte Products Devnet enrollment voucher. `pca` exchanges it for a backend session and never saves the voucher. |
-| `PCA_IDENTITY_TOKEN` | — | Existing identity-backend bearer token for controlled automation. The voucher flow is preferred for normal headless enrollment. |
+| `PCA_IDENTITY_VOUCHER` | — | Optional single-use, base64-encoded 32-byte Products Devnet enrollment voucher, used only as a fallback when automatic client-proof enrollment is rejected by a hard attestation gate. `pca` never saves it. |
+| `PCA_IDENTITY_TOKEN` | — | Existing identity-backend bearer token for controlled automation; overrides automatic session acquisition. |
 
-If a Devnet voucher has been exchanged but registration has not completed,
-`secret.json` temporarily stores the access and refresh tokens so
-`pca register <name>` can retry without consuming another voucher. The session
-is removed after the username claim succeeds. Paseo registration does not use
-these variables.
+If Devnet registration has not completed, `secret.json` temporarily stores the
+automatically issued access and refresh tokens so `pca register <name>` can
+retry or refresh without minting another session. The session is removed after
+the username claim succeeds. Paseo registration does not use this automatic
+session flow.
 
 ### Access control
 
@@ -439,19 +441,19 @@ allowance account and whether an upload node is configured.
 
 ### Named-testnet file delivery
 
-For a private bot on Paseo (the default), `pca` automatically writes:
-
-```sh
-BOT_HOP_UPLOAD_NODE=wss://paseo-hop-next-0.polkadot.io
-BOT_HOP_ALLOWED_NODES=paseo-hop-next-0.polkadot.io,paseo-hop-next-1.polkadot.io
-```
-
-The explicit `--network devnet` profile writes the Products Devnet settings
-instead:
+For a private bot on Products Devnet (the default), `pca` automatically writes:
 
 ```sh
 BOT_HOP_UPLOAD_NODE=wss://bullet.sik.rocks
 BOT_HOP_ALLOWED_NODES=bullet.sik.rocks,bulletin-paseo.tservices.es,bullet.tunastaking.eu
+```
+
+The explicit `--network paseo` profile writes the Paseo settings
+instead:
+
+```sh
+BOT_HOP_UPLOAD_NODE=wss://paseo-hop-next-0.polkadot.io
+BOT_HOP_ALLOWED_NODES=paseo-hop-next-0.polkadot.io,paseo-hop-next-1.polkadot.io
 ```
 
 On a successful normal `pca create`, `pca register`, or non-dry-run `pca deploy`,
@@ -594,7 +596,7 @@ opaque bridge media handle.
 | `BOT_T3AMS_REPLY_OUTBOX_MAX_BYTES` | max(one reply, min(128 MiB, `32 ×` one reply)) | Global serialized-byte cap for incomplete durable direct-agent final replies (up to 4 GiB). |
 | `BOT_T3AMS_ATTACHMENT_MAX_DURATION_MS` | 604800000 (7 days) | Maximum declared audio/video duration accepted as attachment metadata. Set `0` to permit only a zero duration; 31 days is the hard cap. |
 | `BOT_T3AMS_ATTACHMENT_MIME_TYPES` | `*/*` | Comma-separated admission policy. Exact MIME types (for example `image/png`) and `type/*` patterns (for example `image/*`) narrow the broad default. |
-| `BOT_T3AMS_BULLETIN_RPC` | Selected named profile (`wss://paseo-bulletin-next-rpc.polkadot.io` on default Paseo) | Trusted T3ams Bulletin RPC for encrypted downloads and uploads. `--network devnet` selects `wss://bullet.sik.rocks`; set explicitly empty for metadata-only mode. |
+| `BOT_T3AMS_BULLETIN_RPC` | Selected named profile (`wss://bullet.sik.rocks` on default Devnet) | Trusted T3ams Bulletin RPC for encrypted downloads and uploads. `--network paseo` selects `wss://paseo-bulletin-next-rpc.polkadot.io`; set explicitly empty for metadata-only mode. |
 | `BOT_T3AMS_HOP_ALLOW_INSECURE` | `0` | `1` permits insecure `ws://` only for a local test mock. |
 | `BOT_T3AMS_HOP_TIMEOUT_MS` | 120000 | Whole encrypted download/upload deadline. |
 | `BOT_T3AMS_HOP_RPC_FRAME_MAX_BYTES` | 4.5 MB | Largest accepted Bulletin/HOP RPC frame. |

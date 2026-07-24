@@ -19,7 +19,7 @@ export const PRODUCTS_DEVNET = Object.freeze({
   name: "Polkadot Products Devnet",
   peopleEndpoints: PEOPLE_ENDPOINTS,
   identityBackendUrl: "https://polkadot-app.api.polkadotcommunity.foundation",
-  identityRegistrationAuth: "voucher",
+  identityRegistrationAuth: "client-proof",
   bulletin: Object.freeze({
     name: "Bulletin Products Devnet",
     rpcEndpoint: BULLETIN_HOP_ENDPOINTS[0],
@@ -45,7 +45,7 @@ export const PASEO = Object.freeze({
   }),
 });
 
-export const DEFAULT_NETWORK_PROFILE = PASEO.id;
+export const DEFAULT_NETWORK_PROFILE = PRODUCTS_DEVNET.id;
 
 export function configuredNetworkProfile(id) {
   if (id === PRODUCTS_DEVNET.id) return PRODUCTS_DEVNET;

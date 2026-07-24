@@ -19,7 +19,7 @@
 // on-chain identifier-key lookup. No faucet-specific code (coinage/stripe/etc.).
 //
 // Env: BOT_SEED_HEX (root mini-secret),
-//   BOT_ENDPOINT (default Paseo Next v2), BOT_NETWORK_PROFILE (devnet|paseo),
+//   BOT_ENDPOINT (default Products Devnet), BOT_NETWORK_PROFILE (devnet|paseo),
 //   BOT_BRIDGE_PORT (8799), BOT_BRIDGE_HOST (127.0.0.1),
 //   BOT_ACK_TEXT, BOT_ALLOWED_PEERS (comma-sep peer account hexes; empty = allow all),
 //   BOT_REQUEST_LOOKBACK_DAYS (7), BOT_REQUEST_FUTURE_DAYS (2), BOT_POLL_MS (2000),

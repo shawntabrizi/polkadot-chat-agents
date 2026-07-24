@@ -4,10 +4,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { generateMnemonic } from "@polkadot-labs/hdkd-helpers";
+import { generateMnemonic, mnemonicToMiniSecret } from "@polkadot-labs/hdkd-helpers";
 import { verify as verifySr25519 } from "@scure/sr25519";
+import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
 import {
   acquireIdentitySession,
+  obtainIdentitySession,
   redeemIdentityVoucher,
   registerIdentity,
 } from "../lib/register.mjs";
@@ -22,11 +24,60 @@ const concatBytes = (...parts) => {
   return output;
 };
 
-test("voucher enrollment matches the identity backend client-proof contract", async () => {
-  const voucher = Buffer.alloc(32, 7).toString("base64");
-  let request = null;
+test("automatic enrollment obtains a challenge and proves possession of the bot wallet", async () => {
+  const mnemonic = generateMnemonic(128);
+  const wallet = deriveSr25519PairFromSeed(mnemonicToMiniSecret(mnemonic), "//wallet");
+  const challenge = Buffer.alloc(48, 5);
+  const requests = [];
   const fetchImpl = async (url, options) => {
-    request = { url: String(url), options };
+    requests.push({ url: String(url), options });
+    if (String(url).endsWith("/auth/challenges")) {
+      return new Response(JSON.stringify({ challenge: challenge.toString("base64") }), { status: 201 });
+    }
+    return new Response(JSON.stringify({ token: "access.jwt.token", refreshToken: "refresh-token" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  const result = await obtainIdentitySession({
+    backendUrl: "https://identity.example.test",
+    mnemonic,
+    fetchImpl,
+  });
+
+  assert.deepEqual(result, { token: "access.jwt.token", refreshToken: "refresh-token" });
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].url, "https://identity.example.test/api/v1/auth/challenges");
+  assert.equal(requests[0].options.method, "POST");
+  assert.equal(requests[1].url, "https://identity.example.test/api/v1/auth/token");
+  assert.equal(requests[1].options.method, "POST");
+  assert.equal(requests[1].options.body, "{}");
+  const headers = new Headers(requests[1].options.headers);
+  assert.equal(headers.has("auth-attestation-type"), false);
+  assert.equal(headers.has("auth-payload"), false);
+
+  const clientId = new Uint8Array(Buffer.from(headers.get("auth-clientid"), "base64"));
+  const proof = new Uint8Array(Buffer.from(headers.get("auth-clientproof"), "base64"));
+  assert.deepEqual(clientId, wallet.publicKey);
+  assert.equal(proof.length, 64);
+  assert.deepEqual(new Uint8Array(Buffer.from(headers.get("auth-challenge"), "base64")), new Uint8Array(challenge));
+  const body = new TextEncoder().encode("{}");
+  const clientDataHash = sha256(concatBytes(challenge, clientId, sha256(body)));
+  assert.equal(verifySr25519(clientDataHash, proof, clientId), true);
+});
+
+test("voucher fallback uses the same challenge/proof contract and bot wallet", async () => {
+  const voucher = Buffer.alloc(32, 7).toString("base64");
+  const mnemonic = generateMnemonic(128);
+  const wallet = deriveSr25519PairFromSeed(mnemonicToMiniSecret(mnemonic), "//wallet");
+  const challenge = Buffer.alloc(56, 9);
+  const requests = [];
+  const fetchImpl = async (url, options) => {
+    requests.push({ url: String(url), options });
+    if (String(url).endsWith("/auth/challenges")) {
+      return new Response(JSON.stringify({ challenge: challenge.toString("base64") }), { status: 201 });
+    }
     return new Response(JSON.stringify({ token: "access.jwt.token", refreshToken: "refresh-token" }), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -36,60 +87,107 @@ test("voucher enrollment matches the identity backend client-proof contract", as
   const result = await redeemIdentityVoucher({
     backendUrl: "https://identity.example.test",
     secret: voucher,
+    mnemonic,
     fetchImpl,
   });
 
   assert.deepEqual(result, { token: "access.jwt.token", refreshToken: "refresh-token" });
-  assert.equal(request.url, "https://identity.example.test/api/v1/auth/token");
-  assert.equal(request.options.method, "POST");
-  assert.equal(request.options.body, "{}");
-  const headers = new Headers(request.options.headers);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].url, "https://identity.example.test/api/v1/auth/challenges");
+  assert.equal(requests[1].url, "https://identity.example.test/api/v1/auth/token");
+  assert.equal(requests[1].options.method, "POST");
+  assert.equal(requests[1].options.body, "{}");
+  const headers = new Headers(requests[1].options.headers);
   assert.equal(headers.get("auth-attestation-type"), "voucher");
   assert.equal(headers.get("auth-voucher-secret"), voucher);
 
   const clientId = new Uint8Array(Buffer.from(headers.get("auth-clientid"), "base64"));
   const proof = new Uint8Array(Buffer.from(headers.get("auth-clientproof"), "base64"));
-  const challenge = new Uint8Array(Buffer.from(headers.get("auth-challenge"), "base64"));
-  assert.equal(clientId.length, 32);
+  const requestChallenge = new Uint8Array(Buffer.from(headers.get("auth-challenge"), "base64"));
+  assert.deepEqual(clientId, wallet.publicKey);
   assert.equal(proof.length, 64);
-  assert.equal(challenge.length, 24);
+  assert.deepEqual(requestChallenge, new Uint8Array(challenge));
   const body = new TextEncoder().encode("{}");
-  const clientDataHash = sha256(concatBytes(challenge, clientId, sha256(body)));
+  const clientDataHash = sha256(concatBytes(requestChallenge, clientId, sha256(body)));
   assert.equal(verifySr25519(clientDataHash, proof, clientId), true);
 });
 
-test("acquired voucher sessions are persisted and reused without redeeming twice", async () => {
-  const voucher = Buffer.alloc(32, 11).toString("base64");
+test("automatically acquired sessions are persisted and reused without minting twice", async () => {
+  const mnemonic = generateMnemonic(128);
+  const challenge = Buffer.alloc(48, 11);
   const future = Math.floor(Date.now() / 1000) + 3600;
   const jwt = `x.${Buffer.from(JSON.stringify({ exp: future })).toString("base64url")}.x`;
   const requests = [];
   let persisted = null;
   const fetchImpl = async (url) => {
     requests.push(String(url));
+    if (String(url).endsWith("/auth/challenges")) {
+      return new Response(JSON.stringify({ challenge: challenge.toString("base64") }), { status: 201 });
+    }
     return new Response(JSON.stringify({ token: jwt, refreshToken: "refresh-token" }), { status: 200 });
   };
 
   const first = await acquireIdentitySession({
     backendUrl: "https://identity.example.test",
-    enrollmentVoucher: voucher,
+    mnemonic,
     persistSession: (session) => { persisted = session; },
     fetchImpl,
   });
   const second = await acquireIdentitySession({
     backendUrl: "https://identity.example.test/",
-    enrollmentVoucher: voucher,
+    mnemonic,
     savedSession: persisted,
     fetchImpl,
   });
 
   assert.equal(first.token, jwt);
   assert.equal(second.token, jwt);
-  assert.equal(requests.length, 1);
+  assert.deepEqual(requests, [
+    "https://identity.example.test/api/v1/auth/challenges",
+    "https://identity.example.test/api/v1/auth/token",
+  ]);
   assert.deepEqual(persisted, {
     backendUrl: "https://identity.example.test/",
     token: jwt,
     refreshToken: "refresh-token",
   });
+});
+
+test("automatic enrollment falls back to a voucher only when the soft gate rejects it", async () => {
+  const mnemonic = generateMnemonic(128);
+  const voucher = Buffer.alloc(32, 13).toString("base64");
+  const challenge = Buffer.alloc(48, 13).toString("base64");
+  const tokenHeaders = [];
+  const fetchImpl = async (url, options) => {
+    if (String(url).endsWith("/auth/challenges")) {
+      return new Response(JSON.stringify({ challenge }), { status: 201 });
+    }
+    tokenHeaders.push(new Headers(options.headers));
+    if (tokenHeaders.length === 1) {
+      return new Response(JSON.stringify({ title: "Missing Authentication Headers" }), {
+        status: 401,
+        statusText: "Unauthorized",
+      });
+    }
+    return new Response(JSON.stringify({ token: "voucher.jwt.token", refreshToken: "voucher-refresh" }), { status: 200 });
+  };
+
+  const result = await acquireIdentitySession({
+    backendUrl: "https://identity.example.test",
+    mnemonic,
+    enrollmentVoucher: voucher,
+    fetchImpl,
+  });
+
+  assert.deepEqual(result, {
+    backendUrl: "https://identity.example.test/",
+    token: "voucher.jwt.token",
+    refreshToken: "voucher-refresh",
+  });
+  assert.equal(tokenHeaders.length, 2);
+  assert.equal(tokenHeaders[0].has("auth-attestation-type"), false);
+  assert.equal(tokenHeaders[1].get("auth-attestation-type"), "voucher");
+  assert.equal(tokenHeaders[1].get("auth-voucher-secret"), voucher);
 });
 
 test("an expiring saved session rotates and persists its single-use refresh token", async () => {

@@ -103,7 +103,11 @@ async function jsonFetch(url, options, fetchImpl = fetch) {
   const text = await res.text();
   let data = null;
   if (text) { try { data = JSON.parse(text); } catch { data = text; } }
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${typeof data === "string" ? data : JSON.stringify(data)}`);
+  if (!res.ok) {
+    const error = new Error(`${res.status} ${res.statusText}: ${typeof data === "string" ? data : JSON.stringify(data)}`);
+    error.status = res.status;
+    throw error;
+  }
   return data;
 }
 
@@ -125,13 +129,43 @@ function voucherSecret(value) {
   return secret;
 }
 
-// Products Devnet protects identity writes with a device session. Headless
-// clients enroll through the backend's single-use voucher flow: prove
-// possession of a fresh SR25519 key, then receive a normal JWT + refresh token.
-export async function redeemIdentityVoucher({ backendUrl, secret, fetchImpl = fetch }) {
-  const normalizedSecret = voucherSecret(secret);
-  const client = deriveSr25519PairFromSeed(randomBytes(32), "");
-  const challenge = randomBytes(24);
+function identityClient(mnemonic) {
+  if (typeof mnemonic === "string" && mnemonic.trim()) {
+    return deriveSr25519PairFromSeed(mnemonicToMiniSecret(mnemonic), "//wallet");
+  }
+  // Retain backwards compatibility for direct callers of redeemIdentityVoucher.
+  // The CLI always supplies the bot mnemonic so its JWT subject is the bot
+  // account, which is required by registration-queue endpoints.
+  return deriveSr25519PairFromSeed(randomBytes(32), "");
+}
+
+function decodeChallenge(value) {
+  const encoded = typeof value === "string" ? value.trim() : "";
+  if (!encoded || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
+    throw new Error("identity backend returned an invalid authentication challenge");
+  }
+  const challenge = new Uint8Array(Buffer.from(encoded, "base64"));
+  if (challenge.length === 0 || base64(challenge) !== encoded) {
+    throw new Error("identity backend returned an invalid authentication challenge");
+  }
+  return challenge;
+}
+
+export async function requestIdentityChallenge({ backendUrl, fetchImpl = fetch }) {
+  const data = await jsonFetch(new URL("/api/v1/auth/challenges", backendUrl), {
+    method: "POST",
+  }, fetchImpl);
+  return decodeChallenge(data?.challenge);
+}
+
+async function issueIdentitySession({
+  backendUrl,
+  client,
+  enrollmentVoucher = null,
+  fetchImpl = fetch,
+}) {
+  const normalizedVoucher = enrollmentVoucher == null ? null : voucherSecret(enrollmentVoucher);
+  const challenge = await requestIdentityChallenge({ backendUrl, fetchImpl });
   const body = "{}";
   const bodyBytes = enc.encode(body);
   const clientDataHash = sha256(concatBytes(challenge, client.publicKey, sha256(bodyBytes)));
@@ -143,12 +177,40 @@ export async function redeemIdentityVoucher({ backendUrl, secret, fetchImpl = fe
       "Auth-ClientId": base64(client.publicKey),
       "Auth-ClientProof": base64(clientProof),
       "Auth-Challenge": base64(challenge),
-      "Auth-Attestation-Type": "voucher",
-      "Auth-Voucher-Secret": normalizedSecret,
+      ...(normalizedVoucher ? {
+        "Auth-Attestation-Type": "voucher",
+        "Auth-Voucher-Secret": normalizedVoucher,
+      } : {}),
     },
     body,
   }, fetchImpl);
-  return tokenPair(data, "voucher enrollment");
+  return tokenPair(data, normalizedVoucher ? "voucher enrollment" : "client-proof enrollment");
+}
+
+// Products Devnet currently runs its attestation layer in soft mode. A bot can
+// therefore mint the bearer required for username writes by proving possession
+// of its own //wallet SR25519 key, without a phone or operator secret.
+export async function obtainIdentitySession({ backendUrl, mnemonic, fetchImpl = fetch }) {
+  if (typeof mnemonic !== "string" || !mnemonic.trim()) {
+    throw new Error("automatic identity enrollment requires the bot mnemonic");
+  }
+  return issueIdentitySession({
+    backendUrl,
+    client: identityClient(mnemonic),
+    fetchImpl,
+  });
+}
+
+// If a future environment hard-enforces platform attestation, an operator
+// voucher remains a supported fallback. Use the bot wallet as the auth client
+// whenever a mnemonic is available so the resulting JWT subject is stable.
+export async function redeemIdentityVoucher({ backendUrl, secret, mnemonic = null, fetchImpl = fetch }) {
+  return issueIdentitySession({
+    backendUrl,
+    client: identityClient(mnemonic),
+    enrollmentVoucher: secret,
+    fetchImpl,
+  });
 }
 
 export async function refreshIdentitySession({ backendUrl, refreshToken, fetchImpl = fetch }) {
@@ -173,11 +235,14 @@ function jwtExpiresSoon(token, now = Date.now()) {
   }
 }
 
-// Resolve a bearer session without ever putting a voucher on the command line.
-// A redeemed voucher session is persisted by the caller immediately, so a
-// transient username-registration failure does not burn the single-use secret.
+const isAuthRejection = (error) => error?.status === 401 || error?.status === 403;
+
+// Resolve a bearer session without putting a credential on the command line.
+// Automatic and voucher sessions are persisted by the caller immediately, so
+// a transient username-registration failure reuses or refreshes the session.
 export async function acquireIdentitySession({
   backendUrl,
+  mnemonic = null,
   accessToken = null,
   enrollmentVoucher = null,
   savedSession = null,
@@ -194,18 +259,43 @@ export async function acquireIdentitySession({
   const savedToken = typeof savedSession?.token === "string" ? savedSession.token.trim() : "";
   if (savedBackend === currentBackend && savedToken) {
     if (!jwtExpiresSoon(savedToken)) return { ...savedSession, backendUrl: currentBackend, token: savedToken };
-    const refreshed = await refreshIdentitySession({
-      backendUrl,
-      refreshToken: savedSession.refreshToken,
-      fetchImpl,
-    });
-    const session = { backendUrl: currentBackend, ...refreshed };
-    await persistSession?.(session);
-    return session;
+    try {
+      const refreshed = await refreshIdentitySession({
+        backendUrl,
+        refreshToken: savedSession.refreshToken,
+        fetchImpl,
+      });
+      const session = { backendUrl: currentBackend, ...refreshed };
+      await persistSession?.(session);
+      return session;
+    } catch (error) {
+      // A revoked/expired refresh token should not strand a bot whose wallet
+      // can obtain a fresh Devnet session. Connectivity/server failures remain
+      // visible rather than creating extra sessions on a blind retry.
+      if (!isAuthRejection(error) || !mnemonic) throw error;
+    }
   }
 
-  if (enrollmentVoucher == null || String(enrollmentVoucher).trim() === "") return null;
-  const enrolled = await redeemIdentityVoucher({ backendUrl, secret: enrollmentVoucher, fetchImpl });
+  let enrolled;
+  if (mnemonic) {
+    try {
+      enrolled = await obtainIdentitySession({ backendUrl, mnemonic, fetchImpl });
+    } catch (error) {
+      if (!isAuthRejection(error) || enrollmentVoucher == null || String(enrollmentVoucher).trim() === "") {
+        throw error;
+      }
+      enrolled = await redeemIdentityVoucher({
+        backendUrl,
+        secret: enrollmentVoucher,
+        mnemonic,
+        fetchImpl,
+      });
+    }
+  } else if (enrollmentVoucher != null && String(enrollmentVoucher).trim() !== "") {
+    enrolled = await redeemIdentityVoucher({ backendUrl, secret: enrollmentVoucher, fetchImpl });
+  } else {
+    return null;
+  }
   const session = { backendUrl: currentBackend, ...enrolled };
   await persistSession?.(session);
   return session;

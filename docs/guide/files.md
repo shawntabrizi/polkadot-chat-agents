@@ -127,8 +127,8 @@ Bulletin capacity.
 
 ### Default Polkadot-app return path
 
-For a private bot created on the default Paseo profile—or explicitly with
-`--network devnet`—this works without a separate portal step. `pca create`,
+For a private bot created on the default Products Devnet profile—or explicitly
+with `--network paseo`—this works without a separate portal step. `pca create`,
 `pca register`, and a normal (non-dry-run) `pca deploy` use the local CLI to
 check a separate file-delivery account and request or refresh the selected
 testnet's allowance when needed. The allowance belongs to that separate

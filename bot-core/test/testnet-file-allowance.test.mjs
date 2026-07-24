@@ -189,7 +189,7 @@ test("Products Devnet allowance provisioning skips a sufficiently funded active 
 });
 
 test("named testnet allowance profiles retain separate Devnet and Paseo chains", async () => {
-  assert.equal(testnetFileAllowanceNetwork().descriptor, bulletinPaseoNextV2);
+  assert.equal(testnetFileAllowanceNetwork().descriptor, productsDevnetBulletin);
   assert.equal(testnetFileAllowanceNetwork("devnet").descriptor, productsDevnetBulletin);
   assert.equal(testnetFileAllowanceNetwork("paseo").descriptor, bulletinPaseoNextV2);
   assert.notEqual(
