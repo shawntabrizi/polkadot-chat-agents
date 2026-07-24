@@ -98,6 +98,35 @@ test("commands require the current config contract without adding defaults", () 
   }
 });
 
+test("list shows each bot's named or custom network", () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
+  try {
+    writeBot(botsDir, "custombot", {
+      username: "custombot.01",
+      registered: true,
+    });
+    writeBot(botsDir, "devnetbot", {
+      username: "devnetbot.01",
+      registered: true,
+      networkProfile: "devnet",
+    });
+    writeBot(botsDir, "paseobot", {
+      username: "paseobot.01",
+      registered: true,
+      networkProfile: "paseo",
+    });
+
+    const result = runCli(botsDir, ["list"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^NAME\s+USERNAME\s+NETWORK\s+BRAIN\s+WHO CAN MESSAGE IT\s+WHERE$/m);
+    assert.match(result.stdout, /^custombot\s+custombot\.01\s+custom\s+echo\s+public\s+local$/m);
+    assert.match(result.stdout, /^devnetbot\s+devnetbot\.01\s+devnet\s+echo\s+public\s+local$/m);
+    assert.match(result.stdout, /^paseobot\s+paseobot\.01\s+paseo\s+echo\s+public\s+local$/m);
+  } finally {
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
+});
+
 test("T3ams deployment preflight accepts an importable BCTS SDK without native-group APIs", () => {
   const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
   try {

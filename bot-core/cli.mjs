@@ -1262,15 +1262,16 @@ function cmdList() {
     const username = cfg.username
       ? (cfg.registered ? { text: cfg.username } : { text: `${cfg.username} (pending)`, color: "33" })
       : { text: "not registered", color: "33" };
+    const network = { text: cfg.networkProfile ?? "custom" };
     const brain = cfg.model ? `${cfg.brain} · ${cfg.model}` : cfg.brain;
     const labels = cfg.allow.map((hex) => cfg.allowLabels[hex] ?? shortAllowEntry(hex));
     const access = labels.length === 0
       ? { text: "public", color: "33" }
       : { text: labels.length <= 2 ? labels.join(", ") : `${labels[0]} +${labels.length - 1} more` };
     const where = cfg.deploy?.host ? { text: `deployed → ${cfg.deploy.host}`, color: "36" } : { text: "local" };
-    rows.push([{ text: name, color: "1" }, username, { text: brain }, access, where]);
+    rows.push([{ text: name, color: "1" }, username, network, { text: brain }, access, where]);
   }
-  const headers = ["NAME", "USERNAME", "BRAIN", "WHO CAN MESSAGE IT", "WHERE"];
+  const headers = ["NAME", "USERNAME", "NETWORK", "BRAIN", "WHO CAN MESSAGE IT", "WHERE"];
   const widths = headers.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].text.length)));
   const pad = (s, w) => s + " ".repeat(Math.max(0, w - s.length));
   console.log(headers.map((h, i) => c(pad(h, widths[i]), "90")).join("  "));
