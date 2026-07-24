@@ -74,21 +74,23 @@ node bot-core/test-client-device.mjs \
 If a bot answers `test-client.mjs` but not the app, this client is the repro
 tool: the bug is almost certainly in device-session polling or ACKs.
 
-## Paseo testnet outbound file delivery
+## Named-testnet outbound file delivery
 
-Create an allowlisted bot on the named Paseo profile. Normal local onboarding
-provisions its derived testnet allowance automatically, including an expiry
-refresh when needed. Confirm it with:
+Create an allowlisted bot on default Paseo, or add `--network devnet` to
+exercise the Products Devnet profile. Normal local
+onboarding provisions its derived allowance on the selected testnet
+automatically, including an expiry refresh when needed. Confirm it with:
 
 ```bash
 pca storage <name> status
 ```
 
 If it is missing, expired, or low, grant it locally with
-`pca storage <name> grant`. This is a fixed Paseo-testnet faucet transaction;
-it targets the derived allowance account, not the bot's main chat address. Run
-it from the machine that has `~/.pca/bots/<name>/secret.json`: `pca` derives the
-target locally and never sends that seed or mnemonic to the faucet.
+`pca storage <name> grant`. This is a genesis-pinned transaction to the
+selected testnet's faucet; it targets the derived allowance account, not the
+bot's main chat address. Run it from the machine that has
+`~/.pca/bots/<name>/secret.json`: `pca` derives the target locally and never
+sends that seed or mnemonic to the faucet.
 
 Do not retry an interrupted or uncertain grant. Wait for finalization, run
 `pca storage <name> status`, then run `pca storage <name> recover`. A sufficient
@@ -104,6 +106,34 @@ bot log should contain `BOT_FILE_DELIVERED`.
 This validates a real HOP upload. The test faucet and its quota are not a
 production provisioning path; production allocation remains an explicit local
 operator flow.
+
+## Products Devnet registration
+
+See [Use Products Devnet](/guide/devnet) for the full enrollment flow, local
+macOS tests, retry behavior, and the boundary between a mock and the hosted
+network.
+
+Use a newly provisioned single-use voucher for each live registration test:
+
+```bash
+read -s PCA_IDENTITY_VOUCHER
+export PCA_IDENTITY_VOUCHER
+npm run pca -- create testagent --network devnet --brain echo --owner <your-username-or-address>
+unset PCA_IDENTITY_VOUCHER
+```
+
+If the username write or network confirmation is interrupted after voucher
+exchange, do not present the voucher again. The returned session is already in
+the bot's mode-`0600` `secret.json`; run:
+
+```bash
+npm run pca -- register testagent
+```
+
+To test its missing-credential guard without consuming a voucher, omit both
+`PCA_IDENTITY_VOUCHER` and `PCA_IDENTITY_TOKEN`; explicit Devnet creation must
+stop before it generates the bot directory. Omit `--network` to
+regression-test the default Paseo registration behavior.
 
 Optional flags exercise the rich features after the follow-ups: `--reply 1`
 (follow-ups quote the bot's last message), `--react "🔥"` (expect an ACK and no

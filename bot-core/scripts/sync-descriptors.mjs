@@ -15,7 +15,11 @@ fs.cpSync(src, dest, { recursive: true });
 // PAPI emits blank declaration-comment lines with indentation for the Bulletin
 // descriptor. Normalize this generated addition so `prepare` does not create a
 // whitespace-only diff in the committed package asset.
-const normalizedDeclarations = new Set(["bulletinPaseoNextV2.d.ts"]);
+const normalizedDeclarations = new Set([
+  "bulletinPaseoNextV2.d.ts",
+  "productsDevnetBulletin.d.ts",
+  "productsDevnetPeople.d.ts",
+]);
 for (const entry of fs.readdirSync(dest, { withFileTypes: true })) {
   if (!entry.isFile() || !normalizedDeclarations.has(entry.name)) continue;
   const file = path.join(dest, entry.name);

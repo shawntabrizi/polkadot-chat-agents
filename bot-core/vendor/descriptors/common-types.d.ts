@@ -10941,11 +10941,12 @@ export type Iblrnm4k0nni51 = {
     "aliases": Anonymize<Ic5m5lp1oioo8r>;
 };
 export type Iagbupr13a1rnf = {
-    "inputs": Array<Anonymize<Iblrnm4k0nni51>>;
+    "inputs": Anonymize<I1d6jcc1nomglu>;
     "alias_proofs": Anonymize<Itom7fk49o0c9>;
     "to": SS58String;
     "fee_currency": Anonymize<I1h1i9ifhurrkc>;
 };
+export type I1d6jcc1nomglu = Array<Anonymize<Iblrnm4k0nni51>>;
 export type I497d2v63rjmg = {
     "aliases": Anonymize<Ic5m5lp1oioo8r>;
     "value": number;
@@ -12512,4 +12513,3409 @@ export type If4oj302humfb5 = Array<{
     "cid_codec": bigint;
     "extrinsic_index": number;
 }>;
+export type I7i368q6u4lmdh = Array<{
+    "phase": Phase;
+    "event": Anonymize<Iddajvqacduthq>;
+    "topics": Anonymize<Ic5m5lp1oioo8r>;
+}>;
+export type Iddajvqacduthq = AnonymousEnum<{
+    "System": Anonymize<Id30vci165159k>;
+    "ParachainSystem": Anonymize<Icbsekf57miplo>;
+    "MultiBlockMigrations": Anonymize<I94co7vj7h6bo>;
+    "Balances": Anonymize<I4c6hinnlgm6m>;
+    "TransactionPayment": TransactionPaymentEvent;
+    "Assets": Anonymize<I4nr69fhfof48s>;
+    "AssetRate": Anonymize<I51qnoi21es512>;
+    "AssetTxPayment": Anonymize<Ie598chmfqlqa>;
+    "AssetsHolder": Anonymize<Ies5dmgt7ichj9>;
+    "SkipFeelessPayment": Anonymize<I8g774vc9t4tf1>;
+    "OriginRestriction": Anonymize<I2isv113mtlrp7>;
+    "CollatorSelection": Anonymize<I4srakrmf0fspo>;
+    "Session": Anonymize<I6ue0ck5fc3u44>;
+    "XcmpQueue": Anonymize<Idsqc7mhp6nnle>;
+    "PolkadotXcm": Anonymize<If95hivmqmkiku>;
+    "CumulusXcm": Anonymize<I5uv57c3fffoi9>;
+    "MessageQueue": Anonymize<I2kosejppk3jon>;
+    "Utility": Anonymize<I9m26jcpvuf4jn>;
+    "Multisig": Anonymize<I7offdjhhvqnva>;
+    "Proxy": Anonymize<I37e8kif4kno9c>;
+    "Identity": Anonymize<I2au2or9cskfoi>;
+    "People": Anonymize<Idundv7m4eqe4f>;
+    "MobRule": Anonymize<Ifvi9klbes0scs>;
+    "ProofOfInk": Anonymize<I2p1svr0ek31rn>;
+    "Game": Anonymize<I92b5qr86tf4pr>;
+    "Score": Anonymize<Idlsua02m53lrp>;
+    "DummyDim": Anonymize<Inci5ucc4j6it>;
+    "StorageInitialization": Anonymize<I7l1gg2sl9pcgr>;
+    "PeopleLite": Anonymize<I8rnqb4fs2u0s5>;
+    "Resources": Anonymize<Ibdjm4ghdk920m>;
+    "ChunksManager": Anonymize<I2g1s4krv9s4p2>;
+    "Members": Anonymize<If4h4847mmr709>;
+    "Coinage": Anonymize<I8qspd4vrfjncp>;
+    "MembersNotifier": Anonymize<Ieg96uk2l11u40>;
+    "Airdrop": Anonymize<Ic05g466md6v74>;
+    "Honour": Anonymize<I6kiujajvpvk8a>;
+    "Sudo": Anonymize<I4t5b69685rocq>;
+}>;
+export type Id30vci165159k = AnonymousEnum<{
+    /**
+     * An extrinsic completed successfully.
+     */
+    "ExtrinsicSuccess": Anonymize<Ia82mnkmeo2rhc>;
+    /**
+     * An extrinsic failed.
+     */
+    "ExtrinsicFailed": Anonymize<I6dq6jtlpu769k>;
+    /**
+     * `:code` was updated to the code with the given hash.
+     */
+    "CodeUpdated": Anonymize<I1jm8m1rh9e20v>;
+    /**
+     * A new account was created.
+     */
+    "NewAccount": Anonymize<Icbccs0ug47ilf>;
+    /**
+     * An account was reaped.
+     */
+    "KilledAccount": Anonymize<Icbccs0ug47ilf>;
+    /**
+     * On on-chain remark happened.
+     */
+    "Remarked": Anonymize<I855j4i3kr8ko1>;
+    /**
+     * An upgrade was authorized.
+     */
+    "UpgradeAuthorized": Anonymize<Ibgl04rn6nbfm6>;
+    /**
+     * An invalid authorized upgrade was rejected while trying to apply it.
+     */
+    "RejectedInvalidAuthorizedUpgrade": Anonymize<Ibe7mc72lufts8>;
+}>;
+export type I6dq6jtlpu769k = {
+    "dispatch_error": Anonymize<I5qui0u525q0tn>;
+    "dispatch_info": Anonymize<Ic9s8f85vjtncc>;
+};
+export type I5qui0u525q0tn = AnonymousEnum<{
+    "Other": undefined;
+    "CannotLookup": undefined;
+    "BadOrigin": undefined;
+    "Module": Enum<{
+        "System": Anonymize<I5o0s7c8q1cc9b>;
+        "ParachainSystem": Anonymize<Icjkr35j4tmg7k>;
+        "Timestamp": undefined;
+        "ParachainInfo": undefined;
+        "MultiBlockMigrations": Anonymize<Iaaqq5jevtahm8>;
+        "WeightReclaim": undefined;
+        "Balances": Anonymize<Idj13i7adlomht>;
+        "TransactionPayment": undefined;
+        "Assets": Anonymize<I8ktb7n3252jn5>;
+        "AssetRate": Anonymize<I3qgd61cgli6cp>;
+        "AssetTxPayment": undefined;
+        "AssetsHolder": Anonymize<I3rc9953c1unod>;
+        "SkipFeelessPayment": undefined;
+        "OriginRestriction": Anonymize<I8pd5n1lppndg2>;
+        "Authorship": undefined;
+        "CollatorSelection": Anonymize<I36bcffk2387dv>;
+        "Session": Anonymize<I1e07dgbaqd1sq>;
+        "Aura": undefined;
+        "AuraExt": undefined;
+        "XcmpQueue": Anonymize<Idnnbndsjjeqqs>;
+        "PolkadotXcm": Anonymize<I4vcvo9od6afmt>;
+        "CumulusXcm": undefined;
+        "MessageQueue": Anonymize<I5iupade5ag2dp>;
+        "Utility": Anonymize<I8dt2g2hcrgh36>;
+        "Multisig": Anonymize<Ia76qmhhg4jvb9>;
+        "Proxy": Anonymize<Iuvt54ei4cehc>;
+        "VerifySignature": undefined;
+        "Identity": Anonymize<Ib8gja1crqq8kd>;
+        "People": Anonymize<I7crjg7o7jiji6>;
+        "MobRule": Anonymize<I940ulmo4j2d84>;
+        "ProofOfInk": Anonymize<Icouc1975ac8ae>;
+        "Game": Anonymize<Ic64qv46c45g50>;
+        "Score": Anonymize<I1e55cbho6hjcq>;
+        "DummyDim": Anonymize<I4dumqe8b5q0ce>;
+        "StorageInitialization": undefined;
+        "PeopleLite": Anonymize<I3tva1ioru4b0>;
+        "Resources": Anonymize<I3lcis8epk78u>;
+        "ChunksManager": Anonymize<I81gtj1f3ennke>;
+        "Members": Anonymize<Idecbp1bqjv3s9>;
+        "Coinage": Anonymize<Ic1dr90c79fbnh>;
+        "MembersNotifier": Anonymize<Id2ueql1n8r6lh>;
+        "Airdrop": Anonymize<I37f79uio94b2l>;
+        "Honour": Anonymize<Ib7pa0cea24q4v>;
+        "Sudo": Anonymize<Iaug04qjhbli00>;
+    }>;
+    "ConsumerRemaining": undefined;
+    "NoProviders": undefined;
+    "TooManyConsumers": undefined;
+    "Token": TokenError;
+    "Arithmetic": ArithmeticError;
+    "Transactional": TransactionalError;
+    "Exhausted": undefined;
+    "Corruption": undefined;
+    "Unavailable": undefined;
+    "RootNotAllowed": undefined;
+    "Trie": Anonymize<Idh4cj79bvroj8>;
+}>;
+export type Ib8gja1crqq8kd = AnonymousEnum<{
+    /**
+     * Too many subs-accounts.
+     */
+    "TooManySubAccounts": undefined;
+    /**
+     * Account isn't found.
+     */
+    "NotFound": undefined;
+    /**
+     * Account isn't named.
+     */
+    "NotNamed": undefined;
+    /**
+     * Empty index.
+     */
+    "EmptyIndex": undefined;
+    /**
+     * Fee is changed.
+     */
+    "FeeChanged": undefined;
+    /**
+     * No identity found.
+     */
+    "NoIdentity": undefined;
+    /**
+     * Sticky judgement.
+     */
+    "StickyJudgement": undefined;
+    /**
+     * Judgement given.
+     */
+    "JudgementGiven": undefined;
+    /**
+     * Invalid judgement.
+     */
+    "InvalidJudgement": undefined;
+    /**
+     * The index is invalid.
+     */
+    "InvalidIndex": undefined;
+    /**
+     * The target is invalid.
+     */
+    "InvalidTarget": undefined;
+    /**
+     * Maximum amount of registrars reached. Cannot add any more.
+     */
+    "TooManyRegistrars": undefined;
+    /**
+     * Account ID is already named.
+     */
+    "AlreadyClaimed": undefined;
+    /**
+     * Sender is not a sub-account.
+     */
+    "NotSub": undefined;
+    /**
+     * Sub-account isn't owned by sender.
+     */
+    "NotOwned": undefined;
+    /**
+     * The provided judgement was for a different identity.
+     */
+    "JudgementForDifferentIdentity": undefined;
+    /**
+     * Error that occurs when there is an issue paying for judgement.
+     */
+    "JudgementPaymentFailed": undefined;
+    /**
+     * The provided suffix is too long.
+     */
+    "InvalidSuffix": undefined;
+    /**
+     * The sender does not have permission to issue a username.
+     */
+    "NotUsernameAuthority": undefined;
+    /**
+     * The authority cannot allocate any more usernames.
+     */
+    "NoAllocation": undefined;
+    /**
+     * The signature on a username was not valid.
+     */
+    "InvalidSignature": undefined;
+    /**
+     * Setting this username requires a signature, but none was provided.
+     */
+    "RequiresSignature": undefined;
+    /**
+     * The username does not meet the requirements.
+     */
+    "InvalidUsername": undefined;
+    /**
+     * The username is already taken.
+     */
+    "UsernameTaken": undefined;
+    /**
+     * The requested username does not exist.
+     */
+    "NoUsername": undefined;
+    /**
+     * The username cannot be forcefully removed because it can still be accepted.
+     */
+    "NotExpired": undefined;
+    /**
+     * The username cannot be removed because it's still in the grace period.
+     */
+    "TooEarly": undefined;
+    /**
+     * The username cannot be removed because it is not unbinding.
+     */
+    "NotUnbinding": undefined;
+    /**
+     * The username cannot be unbound because it is already unbinding.
+     */
+    "AlreadyUnbinding": undefined;
+    /**
+     * The action cannot be performed because of insufficient privileges (e.g. authority
+     * trying to unbind a username provided by the system).
+     */
+    "InsufficientPrivileges": undefined;
+}>;
+export type Ibe7mc72lufts8 = {
+    "code_hash": SizedHex<32>;
+    "error": Anonymize<I5qui0u525q0tn>;
+};
+export type I9m26jcpvuf4jn = AnonymousEnum<{
+    /**
+     * Batch of dispatches did not complete fully. Index of first failing dispatch given, as
+     * well as the error.
+     */
+    "BatchInterrupted": Anonymize<Ifd1iadsrfatgf>;
+    /**
+     * Batch of dispatches completed fully with no error.
+     */
+    "BatchCompleted": undefined;
+    /**
+     * Batch of dispatches completed but has errors.
+     */
+    "BatchCompletedWithErrors": undefined;
+    /**
+     * A single item within a Batch of dispatches has completed with no error.
+     */
+    "ItemCompleted": undefined;
+    /**
+     * A single item within a Batch of dispatches has completed with error.
+     */
+    "ItemFailed": Anonymize<Ibsrg07o34u087>;
+    /**
+     * A call was dispatched.
+     */
+    "DispatchedAs": Anonymize<Iboi95k6oheii9>;
+    /**
+     * Main call was dispatched.
+     */
+    "IfElseMainSuccess": undefined;
+    /**
+     * The fallback call was dispatched.
+     */
+    "IfElseFallbackCalled": Anonymize<Iaqbcdruj9fo2n>;
+}>;
+export type Ifd1iadsrfatgf = {
+    "index": number;
+    "error": Anonymize<I5qui0u525q0tn>;
+};
+export type Ibsrg07o34u087 = {
+    "error": Anonymize<I5qui0u525q0tn>;
+};
+export type Iboi95k6oheii9 = {
+    "result": Anonymize<I7poqslvvs6sua>;
+};
+export type I7poqslvvs6sua = ResultPayload<undefined, Anonymize<I5qui0u525q0tn>>;
+export type Iaqbcdruj9fo2n = {
+    "main_error": Anonymize<I5qui0u525q0tn>;
+};
+export type I7offdjhhvqnva = AnonymousEnum<{
+    /**
+     * A new multisig operation has begun.
+     */
+    "NewMultisig": Anonymize<Iep27ialq4a7o7>;
+    /**
+     * A multisig operation has been approved by someone.
+     */
+    "MultisigApproval": Anonymize<Iasu5jvoqr43mv>;
+    /**
+     * A multisig operation has been executed.
+     */
+    "MultisigExecuted": Anonymize<I4ei7oag7cupld>;
+    /**
+     * A multisig operation has been cancelled.
+     */
+    "MultisigCancelled": Anonymize<I5qolde99acmd1>;
+    /**
+     * The deposit for a multisig operation has been updated/poked.
+     */
+    "DepositPoked": Anonymize<I8gtde5abn1g9a>;
+}>;
+export type I4ei7oag7cupld = {
+    "approving": SS58String;
+    "timepoint": Anonymize<Itvprrpb0nm3o>;
+    "multisig": SS58String;
+    "call_hash": SizedHex<32>;
+    "result": Anonymize<I7poqslvvs6sua>;
+};
+export type I37e8kif4kno9c = AnonymousEnum<{
+    /**
+     * A proxy was executed correctly, with the given.
+     */
+    "ProxyExecuted": Anonymize<Iboi95k6oheii9>;
+    /**
+     * A pure account has been created by new proxy with given
+     * disambiguation index and proxy type.
+     */
+    "PureCreated": Anonymize<Iemd4d7o8egfol>;
+    /**
+     * A pure proxy was killed by its spawner.
+     */
+    "PureKilled": Anonymize<I4qjtstc5t6mdq>;
+    /**
+     * An announcement was placed to make a call in the future.
+     */
+    "Announced": Anonymize<I2ur0oeqg495j8>;
+    /**
+     * A proxy was added.
+     */
+    "ProxyAdded": Anonymize<I7b10hvivbp6sm>;
+    /**
+     * A proxy was removed.
+     */
+    "ProxyRemoved": Anonymize<I7b10hvivbp6sm>;
+    /**
+     * A deposit stored for proxies or announcements was poked / updated.
+     */
+    "DepositPoked": Anonymize<I1bhd210c3phjj>;
+}>;
+export type Iemd4d7o8egfol = {
+    "pure": SS58String;
+    "who": SS58String;
+    "proxy_type": Anonymize<Ijtujq69eb376>;
+    "disambiguation_index": number;
+    "at": number;
+    "extrinsic_index": number;
+};
+export type Ijtujq69eb376 = AnonymousEnum<{
+    "Any": undefined;
+    "NonTransfer": undefined;
+    "CancelProxy": undefined;
+    "Identity": undefined;
+    "IdentityJudgement": undefined;
+    "Collator": undefined;
+    "SafeSudo": undefined;
+}>;
+export type I4qjtstc5t6mdq = {
+    "pure": SS58String;
+    "spawner": SS58String;
+    "proxy_type": Anonymize<Ijtujq69eb376>;
+    "disambiguation_index": number;
+};
+export type I7b10hvivbp6sm = {
+    "delegator": SS58String;
+    "delegatee": SS58String;
+    "proxy_type": Anonymize<Ijtujq69eb376>;
+    "delay": number;
+};
+export type I2au2or9cskfoi = AnonymousEnum<{
+    /**
+     * A name was set or reset (which will remove all judgements).
+     */
+    "IdentitySet": Anonymize<I4cbvqmqadhrea>;
+    /**
+     * A name was cleared, and the given balance returned.
+     */
+    "IdentityCleared": Anonymize<Iep1lmt6q3s6r3>;
+    /**
+     * A name was removed and the given balance slashed.
+     */
+    "IdentityKilled": Anonymize<Iep1lmt6q3s6r3>;
+    /**
+     * A judgement was asked from a registrar.
+     */
+    "JudgementRequested": Anonymize<I1fac16213rie2>;
+    /**
+     * A judgement request was retracted.
+     */
+    "JudgementUnrequested": Anonymize<I1fac16213rie2>;
+    /**
+     * A judgement was given by a registrar.
+     */
+    "JudgementGiven": Anonymize<Ifjt77oc391o43>;
+    /**
+     * A registrar was added.
+     */
+    "RegistrarAdded": Anonymize<Itvt1jsipv0lc>;
+    /**
+     * A sub-identity was added to an identity and the deposit paid.
+     */
+    "SubIdentityAdded": Anonymize<Ick3mveut33f44>;
+    /**
+     * An account's sub-identities were set (in bulk).
+     */
+    "SubIdentitiesSet": Anonymize<I719lqkkbtikbl>;
+    /**
+     * A given sub-account's associated name was changed by its super-identity.
+     */
+    "SubIdentityRenamed": Anonymize<Ie4intrc3n8jfu>;
+    /**
+     * A sub-identity was removed from an identity and the deposit freed.
+     */
+    "SubIdentityRemoved": Anonymize<Ick3mveut33f44>;
+    /**
+     * A sub-identity was cleared, and the given deposit repatriated from the
+     * main identity account to the sub-identity account.
+     */
+    "SubIdentityRevoked": Anonymize<Ick3mveut33f44>;
+    /**
+     * A username authority was added.
+     */
+    "AuthorityAdded": Anonymize<I2rg5btjrsqec0>;
+    /**
+     * A username authority was removed.
+     */
+    "AuthorityRemoved": Anonymize<I2rg5btjrsqec0>;
+    /**
+     * A username was set for `who`.
+     */
+    "UsernameSet": Anonymize<Ibdqerrooruuq9>;
+    /**
+     * A username was queued, but `who` must accept it prior to `expiration`.
+     */
+    "UsernameQueued": Anonymize<I8u2ba9jeiu6q0>;
+    /**
+     * A queued username passed its expiration without being claimed and was removed.
+     */
+    "PreapprovalExpired": Anonymize<I7ieadb293k6b4>;
+    /**
+     * A username was set as a primary and can be looked up from `who`.
+     */
+    "PrimaryUsernameSet": Anonymize<Ibdqerrooruuq9>;
+    /**
+     * A dangling username (as in, a username corresponding to an account that has removed its
+     * identity) has been removed.
+     */
+    "DanglingUsernameRemoved": Anonymize<Ibdqerrooruuq9>;
+    /**
+     * A username has been unbound.
+     */
+    "UsernameUnbound": Anonymize<Ie5l999tf7t2te>;
+    /**
+     * A username has been removed.
+     */
+    "UsernameRemoved": Anonymize<Ie5l999tf7t2te>;
+    /**
+     * A username has been killed.
+     */
+    "UsernameKilled": Anonymize<Ie5l999tf7t2te>;
+}>;
+export type Ifvi9klbes0scs = AnonymousEnum<{
+    /**
+     * A case has been created.
+     */
+    "CaseCreated": Anonymize<Id1vp19i5a7adv>;
+    /**
+     * A callback was triggered from mob-rule.
+     */
+    "Callback": Anonymize<Iboi95k6oheii9>;
+    /**
+     * There was a codec error when trying to execute the callback.
+     */
+    "CallbackError": undefined;
+    /**
+     * The case has been closed with the following result.
+     */
+    "CaseClosed": Anonymize<Ibi23t489qjaej>;
+    /**
+     * A vote has been placed on a case.
+     */
+    "Voted": Anonymize<I7v53d8lg25u6e>;
+    /**
+     * A vote has been cleaned.
+     */
+    "VoteCleaned": Anonymize<Ic01glfot2319>;
+    /**
+     * A case has been removed.
+     */
+    "CaseRemoved": Anonymize<Id1vp19i5a7adv>;
+    /**
+     * A case has been intervened.
+     */
+    "CaseIntervened": Anonymize<Ibi23t489qjaej>;
+    /**
+     * Credits for votes have been claimed.
+     */
+    "VotesClaimed": Anonymize<Ie732hi40q3bng>;
+    /**
+     * A reward that has been paid out.
+     */
+    "RewardPayout": Anonymize<I4auq2rk2vmnof>;
+    /**
+     * A new payout round has been started.
+     */
+    "PayoutRoundStarted": Anonymize<I36d2sa03ne4gv>;
+    /**
+     * Payout rounds have been scheduled.
+     */
+    "PayoutRoundsScheduled": Anonymize<I1c6o7t4005obp>;
+    /**
+     * A payout schedule has been removed.
+     */
+    "PayoutScheduleRemoved": Anonymize<I666bl2fqjkejo>;
+    /**
+     * Credit has been claimed from the payout distribution.
+     */
+    "CreditClaimed": Anonymize<Id0mmcnagcakpt>;
+    /**
+     * Stale voting points have been cleaned.
+     */
+    "PointsCleaned": Anonymize<I3sgg3ifcuhgsi>;
+    /**
+     * A case has been touched (re-evaluated).
+     */
+    "CaseTouched": Anonymize<I3fn79iu085nho>;
+    /**
+     * A voting penalty has been cleared.
+     */
+    "VotingPenaltyCleared": Anonymize<I1qepegjhn0439>;
+}>;
+export type I92b5qr86tf4pr = AnonymousEnum<{
+    /**
+     * A new game is starting.
+     */
+    "NewGame": Anonymize<I4dge44jia159s>;
+    /**
+     * The game and its post-process has ended.
+     */
+    "GameEnded": Anonymize<I666bl2fqjkejo>;
+    /**
+     * The current game was force-killed by [`Config::ManagerOrigin`].
+     */
+    "GameKilled": Anonymize<I666bl2fqjkejo>;
+    /**
+     * The game phase durations were overridden by [`Config::ManagerOrigin`].
+     */
+    "GamePhasesSet": Anonymize<I7rcbn8l002fcc>;
+    /**
+     * A player signed up for the game.
+     */
+    "SignedUp": Anonymize<I7uvflbq4g7rn>;
+    /**
+     * A player submitted their report.
+     */
+    "ReportSubmitted": Anonymize<Icpl0grufrj09l>;
+    /**
+     * A player offboarded from the game.
+     */
+    "Offboarded": Anonymize<I7uvflbq4g7rn>;
+    /**
+     * An archived player was kicked out.
+     */
+    "KickedOut": Anonymize<Ibi26id9j1t520>;
+    /**
+     * Invites were granted to an account.
+     */
+    "InvitesGranted": Anonymize<Ibl1gaa0rn2c67>;
+    /**
+     * An invite ticket was set.
+     */
+    "InviteTicketSet": Anonymize<I3j43dj5855fif>;
+    /**
+     * An invite ticket was cancelled.
+     */
+    "InviteTicketCancelled": Anonymize<I3j43dj5855fif>;
+    /**
+     * Games were scheduled.
+     */
+    "GamesScheduled": Anonymize<Iafscmv8tjf0ou>;
+    /**
+     * A scheduled game was removed.
+     */
+    "ScheduledGameRemoved": Anonymize<Ic9lb0ksm6bqp9>;
+    /**
+     * Statement store usage removed for the account.
+     */
+    "StmtUsageRemoved": Anonymize<I1qepegjhn0439>;
+    /**
+     * All invites have been removed for the inviter.
+     */
+    "AllInvitesRemoved": Anonymize<I3j43dj5855fif>;
+    /**
+     * Some invites have been removed for the inviter, some are remaining.
+     */
+    "SomeInvitesRemoved": Anonymize<I3j43dj5855fif>;
+    /**
+     * The configured play deposit was updated.
+     */
+    "PlayDepositSet": Anonymize<I3qt1hgg4djhgb>;
+    /**
+     * An airdrop event was scheduled for the current game.
+     */
+    "AirdropScheduled": Anonymize<Irboug90jv3o0>;
+    /**
+     * The airdrop event for the current game failed to schedule.
+     */
+    "AirdropScheduleFailed": Anonymize<I7thug0gvru5sl>;
+    /**
+     * Game `game_index` was cancelled.
+     */
+    "GameCancelled": Anonymize<I8s2eo7q9t6vgf>;
+}>;
+export type I7thug0gvru5sl = {
+    "game_index": number;
+    "error": Anonymize<I5qui0u525q0tn>;
+};
+export type I8qspd4vrfjncp = AnonymousEnum<{
+    "CoinSplit": Anonymize<I4c20l83g9496a>;
+    "CoinTransferred": Anonymize<I4gp88defd7an>;
+    "RecyclerLoadedWithCoin": Anonymize<Icnkee0to4c5ac>;
+    "RecyclerLoadedWithExternalAsset": Anonymize<Id113tpicu8sh3>;
+    "RecyclerUnloadedIntoCoin": Anonymize<I6ceb7pmur4hki>;
+    "RecyclerUnloadedIntoExternalAsset": Anonymize<Ie2d9d2u1qa7ro>;
+    "RecyclerUnloadedIntoExternalAssetAndVouchers": Anonymize<Iebdi09jg1ifvr>;
+    "PaidUnloadTokenRegisteredWithCoin": Anonymize<I5kek6hgenovr0>;
+    "PaidUnloadTokenRegisteredWithNative": Anonymize<I91tbphb2dk7gn>;
+    "PaidUnloadTokenRegisteredWithExternalAsset": Anonymize<I91tbphb2dk7gn>;
+    "PeopleFreeUnloadTokenConsumed": Anonymize<I7ts20td7b1pmf>;
+    "LitePeopleFreeUnloadTokenConsumed": Anonymize<I7ts20td7b1pmf>;
+    "RecyclersUnloadedIntoCoin": Anonymize<I5509mqtnio180>;
+    "RecyclersUnloadedIntoExternalAsset": Anonymize<Ifojd05k7ogo8n>;
+    "RecyclersUnloadedIntoExternalAssetNonAnonymous": Anonymize<I2ccuul1t9pcs0>;
+    "RecyclerUnloadedIntoCoins": Anonymize<I4c20l83g9496a>;
+    "CoinOffboardedIntoExternalAsset": Anonymize<I4lmgf1qe39res>;
+    "RecyclerCleaned": Anonymize<Igvk3mrc51o9l>;
+    "ConsumedFreeTokensCleaned": Anonymize<I7ts20td7b1pmf>;
+    "PaidUnloadTokenRingCleaned": Anonymize<I7315hlp5liq47>;
+    "RecyclerDustCleaned": undefined;
+    "PaidUnloadTokenDustCleaned": undefined;
+    "ExpiredPaidUnloadTokenCollectionDeleted": Anonymize<I7ts20td7b1pmf>;
+    "UnderlyingAssetIdSet": Anonymize<I22bm4d7re21j9>;
+}>;
+export type I2ccuul1t9pcs0 = {
+    "who": SS58String;
+    "to": SS58String;
+    "input_count": number;
+    "amount": bigint;
+    "fee_currency": Anonymize<Id9ihqm6nfrots>;
+};
+export type Id9ihqm6nfrots = AnonymousEnum<{
+    "Native": undefined;
+    "ExternalAsset": undefined;
+}>;
+export type I4t5b69685rocq = AnonymousEnum<{
+    /**
+     * A sudo call just took place.
+     */
+    "Sudid": Anonymize<I9uehc80gsuos1>;
+    /**
+     * The sudo key has been updated.
+     */
+    "KeyChanged": Anonymize<I5rtkmhm2dng4u>;
+    /**
+     * The key was permanently removed.
+     */
+    "KeyRemoved": undefined;
+    /**
+     * A [sudo_as](Pallet::sudo_as) call just took place.
+     */
+    "SudoAsDone": Anonymize<I9uehc80gsuos1>;
+}>;
+export type I9uehc80gsuos1 = {
+    /**
+     * The result of the call made by the sudo user.
+     */
+    "sudo_result": Anonymize<I7poqslvvs6sua>;
+};
+export type I1qdpp5rr8t6nv = [Array<{
+    "delegate": SS58String;
+    "proxy_type": Anonymize<Ijtujq69eb376>;
+    "delay": number;
+}>, bigint];
+export type Ib1i64ek701lf6 = {
+    "judgements": Array<[number, IdentityJudgement]>;
+    "deposit": bigint;
+    "info": Anonymize<Ibr5qtvptt8691>;
+};
+export type IdentityJudgement = Enum<{
+    "Unknown": undefined;
+    "FeePaid": bigint;
+    "Reasonable": undefined;
+    "KnownGood": undefined;
+    "OutOfDate": undefined;
+    "LowQuality": undefined;
+    "Erroneous": undefined;
+}>;
+export declare const IdentityJudgement: GetEnum<IdentityJudgement>;
+export type I5a237gt7v0p8j = AnonymousEnum<{
+    /**
+     * Send a batch of dispatch calls.
+     *
+     * May be called from any origin except `None`.
+     *
+     * - `calls`: The calls to be dispatched from the same origin. The number of call must not
+     * exceed the constant: `batched_calls_limit` (available in constant metadata).
+     *
+     * If origin is root then the calls are dispatched without checking origin filter. (This
+     * includes bypassing `frame_system::Config::BaseCallFilter`).
+     *
+     * ## Complexity
+     * - O(C) where C is the number of calls to be batched.
+     *
+     * This will return `Ok` in all circumstances. To determine the success of the batch, an
+     * event is deposited. If a call failed and the batch was interrupted, then the
+     * `BatchInterrupted` event is deposited, along with the number of successful calls made
+     * and the error of the failed call. If all were successful, then the `BatchCompleted`
+     * event is deposited.
+     */
+    "batch": Anonymize<I8kmgv322d7a0t>;
+    /**
+     * Send a call through an indexed pseudonym of the sender.
+     *
+     * Filter from origin are passed along. The call will be dispatched with an origin which
+     * use the same filter as the origin of this call.
+     *
+     * NOTE: If you need to ensure that any account-based filtering is not honored (i.e.
+     * because you expect `proxy` to have been used prior in the call stack and you do not want
+     * the call restrictions to apply to any sub-accounts), then use `as_multi_threshold_1`
+     * in the Multisig pallet instead.
+     *
+     * NOTE: Prior to version *12, this was called `as_limited_sub`.
+     *
+     * The dispatch origin for this call must be _Signed_.
+     */
+    "as_derivative": Anonymize<I50bvs6v8cvm9b>;
+    /**
+     * Send a batch of dispatch calls and atomically execute them.
+     * The whole transaction will rollback and fail if any of the calls failed.
+     *
+     * May be called from any origin except `None`.
+     *
+     * - `calls`: The calls to be dispatched from the same origin. The number of call must not
+     * exceed the constant: `batched_calls_limit` (available in constant metadata).
+     *
+     * If origin is root then the calls are dispatched without checking origin filter. (This
+     * includes bypassing `frame_system::Config::BaseCallFilter`).
+     *
+     * ## Complexity
+     * - O(C) where C is the number of calls to be batched.
+     */
+    "batch_all": Anonymize<I8kmgv322d7a0t>;
+    /**
+     * Dispatches a function call with a provided origin.
+     *
+     * The dispatch origin for this call must be _Root_.
+     *
+     * ## Complexity
+     * - O(1).
+     */
+    "dispatch_as": Anonymize<Ialatvi99docrh>;
+    /**
+     * Send a batch of dispatch calls.
+     * Unlike `batch`, it allows errors and won't interrupt.
+     *
+     * May be called from any origin except `None`.
+     *
+     * - `calls`: The calls to be dispatched from the same origin. The number of call must not
+     * exceed the constant: `batched_calls_limit` (available in constant metadata).
+     *
+     * If origin is root then the calls are dispatch without checking origin filter. (This
+     * includes bypassing `frame_system::Config::BaseCallFilter`).
+     *
+     * ## Complexity
+     * - O(C) where C is the number of calls to be batched.
+     */
+    "force_batch": Anonymize<I8kmgv322d7a0t>;
+    /**
+     * Dispatch a function call with a specified weight.
+     *
+     * This function does not check the weight of the call, and instead allows the
+     * Root origin to specify the weight of the call.
+     *
+     * The dispatch origin for this call must be _Root_.
+     */
+    "with_weight": Anonymize<I8a33691hq5h84>;
+    /**
+     * Dispatch a fallback call in the event the main call fails to execute.
+     * May be called from any origin except `None`.
+     *
+     * This function first attempts to dispatch the `main` call.
+     * If the `main` call fails, the `fallback` is attemted.
+     * if the fallback is successfully dispatched, the weights of both calls
+     * are accumulated and an event containing the main call error is deposited.
+     *
+     * In the event of a fallback failure the whole call fails
+     * with the weights returned.
+     *
+     * - `main`: The main call to be dispatched. This is the primary action to execute.
+     * - `fallback`: The fallback call to be dispatched in case the `main` call fails.
+     *
+     * ## Dispatch Logic
+     * - If the origin is `root`, both the main and fallback calls are executed without
+     * applying any origin filters.
+     * - If the origin is not `root`, the origin filter is applied to both the `main` and
+     * `fallback` calls.
+     *
+     * ## Use Case
+     * - Some use cases might involve submitting a `batch` type call in either main, fallback
+     * or both.
+     */
+    "if_else": Anonymize<I81io2feo613h3>;
+    /**
+     * Dispatches a function call with a provided origin.
+     *
+     * Almost the same as [`Pallet::dispatch_as`] but forwards any error of the inner call.
+     *
+     * The dispatch origin for this call must be _Root_.
+     */
+    "dispatch_as_fallible": Anonymize<Ialatvi99docrh>;
+}>;
+export type I8kmgv322d7a0t = {
+    "calls": Array<TxCallData>;
+};
+export type I50bvs6v8cvm9b = {
+    "index": number;
+    "call": TxCallData;
+};
+export type Ialatvi99docrh = {
+    "as_origin": Anonymize<I2vjn8o312puvk>;
+    "call": TxCallData;
+};
+export type I8a33691hq5h84 = {
+    "call": TxCallData;
+    "weight": Anonymize<I4q39t5hn830vp>;
+};
+export type I81io2feo613h3 = {
+    "main": TxCallData;
+    "fallback": TxCallData;
+};
+export type I22rmntjfe06vd = AnonymousEnum<{
+    /**
+     * Immediately dispatch a multi-signature call using a single approval from the caller.
+     *
+     * The dispatch origin for this call must be _Signed_.
+     *
+     * - `other_signatories`: The accounts (other than the sender) who are part of the
+     * multi-signature, but do not participate in the approval process.
+     * - `call`: The call to be executed.
+     *
+     * Result is equivalent to the dispatched result.
+     *
+     * ## Complexity
+     * O(Z + C) where Z is the length of the call and C its execution weight.
+     */
+    "as_multi_threshold_1": Anonymize<Ibttvfhqip49e6>;
+    /**
+     * Register approval for a dispatch to be made from a deterministic composite account if
+     * approved by a total of `threshold - 1` of `other_signatories`.
+     *
+     * **If the approval threshold is met (including the sender's approval), this will
+     * immediately execute the call.** This is the only way to execute a multisig call -
+     * `approve_as_multi` will never trigger execution.
+     *
+     * Payment: `DepositBase` will be reserved if this is the first approval, plus
+     * `threshold` times `DepositFactor`. It is returned once this dispatch happens or
+     * is cancelled.
+     *
+     * The dispatch origin for this call must be _Signed_.
+     *
+     * - `threshold`: The total number of approvals for this dispatch before it is executed.
+     * - `other_signatories`: The accounts (other than the sender) who can approve this
+     * dispatch. May not be empty.
+     * - `maybe_timepoint`: If this is the first approval, then this must be `None`. If it is
+     * not the first approval, then it must be `Some`, with the timepoint (block number and
+     * transaction index) of the first approval transaction.
+     * - `call`: The call to be executed.
+     *
+     * NOTE: For intermediate approvals (not the final approval), you should generally use
+     * `approve_as_multi` instead, since it only requires a hash of the call and is more
+     * efficient.
+     *
+     * Result is equivalent to the dispatched result if `threshold` is exactly `1`. Otherwise
+     * on success, result is `Ok` and the result from the interior call, if it was executed,
+     * may be found in the deposited `MultisigExecuted` event.
+     *
+     * ## Complexity
+     * - `O(S + Z + Call)`.
+     * - Up to one balance-reserve or unreserve operation.
+     * - One passthrough operation, one insert, both `O(S)` where `S` is the number of
+     * signatories. `S` is capped by `MaxSignatories`, with weight being proportional.
+     * - One call encode & hash, both of complexity `O(Z)` where `Z` is tx-len.
+     * - One encode & hash, both of complexity `O(S)`.
+     * - Up to one binary search and insert (`O(logS + S)`).
+     * - I/O: 1 read `O(S)`, up to 1 mutate `O(S)`. Up to one remove.
+     * - One event.
+     * - The weight of the `call`.
+     * - Storage: inserts one item, value size bounded by `MaxSignatories`, with a deposit
+     * taken for its lifetime of `DepositBase + threshold * DepositFactor`.
+     */
+    "as_multi": Anonymize<Ibbpdksgdscuat>;
+    /**
+     * Register approval for a dispatch to be made from a deterministic composite account if
+     * approved by a total of `threshold - 1` of `other_signatories`.
+     *
+     * **This function will NEVER execute the call, even if the approval threshold is
+     * reached.** It only registers approval. To actually execute the call, `as_multi` must
+     * be called with the full call data by any of the signatories.
+     *
+     * This function is more efficient than `as_multi` for intermediate approvals since it
+     * only requires the call hash, not the full call data.
+     *
+     * Payment: `DepositBase` will be reserved if this is the first approval, plus
+     * `threshold` times `DepositFactor`. It is returned once this dispatch happens or
+     * is cancelled.
+     *
+     * The dispatch origin for this call must be _Signed_.
+     *
+     * - `threshold`: The total number of approvals for this dispatch before it is executed.
+     * - `other_signatories`: The accounts (other than the sender) who can approve this
+     * dispatch. May not be empty.
+     * - `maybe_timepoint`: If this is the first approval, then this must be `None`. If it is
+     * not the first approval, then it must be `Some`, with the timepoint (block number and
+     * transaction index) of the first approval transaction.
+     * - `call_hash`: The hash of the call to be executed.
+     *
+     * NOTE: To execute the call after approvals are gathered, any signatory must call
+     * `as_multi` with the full call data. This function cannot execute the call.
+     *
+     * ## Complexity
+     * - `O(S)`.
+     * - Up to one balance-reserve or unreserve operation.
+     * - One passthrough operation, one insert, both `O(S)` where `S` is the number of
+     * signatories. `S` is capped by `MaxSignatories`, with weight being proportional.
+     * - One encode & hash, both of complexity `O(S)`.
+     * - Up to one binary search and insert (`O(logS + S)`).
+     * - I/O: 1 read `O(S)`, up to 1 mutate `O(S)`. Up to one remove.
+     * - One event.
+     * - Storage: inserts one item, value size bounded by `MaxSignatories`, with a deposit
+     * taken for its lifetime of `DepositBase + threshold * DepositFactor`.
+     */
+    "approve_as_multi": Anonymize<Ideaemvoneh309>;
+    /**
+     * Cancel a pre-existing, on-going multisig transaction. Any deposit reserved previously
+     * for this operation will be unreserved on success.
+     *
+     * The dispatch origin for this call must be _Signed_.
+     *
+     * - `threshold`: The total number of approvals for this dispatch before it is executed.
+     * - `other_signatories`: The accounts (other than the sender) who can approve this
+     * dispatch. May not be empty.
+     * - `timepoint`: The timepoint (block number and transaction index) of the first approval
+     * transaction for this dispatch.
+     * - `call_hash`: The hash of the call to be executed.
+     *
+     * ## Complexity
+     * - `O(S)`.
+     * - Up to one balance-reserve or unreserve operation.
+     * - One passthrough operation, one insert, both `O(S)` where `S` is the number of
+     * signatories. `S` is capped by `MaxSignatories`, with weight being proportional.
+     * - One encode & hash, both of complexity `O(S)`.
+     * - One event.
+     * - I/O: 1 read `O(S)`, one remove.
+     * - Storage: removes one item.
+     */
+    "cancel_as_multi": Anonymize<I3d9o9d7epp66v>;
+    /**
+     * Poke the deposit reserved for an existing multisig operation.
+     *
+     * The dispatch origin for this call must be _Signed_ and must be the original depositor of
+     * the multisig operation.
+     *
+     * The transaction fee is waived if the deposit amount has changed.
+     *
+     * - `threshold`: The total number of approvals needed for this multisig.
+     * - `other_signatories`: The accounts (other than the sender) who are part of the
+     * multisig.
+     * - `call_hash`: The hash of the call this deposit is reserved for.
+     *
+     * Emits `DepositPoked` if successful.
+     */
+    "poke_deposit": Anonymize<I6lqh1vgb4mcja>;
+}>;
+export type Ibttvfhqip49e6 = {
+    "other_signatories": Anonymize<Ia2lhg7l2hilo3>;
+    "call": TxCallData;
+};
+export type Ibbpdksgdscuat = {
+    "threshold": number;
+    "other_signatories": Anonymize<Ia2lhg7l2hilo3>;
+    "maybe_timepoint"?: Anonymize<I95jfd8j5cr5eh>;
+    "call": TxCallData;
+    "max_weight": Anonymize<I4q39t5hn830vp>;
+};
+export type Ifg2b5jog36t95 = AnonymousEnum<{
+    /**
+     * Dispatch the given `call` from an account that the sender is authorised for through
+     * `add_proxy`.
+     *
+     * The dispatch origin for this call must be _Signed_.
+     *
+     * Parameters:
+     * - `real`: The account that the proxy will make a call on behalf of.
+     * - `force_proxy_type`: Specify the exact proxy type to be used and checked for this call.
+     * - `call`: The call to be made by the `real` account.
+     */
+    "proxy": Anonymize<I4vrh01prvotgd>;
+    /**
+     * Register a proxy account for the sender that is able to make calls on its behalf.
+     *
+     * The dispatch origin for this call must be _Signed_.
+     *
+     * Parameters:
+     * - `proxy`: The account that the `caller` would like to make a proxy.
+     * - `proxy_type`: The permissions allowed for this proxy account.
+     * - `delay`: The announcement period required of the initial proxy. Will generally be
+     * zero.
+     */
+    "add_proxy": Anonymize<I9gtcp0ur229rb>;
+    /**
+     * Unregister a proxy account for the sender.
+     *
+     * The dispatch origin for this call must be _Signed_.
+     *
+     * Parameters:
+     * - `proxy`: The account that the `caller` would like to remove as a proxy.
+     * - `proxy_type`: The permissions currently enabled for the removed proxy account.
+     */
+    "remove_proxy": Anonymize<I9gtcp0ur229rb>;
+    /**
+     * Unregister all proxy accounts for the sender.
+     *
+     * The dispatch origin for this call must be _Signed_.
+     *
+     * WARNING: This may be called on accounts created by `create_pure`, however if done, then
+     * the unreserved fees will be inaccessible. **All access to this account will be lost.**
+     */
+    "remove_proxies": undefined;
+    /**
+     * Spawn a fresh new account that is guaranteed to be otherwise inaccessible, and
+     * initialize it with a proxy of `proxy_type` for `origin` sender.
+     *
+     * Requires a `Signed` origin.
+     *
+     * - `proxy_type`: The type of the proxy that the sender will be registered as over the
+     * new account. This will almost always be the most permissive `ProxyType` possible to
+     * allow for maximum flexibility.
+     * - `index`: A disambiguation index, in case this is called multiple times in the same
+     * transaction (e.g. with `utility::batch`). Unless you're using `batch` you probably just
+     * want to use `0`.
+     * - `delay`: The announcement period required of the initial proxy. Will generally be
+     * zero.
+     *
+     * Fails with `Duplicate` if this has already been called in this transaction, from the
+     * same sender, with the same parameters.
+     *
+     * Fails if there are insufficient funds to pay for deposit.
+     */
+    "create_pure": Anonymize<Iadsnfrnvi5gjr>;
+    /**
+     * Removes a previously spawned pure proxy.
+     *
+     * WARNING: **All access to this account will be lost.** Any funds held in it will be
+     * inaccessible.
+     *
+     * Requires a `Signed` origin, and the sender account must have been created by a call to
+     * `create_pure` with corresponding parameters.
+     *
+     * - `spawner`: The account that originally called `create_pure` to create this account.
+     * - `index`: The disambiguation index originally passed to `create_pure`. Probably `0`.
+     * - `proxy_type`: The proxy type originally passed to `create_pure`.
+     * - `height`: The height of the chain when the call to `create_pure` was processed.
+     * - `ext_index`: The extrinsic index in which the call to `create_pure` was processed.
+     *
+     * Fails with `NoPermission` in case the caller is not a previously created pure
+     * account whose `create_pure` call has corresponding parameters.
+     */
+    "kill_pure": Anonymize<Iekkhrdinb4r25>;
+    /**
+     * Publish the hash of a proxy-call that will be made in the future.
+     *
+     * This must be called some number of blocks before the corresponding `proxy` is attempted
+     * if the delay associated with the proxy relationship is greater than zero.
+     *
+     * No more than `MaxPending` announcements may be made at any one time.
+     *
+     * This will take a deposit of `AnnouncementDepositFactor` as well as
+     * `AnnouncementDepositBase` if there are no other pending announcements.
+     *
+     * The dispatch origin for this call must be _Signed_ and a proxy of `real`.
+     *
+     * Parameters:
+     * - `real`: The account that the proxy will make a call on behalf of.
+     * - `call_hash`: The hash of the call to be made by the `real` account.
+     */
+    "announce": Anonymize<I2eb501t8s6hsq>;
+    /**
+     * Remove a given announcement.
+     *
+     * May be called by a proxy account to remove a call they previously announced and return
+     * the deposit.
+     *
+     * The dispatch origin for this call must be _Signed_.
+     *
+     * Parameters:
+     * - `real`: The account that the proxy will make a call on behalf of.
+     * - `call_hash`: The hash of the call to be made by the `real` account.
+     */
+    "remove_announcement": Anonymize<I2eb501t8s6hsq>;
+    /**
+     * Remove the given announcement of a delegate.
+     *
+     * May be called by a target (proxied) account to remove a call that one of their delegates
+     * (`delegate`) has announced they want to execute. The deposit is returned.
+     *
+     * The dispatch origin for this call must be _Signed_.
+     *
+     * Parameters:
+     * - `delegate`: The account that previously announced the call.
+     * - `call_hash`: The hash of the call to be made.
+     */
+    "reject_announcement": Anonymize<Ianmuoljk2sk1u>;
+    /**
+     * Dispatch the given `call` from an account that the sender is authorized for through
+     * `add_proxy`.
+     *
+     * Removes any corresponding announcement(s).
+     *
+     * The dispatch origin for this call must be _Signed_.
+     *
+     * Parameters:
+     * - `real`: The account that the proxy will make a call on behalf of.
+     * - `force_proxy_type`: Specify the exact proxy type to be used and checked for this call.
+     * - `call`: The call to be made by the `real` account.
+     */
+    "proxy_announced": Anonymize<Iclch72nc7pia1>;
+    /**
+     * Poke / Adjust deposits made for proxies and announcements based on current values.
+     * This can be used by accounts to possibly lower their locked amount.
+     *
+     * The dispatch origin for this call must be _Signed_.
+     *
+     * The transaction fee is waived if the deposit amount has changed.
+     *
+     * Emits `DepositPoked` if successful.
+     */
+    "poke_deposit": undefined;
+}>;
+export type I4vrh01prvotgd = {
+    "real": MultiAddress;
+    "force_proxy_type"?: Anonymize<I9ce9kuir32834>;
+    "call": TxCallData;
+};
+export type I9ce9kuir32834 = (Anonymize<Ijtujq69eb376>) | undefined;
+export type I9gtcp0ur229rb = {
+    "delegate": MultiAddress;
+    "proxy_type": Anonymize<Ijtujq69eb376>;
+    "delay": number;
+};
+export type Iadsnfrnvi5gjr = {
+    "proxy_type": Anonymize<Ijtujq69eb376>;
+    "delay": number;
+    "index": number;
+};
+export type Iekkhrdinb4r25 = {
+    "spawner": MultiAddress;
+    "proxy_type": Anonymize<Ijtujq69eb376>;
+    "index": number;
+    "height": number;
+    "ext_index": number;
+};
+export type Iclch72nc7pia1 = {
+    "delegate": MultiAddress;
+    "real": MultiAddress;
+    "force_proxy_type"?: Anonymize<I9ce9kuir32834>;
+    "call": TxCallData;
+};
+export type If3dn8g4dlbafo = AnonymousEnum<{
+    /**
+     * Add a registrar to the system.
+     *
+     * The dispatch origin for this call must be `T::RegistrarOrigin`.
+     *
+     * - `account`: the account of the registrar.
+     *
+     * Emits `RegistrarAdded` if successful.
+     */
+    "add_registrar": Anonymize<Ic6cqd9g0t65v0>;
+    /**
+     * Set an account's identity information and reserve the appropriate deposit.
+     *
+     * If the account already has identity information, the deposit is taken as part payment
+     * for the new deposit.
+     *
+     * The dispatch origin for this call must be _Signed_.
+     *
+     * - `info`: The identity information.
+     *
+     * Emits `IdentitySet` if successful.
+     */
+    "set_identity": Anonymize<I5sv83ib1q5mod>;
+    /**
+     * Set the sub-accounts of the sender.
+     *
+     * Payment: Any aggregate balance reserved by previous `set_subs` calls will be returned
+     * and an amount `SubAccountDeposit` will be reserved for each item in `subs`.
+     *
+     * The dispatch origin for this call must be _Signed_ and the sender must have a registered
+     * identity.
+     *
+     * - `subs`: The identity's (new) sub-accounts.
+     */
+    "set_subs": Anonymize<Ia9mkdf6l44shb>;
+    /**
+     * Clear an account's identity info and all sub-accounts and return all deposits.
+     *
+     * Payment: All reserved balances on the account are returned.
+     *
+     * The dispatch origin for this call must be _Signed_ and the sender must have a registered
+     * identity.
+     *
+     * Emits `IdentityCleared` if successful.
+     */
+    "clear_identity": undefined;
+    /**
+     * Request a judgement from a registrar.
+     *
+     * Payment: At most `max_fee` will be reserved for payment to the registrar if judgement
+     * given.
+     *
+     * The dispatch origin for this call must be _Signed_ and the sender must have a
+     * registered identity.
+     *
+     * - `reg_index`: The index of the registrar whose judgement is requested.
+     * - `max_fee`: The maximum fee that may be paid. This should just be auto-populated as:
+     *
+     * ```nocompile
+     * Registrars::<T>::get().get(reg_index).unwrap().fee
+     * ```
+     *
+     * Emits `JudgementRequested` if successful.
+     */
+    "request_judgement": Anonymize<I9l2s4klu0831o>;
+    /**
+     * Cancel a previous request.
+     *
+     * Payment: A previously reserved deposit is returned on success.
+     *
+     * The dispatch origin for this call must be _Signed_ and the sender must have a
+     * registered identity.
+     *
+     * - `reg_index`: The index of the registrar whose judgement is no longer requested.
+     *
+     * Emits `JudgementUnrequested` if successful.
+     */
+    "cancel_request": Anonymize<I2ctrt5nqb8o7c>;
+    /**
+     * Set the fee required for a judgement to be requested from a registrar.
+     *
+     * The dispatch origin for this call must be _Signed_ and the sender must be the account
+     * of the registrar whose index is `index`.
+     *
+     * - `index`: the index of the registrar whose fee is to be set.
+     * - `fee`: the new fee.
+     */
+    "set_fee": Anonymize<I711qahikocb1c>;
+    /**
+     * Change the account associated with a registrar.
+     *
+     * The dispatch origin for this call must be _Signed_ and the sender must be the account
+     * of the registrar whose index is `index`.
+     *
+     * - `index`: the index of the registrar whose fee is to be set.
+     * - `new`: the new account ID.
+     */
+    "set_account_id": Anonymize<I6o1er683vod1j>;
+    /**
+     * Set the field information for a registrar.
+     *
+     * The dispatch origin for this call must be _Signed_ and the sender must be the account
+     * of the registrar whose index is `index`.
+     *
+     * - `index`: the index of the registrar whose fee is to be set.
+     * - `fields`: the fields that the registrar concerns themselves with.
+     */
+    "set_fields": Anonymize<Id6gojh30v9ib2>;
+    /**
+     * Provide a judgement for an account's identity.
+     *
+     * The dispatch origin for this call must be _Signed_ and the sender must be the account
+     * of the registrar whose index is `reg_index`.
+     *
+     * - `reg_index`: the index of the registrar whose judgement is being made.
+     * - `target`: the account whose identity the judgement is upon. This must be an account
+     * with a registered identity.
+     * - `judgement`: the judgement of the registrar of index `reg_index` about `target`.
+     * - `identity`: The hash of the [`IdentityInformationProvider`] for that the judgement is
+     * provided.
+     *
+     * Note: Judgements do not apply to a username.
+     *
+     * Emits `JudgementGiven` if successful.
+     */
+    "provide_judgement": Anonymize<Ide1bahhh47lj9>;
+    /**
+     * Remove an account's identity and sub-account information and slash the deposits.
+     *
+     * Payment: Reserved balances from `set_subs` and `set_identity` are slashed and handled by
+     * `Slash`. Verification request deposits are not returned; they should be cancelled
+     * manually using `cancel_request`.
+     *
+     * The dispatch origin for this call must match `T::ForceOrigin`.
+     *
+     * - `target`: the account whose identity the judgement is upon. This must be an account
+     * with a registered identity.
+     *
+     * Emits `IdentityKilled` if successful.
+     */
+    "kill_identity": Anonymize<Id9uqtigc0il3v>;
+    /**
+     * Add the given account to the sender's subs.
+     *
+     * Payment: Balance reserved by a previous `set_subs` call for one sub will be repatriated
+     * to the sender.
+     *
+     * The dispatch origin for this call must be _Signed_ and the sender must have a registered
+     * sub identity of `sub`.
+     */
+    "add_sub": Anonymize<Ic68lsi7chpv5k>;
+    /**
+     * Alter the associated name of the given sub-account.
+     *
+     * The dispatch origin for this call must be _Signed_ and the sender must have a registered
+     * sub identity of `sub`.
+     */
+    "rename_sub": Anonymize<Ic68lsi7chpv5k>;
+    /**
+     * Remove the given account from the sender's subs.
+     *
+     * Payment: Balance reserved by a previous `set_subs` call for one sub will be repatriated
+     * to the sender.
+     *
+     * The dispatch origin for this call must be _Signed_ and the sender must have a registered
+     * sub identity of `sub`.
+     */
+    "remove_sub": Anonymize<Iek0boln8pgnko>;
+    /**
+     * Remove the sender as a sub-account.
+     *
+     * Payment: Balance reserved by a previous `set_subs` call for one sub will be repatriated
+     * to the sender (*not* the original depositor).
+     *
+     * The dispatch origin for this call must be _Signed_ and the sender must have a registered
+     * super-identity.
+     *
+     * NOTE: This should not normally be used, but is provided in the case that the non-
+     * controller of an account is maliciously registered as a sub-account.
+     */
+    "quit_sub": undefined;
+    /**
+     * Add an `AccountId` with permission to grant usernames with a given `suffix` appended.
+     *
+     * The authority can grant up to `allocation` usernames. To top up the allocation or
+     * change the account used to grant usernames, this call can be used with the updated
+     * parameters to overwrite the existing configuration.
+     */
+    "add_username_authority": Anonymize<I452bkd71b385t>;
+    /**
+     * Remove `authority` from the username authorities.
+     */
+    "remove_username_authority": Anonymize<Ie83f0p0ke1f4u>;
+    /**
+     * Set the username for `who`. Must be called by a username authority.
+     *
+     * If `use_allocation` is set, the authority must have a username allocation available to
+     * spend. Otherwise, the authority will need to put up a deposit for registering the
+     * username.
+     *
+     * Users can either pre-sign their usernames or
+     * accept them later.
+     *
+     * Usernames must:
+     * - Only contain lowercase ASCII characters or digits.
+     * - When combined with the suffix of the issuing authority be _less than_ the
+     * `MaxUsernameLength`.
+     */
+    "set_username_for": Anonymize<Ib9nmpn9ru9aeh>;
+    /**
+     * Accept a given username that an `authority` granted. The call must include the full
+     * username, as in `username.suffix`.
+     */
+    "accept_username": Anonymize<Ie5l999tf7t2te>;
+    /**
+     * Remove an expired username approval. The username was approved by an authority but never
+     * accepted by the user and must now be beyond its expiration. The call must include the
+     * full username, as in `username.suffix`.
+     */
+    "remove_expired_approval": Anonymize<Ie5l999tf7t2te>;
+    /**
+     * Set a given username as the primary. The username should include the suffix.
+     */
+    "set_primary_username": Anonymize<Ie5l999tf7t2te>;
+    /**
+     * Start the process of removing a username by placing it in the unbinding usernames map.
+     * Once the grace period has passed, the username can be deleted by calling
+     * [remove_username](crate::Call::remove_username).
+     */
+    "unbind_username": Anonymize<Ie5l999tf7t2te>;
+    /**
+     * Permanently delete a username which has been unbinding for longer than the grace period.
+     * Caller is refunded the fee if the username expired and the removal was successful.
+     */
+    "remove_username": Anonymize<Ie5l999tf7t2te>;
+    /**
+     * Call with [ForceOrigin](crate::Config::ForceOrigin) privileges which deletes a username
+     * and slashes any deposit associated with it.
+     */
+    "kill_username": Anonymize<Ie5l999tf7t2te>;
+}>;
+export type Ide1bahhh47lj9 = {
+    "reg_index": number;
+    "target": MultiAddress;
+    "judgement": IdentityJudgement;
+    "identity": SizedHex<32>;
+};
+export type Iarggo2bj45nvd = AnonymousEnum<{
+    /**
+     * Dispatch a call under an alias using the `account <-> alias` mapping.
+     *
+     * This is a call version of the transaction extension `AsPersonalAliasWithAccount`.
+     * It is recommended to use the transaction extension instead when suitable.
+     */
+    "under_alias": Anonymize<I865ar2evj8fov>;
+    /**
+     * This transaction is refunded if successful and no alias was previously set.
+     *
+     * The call is valid from `call_valid_at` until
+     * `call_valid_at + account_setup_time_tolerance`.
+     * `account_setup_time_tolerance` is a constant available in the metadata.
+     *
+     * Parameters:
+     * - `account`: The account to set the alias for.
+     * - `call_valid_at`: The block number when the call becomes valid.
+     */
+    "set_alias_account": Anonymize<I6viutd279aov3>;
+    /**
+     * Remove the mapping from a particular alias to its registered account.
+     */
+    "unset_alias_account": undefined;
+    /**
+     * Recognize a set of people without any additional checks.
+     *
+     * The people are identified by the provided list of keys and will each be assigned, in
+     * order, the next available personal ID.
+     */
+    "force_recognize_personhood": Anonymize<I6tuqjmsr5ahcq>;
+    /**
+     * Set a personal id account.
+     *
+     * The account can then be used to sign transactions on behalf of the personal id, and
+     * provide replay protection with the nonce.
+     *
+     * This transaction is refunded if successful and no account was previously set for the
+     * personal id.
+     *
+     * The call is valid from `call_valid_at` until
+     * `call_valid_at + account_setup_time_tolerance`.
+     * `account_setup_time_tolerance` is a constant available in the metadata.
+     *
+     * Parameters:
+     * - `account`: The account to set the alias for.
+     * - `call_valid_at`: The block number when the call becomes valid.
+     */
+    "set_personal_id_account": Anonymize<I6viutd279aov3>;
+    /**
+     * Unset the personal id account.
+     */
+    "unset_personal_id_account": undefined;
+    /**
+     * Create the people collection.
+     *
+     * This call is valid only if the collection doesn't exist yet. Once created,
+     * this call cannot be executed again.
+     *
+     * The collection is created with a fixed configuration:
+     * - Owner: Configured via `CollectionOwner` type
+     * - Onboarding size: `PEOPLE_ONBOARDING_SIZE` (10)
+     * - Mode: `Flexible`
+     * - Ring size: `R2e9`
+     */
+    "create_people_collection": undefined;
+    /**
+     * Remove stale alias <-> account mappings.
+     *
+     * A mapping is stale when:
+     * - its context has been removed from [`Config::AccountContexts`] (governance
+     * reconfiguration, ended airdrop etc.), or
+     * - its ring has been deleted.
+     *
+     * Revision mismatches do not render an alias stale. The user can continue
+     * transacting via `AsPersonalAliasWithAccountRevised` without having to
+     * redo account setup.
+     *
+     * Typically submitted by the OCW, but the dispatch does not trust
+     * the caller. Each alias is re-validated via
+     * `Self::ensure_alias_is_stale`; those that are not stale are
+     * skipped.
+     *
+     * At most [`MAX_BULK_CLEANUP`] aliases are processed per call.
+     *
+     * The transaction source must be local or in-block. Thus, external
+     * invocations are not permitted.
+     */
+    "clean_up_stale_aliases": Anonymize<I8k2cd3v73pgjh>;
+}>;
+export type I865ar2evj8fov = {
+    "call": TxCallData;
+};
+export type I4p8r9ogdpeolf = AnonymousEnum<{
+    /**
+     * Grant some attestation allowance to an account so they can attest people.
+     *
+     * The origin must be `AttestationAllowanceManager`.
+     *
+     * - `account`: The account to grant attestations to.
+     * - `count`: The number of attestations to grant.
+     */
+    "increase_attestation_allowance": Anonymize<Ibl1gaa0rn2c67>;
+    /**
+     * Clear all attestation allowance for an account.
+     *
+     * The origin must be `AttestationAllowanceManager`.
+     *
+     * - `account`: The account to remove all attestations from.
+     */
+    "clear_attestation_allowance": Anonymize<Icbccs0ug47ilf>;
+    /**
+     * Attest an account.
+     *
+     * The origin must be signed by an account and have some attestation allowance left.
+     *
+     * The authority will have to get two signatures from the user:
+     * - one created using their account key attesting to the ownership of the `candidate`
+     * account;
+     * - one created using their ring-vrf key attesting to the ownership of the `ring_vrf_key`
+     * key.
+     *
+     * The message to be signed by both keys from which the signatures are generated is created
+     * by concatenating the bytes "pop:people-lite:register using" with the encoded bytes of
+     * the user's account (`candidate`), and the encoded bytes of the ring VRF key
+     * (`ring_vrf_key`).
+     *
+     * On success, this call:
+     * - stores lite registration data in `LitePeople`,
+     * - adds the user's ring VRF key to the lite member collection.
+     *
+     * The lite member collection must already have been initialized by `on_poll`.
+     *
+     * - `candidate`: The candidate to be recognized as a lite person.
+     * - `candidate_signature`: The signature, provided by the candidate, to allow the attester
+     * to complete the registration process on their behalf.
+     * - `ring_vrf_key`: The ring VRF key to be associated with the lite person.
+     * - `ring_vrf_key_signature`: The ring VRF signature, provided by the candidate, to allow
+     * the attester to complete the registration process. This also prove the ownership of
+     * the ring VRF key by the candidate.
+     * - consumer_registration: Optional parameter which can contain the necessary information
+     * to forward a consumer registration request to the `LiteConsumerRegistrar` service. If
+     * present, it also contains a signature created by the user in order to validate the
+     * intent. More information on the signing payload generation available in
+     * [types::LiteConsumerRegistrationParams::signing_payload].
+     */
+    "attest": Anonymize<Iddfuva7fle38r>;
+    "dispatch_as_signer": Anonymize<I865ar2evj8fov>;
+    /**
+     * Set the account associated with a lite alias.
+     *
+     * The call is valid from `valid_at_block` until
+     * `valid_at_block + account_setup_block_tolerance`.
+     */
+    "set_alias_account": Anonymize<Iefam38o91ona9>;
+    "unset_alias_account": undefined;
+}>;
+export type Ie0oera0jjjpr6 = AnonymousEnum<{
+    /**
+     * Merge the members in two rings into a single, new ring. In order for the rings to be
+     * eligible for merging, they must be below 1/2 of max capacity, have no pending
+     * suspensions and not be the top ring used for onboarding.
+     */
+    "merge_rings": Anonymize<I6mk90q9np5nf3>;
+    /**
+     * Force set the onboarding size for a collection. This call requires root privileges.
+     */
+    "set_onboarding_size": Anonymize<Ichkkipipv6vbf>;
+    /**
+     * Allow a member waiting in the onboarding queue to include themselves into a ring
+     * after enough time has passed. This bypasses the normal cohort-based onboarding size
+     * requirement.
+     *
+     * This call must be dispatched with a `SelfInclude` origin, authenticated by the
+     * `AsMember` transaction extension. The rings must be in append-only mode.
+     *
+     * The `call_valid_at` parameter dictates the time window in which this transaction is
+     * valid and represents the timestamp (in seconds since the UNIX epoch) when this call
+     * becomes valid.
+     */
+    "self_include": Anonymize<Ie0n67dnlcbpcf>;
+    /**
+     * Build a ring root for a specific ring in a collection.
+     *
+     * Submitted by the OCW with a `to_include` snapshot from
+     * [`Pallet::should_build_ring`]. Leftovers from later onboarding are picked up
+     * on the next OCW tick, or by the member via [`Self::self_include`] when
+     * cohort gating stalls onboarding.
+     *
+     * `discriminator` is any `u32`; it lets the OCW send a different transaction when a
+     * previous one is banned by the pool because it was validated against a different state
+     * after a re-org. As the accepted transaction source is only local, it cannot be used to
+     * spam the pool.
+     */
+    "build_ring_authorized": Anonymize<I5fcgnt467okla>;
+    /**
+     * Onboard members from the onboarding queue for a specific collection.
+     *
+     * Submitted by the offchain worker.
+     *
+     * `discriminator` is any `u32`; it lets the OCW send a different transaction when a
+     * previous one is banned by the pool because it was validated against a different state
+     * after a re-org. As the accepted transaction source is only local, it cannot be used to
+     * spam the pool.
+     */
+    "onboard_members_authorized": Anonymize<I3silg6bqaeqo8>;
+    /**
+     * Merge the top two onboarding queue pages for a specific collection.
+     *
+     * Submitted by the offchain worker.
+     */
+    "merge_queue_pages_authorized": Anonymize<I4eperb3q65q14>;
+    /**
+     * Remove suspended keys from a specific ring in a collection.
+     *
+     * Submitted by the offchain worker.
+     *
+     * `discriminator` is any `u32`; it lets the OCW send a different transaction when a
+     * previous one is banned by the pool because it was validated against a different state
+     * after a re-org. As the accepted transaction source is only local, it cannot be used to
+     * spam the pool.
+     */
+    "remove_suspended_keys_authorized": Anonymize<Ia8odrnpl6k4r6>;
+    /**
+     * Delete a page for a specific ring in a collection.
+     *
+     * Submitted by the offchain worker.
+     */
+    "delete_ring_page_authorized": Anonymize<I8lare4sf457ul>;
+    /**
+     * Enqueue a ring for deletion as part of collection deletion.
+     *
+     * Archives the ring root, notifies subscribers, removes ring metadata, and
+     * enqueues ring pages into `RingDeletionQueue` for processing by
+     * `delete_ring_page_authorized`.
+     *
+     * Submitted by the offchain worker.
+     */
+    "enqueue_ring_deletion_authorized": Anonymize<Idpufnltgsuodp>;
+    /**
+     * Delete an onboarding queue page as part of collection deletion.
+     *
+     * Removes all `Members` entries for the members in the page, then removes
+     * the page itself. Can only proceed when all rings and ring pages have been
+     * fully deleted.
+     *
+     * Submitted by the offchain worker.
+     */
+    "delete_onboarding_queue_page_authorized": Anonymize<I2gt0vglt3agsj>;
+    /**
+     * Finalize collection deletion.
+     *
+     * Removes all remaining per-collection storage and the owner's identifier
+     * reference. Can only proceed when all rings, ring pages, and onboarding
+     * queue pages have been fully deleted.
+     *
+     * Submitted by the offchain worker.
+     */
+    "finalize_collection_deletion_authorized": Anonymize<Idjiu7vp8ovdab>;
+    /**
+     * Mark a ring as stale so the offchain worker will rebuild it.
+     *
+     * Anyone can submit this transaction if the ring has members that are not
+     * yet included in the root (`total > included`) and the ring is not already
+     * marked stale. This is a recovery mechanism in case the `StaleRings` entry
+     * was lost or never inserted.
+     */
+    "mark_ring_stale_authorized": Anonymize<Idpufnltgsuodp>;
+    /**
+     * Clean up expired old ring roots.
+     *
+     * Removes up to `limit` old ring roots for the given ring in the given
+     * collection.
+     *
+     * The transaction source must be `Local` or `InBlock`.
+     *
+     * This is a maintenance call. Submitted by the offchain worker.
+     */
+    "clean_up_old_roots_authorized": Anonymize<I4maqh2jefgv7u>;
+}>;
+export type I5fcgnt467okla = {
+    "identifier": SizedHex<32>;
+    "ring_index": number;
+    "ring_exponent": Anonymize<Idvob66qflhcgd>;
+    "revision"?: Anonymize<I4arjljr6dpflb>;
+    "to_include": number;
+    "discriminator": number;
+};
+export type I3silg6bqaeqo8 = {
+    "identifier": SizedHex<32>;
+    "ring_index": number;
+    "head": number;
+    "first_member"?: Anonymize<I4s6vifaf8k998>;
+    "discriminator": number;
+};
+export type Ia8odrnpl6k4r6 = {
+    "identifier": SizedHex<32>;
+    "ring_index": number;
+    "revision"?: Anonymize<I4arjljr6dpflb>;
+    "discriminator": number;
+};
+export type Ibmns0e4k6qqrr = AnonymousEnum<{
+    /**
+     * Split a coin into multiple coins.
+     *
+     * The origin must be a [Origin::Coin], which can be obtained from the transaction
+     * extension [`AsCoinage`](crate::extension::AsCoinage).
+     *
+     * The call is free and ages the resulting coins by one.
+     *
+     * The `split_into` parameter contains a vector of pairs, each pair containing a coin
+     * value and a list of destination account ids. For each pair, a new coin with the given
+     * value is created for each destination account id.
+     *
+     * Validity requirements:
+     * (an invalid transaction won't be included in a block, the coin is not consumed)
+     * * The coin's age must be less than [Config::MaximumAge].
+     * * The coin value must be within the bounds defined by [Config::MinimumExponent] and
+     * [Config::MaximumExponent].
+     * * The total value of the new coins must equal the value of the origin coin.
+     * * The number of outputs must not exceed [Config::MaxSplitOutputs].
+     * * The age of the new coins is set to the age of the origin coin plus one.
+     * * Each destination account must not already have a coin.
+     */
+    "split": Anonymize<Ibv24s7lkcbv1r>;
+    /**
+     * Transfer a coin to another account.
+     *
+     * The origin must be a [Origin::Coin], which can be obtained from the transaction
+     * extension [`AsCoinage`](crate::extension::AsCoinage).
+     *
+     * The call is free and ages the resulting coin by one.
+     *
+     * Validity requirements:
+     * (an invalid transaction won't be included in a block, the coin is not consumed)
+     * * The destination account must not already have a coin.
+     * * The coin's age must be less than [Config::MaximumAge].
+     */
+    "transfer": Anonymize<Iadkk9nq2cqqve>;
+    /**
+     * Load coin into a recycler.
+     *
+     * The origin must be a [Origin::Coin], which can be obtained from the transaction
+     * extension [`AsCoinage`](crate::extension::AsCoinage).
+     *
+     * The call is free.
+     *
+     * The `member_key` parameter is the member key to be included in the recycler, and whose
+     * alias is used to unload from the recycler.
+     *
+     * Validity requirements:
+     * (an invalid transaction won't be included in a block, the coin is not consumed)
+     * * The `member_key` must not already be used in another recycler.
+     * * The `member_key` must be valid (i.e. well formed).
+     * * The `proof_of_ownership` must be a valid signature of the coin's account id by the
+     * `member_key`.
+     * * The recycler collection for the coin's value must already exist
+     */
+    "load_recycler_with_coin": Anonymize<I1b55a83kk37g4>;
+    /**
+     * Load external asset into a recycler.
+     *
+     * The origin must be a signed origin.
+     *
+     * The transaction fee is refunded.
+     *
+     * The `preservation` parameter indicates how the asset transfer should preserve the
+     * signer's account.
+     *
+     * The `value` parameter indicates the coin value to be loaded into the recycler.
+     * The equivalent amount of the underlying asset is transferred from the signer to
+     * the pallet account.
+     *
+     * The `member_key` parameter is the member key to be included in the recycler, and whose
+     * alias is used to unload from the recycler.
+     *
+     * The `proof_of_ownership` parameter is the signature of the signer's account id by the
+     * `member_key`.
+     *
+     * Requirements:
+     * * The `member_key` must not already be used in another recycler.
+     * * The `member_key` must be valid (i.e. well formed).
+     * * The `value` must be within the bounds defined by [Config::MinimumExponent] and
+     * [Config::MaximumExponent].
+     * * The signer must have enough balance of the underlying asset to cover the equivalent
+     * amount for the given coin value.
+     * * The `proof_of_ownership` must be a valid signature of the signer's account id by the
+     * `member_key`.
+     */
+    "load_recycler_with_external_asset": Anonymize<Icdnv1iut1hln7>;
+    /**
+     * Load external asset into a recycler (infallible, validated unpaid variant).
+     *
+     * The origin must be [Origin::InfallibleUnpaidSigned], which can be obtained from the
+     * transaction extension variant
+     * [`AsCoinageInfo::InfallibleUnpaidSigned`](crate::extension::AsCoinageInfo::InfallibleUnpaidSigned).
+     *
+     *
+     * The transaction extension validation phase must ensure:
+     * - The `member_key` is valid and not already used in another recycler.
+     * - The `proof_of_ownership` is a valid signature of the signer's account id by the
+     * `member_key`.
+     * - The `value` is within the bounds defined by [Config::MinimumExponent] and
+     * [Config::MaximumExponent], and can be losslessly converted to an asset amount.
+     * - The signer has enough balance of the underlying asset to cover the equivalent amount
+     * for the given coin value (respecting `preservation`).
+     * - The nonce is valid for replay protection.
+     * - The recycler collection for `value` already exists.
+     *
+     * The call is free.
+     */
+    "load_recycler_with_external_asset_unpaid": Anonymize<Icdnv1iut1hln7>;
+    /**
+     * Batched variant of [`Self::load_recycler_with_external_asset_unpaid`].
+     *
+     * The origin must be [Origin::InfallibleUnpaidSigned], which can be obtained from the
+     * transaction extension variant
+     * [`AsCoinageInfo::InfallibleUnpaidSigned`](crate::extension::AsCoinageInfo::InfallibleUnpaidSigned).
+     * The extension validates each inner item and additionally checks within-batch
+     * member-key uniqueness and that the signer's balance covers the sum of all inner asset
+     * amounts.
+     *
+     * This call dispatches each inner load by re-running the same checks the extension
+     * just performed (see [`RecyclerManager::load`]). The redundancy matches the defensive
+     * pattern used by [`Self::load_recycler_with_external_asset_unpaid`]: a dispatch path
+     * that fails any of these checks is a logic bug in the extension, not a user error.
+     *
+     * The call is free.
+     */
+    "load_recycler_with_external_asset_unpaid_batch": Anonymize<I8a919tojdi2qf>;
+    /**
+     * Unload a recycler to mint a new coin.
+     *
+     * The origin must be a [Origin::UnloadToken] with `fee: UnloadFee::Prepaid`, which can be
+     * obtained from the transaction extension [`AsCoinage`](crate::extension::AsCoinage) using
+     * `AsUnloadTokenPeople`,
+     * `AsUnloadTokenLitePeople`, or `AsUnloadTokenPaid` variants.
+     *
+     * This function allows a user to prove they own one or more coins in a recycler ring
+     * without revealing which specific coins they own. It consolidates one or multiple inputs
+     * into a single output coin.
+     *
+     * Parameters:
+     * * `aliases`: the list of aliases corresponding to the member keys included in the
+     * recycler. The proofs for these aliases are contained in the origin.
+     * * `value` and `index`: identifies the recycler being unloaded.
+     * * `_revision`: the recycler revision used for the alias_proofs.
+     * * `to`: the destination account for the new coin.
+     *
+     * Requirements:
+     * * The origin must be [Origin::UnloadToken] with `fee: UnloadFee::Prepaid`.
+     * * The recycler identified by `value` and `index` must exist.
+     * * The alias proofs provided in the origin must be valid for the recycler's revision.
+     * * The `aliases` provided must match the aliases derived from the proofs.
+     * * The aliases must not have been already unloaded from this recycler.
+     * * The number of aliases must be a power of two.
+     * * The resulting consolidated value must not exceed [Config::MaximumExponent].
+     */
+    "unload_recycler_into_coin": Anonymize<I8en8uvi5isgvj>;
+    /**
+     * Unload a recycler to withdraw the underlying external asset.
+     *
+     * The origin must be [Origin::UnloadToken], which can be obtained from the transaction
+     * extension [`AsCoinage`](crate::extension::AsCoinage).
+     *
+     * When `fee` is [UnloadFee::Prepaid] (via free or paid unload token), no fee is deducted.
+     * When `fee` is [UnloadFee::FromOutput], the fee is deducted from the unloaded assets.
+     *
+     * This function allows a user to withdraw their coins back into the underlying
+     * asset (e.g., an external asset).
+     *
+     * Parameters:
+     * * `aliases`: the list of aliases corresponding to the member keys included in the
+     * recycler. The proofs for these aliases are contained in the origin.
+     * * `value` and `index`: identifies the recycler being unloaded.
+     * * `_revision`: the recycler revision used for the alias_proofs.
+     * * `to`: the destination account for the underlying asset.
+     *
+     * Requirements:
+     * * The origin must be [Origin::UnloadToken].
+     * * The recycler identified by `value` and `index` must exist.
+     * * The alias proofs provided in the origin must be valid for the recycler's revision.
+     * * The aliases must not have been already unloaded (except for the first one when `fee`
+     * is [UnloadFee::FromOutput], which was pre-marked in the extension).
+     */
+    "unload_recycler_into_external_asset": Anonymize<I8en8uvi5isgvj>;
+    /**
+     * Pay the fee to register a member key for a paid unload token using a coin.
+     *
+     * The origin must be a [Origin::Coin], which can be obtained from the transaction
+     * extension [`AsCoinage`](crate::extension::AsCoinage).
+     *
+     * The coin is consumed. The fee is deducted from the coin's value and transferred to
+     * [Config::FeeDestination]. The remaining value of the coin is destroyed.
+     *
+     * If the call fails, the origin coin is still consumed.
+     *
+     * To protect the user against varying fees, if the coin's value is less than the fee, the
+     * call is invalid (an invalid call never goes into a block).
+     *
+     * The `proof_of_ownership` is a signature of the caller's account ID by the `member_key`.
+     * This ensures the caller controls the member key to prevent front-running.
+     *
+     * Requirements:
+     * * The coin's age must be less than [Config::MaximumAge].
+     * * The coin value must be sufficient to cover the fee.
+     * * The `member_key` must be valid and not already used.
+     * * The `proof_of_ownership` must be valid.
+     */
+    "pay_for_recycler_unload_fee_token_with_coin": Anonymize<I1b55a83kk37g4>;
+    /**
+     * Pay the fee to register a member key for a paid unload token using the native currency.
+     *
+     * The origin must be Signed.
+     *
+     * This adds the `member_key` to a "paid unload token ring". Being part of this ring
+     * allows the user to later generate an `UnloadToken` to unload a recycler.
+     *
+     * The fee is transferred from the caller to [Config::FeeDestination].
+     *
+     * The `proof_of_ownership` is a signature of the caller's account ID by the `member_key`.
+     * This ensures the caller controls the member key to prevent front-running.
+     *
+     * Requirements:
+     * * The `member_key` must be valid and not already used.
+     * * The `proof_of_ownership` must be valid.
+     */
+    "pay_for_recycler_unload_fee_token_with_native": Anonymize<I1b55a83kk37g4>;
+    /**
+     * Pay the fee to register a member key for a paid unload token using the underlying
+     * external asset.
+     *
+     * The origin must be Signed.
+     *
+     * This adds the `member_key` to a "paid unload token ring". Being part of this ring
+     * allows the user to later generate an `UnloadToken` to unload a recycler.
+     *
+     * The fee is transferred from the caller to [Config::FeeDestination].
+     *
+     * The `proof_of_ownership` is a signature of the caller's account ID by the `member_key`.
+     * This ensures the caller controls the member key to prevent front-running.
+     *
+     * Requirements:
+     * * The `member_key` must be valid and not already used.
+     * * The `proof_of_ownership` must be valid.
+     */
+    "pay_for_recycler_unload_fee_token_with_external_asset": Anonymize<I1b55a83kk37g4>;
+    /**
+     * Unload a recycler into a mix of external asset and fresh vouchers.
+     *
+     * The origin must be [Origin::UnloadToken], which can be obtained from the transaction
+     * extension [`AsCoinage`](crate::extension::AsCoinage).
+     *
+     * This function allows a user to offboard part of the unloaded value into the underlying
+     * asset while reminting the rest as fresh recycler vouchers.
+     *
+     * When `fee` is [UnloadFee::Prepaid], `external_asset_amount` is transferred as-is.
+     * When `fee` is [UnloadFee::FromOutput], the fee is deducted from the specified
+     * `external_asset_amount`, so the recipient receives the remainder.
+     *
+     * Parameters:
+     * * `aliases`: the list of aliases corresponding to the member keys included in the
+     * recycler. The proofs for these aliases are contained in the origin.
+     * * `value` and `index`: identifies the recycler being unloaded.
+     * * `revision`: the recycler revision used for the alias proofs.
+     * * `to`: the destination account for the external asset portion.
+     * * `external_asset_amount`: the gross asset portion to offboard from the unloaded value.
+     * * `new_vouchers`: the fresh recycler vouchers to mint from the remaining unloaded value.
+     *
+     * The total unloaded value must always equal the asset portion plus the voucher portion.
+     * In `FromOutput` mode, the asset portion must be large enough to cover the unload fee.
+     *
+     * Requirements:
+     * * The origin must be [Origin::UnloadToken].
+     * * The recycler identified by `value` and `index` must exist.
+     * * The alias proofs provided in the origin must be valid for the recycler's revision.
+     * * The aliases must not have been already unloaded (except for the first one when `fee`
+     * is [UnloadFee::FromOutput], which was pre-marked in the extension).
+     * * `new_vouchers` must not be empty, and all voucher member keys must be valid and
+     * unused.
+     * * The total unloaded value must equal `external_asset_amount` plus the total asset value
+     * of `new_vouchers`.
+     * * When using [UnloadFee::FromOutput], `external_asset_amount` must cover the fee.
+     */
+    "unload_recycler_into_external_asset_and_vouchers": Anonymize<Ibg509ejf21uui>;
+    /**
+     * Unload a recycler to withdraw the underlying external asset (non-anonymous).
+     *
+     * Convenience wrapper around [Self::unload_recyclers_into_external_asset_non_anonymous]
+     * for the single-recycler case.
+     *
+     * See [Self::unload_recyclers_into_external_asset_non_anonymous] for full documentation.
+     */
+    "unload_recycler_into_external_asset_non_anonymous": Anonymize<I634921sber3t4>;
+    /**
+     * Unload multiple recyclers to withdraw the underlying external asset (non-anonymous).
+     *
+     * This is a signed-origin version of [`Self::unload_recycler_into_external_asset`]
+     * where the fee is paid explicitly by the signer rather than through the
+     * ring-authenticated unload token, and for multiple recyclers.
+     *
+     * The fee charged is one unload token fee per recycler (i.e., `inputs.len()`).
+     *
+     * Parameters:
+     * * `inputs`: A list of inputs, specifying the recycler and aliases to unload.
+     * * `alias_proofs`: the proofs for all aliases across all inputs, signed over a message
+     * that includes the signer. The proofs must correspond sequentially to the aliases in
+     * `inputs`.
+     * * `to`: the destination account for the asset.
+     * * `fee_currency`: whether to pay the fee in native currency or external asset.
+     *
+     * Requirements:
+     * * The origin must be Signed.
+     * * All specified recyclers must exist.
+     * * The alias proofs must correspond sequentially to the aliases in `inputs`.
+     * * `inputs` must not be empty and each element must contain at least one alias.
+     * * The signer must have sufficient balance to pay the fee (one fee per recycler).
+     */
+    "unload_recyclers_into_external_asset_non_anonymous": Anonymize<Id9tjv96cmemjl>;
+    /**
+     * Unload a recycler to mint multiple new coins (split).
+     *
+     * The origin must be a [Origin::UnloadToken] with `fee: UnloadFee::Prepaid`.
+     *
+     * This function combines the functionality of [Self::unload_recycler_into_coin] and
+     * [Self::split] in a single atomic operation. The resulting coins' age is 1 because
+     * the action of splitting age coins. This is also important because resulting coins
+     * are not entirely fresh, they can be linked to other coins.
+     *
+     * Unlike [Self::unload_recycler_into_coin], this call does **not** require the number of
+     * aliases to be a power of two.
+     *
+     * Parameters:
+     * * `aliases`: the list of aliases corresponding to the member keys included in the
+     * recycler. The proofs for these aliases are contained in the origin.
+     * * `value` and `index`: identifies the recycler being unloaded.
+     * * `revision`: the recycler revision used for the alias_proofs.
+     * * `split_into`: a vector of pairs, each pair containing a coin value and a list of
+     * destination account ids.
+     * * `max_fee`: the maximum fee the caller is willing to pay, expressed in the underlying
+     * asset balance. It must be equal to the difference between the total value of the
+     * unloaded coins and the total value of the new coins defined in `split_into`.
+     *
+     * When using [UnloadFee::Prepaid], this must be 0.
+     * When using [UnloadFee::FromOutput], this amount is deducted from the input: the
+     * network fee is transferred to [Config::FeeDestination] and any remainder is burned.
+     * The caller can query `get_paid_unload_token_fee_in_asset` to estimate the fee.
+     *
+     * This parameter serves as a safeguard: the transaction is rejected at validation if the
+     * actual network fee exceeds `max_fee`, protecting the caller from excessive fee
+     * increases that would render the argument `split_into` invalid (unloaded funds must be
+     * higher than the split plus the fee).
+     *
+     * Requirements:
+     * * The origin must be [Origin::UnloadToken].
+     * * The recycler identified by `value` and `index` must exist.
+     * * The alias proofs provided in the origin must be valid for the recycler's revision.
+     * * The `aliases` provided must match the aliases derived from the proofs.
+     * * The total value of the new coins defined in `split_into` plus `max_fee` must equal the
+     * total value of the unloaded coins.
+     * * `max_fee` must be a multiple of the minimum coin. (This is implied by the condition
+     * above).
+     * * Each destination account must not already have a coin.
+     * * When using [UnloadFee::Prepaid], `max_fee` must be 0.
+     * * When using [UnloadFee::FromOutput], `max_fee` must cover the network fee.
+     */
+    "unload_recycler_into_coins": Anonymize<I497d2v63rjmg>;
+    /**
+     * Directly offboard a fresh, 0-age coin into the underlying external asset.
+     *
+     * The origin must be a [Origin::Coin], obtained through
+     * [`AsCoinage`](crate::extension::AsCoinage) using `AsCoin`.
+     *
+     * Because the coin must be fresh (`age == 0`), this call bypasses the
+     * recycler/unload-token offboarding flow and releases the underlying asset directly.
+     *
+     * Parameters:
+     * * `to`: destination account that receives the released underlying asset amount.
+     *
+     * Requirements:
+     * * The origin must be [Origin::Coin].
+     * * The coin must be fresh: `coin.age == 0`.
+     * * The coin value must be representable as underlying-asset amount.
+     */
+    "direct_offboard_coin_into_external_asset": Anonymize<Iadkk9nq2cqqve>;
+    /**
+     * Set the underlying asset id used by the pallet.
+     *
+     * The origin must satisfy [`Config::UnderlyingAssetIdManager`]. The setter is
+     * **single-use**: calling it again after the asset id has been set returns
+     * [`Error::AssetIdAlreadySet`]. Changing the underlying asset after coins exist would
+     * orphan the held balances of every in-flight coin, so the on-chain decision is
+     * intentionally one-shot.
+     *
+     * The asset id must already exist in [`Config::Fungibles`].
+     */
+    "set_underlying_asset_id": Anonymize<I22bm4d7re21j9>;
+    /**
+     * Clean up an expired recycler.
+     *
+     * This is a maintenance call. The origin must be authorized and from local source.
+     *
+     * This removes an old recycler that has exceeded its expiration time.
+     * Any remaining (not unloaded) value in the recycler is considered lost and added to
+     * [TotalValueOfDestroyedCoins].
+     */
+    "clean_recycler": Anonymize<Icnkee0to4c5ac>;
+    /**
+     * Cleanup storage for consumed free unload tokens of old periods.
+     *
+     * This is a maintenance call. The origin must be authorized and from local source.
+     */
+    "clean_consumed_free_token": Anonymize<I7ts20td7b1pmf>;
+    /**
+     * Clean up a single ring in an expired paid unload token collection.
+     *
+     * This is a maintenance call. The origin must be authorized and from local source.
+     * Rings must be cleaned sequentially (ring 0 first, then 1, etc.) before the
+     * collection can be deleted via
+     * [`delete_expired_paid_unload_token_collection`](Self::delete_expired_paid_unload_token_collection).
+     */
+    "clean_paid_unload_token_ring": Anonymize<I7315hlp5liq47>;
+    /**
+     * Clean up dust for recyclers.
+     *
+     * This is a maintenance call. The origin must be authorized and from local source.
+     * Removes up to DUST_CLEANUP_BATCH_SIZE unloaded alias entries per call to bound the
+     * operation.
+     */
+    "clean_recycler_dust": undefined;
+    /**
+     * Clean up dust for paid unload tokens.
+     *
+     * This is a maintenance call. The origin must be authorized and from local source.
+     */
+    "clean_paid_unload_token_dust": undefined;
+    /**
+     * Delete an expired paid unload token collection after all rings have been cleaned.
+     *
+     * This is a maintenance call. The origin must be authorized and from local source.
+     * All rings must have been cleaned via
+     * [`clean_paid_unload_token_ring`](Self::clean_paid_unload_token_ring) before this
+     * can be called.
+     */
+    "delete_expired_paid_unload_token_collection": Anonymize<I7ts20td7b1pmf>;
+}>;
+export type I634921sber3t4 = {
+    "input": Anonymize<Iblrnm4k0nni51>;
+    "alias_proofs": Anonymize<Itom7fk49o0c9>;
+    "to": SS58String;
+    "fee_currency": Anonymize<Id9ihqm6nfrots>;
+};
+export type Id9tjv96cmemjl = {
+    "inputs": Anonymize<I1d6jcc1nomglu>;
+    "alias_proofs": Anonymize<Itom7fk49o0c9>;
+    "to": SS58String;
+    "fee_currency": Anonymize<Id9ihqm6nfrots>;
+};
+export type Ialfpbeqb0fdpi = AnonymousEnum<{
+    /**
+     * Registers the parachain as a subscriber.
+     * The initial state will be sent over shortly via XCM.
+     *
+     * ## Origin
+     * Requires `ManageOrigin` (governance/root).
+     *
+     * ## Parameters
+     * - `subscriber_parachain_id`: The ParaId of the subscribing parachain.
+     * - `members_collections`: List of collection identifiers to subscribe to and their
+     * respective ring exponents.
+     * - `pallet_index`: Pallet index of members-subscriber on the subscriber chain.
+     */
+    "subscribe": Anonymize<Ic73rrpct6ckoa>;
+    /**
+     * Unsubscribes a parachain.
+     *
+     * ## Origin
+     * - **Self-unsubscribe**: Subscriber parachain via XCM (`EnsureSubscriberOrigin`)
+     * - **Governance unsubscribe**: Requires `ManageOrigin`
+     *
+     * ## Parameters
+     * - `subscriber_parachain_id`: The ParaId to unsubscribe. Required for governance, ignored
+     * for self-unsubscribe (derived from XCM origin).
+     */
+    "unsubscribe": Anonymize<Ib1hmb261fe7mh>;
+    /**
+     * Requests replay of specific ring roots.
+     *
+     * Permissionless — any signed origin can request a replay for any subscriber.
+     * The subscriber parachain is identified by the `subscriber_parachain_id` parameter.
+     *
+     * Parameters:
+     * - `subscriber_parachain_id`: The ParaId of the subscriber.
+     * - `identifier`: Collection identifier.
+     * - `ring_root_indices`: List of ring root indices, must be in strictly ascending order.
+     */
+    "request_replay": Anonymize<I9jfggcqa8oi6c>;
+    /**
+     * Enqueues pending updates into a sealed batch for distribution.
+     *
+     * Authorized call submitted by the offchain worker.
+     */
+    "enqueue_updates": Anonymize<I4h7nuietabku4>;
+    /**
+     * Sends the current batch to a specific subscriber.
+     *
+     * Authorized maintenance call submitted by the offchain worker.
+     */
+    "send_batch": Anonymize<I7hni0vmjve0vn>;
+    /**
+     * Sends one page of initialization data to a subscriber.
+     *
+     * Authorized maintenance call submitted by the offchain worker.
+     */
+    "send_init_page": Anonymize<Iaub50sqs4hhqk>;
+    /**
+     * Abandons a stuck batch that exceeded `StuckBatchTimeout`.
+     * Subscribers that did not receive the batch can recover via `request_replay`.
+     *
+     * Authorized maintenance call submitted by the offchain worker when a batch has
+     * been active longer than `StuckBatchTimeout`.
+     */
+    "abandon_stuck_batch": Anonymize<I6r7odh9pc99fv>;
+}>;
+export type I4h7nuietabku4 = {
+    "send_page": number;
+    "discriminator": number;
+};
+export type I7hni0vmjve0vn = {
+    "para_id": number;
+    "sequence": bigint;
+    "discriminator": number;
+};
+export type Iaub50sqs4hhqk = {
+    "para_id": number;
+    "current_collection_index": number;
+    "after_ring_index"?: Anonymize<I4arjljr6dpflb>;
+    "discriminator": number;
+};
+export type I6r7odh9pc99fv = {
+    "discriminator": number;
+};
+export type Iec1npvopo3cor = AnonymousEnum<{
+    /**
+     * Schedule a new airdrop event. Origin must be `ManagerOrigin`. The prize allocation is
+     * held in the pallet's pot account. The pot is assumed to be pre-funded.
+     *
+     * Cross-pallet callers should use the [`crate::types::Airdrop::schedule`] trait method
+     * instead, which debits a caller-supplied `source` account.
+     */
+    "schedule_event": Anonymize<Ie9gieran6hmh7>;
+    /**
+     * Remove a previously scheduled event. The event must not have already
+     * started, otherwise this call will fail.
+     */
+    "remove_scheduled_event": Anonymize<Ib4o08d7u3o37d>;
+    /**
+     * Enable an asset for use in airdrop events. The origin must be `ManagerOrigin` only.
+     *
+     * Transfers the asset's current minimum balance from `source` to the pallet's pot so the
+     * pot's asset account stays alive while events hold prize funds against it.
+     */
+    "enable_asset": Anonymize<I2l0pq1htsnh8g>;
+    /**
+     * Disable an asset previously enabled with `enable_asset`. Refunds the originally-funded
+     * amount from the pot to `beneficiary`. The origin must be `ManagerOrigin` only.
+     *
+     * The manager is responsible for ensuring no events still reference this asset before
+     * disabling, but this is safe since scheduling an event is permissioned.
+     */
+    "disable_asset": Anonymize<Icg4lihlimlj9s>;
+    /**
+     * OCW-driven: transition `Scheduled → Registering` when
+     * `registration_starts` is reached.
+     *
+     * `discriminator` is any `u32`; it lets the OCW send a different transaction when a
+     * previous one is banned by the pool because it was validated against a different state
+     * after a re-org. As the accepted transaction source is only local, it cannot be used to
+     * spam the pool.
+     */
+    "start_registration_authorized": Anonymize<Icuc3bubd55bkj>;
+    /**
+     * OCW-driven: at `draw_time`:
+     * - close registration
+     * - capture randomness
+     * - compute the target winner count
+     * - release the unused-slot prize allocation up-front
+     * - transition `Registering → DrawWinners`
+     *
+     * The draw itself is performed in batches by `draw_winners_authorized`.
+     *
+     * `discriminator` is any `u32`; it lets the OCW send a different transaction when a
+     * previous one is banned by the pool because it was validated against a different state
+     * after a re-org. As the accepted transaction source is only local, it cannot be used to
+     * spam the pool.
+     */
+    "close_registration_authorized": Anonymize<Icuc3bubd55bkj>;
+    /**
+     * OCW-driven: draw up to `DrawLimit` winners per call.
+     *
+     * After all the winners are drawn, the transition to `Claiming` is performed by the
+     * separate `close_drawing_authorized`.
+     *
+     * `discriminator` is any `u32`; it lets the OCW send a different transaction when a
+     * previous one is banned by the pool because it was validated against a different state
+     * after a re-org. As the accepted transaction source is only local, it cannot be used to
+     * spam the pool.
+     */
+    "draw_winners_authorized": Anonymize<Icuc3bubd55bkj>;
+    /**
+     * OCW-driven: once `draw_winners_authorized` has filled the winner set, transition the
+     * event from `DrawWinners` to `Claiming`.
+     *
+     * `discriminator` is any `u32`; it lets the OCW send a different transaction when a
+     * previous one is banned by the pool because it was validated against a different state
+     * after a re-org. As the accepted transaction source is only local, it cannot be used to
+     * spam the pool.
+     */
+    "close_drawing_authorized": Anonymize<Icuc3bubd55bkj>;
+    /**
+     * OCW-driven: at `end_time` close claiming and enter the first clean-up phase.
+     *
+     * `discriminator` is any `u32`; it lets the OCW send a different transaction when a
+     * previous one is banned by the pool because it was validated against a different state
+     * after a re-org. As the accepted transaction source is only local, it cannot be used to
+     * spam the pool.
+     */
+    "close_claiming_authorized": Anonymize<Icuc3bubd55bkj>;
+    /**
+     * OCW-driven: First step of clean-up is to clear up to `ClearLimit` entries from
+     * `Registrations`. When the storage is fully drained, transitions to `ClearingWinners`.
+     *
+     * `discriminator` is any `u32`; it lets the OCW send a different transaction when a
+     * previous one is banned by the pool because it was validated against a different state
+     * after a re-org. As the accepted transaction source is only local, it cannot be used to
+     * spam the pool.
+     */
+    "clean_up_registrations_authorized": Anonymize<Icuc3bubd55bkj>;
+    /**
+     * OCW-driven: Second step of clean-up is to clear up to `ClearLimit` entries from
+     * `Winners`. When the storage is fully drained, transitions to `Finalizing`.
+     *
+     * `discriminator` is any `u32`; it lets the OCW send a different transaction when a
+     * previous one is banned by the pool because it was validated against a different state
+     * after a re-org. As the accepted transaction source is only local, it cannot be used to
+     * spam the pool.
+     */
+    "clean_up_winners_authorized": Anonymize<Icuc3bubd55bkj>;
+    /**
+     * OCW-driven: Third step of clean-up is to release the unclaimed prize allocation and
+     * remove the event.
+     *
+     * `discriminator` is any `u32`; it lets the OCW send a different transaction when a
+     * previous one is banned by the pool because it was validated against a different state
+     * after a re-org. As the accepted transaction source is only local, it cannot be used to
+     * spam the pool.
+     */
+    "finalize_authorized": Anonymize<Icuc3bubd55bkj>;
+}>;
+export type Icuc3bubd55bkj = {
+    "event_id": SizedHex<32>;
+    "discriminator": number;
+};
+export type Id4v44ocnq10gl = AnonymousEnum<{
+    /**
+     * Authenticates the sudo key and dispatches a function call with `Root` origin.
+     */
+    "sudo": Anonymize<I865ar2evj8fov>;
+    /**
+     * Authenticates the sudo key and dispatches a function call with `Root` origin.
+     * This function does not check the weight of the call, and instead allows the
+     * Sudo user to specify the weight of the call.
+     *
+     * The dispatch origin for this call must be _Signed_.
+     */
+    "sudo_unchecked_weight": Anonymize<I8a33691hq5h84>;
+    /**
+     * Authenticates the current sudo key and sets the given AccountId (`new`) as the new sudo
+     * key.
+     */
+    "set_key": Anonymize<I8k3rnvpeeh4hv>;
+    /**
+     * Authenticates the sudo key and dispatches a function call with `Signed` origin from
+     * a given account.
+     *
+     * The dispatch origin for this call must be _Signed_.
+     */
+    "sudo_as": Anonymize<I6et065lmj2gtf>;
+    /**
+     * Permanently removes the sudo key.
+     *
+     * **This cannot be un-done.**
+     */
+    "remove_key": undefined;
+}>;
+export type I6et065lmj2gtf = {
+    "who": MultiAddress;
+    "call": TxCallData;
+};
+export type I4ihpihsujp5nb = AnonymousEnum<{
+    "System": Anonymize<Iekve0i6djpd9f>;
+    "ParachainSystem": Anonymize<I3u72uvpuo4qrt>;
+    "Timestamp": Anonymize<I7d75gqfg6jh9c>;
+    "ParachainInfo": undefined;
+    "MultiBlockMigrations": Anonymize<I4oqb168b2d4er>;
+    "Balances": Anonymize<I9svldsp29mh87>;
+    "Assets": Anonymize<Iu9seb88fh81e>;
+    "AssetRate": Anonymize<I5lh6k2tq92l6m>;
+    "OriginRestriction": Anonymize<I46ohf9ad4t2nj>;
+    "CollatorSelection": Anonymize<I9dpq5287dur8b>;
+    "Session": Anonymize<I77dda7hps0u37>;
+    "XcmpQueue": Anonymize<Ib7tahn20bvsep>;
+    "PolkadotXcm": Anonymize<I6k1inef986368>;
+    "CumulusXcm": undefined;
+    "MessageQueue": Anonymize<Ic2uoe7jdksosp>;
+    "Utility": Anonymize<I5a237gt7v0p8j>;
+    "Multisig": Anonymize<I22rmntjfe06vd>;
+    "Proxy": Anonymize<Ifg2b5jog36t95>;
+    "Identity": Anonymize<If3dn8g4dlbafo>;
+    "People": Anonymize<Iarggo2bj45nvd>;
+    "MobRule": Anonymize<Id7gcu75dd10kk>;
+    "ProofOfInk": Anonymize<I9t98vnr0hbhog>;
+    "Game": Anonymize<I3g84u7212cn6d>;
+    "Score": Anonymize<I4h2fcgcv43u00>;
+    "DummyDim": Anonymize<I3c4r0hatvif1e>;
+    "PeopleLite": Anonymize<I4p8r9ogdpeolf>;
+    "Resources": Anonymize<I4n7unmaqs9i43>;
+    "ChunksManager": Anonymize<I9sqknhnkp2m32>;
+    "Members": Anonymize<Ie0oera0jjjpr6>;
+    "Coinage": Anonymize<Ibmns0e4k6qqrr>;
+    "MembersNotifier": Anonymize<Ialfpbeqb0fdpi>;
+    "Airdrop": Anonymize<Iec1npvopo3cor>;
+    "Honour": Anonymize<I3vm8qsehc5fdj>;
+    "Sudo": Anonymize<Id4v44ocnq10gl>;
+}>;
+export type Idpqrnnbdf862h = ResultPayload<Anonymize<I7poqslvvs6sua>, Anonymize<I5nrjkj9qumobs>>;
+export type Iegq33n3epfpgf = ResultPayload<{
+    "execution_result": ResultPayload<Anonymize<Ia1u1r3n74r13c>, {
+        "post_info": Anonymize<Ia1u1r3n74r13c>;
+        "error": Anonymize<I5qui0u525q0tn>;
+    }>;
+    "emitted_events": Anonymize<I7c6o8j22dqnug>;
+    "local_xcm"?: Anonymize<Ieqgqma27vbupd>;
+    "forwarded_xcms": Anonymize<Ialhmrpub9sefe>;
+}, Anonymize<I55ku9c5gk50hb>>;
+export type I7c6o8j22dqnug = Array<Anonymize<Iddajvqacduthq>>;
+export type Id2985f3a6u3ib = ResultPayload<{
+    "execution_result": Anonymize<Ieqhmksji3pmv5>;
+    "emitted_events": Anonymize<I7c6o8j22dqnug>;
+    "forwarded_xcms": Anonymize<Ialhmrpub9sefe>;
+}, Anonymize<I55ku9c5gk50hb>>;
+export type Iao3ss988o1fvj = Array<{
+    "phase": Phase;
+    "event": Anonymize<Id3puktv552uqb>;
+    "topics": Anonymize<Ic5m5lp1oioo8r>;
+}>;
+export type Id3puktv552uqb = AnonymousEnum<{
+    "System": Anonymize<I31omuov1l9nft>;
+    "ParachainSystem": Anonymize<Icbsekf57miplo>;
+    "Utility": Anonymize<I6gf7s30pmma7>;
+    "MultiBlockMigrations": Anonymize<I94co7vj7h6bo>;
+    "Balances": Anonymize<Ifhlvt8s3bh824>;
+    "TransactionPayment": TransactionPaymentEvent;
+    "SkipFeelessPayment": Anonymize<Iis17qun6haln>;
+    "TransactionStorage": Anonymize<Iapo7s3gk3t9fd>;
+    "CollatorSelection": Anonymize<I4srakrmf0fspo>;
+    "Session": Anonymize<I6ue0ck5fc3u44>;
+    "XcmpQueue": Anonymize<Idsqc7mhp6nnle>;
+    "PolkadotXcm": Anonymize<If95hivmqmkiku>;
+    "CumulusXcm": Anonymize<I5uv57c3fffoi9>;
+    "MessageQueue": Anonymize<I2kosejppk3jon>;
+    "Sudo": Anonymize<Ie07huq1p0kvlq>;
+}>;
+export type I31omuov1l9nft = AnonymousEnum<{
+    /**
+     * An extrinsic completed successfully.
+     */
+    "ExtrinsicSuccess": Anonymize<Ia82mnkmeo2rhc>;
+    /**
+     * An extrinsic failed.
+     */
+    "ExtrinsicFailed": Anonymize<I5o3smvo7gkt9d>;
+    /**
+     * `:code` was updated to the code with the given hash.
+     */
+    "CodeUpdated": Anonymize<I1jm8m1rh9e20v>;
+    /**
+     * A new account was created.
+     */
+    "NewAccount": Anonymize<Icbccs0ug47ilf>;
+    /**
+     * An account was reaped.
+     */
+    "KilledAccount": Anonymize<Icbccs0ug47ilf>;
+    /**
+     * On on-chain remark happened.
+     */
+    "Remarked": Anonymize<I855j4i3kr8ko1>;
+    /**
+     * An upgrade was authorized.
+     */
+    "UpgradeAuthorized": Anonymize<Ibgl04rn6nbfm6>;
+    /**
+     * An invalid authorized upgrade was rejected while trying to apply it.
+     */
+    "RejectedInvalidAuthorizedUpgrade": Anonymize<I7lrufahb64usv>;
+}>;
+export type I5o3smvo7gkt9d = {
+    "dispatch_error": Anonymize<I2no2ge71kivps>;
+    "dispatch_info": Anonymize<Ic9s8f85vjtncc>;
+};
+export type I2no2ge71kivps = AnonymousEnum<{
+    "Other": undefined;
+    "CannotLookup": undefined;
+    "BadOrigin": undefined;
+    "Module": Enum<{
+        "System": Anonymize<I5o0s7c8q1cc9b>;
+        "ParachainSystem": Anonymize<Icjkr35j4tmg7k>;
+        "Timestamp": undefined;
+        "ParachainInfo": undefined;
+        "WeightReclaim": undefined;
+        "Utility": Anonymize<I8dt2g2hcrgh36>;
+        "MultiBlockMigrations": Anonymize<Iaaqq5jevtahm8>;
+        "Balances": Anonymize<Idj13i7adlomht>;
+        "TransactionPayment": undefined;
+        "SkipFeelessPayment": undefined;
+        "TransactionStorage": Anonymize<Ie265emm4m6kks>;
+        "HopPromotion": undefined;
+        "Authorship": undefined;
+        "CollatorSelection": Anonymize<I36bcffk2387dv>;
+        "Session": Anonymize<I1e07dgbaqd1sq>;
+        "Aura": undefined;
+        "AuraExt": undefined;
+        "XcmpQueue": Anonymize<Idnnbndsjjeqqs>;
+        "PolkadotXcm": Anonymize<I4vcvo9od6afmt>;
+        "CumulusXcm": undefined;
+        "MessageQueue": Anonymize<I5iupade5ag2dp>;
+        "Sudo": Anonymize<Iaug04qjhbli00>;
+    }>;
+    "ConsumerRemaining": undefined;
+    "NoProviders": undefined;
+    "TooManyConsumers": undefined;
+    "Token": TokenError;
+    "Arithmetic": ArithmeticError;
+    "Transactional": TransactionalError;
+    "Exhausted": undefined;
+    "Corruption": undefined;
+    "Unavailable": undefined;
+    "RootNotAllowed": undefined;
+    "Trie": Anonymize<Idh4cj79bvroj8>;
+}>;
+export type Ie265emm4m6kks = AnonymousEnum<{
+    /**
+     * Attempted to call `store`/`renew` outside of block execution.
+     */
+    "BadContext": undefined;
+    /**
+     * Data size is not in the allowed range.
+     */
+    "BadDataSize": undefined;
+    /**
+     * Too many transactions in the block.
+     */
+    "TooManyTransactions": undefined;
+    /**
+     * Invalid configuration.
+     */
+    "NotConfigured": undefined;
+    /**
+     * Renewed extrinsic is not found.
+     */
+    "RenewedNotFound": undefined;
+    /**
+     * Proof was not expected in this block.
+     */
+    "UnexpectedProof": undefined;
+    /**
+     * Proof failed verification.
+     */
+    "InvalidProof": undefined;
+    /**
+     * Missing storage proof.
+     */
+    "MissingProof": undefined;
+    /**
+     * Unable to verify proof because state data is missing.
+     */
+    "MissingStateData": undefined;
+    /**
+     * Double proof check in the block.
+     */
+    "DoubleCheck": undefined;
+    /**
+     * Storage proof was not checked in the block.
+     */
+    "ProofNotChecked": undefined;
+    /**
+     * Authorization was not found.
+     */
+    "AuthorizationNotFound": undefined;
+    /**
+     * Authorization has not expired.
+     */
+    "AuthorizationNotExpired": undefined;
+    /**
+     * Renew rejected: would push the signer's `bytes_permanent` past their
+     * `bytes_allowance` (per-account hard cap).
+     */
+    "PermanentAllowanceExceeded": undefined;
+    /**
+     * Renew rejected: would push `PermanentStorageUsed` past
+     * `MaxPermanentStorageSize` (chain-wide hard cap).
+     */
+    "ChainPermanentCapReached": undefined;
+    /**
+     * Content hash was not calculated.
+     */
+    "InvalidContentHash": undefined;
+    /**
+     * Authorizer account was not found.
+     */
+    "AuthorizerNotFound": undefined;
+    /**
+     * Authorizer is not eligible for permissionless removal — it still has budget on both
+     * axes AND (if `valid_until` is set) has not yet expired.
+     */
+    "AuthorizerBudgetNotExhausted": undefined;
+    /**
+     * Auto-renewal is already enabled for this content hash.
+     */
+    "AutoRenewalAlreadyEnabled": undefined;
+    /**
+     * Auto-renewal is not enabled for this content hash.
+     */
+    "AutoRenewalNotEnabled": undefined;
+    /**
+     * Caller is not the owner of the auto-renewal registration.
+     */
+    "NotAutoRenewalOwner": undefined;
+    /**
+     * `disable_auto_renew` rejected: the registration has been prepaid for its next
+     * cycle. The owner must wait until that cycle consumes the prepayment before
+     * disabling. Root can disable regardless.
+     */
+    "CannotDisablePrepaidAutoRenewal": undefined;
+    /**
+     * `valid_until` supplied to `add_authorizer` is in the past (`<= now`, would
+     * expire immediately). Pass `None` for no expiration.
+     */
+    "InvalidValidUntil": undefined;
+    /**
+     * `authorize_account` / `authorize_preimage` called by a signer whose
+     * `AllowedAuthorizers` budget cannot cover the requested
+     * `transactions` / `bytes` (or `max_size`).
+     */
+    "InsufficientAuthorizerBudget": undefined;
+}>;
+export type I7lrufahb64usv = {
+    "code_hash": SizedHex<32>;
+    "error": Anonymize<I2no2ge71kivps>;
+};
+export type I6gf7s30pmma7 = AnonymousEnum<{
+    /**
+     * Batch of dispatches did not complete fully. Index of first failing dispatch given, as
+     * well as the error.
+     */
+    "BatchInterrupted": Anonymize<Iclpjn2as45tpn>;
+    /**
+     * Batch of dispatches completed fully with no error.
+     */
+    "BatchCompleted": undefined;
+    /**
+     * Batch of dispatches completed but has errors.
+     */
+    "BatchCompletedWithErrors": undefined;
+    /**
+     * A single item within a Batch of dispatches has completed with no error.
+     */
+    "ItemCompleted": undefined;
+    /**
+     * A single item within a Batch of dispatches has completed with error.
+     */
+    "ItemFailed": Anonymize<I1blv5vt8086o2>;
+    /**
+     * A call was dispatched.
+     */
+    "DispatchedAs": Anonymize<Icf3c8o4mer337>;
+    /**
+     * Main call was dispatched.
+     */
+    "IfElseMainSuccess": undefined;
+    /**
+     * The fallback call was dispatched.
+     */
+    "IfElseFallbackCalled": Anonymize<I1n8ismao8deae>;
+}>;
+export type Iclpjn2as45tpn = {
+    "index": number;
+    "error": Anonymize<I2no2ge71kivps>;
+};
+export type I1blv5vt8086o2 = {
+    "error": Anonymize<I2no2ge71kivps>;
+};
+export type Icf3c8o4mer337 = {
+    "result": Anonymize<I1pv6k2bu89l3c>;
+};
+export type I1pv6k2bu89l3c = ResultPayload<undefined, Anonymize<I2no2ge71kivps>>;
+export type I1n8ismao8deae = {
+    "main_error": Anonymize<I2no2ge71kivps>;
+};
+export type Iapo7s3gk3t9fd = AnonymousEnum<{
+    /**
+     * Stored data under specified index.
+     */
+    "Stored": Anonymize<I395h9meqpi2hf>;
+    /**
+     * Renewed data under specified index.
+     */
+    "Renewed": Anonymize<I66jdpl6lile9j>;
+    /**
+     * Storage proof was successfully checked.
+     */
+    "ProofChecked": undefined;
+    /**
+     * An account `who` was authorized to store `bytes` bytes in `transactions` boost-tier
+     * transactions.
+     */
+    "AccountAuthorized": Anonymize<I2i8iea6e4ne1j>;
+    /**
+     * An authorization for account `who` was refreshed.
+     */
+    "AccountAuthorizationRefreshed": Anonymize<I4cbvqmqadhrea>;
+    /**
+     * Authorization was given for a preimage of `content_hash` (not exceeding `max_size`) to
+     * be stored by anyone.
+     */
+    "PreimageAuthorized": Anonymize<I4jotama61aldv>;
+    /**
+     * An authorization for a preimage of `content_hash` was refreshed.
+     */
+    "PreimageAuthorizationRefreshed": Anonymize<I3rfugj0vt1ug5>;
+    /**
+     * An expired account authorization was removed.
+     */
+    "ExpiredAccountAuthorizationRemoved": Anonymize<I4cbvqmqadhrea>;
+    /**
+     * An expired preimage authorization was removed.
+     */
+    "ExpiredPreimageAuthorizationRemoved": Anonymize<I3rfugj0vt1ug5>;
+    /**
+     * An authorizer was added to the allowed list.
+     */
+    "AuthorizerAdded": Anonymize<I4cbvqmqadhrea>;
+    /**
+     * An authorizer was removed from the allowed list by the manager.
+     */
+    "AuthorizerRemoved": Anonymize<I4cbvqmqadhrea>;
+    /**
+     * An authorizer was removed from the allowed list due to budget exhaustion.
+     */
+    "ExhaustedAuthorizerRemoved": Anonymize<I4cbvqmqadhrea>;
+    /**
+     * A renewal was enabled for `content_hash` by `who`.
+     */
+    "RenewalEnabled": Anonymize<Ifa84va5usjhbs>;
+    /**
+     * Auto-renewal disabled for `content_hash`. `who` is the registration's owner
+     * (not the caller when Root issued the disable).
+     */
+    "AutoRenewalDisabled": Anonymize<I7qnibt85843h4>;
+    /**
+     * Data was automatically renewed at `index` with `content_hash` for `account`.
+     */
+    "DataAutoRenewed": Anonymize<Iecest14o0pmc2>;
+    /**
+     * Auto-renewal failed for `content_hash` (insufficient authorization for `account`).
+     */
+    "AutoRenewalFailed": Anonymize<I5i6clrj1m1v3f>;
+    /**
+     * `PermanentStorageUsed` changed (a `renew` bumped it, or the lazy drain
+     * decremented it). Off-chain capacity-planning consumers can drive their dashboards
+     * from these.
+     */
+    "PermanentStorageUsedUpdated": Anonymize<Ife9a8l1jn5dhf>;
+    /**
+     * `PermanentStorageUsed` just crossed the [`PERMANENT_STORAGE_NEAR_CAP_PERCENT`]
+     * threshold of `MaxPermanentStorageSize` on the rising edge. Emitted once per
+     * crossing — no re-emission while still above the threshold.
+     */
+    "PermanentStorageNearCap": Anonymize<I1srmrc4hmsm4>;
+}>;
+export type Ifa84va5usjhbs = {
+    "content_hash": SizedHex<32>;
+    "who": SS58String;
+    "recurring": boolean;
+};
+export type Ie07huq1p0kvlq = AnonymousEnum<{
+    /**
+     * A sudo call just took place.
+     */
+    "Sudid": Anonymize<Ibed9kp93286e>;
+    /**
+     * The sudo key has been updated.
+     */
+    "KeyChanged": Anonymize<I5rtkmhm2dng4u>;
+    /**
+     * The key was permanently removed.
+     */
+    "KeyRemoved": undefined;
+    /**
+     * A [sudo_as](Pallet::sudo_as) call just took place.
+     */
+    "SudoAsDone": Anonymize<Ibed9kp93286e>;
+}>;
+export type Ibed9kp93286e = {
+    /**
+     * The result of the call made by the sudo user.
+     */
+    "sudo_result": Anonymize<I1pv6k2bu89l3c>;
+};
+export type Iecn3tfn6gr5ce = {
+    "quota"?: ({
+        "transactions": number;
+        "bytes": bigint;
+    }) | undefined;
+    "valid_until"?: Anonymize<I4arjljr6dpflb>;
+    "feeless": boolean;
+};
+export type I9i4rhi4dg5bdo = {
+    "account": SS58String;
+    "recurring": boolean;
+    "paid": boolean;
+};
+export type I6378f2ieh7hhh = Array<[SizedHex<32>, Anonymize<Id5dqph5l5iilr>, Anonymize<I9i4rhi4dg5bdo>]>;
+export type Idio89pm8v69un = AnonymousEnum<{
+    /**
+     * Send a batch of dispatch calls.
+     *
+     * May be called from any origin except `None`.
+     *
+     * - `calls`: The calls to be dispatched from the same origin. The number of call must not
+     * exceed the constant: `batched_calls_limit` (available in constant metadata).
+     *
+     * If origin is root then the calls are dispatched without checking origin filter. (This
+     * includes bypassing `frame_system::Config::BaseCallFilter`).
+     *
+     * ## Complexity
+     * - O(C) where C is the number of calls to be batched.
+     *
+     * This will return `Ok` in all circumstances. To determine the success of the batch, an
+     * event is deposited. If a call failed and the batch was interrupted, then the
+     * `BatchInterrupted` event is deposited, along with the number of successful calls made
+     * and the error of the failed call. If all were successful, then the `BatchCompleted`
+     * event is deposited.
+     */
+    "batch": Anonymize<If378023tlda0t>;
+    /**
+     * Send a call through an indexed pseudonym of the sender.
+     *
+     * Filter from origin are passed along. The call will be dispatched with an origin which
+     * use the same filter as the origin of this call.
+     *
+     * NOTE: If you need to ensure that any account-based filtering is not honored (i.e.
+     * because you expect `proxy` to have been used prior in the call stack and you do not want
+     * the call restrictions to apply to any sub-accounts), then use `as_multi_threshold_1`
+     * in the Multisig pallet instead.
+     *
+     * NOTE: Prior to version *12, this was called `as_limited_sub`.
+     *
+     * The dispatch origin for this call must be _Signed_.
+     */
+    "as_derivative": Anonymize<I2o691899uj80g>;
+    /**
+     * Send a batch of dispatch calls and atomically execute them.
+     * The whole transaction will rollback and fail if any of the calls failed.
+     *
+     * May be called from any origin except `None`.
+     *
+     * - `calls`: The calls to be dispatched from the same origin. The number of call must not
+     * exceed the constant: `batched_calls_limit` (available in constant metadata).
+     *
+     * If origin is root then the calls are dispatched without checking origin filter. (This
+     * includes bypassing `frame_system::Config::BaseCallFilter`).
+     *
+     * ## Complexity
+     * - O(C) where C is the number of calls to be batched.
+     */
+    "batch_all": Anonymize<If378023tlda0t>;
+    /**
+     * Dispatches a function call with a provided origin.
+     *
+     * The dispatch origin for this call must be _Root_.
+     *
+     * ## Complexity
+     * - O(1).
+     */
+    "dispatch_as": Anonymize<Ib9m87pqct7as2>;
+    /**
+     * Send a batch of dispatch calls.
+     * Unlike `batch`, it allows errors and won't interrupt.
+     *
+     * May be called from any origin except `None`.
+     *
+     * - `calls`: The calls to be dispatched from the same origin. The number of call must not
+     * exceed the constant: `batched_calls_limit` (available in constant metadata).
+     *
+     * If origin is root then the calls are dispatch without checking origin filter. (This
+     * includes bypassing `frame_system::Config::BaseCallFilter`).
+     *
+     * ## Complexity
+     * - O(C) where C is the number of calls to be batched.
+     */
+    "force_batch": Anonymize<If378023tlda0t>;
+    /**
+     * Dispatch a function call with a specified weight.
+     *
+     * This function does not check the weight of the call, and instead allows the
+     * Root origin to specify the weight of the call.
+     *
+     * The dispatch origin for this call must be _Root_.
+     */
+    "with_weight": Anonymize<Iflhgb0ea27aua>;
+    /**
+     * Dispatch a fallback call in the event the main call fails to execute.
+     * May be called from any origin except `None`.
+     *
+     * This function first attempts to dispatch the `main` call.
+     * If the `main` call fails, the `fallback` is attemted.
+     * if the fallback is successfully dispatched, the weights of both calls
+     * are accumulated and an event containing the main call error is deposited.
+     *
+     * In the event of a fallback failure the whole call fails
+     * with the weights returned.
+     *
+     * - `main`: The main call to be dispatched. This is the primary action to execute.
+     * - `fallback`: The fallback call to be dispatched in case the `main` call fails.
+     *
+     * ## Dispatch Logic
+     * - If the origin is `root`, both the main and fallback calls are executed without
+     * applying any origin filters.
+     * - If the origin is not `root`, the origin filter is applied to both the `main` and
+     * `fallback` calls.
+     *
+     * ## Use Case
+     * - Some use cases might involve submitting a `batch` type call in either main, fallback
+     * or both.
+     */
+    "if_else": Anonymize<Ib92qakm3f755v>;
+    /**
+     * Dispatches a function call with a provided origin.
+     *
+     * Almost the same as [`Pallet::dispatch_as`] but forwards any error of the inner call.
+     *
+     * The dispatch origin for this call must be _Root_.
+     */
+    "dispatch_as_fallible": Anonymize<Ib9m87pqct7as2>;
+}>;
+export type If378023tlda0t = {
+    "calls": Array<TxCallData>;
+};
+export type I2o691899uj80g = {
+    "index": number;
+    "call": TxCallData;
+};
+export type Ib9m87pqct7as2 = {
+    "as_origin": Anonymize<I9cqlcs1cfiqgk>;
+    "call": TxCallData;
+};
+export type Iflhgb0ea27aua = {
+    "call": TxCallData;
+    "weight": Anonymize<I4q39t5hn830vp>;
+};
+export type Ib92qakm3f755v = {
+    "main": TxCallData;
+    "fallback": TxCallData;
+};
+export type I1lqd2rcdbpgma = AnonymousEnum<{
+    /**
+     * Index and store data off chain. Minimum data size is 1 byte, maximum is
+     * `MaxTransactionSize`. Data will be removed after `RetentionPeriod` blocks, unless
+     * `renew` is called.
+     *
+     * Authorization is required to store data using regular signed/unsigned transactions.
+     * Regular signed transactions require account authorization (see
+     * [`authorize_account`](Self::authorize_account)), regular unsigned transactions require
+     * preimage authorization (see [`authorize_preimage`](Self::authorize_preimage)).
+     *
+     * Emits [`Stored`](Event::Stored) when successful.
+     *
+     * ## Complexity
+     *
+     * O(n*log(n)) of data size, as all data is pushed to an in-memory trie.
+     */
+    "store": Anonymize<Itrlf5b2o2l8q>;
+    /**
+     * Index and store data off chain with an explicit CID configuration.
+     *
+     * Behaves identically to [`store`](Self::store), but the CID configuration
+     * (codec and hashing algorithm) is passed directly as a parameter.
+     *
+     * Emits [`Stored`](Event::Stored) when successful.
+     */
+    "store_with_cid_config": Anonymize<Icegg8a2cqf1gu>;
+    /**
+     * Schedule a **one-shot** auto-renewal of previously stored data. The renewal fires
+     * exactly once, when the data reaches its `RetentionPeriod` boundary, and then the
+     * registration is removed. For continuous renewal, use
+     * [`enable_auto_renew`](Self::enable_auto_renew) instead.
+     *
+     * `entry` identifies the data either by `(block, index)` or by content hash.
+     *
+     * Feeless. Registration cost (one transaction unit) is charged in `check_signed`;
+     * the eventual renewal cycle charges bytes against `bytes_permanent` and the
+     * chain-wide cap.
+     *
+     * Rejects with [`AutoRenewalAlreadyEnabled`](Error::AutoRenewalAlreadyEnabled) if a
+     * scheduled renewal already exists for this content hash.
+     *
+     * Emits [`RenewalEnabled`](Event::RenewalEnabled) `{ recurring: false }`.
+     *
+     * For synchronous renewal at dispatch time, see [`force_renew`](Self::force_renew).
+     */
+    "renew": Anonymize<I7d71c6b0ekmt9>;
+    /**
+     * Immediately renew previously stored data, synchronous at dispatch time.
+     *
+     * Authorization is required (as with [`store`](Self::store)). Charges `info.size`
+     * against `bytes_permanent` (per-account renew cap) and `PermanentStorageUsed`
+     * (chain-wide cap).
+     *
+     * Emits [`Renewed`](Event::Renewed) when successful.
+     */
+    "force_renew": Anonymize<I7d71c6b0ekmt9>;
+    /**
+     * Authorize an account to store up to `bytes` of arbitrary data in `transactions`
+     * boost-tier transactions. The authorization will expire after a configured number
+     * of blocks.
+     *
+     * If the account already has an unexpired authorization, this call **adds** `bytes`
+     * and `transactions` to the existing `bytes_allowance` and `transactions_allowance`
+     * caps (both saturating); the expiration block is **not** pushed back, and the
+     * consumed counters are preserved. Once the authorization has expired, the next call
+     * replaces it with a fresh entry (consumed counters reset to `0`, allowances set to
+     * the new values, expiry = `now + AuthorizationPeriod`).
+     *
+     * Parameters:
+     *
+     * - `who`: The account to be credited with an authorization to store data.
+     * - `transactions`: The number of boost-tier transactions that `who` may submit.
+     * - `bytes`: The number of bytes that `who` may submit.
+     *
+     * The origin for this call must be the pallet's `Authorizer`. Emits
+     * [`AccountAuthorized`](Event::AccountAuthorized) when successful.
+     */
+    "authorize_account": Anonymize<I2i8iea6e4ne1j>;
+    /**
+     * Authorize anyone to store a preimage of the given content hash. The authorization will
+     * expire after a configured number of blocks.
+     *
+     * If authorization already exists for a preimage of the given hash to be stored, the
+     * maximum size of the preimage will be increased to `max_size`. The expiration block
+     * is **not** pushed back; use
+     * [`refresh_preimage_authorization`](Self::refresh_preimage_authorization) to extend
+     * expiry.
+     *
+     * Parameters:
+     *
+     * - `content_hash`: The hash of the data to be submitted. For [`store`](Self::store) this
+     * is the BLAKE2b-256 hash; for [`store_with_cid_config`](Self::store_with_cid_config)
+     * this is the hash produced by the CID config's hashing algorithm.
+     * - `max_size`: The maximum size, in bytes, of the preimage.
+     *
+     * The origin for this call must be the pallet's `Authorizer`. Emits
+     * [`PreimageAuthorized`](Event::PreimageAuthorized) when successful.
+     */
+    "authorize_preimage": Anonymize<I4jotama61aldv>;
+    /**
+     * Remove an expired account authorization from storage. Anyone can call this.
+     *
+     * Parameters:
+     *
+     * - `who`: The account with an expired authorization to remove.
+     *
+     * Emits [`ExpiredAccountAuthorizationRemoved`](Event::ExpiredAccountAuthorizationRemoved)
+     * when successful.
+     */
+    "remove_expired_account_authorization": Anonymize<I4cbvqmqadhrea>;
+    /**
+     * Remove an expired preimage authorization from storage. Anyone can call this.
+     *
+     * Parameters:
+     *
+     * - `content_hash`: The BLAKE2b hash that was authorized.
+     *
+     * Emits
+     * [`ExpiredPreimageAuthorizationRemoved`](Event::ExpiredPreimageAuthorizationRemoved)
+     * when successful.
+     */
+    "remove_expired_preimage_authorization": Anonymize<I3rfugj0vt1ug5>;
+    /**
+     * Refresh the expiration of an existing authorization for an account.
+     *
+     * Only the expiration block is updated — consumed counters (`bytes`,
+     * `transactions`) and the granted caps (`bytes_allowance`,
+     * `transactions_allowance`) are left untouched. To extend the caps, call
+     * `authorize_account` instead (additive on the unexpired path).
+     *
+     * If the account does not have an authorization, the call will fail.
+     *
+     * Parameters:
+     *
+     * - `who`: The account to be credited with an authorization to store data.
+     *
+     * The origin for this call must be the pallet's `Authorizer`. Emits
+     * [`AccountAuthorizationRefreshed`](Event::AccountAuthorizationRefreshed) when successful.
+     */
+    "refresh_account_authorization": Anonymize<I4cbvqmqadhrea>;
+    /**
+     * Refresh the expiration of an existing authorization for a preimage of a BLAKE2b hash.
+     *
+     * Only the expiration block is updated — consumed counters (`bytes`,
+     * `transactions`) and the granted caps (`bytes_allowance`,
+     * `transactions_allowance`) are left untouched. To raise the cap, call
+     * `authorize_preimage` instead.
+     *
+     * If the preimage does not have an authorization, the call will fail.
+     *
+     * Parameters:
+     *
+     * - `content_hash`: The BLAKE2b hash of the data to be submitted.
+     *
+     * The origin for this call must be the pallet's `Authorizer`. Emits
+     * [`PreimageAuthorizationRefreshed`](Event::PreimageAuthorizationRefreshed) when
+     * successful.
+     */
+    "refresh_preimage_authorization": Anonymize<I3rfugj0vt1ug5>;
+    /**
+     * Enable automatic renewal for a previously stored piece of data.
+     *
+     * **Recurring scheduler with pre-paid first cycle.** The extension's
+     * `check_signed` charges `bytes_permanent`, `PermanentStorageUsed`, and
+     * one tx slot at registration (same hard-cap accounting as `force_renew`
+     * / one-shot `renew`). The registration is inserted as
+     * [`RenewalData`] `{ recurring: true, paid: true }`. The first renewal
+     * cycle fires at the next `RetentionPeriod` boundary **without**
+     * re-charging — the slot is already paid for; the cycle then flips
+     * `paid` to `false`. From that point on, every subsequent cycle charges
+     * the owner's authorization in [`Self::do_process_auto_renewals`],
+     * dropping the registration with [`Event::AutoRenewalFailed`] if the
+     * quota is exhausted at cycle time.
+     *
+     * Feeless: no token fee. Spam is bounded structurally by the up-front
+     * hard-cap charge — the caller cannot over-schedule past their
+     * `bytes_allowance` or the chain-wide `MaxPermanentStorageSize`.
+     * [`Self::disable_auto_renew`] additionally rejects the owner while
+     * `paid` is `true`, so the prepayment cannot be reclaimed before the
+     * first cycle fires.
+     *
+     * Emits [`RenewalEnabled`](Event::RenewalEnabled) `{ recurring: true }`
+     * for the registration; the first actual renewal is emitted as
+     * [`DataAutoRenewed`](Event::DataAutoRenewed) at cycle time.
+     */
+    "enable_auto_renew": Anonymize<I3rfugj0vt1ug5>;
+    /**
+     * Disable automatic renewal for a piece of data.
+     *
+     * Signed: the caller must be the account that originally enabled the renewal,
+     * and the registration must not be in its prepaid window — see
+     * [`Error::CannotDisablePrepaidAutoRenewal`]. Both registrations from
+     * [`Pallet::renew`] and [`Pallet::enable_auto_renew`] start with `paid: true`;
+     * the owner has to wait for the first cycle to consume the prepayment before
+     * they can disable.
+     *
+     * Root: bypasses the owner check and the prepaid-window check
+     * (governance/cleanup).
+     *
+     * Feeless: no token fee and no authorization is consumed. Signed admission is
+     * gated in [`check_signed`](Self::check_signed) on ownership and the prepaid
+     * flag, so a caller can issue at most one successful `disable_auto_renew` per
+     * registration it owns — and only after the first cycle has fired.
+     *
+     * Emits [`AutoRenewalDisabled`](Event::AutoRenewalDisabled) when successful.
+     */
+    "disable_auto_renew": Anonymize<I3rfugj0vt1ug5>;
+    /**
+     * Composite block-level inherent: optionally validates a transaction storage proof and
+     * always drains [`PendingAutoRenewals`].
+     *
+     * `ProvideInherent::create_inherent` only returns a single `Call`, but this pallet
+     * has two block-end concerns — verifying the storage proof for the block at
+     * `n - RetentionPeriod`, and renewing entries flagged via [`AutoRenewals`] before
+     * they expire at `n - RetentionPeriod - 1`. Both effects collapse into this single
+     * mandatory inherent so that block authors emit one extrinsic that satisfies both
+     * `on_finalize` invariants (`ProofChecked` and "PendingAutoRenewals empty").
+     *
+     * `proof` is `Some` when the inherent data provider supplied one; otherwise the
+     * proof step is skipped (early or empty blocks). The auto-renewal drain runs
+     * unconditionally — emitting an inherent at all implies that `on_initialize` may
+     * have populated `PendingAutoRenewals`.
+     */
+    "apply_block_inherents": Anonymize<Ifq8h9n7vmgpf0>;
+    /**
+     * Add an account to the set of allowed authorizers. Allowed authorizers can call
+     * [`authorize_account`](Self::authorize_account) and
+     * [`authorize_preimage`](Self::authorize_preimage) to grant storage access.
+     *
+     * If the account is already an allowed authorizer, its `budget` is **overwritten**
+     * with the new values.
+     *
+     * `budget` constraints:
+     *
+     * - `valid_until`: when `Some(t)`, must satisfy `t > now`. The entry stops authorizing
+     * once `now >= t` and becomes eligible for permissionless cleanup via
+     * [`remove_exhausted_authorizer`](Self::remove_exhausted_authorizer). Authorizations
+     * granted by this entry have their expiration clamped to `t`.
+     *
+     * The origin for this call must satisfy `AuthorizerRegistrarOrigin`. Emits
+     * [`AuthorizerAdded`](Event::AuthorizerAdded) when successful.
+     */
+    "add_authorizer": Anonymize<Ifa480ahjcunq>;
+    /**
+     * Remove an account from the set of allowed authorizers. The removed account will no
+     * longer be able to call [`authorize_account`](Self::authorize_account) or
+     * [`authorize_preimage`](Self::authorize_preimage).
+     *
+     * If the account is not currently an allowed authorizer, this is a no-op.
+     *
+     * Parameters:
+     *
+     * - `who`: The account to remove from the allowed authorizers.
+     *
+     * The origin for this call must satisfy `AuthorizerRegistrarOrigin`. Emits
+     * [`AuthorizerRemoved`](Event::AuthorizerRemoved) when successful.
+     */
+    "remove_authorizer": Anonymize<I4cbvqmqadhrea>;
+    /**
+     * Remove an authorizer that is exhausted (budget zero on either axis) or expired
+     * (`now >= valid_until` for an entry that set `valid_period`). Anyone can call this.
+     *
+     * Parameters:
+     *
+     * - `who`: The authorizer to remove.
+     *
+     * Emits [`ExhaustedAuthorizerRemoved`](Event::ExhaustedAuthorizerRemoved)
+     * when successful.
+     */
+    "remove_exhausted_authorizer": Anonymize<I4cbvqmqadhrea>;
+}>;
+export type I7d71c6b0ekmt9 = {
+    "entry": Anonymize<I3oi105i165rd5>;
+};
+export type I3oi105i165rd5 = AnonymousEnum<{
+    "Position": Anonymize<I4vj3ndsquheo1>;
+    "ContentHash": SizedHex<32>;
+}>;
+export type Ifa480ahjcunq = {
+    "who": SS58String;
+    "budget": Anonymize<Iecn3tfn6gr5ce>;
+};
+export type Iem39ihml1rkfo = AnonymousEnum<{
+    /**
+     * Authenticates the sudo key and dispatches a function call with `Root` origin.
+     */
+    "sudo": Anonymize<I7s4rt9nf3sfnr>;
+    /**
+     * Authenticates the sudo key and dispatches a function call with `Root` origin.
+     * This function does not check the weight of the call, and instead allows the
+     * Sudo user to specify the weight of the call.
+     *
+     * The dispatch origin for this call must be _Signed_.
+     */
+    "sudo_unchecked_weight": Anonymize<Iflhgb0ea27aua>;
+    /**
+     * Authenticates the current sudo key and sets the given AccountId (`new`) as the new sudo
+     * key.
+     */
+    "set_key": Anonymize<I8k3rnvpeeh4hv>;
+    /**
+     * Authenticates the sudo key and dispatches a function call with `Signed` origin from
+     * a given account.
+     *
+     * The dispatch origin for this call must be _Signed_.
+     */
+    "sudo_as": Anonymize<I9m2d3sqh5dirs>;
+    /**
+     * Permanently removes the sudo key.
+     *
+     * **This cannot be un-done.**
+     */
+    "remove_key": undefined;
+}>;
+export type I7s4rt9nf3sfnr = {
+    "call": TxCallData;
+};
+export type I9m2d3sqh5dirs = {
+    "who": MultiAddress;
+    "call": TxCallData;
+};
+export type I49ln1dlnvn5mm = ResultPayload<Anonymize<I1pv6k2bu89l3c>, Anonymize<I5nrjkj9qumobs>>;
+export type I5h0sno917s28c = AnonymousEnum<{
+    "System": Anonymize<Iekve0i6djpd9f>;
+    "ParachainSystem": Anonymize<I3u72uvpuo4qrt>;
+    "Timestamp": Anonymize<I7d75gqfg6jh9c>;
+    "ParachainInfo": undefined;
+    "Utility": Anonymize<Idio89pm8v69un>;
+    "MultiBlockMigrations": Anonymize<I4oqb168b2d4er>;
+    "Balances": Anonymize<I9svldsp29mh87>;
+    "TransactionStorage": Anonymize<I1lqd2rcdbpgma>;
+    "HopPromotion": Anonymize<I1vfnh83561alb>;
+    "CollatorSelection": Anonymize<I9dpq5287dur8b>;
+    "Session": Anonymize<I77dda7hps0u37>;
+    "XcmpQueue": Anonymize<Ib7tahn20bvsep>;
+    "PolkadotXcm": Anonymize<I6k1inef986368>;
+    "CumulusXcm": undefined;
+    "MessageQueue": Anonymize<Ic2uoe7jdksosp>;
+    "Sudo": Anonymize<Iem39ihml1rkfo>;
+}>;
+export type Ivl81oef14rgt = ResultPayload<{
+    "execution_result": ResultPayload<Anonymize<Ia1u1r3n74r13c>, {
+        "post_info": Anonymize<Ia1u1r3n74r13c>;
+        "error": Anonymize<I2no2ge71kivps>;
+    }>;
+    "emitted_events": Anonymize<Iagqlvs3fsns6a>;
+    "local_xcm"?: Anonymize<Ieqgqma27vbupd>;
+    "forwarded_xcms": Anonymize<Ialhmrpub9sefe>;
+}, Anonymize<I55ku9c5gk50hb>>;
+export type Iagqlvs3fsns6a = Array<Anonymize<Id3puktv552uqb>>;
+export type I3t5bsspkebnln = ResultPayload<{
+    "execution_result": Anonymize<Ieqhmksji3pmv5>;
+    "emitted_events": Anonymize<Iagqlvs3fsns6a>;
+    "forwarded_xcms": Anonymize<Ialhmrpub9sefe>;
+}, Anonymize<I55ku9c5gk50hb>>;
+export type If5dekqlo7be3f = ({
+    "expires_at": number;
+    "bytes_allowance": bigint;
+    "bytes_used": bigint;
+    "bytes_permanent_used": bigint;
+    "transactions_allowance": number;
+    "transactions_used": number;
+}) | undefined;
 export {};

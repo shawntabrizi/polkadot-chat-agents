@@ -7,7 +7,9 @@
 // registered identifier_key consistent with what bot-core runs).
 
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { blake2b } from "@noble/hashes/blake2.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { mnemonicToEntropy, mnemonicToMiniSecret, ss58Address } from "@polkadot-labs/hdkd-helpers";
 import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
 import { deriveP256PrivateKey, p256PublicKeyFromPrivateKey } from "../vendor/app-chat-codec.mjs";
@@ -21,6 +23,7 @@ export { withTimeout };
 const MSG_PREFIX = "pop:people-lite:register using";
 
 export const DEFAULT_BACKENDS = {
+  devnet: "https://polkadot-app.api.polkadotcommunity.foundation",
   paseo: "https://identity-backend-next.parity-testnet.parity.io",
   summit: "https://polkadot-app.api.polkadotcommunity.foundation",
 };
@@ -95,13 +98,117 @@ async function runLitePerson(bin, entropyHex, messageHex) {
   return JSON.parse(r.stdout.trim());
 }
 
-async function jsonFetch(url, options) {
-  const res = await fetch(url, options);
+async function jsonFetch(url, options, fetchImpl = fetch) {
+  const res = await fetchImpl(url, options);
   const text = await res.text();
   let data = null;
   if (text) { try { data = JSON.parse(text); } catch { data = text; } }
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${typeof data === "string" ? data : JSON.stringify(data)}`);
   return data;
+}
+
+const canonicalBackendUrl = (backendUrl) => new URL(backendUrl).href;
+const base64 = (bytes) => Buffer.from(bytes).toString("base64");
+
+function tokenPair(data, operation) {
+  const token = typeof data?.token === "string" ? data.token.trim() : "";
+  const refreshToken = typeof data?.refreshToken === "string" ? data.refreshToken.trim() : "";
+  if (!token || !refreshToken) throw new Error(`identity backend did not return a complete token pair after ${operation}`);
+  return { token, refreshToken };
+}
+
+function voucherSecret(value) {
+  const secret = typeof value === "string" ? value.trim() : "";
+  if (!/^[A-Za-z0-9+/]{43}=$/.test(secret) || Buffer.from(secret, "base64").length !== 32) {
+    throw new Error("PCA_IDENTITY_VOUCHER must be a base64-encoded 32-byte enrollment voucher");
+  }
+  return secret;
+}
+
+// Products Devnet protects identity writes with a device session. Headless
+// clients enroll through the backend's single-use voucher flow: prove
+// possession of a fresh SR25519 key, then receive a normal JWT + refresh token.
+export async function redeemIdentityVoucher({ backendUrl, secret, fetchImpl = fetch }) {
+  const normalizedSecret = voucherSecret(secret);
+  const client = deriveSr25519PairFromSeed(randomBytes(32), "");
+  const challenge = randomBytes(24);
+  const body = "{}";
+  const bodyBytes = enc.encode(body);
+  const clientDataHash = sha256(concatBytes(challenge, client.publicKey, sha256(bodyBytes)));
+  const clientProof = client.sign(clientDataHash);
+  const data = await jsonFetch(new URL("/api/v1/auth/token", backendUrl), {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "Auth-ClientId": base64(client.publicKey),
+      "Auth-ClientProof": base64(clientProof),
+      "Auth-Challenge": base64(challenge),
+      "Auth-Attestation-Type": "voucher",
+      "Auth-Voucher-Secret": normalizedSecret,
+    },
+    body,
+  }, fetchImpl);
+  return tokenPair(data, "voucher enrollment");
+}
+
+export async function refreshIdentitySession({ backendUrl, refreshToken, fetchImpl = fetch }) {
+  const normalizedRefreshToken = typeof refreshToken === "string" ? refreshToken.trim() : "";
+  if (!normalizedRefreshToken) throw new Error("saved identity registration session has no refresh token");
+  const data = await jsonFetch(new URL("/api/v1/auth/token/refresh", backendUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ refreshToken: normalizedRefreshToken }),
+  }, fetchImpl);
+  return tokenPair(data, "session refresh");
+}
+
+function jwtExpiresSoon(token, now = Date.now()) {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return false;
+    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+    return typeof payload.exp === "number" && payload.exp * 1000 <= now + 60_000;
+  } catch {
+    return false;
+  }
+}
+
+// Resolve a bearer session without ever putting a voucher on the command line.
+// A redeemed voucher session is persisted by the caller immediately, so a
+// transient username-registration failure does not burn the single-use secret.
+export async function acquireIdentitySession({
+  backendUrl,
+  accessToken = null,
+  enrollmentVoucher = null,
+  savedSession = null,
+  persistSession = null,
+  fetchImpl = fetch,
+}) {
+  const directToken = typeof accessToken === "string" ? accessToken.trim() : "";
+  if (directToken) return { token: directToken, refreshToken: null, backendUrl: canonicalBackendUrl(backendUrl) };
+
+  const savedBackend = typeof savedSession?.backendUrl === "string"
+    ? canonicalBackendUrl(savedSession.backendUrl)
+    : null;
+  const currentBackend = canonicalBackendUrl(backendUrl);
+  const savedToken = typeof savedSession?.token === "string" ? savedSession.token.trim() : "";
+  if (savedBackend === currentBackend && savedToken) {
+    if (!jwtExpiresSoon(savedToken)) return { ...savedSession, backendUrl: currentBackend, token: savedToken };
+    const refreshed = await refreshIdentitySession({
+      backendUrl,
+      refreshToken: savedSession.refreshToken,
+      fetchImpl,
+    });
+    const session = { backendUrl: currentBackend, ...refreshed };
+    await persistSession?.(session);
+    return session;
+  }
+
+  if (enrollmentVoucher == null || String(enrollmentVoucher).trim() === "") return null;
+  const enrolled = await redeemIdentityVoucher({ backendUrl, secret: enrollmentVoucher, fetchImpl });
+  const session = { backendUrl: currentBackend, ...enrolled };
+  await persistSession?.(session);
+  return session;
 }
 
 // Validate a username to the backend's rule: >=6 lowercase letters (+ optional .NN).
@@ -111,7 +218,16 @@ export function normalizeUsername(raw) {
   return { base: m[1], digits: m[2] ?? null };
 }
 
-export async function registerIdentity({ mnemonic, username, digits = null, backendUrl, bandersnatchBin = null, ss58Prefix = 42 }) {
+export async function registerIdentity({
+  mnemonic,
+  username,
+  digits = null,
+  backendUrl,
+  bandersnatchBin = null,
+  ss58Prefix = 42,
+  identityToken = null,
+  fetchImpl = fetch,
+}) {
   const { base, digits: parsedDigits } = normalizeUsername(username);
   const preferredDigits = digits ?? parsedDigits;
 
@@ -121,7 +237,7 @@ export async function registerIdentity({ mnemonic, username, digits = null, back
   const p256Pub = p256PublicKeyFromPrivateKey(deriveP256PrivateKey(deriveSr25519PairFromSeed(rootSeed, "//wallet//chat")));
   const liteEntropy = blake2b(mnemonicToEntropy(mnemonic), { dkLen: 32 });
 
-  const attesterData = await jsonFetch(new URL("/api/v1/attester", backendUrl), { method: "GET" });
+  const attesterData = await jsonFetch(new URL("/api/v1/attester", backendUrl), { method: "GET" }, fetchImpl);
   const attester = attesterData?.attester;
   if (!attester) throw new Error("identity backend did not return an attester");
 
@@ -147,9 +263,12 @@ export async function registerIdentity({ mnemonic, username, digits = null, back
 
   const submitted = await jsonFetch(new URL("/api/v1/usernames", backendUrl), {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      ...(identityToken ? { authorization: `Bearer ${identityToken}` } : {}),
+    },
     body: JSON.stringify(payload),
-  });
+  }, fetchImpl);
 
   return {
     account: bytesToHex(accountId),

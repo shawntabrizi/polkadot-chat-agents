@@ -37,7 +37,7 @@ whoever messages it, at whatever rate they message it. Treat `--public` as
 
 For the default Polkadot-app transport, public bots receive attachment
 references but only download and process their bytes after you configure
-`BOT_HOP_ALLOWED_NODES` with trusted HOP hosts. Its automatic Paseo
+`BOT_HOP_ALLOWED_NODES` with trusted HOP hosts. Its automatic named-testnet
 file-delivery allowance is intentionally disabled. For T3ams, use a trusted
 `BOT_T3AMS_BULLETIN_RPC`, narrow `BOT_T3AMS_ATTACHMENT_MIME_TYPES`, and bound
 the count, size, cache, and vault; T3ams has no automatic Bulletin upload grant.
@@ -63,7 +63,7 @@ allows in chat:
 | Who can message | Only listed accounts | Anyone |
 | Who pays | You, for trusted people | You, for everyone |
 | `/model` switching | Can be opened (`pca model <bot> open`) — trusted peers only | Never unrestricted; at most an approved set (`pca model <bot> allow a,b`) |
-| Returning saved files | Ready automatically on the default Paseo testnet profile | No automatic finite-allowance profile |
+| Returning saved files | Ready automatically on default Paseo or with `--network devnet` | No automatic finite-allowance profile |
 | Sensible model | Your call | Pin a cheaper model |
 | Built-in direct-agent tools | No tools by default; deployer chooses portable capability/scope policy | Same policy; every sender can direct the selected capability |
 

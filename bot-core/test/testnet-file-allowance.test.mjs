@@ -1,27 +1,28 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  PASEO_FILE_ALLOWANCE_BYTES,
-  PASEO_FILE_ALLOWANCE_MIN_BYTES,
-  PASEO_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS,
-  PASEO_FILE_ALLOWANCE_MIN_TRANSACTIONS,
-  PASEO_FILE_ALLOWANCE_TRANSACTIONS,
-  PaseoAllowanceFinalizationUnknownError,
-  describePaseoFileAllowance,
-  ensurePaseoFileAllowance,
-  hasSufficientPaseoFileAllowance,
+  TESTNET_FILE_ALLOWANCE_BYTES,
+  TESTNET_FILE_ALLOWANCE_MIN_BYTES,
+  TESTNET_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS,
+  TESTNET_FILE_ALLOWANCE_MIN_TRANSACTIONS,
+  TESTNET_FILE_ALLOWANCE_TRANSACTIONS,
+  TestnetAllowanceFinalizationUnknownError,
+  describeTestnetFileAllowance,
+  ensureTestnetFileAllowance,
+  hasSufficientTestnetFileAllowance,
+  testnetFileAllowanceNetwork,
 } from "../lib/testnet-file-allowance.mjs";
-import { bulletinPaseoNextV2 } from "../lib/descriptors.mjs";
+import { bulletinPaseoNextV2, productsDevnetBulletin } from "../lib/descriptors.mjs";
 
 const ADDRESS = "5FaucetTestAddress";
-const EXPECTED_GENESIS = bulletinPaseoNextV2.genesis;
+const EXPECTED_GENESIS = productsDevnetBulletin.genesis;
 
 function authorization({
   expiration = 1_000,
   transactions = 0,
-  transactionsAllowance = PASEO_FILE_ALLOWANCE_TRANSACTIONS,
+  transactionsAllowance = TESTNET_FILE_ALLOWANCE_TRANSACTIONS,
   bytes = 0n,
-  bytesAllowance = PASEO_FILE_ALLOWANCE_BYTES,
+  bytesAllowance = TESTNET_FILE_ALLOWANCE_BYTES,
 } = {}) {
   return {
     expiration,
@@ -48,6 +49,7 @@ function fakeAllowanceClient({
     chainSpec: 0,
     authorization: [],
     block: 0,
+    descriptors: [],
     grants: [],
     refreshes: [],
     signers: [],
@@ -68,11 +70,11 @@ function fakeAllowanceClient({
         if (operation === "refresh" && authorizationValue) {
           authorizationValue = {
             ...authorizationValue,
-            expiration: block + PASEO_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS + 100,
+            expiration: block + TESTNET_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS + 100,
           };
         } else {
           authorizationValue = authorization({
-            expiration: block + PASEO_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS + 100,
+            expiration: block + TESTNET_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS + 100,
           });
         }
       }
@@ -121,7 +123,10 @@ function fakeAllowanceClient({
         calls.chainSpec += 1;
         return { genesisHash };
       },
-      getTypedApi: () => api,
+      getTypedApi: (descriptor) => {
+        calls.descriptors.push(descriptor);
+        return api;
+      },
       destroy: () => { destroyed += 1; },
     },
     calls,
@@ -129,47 +134,48 @@ function fakeAllowanceClient({
   };
 }
 
-test("Paseo allowance status accounts for expiry, safety window, and remaining extent", () => {
-  const healthy = describePaseoFileAllowance(authorization({
-    expiration: 199 + PASEO_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS,
-    transactions: PASEO_FILE_ALLOWANCE_TRANSACTIONS - PASEO_FILE_ALLOWANCE_MIN_TRANSACTIONS,
-    bytes: PASEO_FILE_ALLOWANCE_BYTES - PASEO_FILE_ALLOWANCE_MIN_BYTES,
+test("Products Devnet allowance status accounts for expiry, safety window, and remaining extent", () => {
+  const healthy = describeTestnetFileAllowance(authorization({
+    expiration: 199 + TESTNET_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS,
+    transactions: TESTNET_FILE_ALLOWANCE_TRANSACTIONS - TESTNET_FILE_ALLOWANCE_MIN_TRANSACTIONS,
+    bytes: TESTNET_FILE_ALLOWANCE_BYTES - TESTNET_FILE_ALLOWANCE_MIN_BYTES,
   }), 199);
   assert.equal(healthy.active, true);
-  assert.equal(healthy.remainingBlocks, PASEO_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS);
-  assert.equal(healthy.remainingTransactions, PASEO_FILE_ALLOWANCE_MIN_TRANSACTIONS);
-  assert.equal(healthy.remainingBytes, PASEO_FILE_ALLOWANCE_MIN_BYTES);
-  assert.equal(hasSufficientPaseoFileAllowance(healthy), true);
+  assert.equal(healthy.remainingBlocks, TESTNET_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS);
+  assert.equal(healthy.remainingTransactions, TESTNET_FILE_ALLOWANCE_MIN_TRANSACTIONS);
+  assert.equal(healthy.remainingBytes, TESTNET_FILE_ALLOWANCE_MIN_BYTES);
+  assert.equal(hasSufficientTestnetFileAllowance(healthy), true);
 
-  const exhausted = describePaseoFileAllowance(authorization({
-    transactions: PASEO_FILE_ALLOWANCE_TRANSACTIONS,
-    bytes: PASEO_FILE_ALLOWANCE_BYTES,
+  const exhausted = describeTestnetFileAllowance(authorization({
+    transactions: TESTNET_FILE_ALLOWANCE_TRANSACTIONS,
+    bytes: TESTNET_FILE_ALLOWANCE_BYTES,
   }), 199);
   assert.equal(exhausted.active, true);
   assert.equal(exhausted.remainingTransactions, 0);
   assert.equal(exhausted.remainingBytes, 0n);
-  assert.equal(hasSufficientPaseoFileAllowance(exhausted), false);
+  assert.equal(hasSufficientTestnetFileAllowance(exhausted), false);
 
-  const expired = describePaseoFileAllowance(authorization({ expiration: 199 }), 199);
+  const expired = describeTestnetFileAllowance(authorization({ expiration: 199 }), 199);
   assert.equal(expired.active, false);
 
-  const nearExpiry = describePaseoFileAllowance(authorization({
-    expiration: 199 + PASEO_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS - 1,
+  const nearExpiry = describeTestnetFileAllowance(authorization({
+    expiration: 199 + TESTNET_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS - 1,
   }), 199);
   assert.equal(nearExpiry.active, true);
-  assert.equal(hasSufficientPaseoFileAllowance(nearExpiry), false);
+  assert.equal(hasSufficientTestnetFileAllowance(nearExpiry), false);
 
-  const unrepresentableTransactions = describePaseoFileAllowance(authorization({
+  const unrepresentableTransactions = describeTestnetFileAllowance(authorization({
     transactionsAllowance: BigInt(Number.MAX_SAFE_INTEGER) + 1n,
   }), 199);
   assert.equal(unrepresentableTransactions.remainingTransactions, null);
-  assert.equal(hasSufficientPaseoFileAllowance(unrepresentableTransactions), false);
+  assert.equal(hasSufficientTestnetFileAllowance(unrepresentableTransactions), false);
 });
 
-test("Paseo allowance provisioning skips a sufficiently funded active authorization", async () => {
+test("Products Devnet allowance provisioning skips a sufficiently funded active authorization", async () => {
   const fixture = fakeAllowanceClient({ current: authorization() });
-  const result = await ensurePaseoFileAllowance({
+  const result = await ensureTestnetFileAllowance({
     address: ADDRESS,
+    networkProfile: "devnet",
     createClient: () => fixture.client,
     createSigner: () => "faucet-signer",
   });
@@ -182,13 +188,37 @@ test("Paseo allowance provisioning skips a sufficiently funded active authorizat
   assert.equal(fixture.destroyed(), 1);
 });
 
-test("Paseo allowance provisioning grants a missing or depleted authorization", async () => {
+test("named testnet allowance profiles retain separate Devnet and Paseo chains", async () => {
+  assert.equal(testnetFileAllowanceNetwork().descriptor, bulletinPaseoNextV2);
+  assert.equal(testnetFileAllowanceNetwork("devnet").descriptor, productsDevnetBulletin);
+  assert.equal(testnetFileAllowanceNetwork("paseo").descriptor, bulletinPaseoNextV2);
+  assert.notEqual(
+    testnetFileAllowanceNetwork("devnet").rpcEndpoint,
+    testnetFileAllowanceNetwork("paseo").rpcEndpoint,
+  );
+
+  const fixture = fakeAllowanceClient({
+    current: authorization(),
+    genesisHash: bulletinPaseoNextV2.genesis,
+  });
+  const result = await ensureTestnetFileAllowance({
+    address: "5PaseoFaucetTestAddress",
+    networkProfile: "paseo",
+    createClient: () => fixture.client,
+    createSigner: () => "faucet-signer",
+  });
+  assert.equal(result.action, "already-authorized");
+  assert.deepEqual(fixture.calls.descriptors, [bulletinPaseoNextV2]);
+});
+
+test("Products Devnet allowance provisioning grants a missing or depleted authorization", async () => {
   const fixture = fakeAllowanceClient({ current: authorization({
-    transactions: PASEO_FILE_ALLOWANCE_TRANSACTIONS - 1,
-    bytes: PASEO_FILE_ALLOWANCE_BYTES - 1n,
+    transactions: TESTNET_FILE_ALLOWANCE_TRANSACTIONS - 1,
+    bytes: TESTNET_FILE_ALLOWANCE_BYTES - 1n,
   }) });
-  const result = await ensurePaseoFileAllowance({
+  const result = await ensureTestnetFileAllowance({
     address: ADDRESS,
+    networkProfile: "devnet",
     createClient: () => fixture.client,
     createSigner: () => "faucet-signer",
   });
@@ -201,21 +231,22 @@ test("Paseo allowance provisioning grants a missing or depleted authorization", 
   assert.equal(fixture.calls.refreshes.length, 0);
   assert.deepEqual(fixture.calls.grants[0], {
     who: ADDRESS,
-    transactions: PASEO_FILE_ALLOWANCE_TRANSACTIONS,
-    bytes: PASEO_FILE_ALLOWANCE_BYTES,
+    transactions: TESTNET_FILE_ALLOWANCE_TRANSACTIONS,
+    bytes: TESTNET_FILE_ALLOWANCE_BYTES,
   });
   assert.deepEqual(fixture.calls.signers, ["faucet-signer"]);
   assert.equal(fixture.calls.authorization.length, 2, "re-reads status after finalization");
   assert.equal(fixture.destroyed(), 1);
 });
 
-test("Paseo allowance provisioning refreshes a funded authorization near expiry", async () => {
+test("Products Devnet allowance provisioning refreshes a funded authorization near expiry", async () => {
   const fixture = fakeAllowanceClient({ current: authorization({
-    expiration: 100 + PASEO_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS - 1,
+    expiration: 100 + TESTNET_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS - 1,
   }) });
   const started = [];
-  const result = await ensurePaseoFileAllowance({
+  const result = await ensureTestnetFileAllowance({
     address: ADDRESS,
+    networkProfile: "devnet",
     createClient: () => fixture.client,
     createSigner: () => "faucet-signer",
     onSubmissionStarting: (operation) => { started.push(operation); },
@@ -223,7 +254,7 @@ test("Paseo allowance provisioning refreshes a funded authorization near expiry"
 
   assert.equal(result.action, "refreshed");
   assert.equal(result.statusVerified, true);
-  assert.equal(hasSufficientPaseoFileAllowance(result), true);
+  assert.equal(hasSufficientTestnetFileAllowance(result), true);
   assert.deepEqual(fixture.calls.refreshes, [{ who: ADDRESS }]);
   assert.equal(fixture.calls.grants.length, 0);
   assert.deepEqual(started, ["refresh"]);
@@ -231,32 +262,34 @@ test("Paseo allowance provisioning refreshes a funded authorization near expiry"
   assert.equal(fixture.destroyed(), 1);
 });
 
-test("Paseo allowance provisioning refreshes before topping up a near-expiry depleted authorization", async () => {
+test("Products Devnet allowance provisioning refreshes before topping up a near-expiry depleted authorization", async () => {
   const fixture = fakeAllowanceClient({ current: authorization({
-    expiration: 100 + PASEO_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS - 1,
-    transactions: PASEO_FILE_ALLOWANCE_TRANSACTIONS - 1,
-    bytes: PASEO_FILE_ALLOWANCE_BYTES - 1n,
+    expiration: 100 + TESTNET_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS - 1,
+    transactions: TESTNET_FILE_ALLOWANCE_TRANSACTIONS - 1,
+    bytes: TESTNET_FILE_ALLOWANCE_BYTES - 1n,
   }) });
-  const result = await ensurePaseoFileAllowance({
+  const result = await ensureTestnetFileAllowance({
     address: ADDRESS,
+    networkProfile: "devnet",
     createClient: () => fixture.client,
     createSigner: () => "faucet-signer",
   });
 
   assert.equal(result.action, "refreshed-and-authorized");
   assert.equal(result.statusVerified, true);
-  assert.equal(hasSufficientPaseoFileAllowance(result), true);
+  assert.equal(hasSufficientTestnetFileAllowance(result), true);
   assert.deepEqual(fixture.calls.refreshes, [{ who: ADDRESS }]);
   assert.equal(fixture.calls.grants.length, 1);
   assert.deepEqual(fixture.calls.submissions.map(({ operation }) => operation), ["refresh", "authorize"]);
   assert.equal(fixture.destroyed(), 1);
 });
 
-test("Paseo allowance provisioning rejects failed faucet transactions and closes the client", async () => {
+test("Products Devnet allowance provisioning rejects failed faucet transactions and closes the client", async () => {
   const fixture = fakeAllowanceClient({ current: null, result: { ok: false, txHash: "0xfailed" } });
   await assert.rejects(
-    ensurePaseoFileAllowance({
+    ensureTestnetFileAllowance({
       address: ADDRESS,
+      networkProfile: "devnet",
       createClient: () => fixture.client,
       createSigner: () => "faucet-signer",
     }),
@@ -265,11 +298,12 @@ test("Paseo allowance provisioning rejects failed faucet transactions and closes
   assert.equal(fixture.destroyed(), 1);
 });
 
-test("Paseo allowance provisioning refuses an unexpected chain before it queries or signs", async () => {
+test("Products Devnet allowance provisioning refuses an unexpected chain before it queries or signs", async () => {
   const fixture = fakeAllowanceClient({ genesisHash: `0x${"00".repeat(32)}` });
   await assert.rejects(
-    ensurePaseoFileAllowance({
+    ensureTestnetFileAllowance({
       address: ADDRESS,
+      networkProfile: "devnet",
       createClient: () => fixture.client,
       createSigner: () => "faucet-signer",
     }),
@@ -280,7 +314,7 @@ test("Paseo allowance provisioning refuses an unexpected chain before it queries
   assert.equal(fixture.destroyed(), 1);
 });
 
-test("Paseo allowance provisioning keeps an unverified finalized grant from being retried", async () => {
+test("Products Devnet allowance provisioning keeps an unverified finalized grant from being retried", async () => {
   const unverifiedAddress = "5FaucetUnverifiedFinalizationAddress";
   const fixture = fakeAllowanceClient({
     current: null,
@@ -289,8 +323,9 @@ test("Paseo allowance provisioning keeps an unverified finalized grant from bein
       return current;
     },
   });
-  const result = await ensurePaseoFileAllowance({
+  const result = await ensureTestnetFileAllowance({
     address: unverifiedAddress,
+    networkProfile: "devnet",
     createClient: () => fixture.client,
     createSigner: () => "faucet-signer",
   });
@@ -304,17 +339,18 @@ test("Paseo allowance provisioning keeps an unverified finalized grant from bein
   assert.equal(result.remainingBytes, null);
   assert.equal(fixture.destroyed(), 1);
   await assert.rejects(
-    ensurePaseoFileAllowance({
+    ensureTestnetFileAllowance({
       address: unverifiedAddress,
+      networkProfile: "devnet",
       createClient: () => fixture.client,
       createSigner: () => "faucet-signer",
     }),
-    (error) => error instanceof PaseoAllowanceFinalizationUnknownError,
+    (error) => error instanceof TestnetAllowanceFinalizationUnknownError,
   );
   assert.equal(fixture.calls.chainSpec, 1, "the unverified finalized grant cannot be automatically retried");
 });
 
-test("Paseo allowance provisioning marks a stalled submission as unknown and closes the client", async () => {
+test("Products Devnet allowance provisioning marks a stalled submission as unknown and closes the client", async () => {
   const unknownAddress = "5FaucetUnknownSubmissionAddress";
   let destroyed = 0;
   let clientCalls = 0;
@@ -334,8 +370,9 @@ test("Paseo allowance provisioning marks a stalled submission as unknown and clo
     destroy: () => { destroyed += 1; },
   };
   await assert.rejects(
-    ensurePaseoFileAllowance({
+    ensureTestnetFileAllowance({
       address: unknownAddress,
+      networkProfile: "devnet",
       createClient: () => {
         clientCalls += 1;
         return client;
@@ -343,25 +380,26 @@ test("Paseo allowance provisioning marks a stalled submission as unknown and clo
       createSigner: () => "faucet-signer",
       timeoutMs: 5,
     }),
-    (error) => error instanceof PaseoAllowanceFinalizationUnknownError,
+    (error) => error instanceof TestnetAllowanceFinalizationUnknownError,
   );
   assert.equal(destroyed, 1);
   assert.equal(clientCalls, 1);
   await assert.rejects(
-    ensurePaseoFileAllowance({
+    ensureTestnetFileAllowance({
       address: unknownAddress,
+      networkProfile: "devnet",
       createClient: () => {
         clientCalls += 1;
         return client;
       },
       createSigner: () => "faucet-signer",
     }),
-    (error) => error instanceof PaseoAllowanceFinalizationUnknownError,
+    (error) => error instanceof TestnetAllowanceFinalizationUnknownError,
   );
   assert.equal(clientCalls, 1, "an ambiguous submission cannot be automatically retried");
 });
 
-test("Paseo allowance provisioning coalesces concurrent grants for the same account", async () => {
+test("Products Devnet allowance provisioning coalesces concurrent grants for the same account", async () => {
   let finishSubmission;
   let submissionStarted;
   const started = new Promise((resolve) => { submissionStarted = resolve; });
@@ -378,6 +416,7 @@ test("Paseo allowance provisioning coalesces concurrent grants for the same acco
   let clientCalls = 0;
   const options = {
     address: ADDRESS,
+    networkProfile: "devnet",
     createClient: () => {
       clientCalls += 1;
       return fixture.client;
@@ -385,9 +424,9 @@ test("Paseo allowance provisioning coalesces concurrent grants for the same acco
     createSigner: () => "faucet-signer",
   };
 
-  const first = ensurePaseoFileAllowance(options);
+  const first = ensureTestnetFileAllowance(options);
   await started;
-  const second = ensurePaseoFileAllowance(options);
+  const second = ensureTestnetFileAllowance(options);
   assert.equal(fixture.calls.grants.length, 1);
   assert.equal(clientCalls, 1);
   finishSubmission();

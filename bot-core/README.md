@@ -13,8 +13,10 @@ pca create mycoolbot --brain claude --owner <your-app-username>
 pca run mycoolbot --greet
 ```
 
-`create` generates the bot's identity, registers a username on the network
-(currently the Paseo testnet), and locks the bot to your account. With
+`create` generates the bot's identity, registers a username on the default
+Paseo Next v2 network, and locks the bot to your account. Polkadot Products
+Devnet remains available with `--network devnet`; Devnet username writes
+require a single-use enrollment voucher from the network operator. With
 `--greet`, the bot messages you first — watch your phone.
 
 Requirements: Node 22+, and for an AI brain the model's CLI installed and
@@ -35,8 +37,8 @@ Highlights:
   git worktree) points the agent at that repo.
 - Long answers arrive as several ordered messages (split at paragraph and
   code-fence boundaries), never as one failed oversized send.
-- Private Paseo bots automatically receive their testnet file allowance from
-  local `pca`, including an expiry refresh when needed; use
+- Private bots on either named testnet profile automatically receive their file
+  allowance from local `pca`, including an expiry refresh when needed; use
   `pca storage <bot> status` to inspect it, `grant` only when capacity is
   needed, and `recover` after an interrupted or uncertain faucet submission.
   Production storage remains a separate operator authorization flow.

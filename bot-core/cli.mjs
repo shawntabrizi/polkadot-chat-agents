@@ -25,7 +25,14 @@ import {
 } from "@polkadot-labs/hdkd-helpers";
 import { createClient as createPapiClient } from "polkadot-api";
 import { getWsProvider } from "polkadot-api/ws";
-import { paseoPeopleNext } from "./lib/descriptors.mjs";
+import { paseoPeopleNext, productsDevnetPeople } from "./lib/descriptors.mjs";
+import {
+  DEFAULT_NETWORK_PROFILE,
+  PASEO,
+  PRODUCTS_DEVNET,
+  configuredNetworkProfile,
+  peopleEndpointsFor,
+} from "./lib/network-config.mjs";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
 import { deriveP256PrivateKey, p256PublicKeyFromPrivateKey } from "./vendor/app-chat-codec.mjs";
 import { entrypointForTransport } from "./lib/transport-entrypoint.mjs";
@@ -38,12 +45,18 @@ import {
   toolPolicyEnvironment,
   toolPolicySummary,
 } from "./lib/tool-policy.mjs";
-import { registerIdentity, waitForAttestation, withTimeout, DEFAULT_BACKENDS } from "./lib/register.mjs";
 import {
-  PaseoAllowanceFinalizationUnknownError,
-  ensurePaseoFileAllowance,
-  getPaseoFileAllowanceStatus,
-  hasSufficientPaseoFileAllowance,
+  DEFAULT_BACKENDS,
+  acquireIdentitySession,
+  registerIdentity,
+  waitForAttestation,
+  withTimeout,
+} from "./lib/register.mjs";
+import {
+  TestnetAllowanceFinalizationUnknownError,
+  ensureTestnetFileAllowance,
+  getTestnetFileAllowanceStatus,
+  hasSufficientTestnetFileAllowance,
 } from "./lib/testnet-file-allowance.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -51,29 +64,42 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 // set PCA_BANDERSNATCH_CLI to a natively built binary to override.
 const BANDERSNATCH_BIN = process.env.PCA_BANDERSNATCH_CLI ?? null;
 
-async function withPeopleApi(endpoint, fn) {
-  const client = createPapiClient(getWsProvider(endpoint));
-  try { return await fn(client.getTypedApi(paseoPeopleNext)); }
+async function withPeopleApi(config, fn) {
+  const endpoints = peopleEndpointsFor(config.endpoint, config.networkProfile);
+  const client = createPapiClient(getWsProvider(endpoints));
+  const descriptor = config.networkProfile === PASEO.id ? paseoPeopleNext : productsDevnetPeople;
+  try { return await fn(client.getTypedApi(descriptor)); }
   finally { client.destroy(); }
 }
 
 // Bots live in a stable per-user location so `pca list` finds them regardless of
 // the working directory. Override with PCA_BOTS_DIR.
 const BOTS_DIR = process.env.PCA_BOTS_DIR ?? path.join(os.homedir(), ".pca", "bots");
-const DEFAULT_ENDPOINT = "wss://paseo-people-next-system-rpc.polkadot.io";
 // Keep testnet attachment delivery deliberate and named. An arbitrary People
 // endpoint tells us nothing about the matching Bulletin/HOP network, so only a
 // known profile receives automatic HOP configuration.
-const PASEO_TESTNET_FILE_DELIVERY = Object.freeze({
-  profile: "paseo-next-v2",
-  bulletinNetwork: "Bulletin Paseo Next v2",
-  consoleUrl: "https://paritytech.github.io/polkadot-bulletin-chain/authorizations?tab=faucet",
-  uploadNode: "wss://paseo-hop-next-0.polkadot.io",
-  allowedNodes: Object.freeze([
-    "paseo-hop-next-0.polkadot.io",
-    "paseo-hop-next-1.polkadot.io",
-  ]),
+const TESTNET_FAUCET_CONSOLE = "https://paritytech.github.io/polkadot-bulletin-chain/authorizations?tab=faucet";
+const FILE_DELIVERY_PROFILES = Object.freeze({
+  [PRODUCTS_DEVNET.id]: Object.freeze({
+    profile: "products-devnet",
+    networkProfile: PRODUCTS_DEVNET.id,
+    networkName: PRODUCTS_DEVNET.name,
+    bulletinNetwork: PRODUCTS_DEVNET.bulletin.name,
+    consoleUrl: TESTNET_FAUCET_CONSOLE,
+    uploadNode: PRODUCTS_DEVNET.bulletin.hopEndpoints[0],
+    allowedNodes: Object.freeze(PRODUCTS_DEVNET.bulletin.hopEndpoints.map((endpoint) => new URL(endpoint).hostname)),
+  }),
+  [PASEO.id]: Object.freeze({
+    profile: "paseo-next-v2",
+    networkProfile: PASEO.id,
+    networkName: PASEO.name,
+    bulletinNetwork: PASEO.bulletin.name,
+    consoleUrl: TESTNET_FAUCET_CONSOLE,
+    uploadNode: PASEO.bulletin.hopEndpoints[0],
+    allowedNodes: Object.freeze(PASEO.bulletin.hopEndpoints.map((endpoint) => new URL(endpoint).hostname)),
+  }),
 });
+const NAMED_NETWORK_IDS = Object.freeze(Object.keys(FILE_DELIVERY_PROFILES));
 // Immutable multi-architecture manifests prevent a later deploy from silently
 // receiving a republished mutable image.
 const NODE_IMAGE = "node:22.22.0-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94";
@@ -162,14 +188,46 @@ const BOT_NAME_RE = /^[a-z][a-z0-9-]{1,30}(?:\.\d{2})?$/;
 const botDir = (name) => path.join(BOTS_DIR, name);
 const configPath = (name) => path.join(botDir(name), "config.json");
 const secretPath = (name) => path.join(botDir(name), "secret.json");
-const allowanceProvisioningLockPath = (address) => path.join(
+const allowanceProvisioningLockPath = (networkProfile, address) => path.join(
   BOTS_DIR,
-  `.paseo-file-allowance-${createHash("sha256").update(address).digest("hex")}.lock`,
+  `.${networkProfile === PASEO.id ? "paseo" : "products-devnet"}-file-allowance-${createHash("sha256").update(address).digest("hex")}.lock`,
 );
 const saveConfig = (name, cfg) => {
   fs.writeFileSync(configPath(name), `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 });
   fs.chmodSync(configPath(name), 0o600);
 };
+const saveSecret = (name, secret) => {
+  const target = secretPath(name);
+  const temporary = `${target}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+  try {
+    fs.writeFileSync(temporary, `${JSON.stringify(secret, null, 2)}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    fs.renameSync(temporary, target);
+    fs.chmodSync(target, 0o600);
+  } finally {
+    try { fs.unlinkSync(temporary); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+  }
+};
+
+function requiresIdentityRegistrationAuth(config) {
+  const profile = configuredNetworkProfile(config.networkProfile);
+  if (profile?.identityRegistrationAuth !== "voucher") return false;
+  try { return new URL(config.backendUrl).href === new URL(profile.identityBackendUrl).href; }
+  catch { return false; }
+}
+
+const hasIdentityRegistrationCredential = () => Boolean(
+  process.env.PCA_IDENTITY_TOKEN?.trim() || process.env.PCA_IDENTITY_VOUCHER?.trim(),
+);
+
+function identityCredentialMessage() {
+  return "Products Devnet username registration requires an enrollment credential. "
+    + "Set PCA_IDENTITY_VOUCHER to a single-use voucher from the Devnet operator, "
+    + "or PCA_IDENTITY_TOKEN to a valid identity-backend bearer token.";
+}
 
 class CurrentConfigError extends Error {}
 
@@ -187,6 +245,9 @@ function validateCurrentConfig(name, cfg) {
   if (cfg.name !== name) throw configError(name, "name does not match its bot directory");
   if (!nonEmptyConfigString(cfg.endpoint)) throw configError(name, "endpoint is required");
   if (!nonEmptyConfigString(cfg.backendUrl)) throw configError(name, "backendUrl is required");
+  if (cfg.networkProfile != null && configuredNetworkProfile(cfg.networkProfile) == null) {
+    throw configError(name, `networkProfile must be one of ${NAMED_NETWORK_IDS.join(", ")} or omitted for a compatible custom endpoint`);
+  }
   if (typeof cfg.brain !== "string" || !BRAINS.includes(cfg.brain)) {
     throw configError(name, `brain must be one of: ${BRAINS.join(", ")}`);
   }
@@ -241,15 +302,15 @@ const readConfig = (name) => {
 };
 const listBots = () => (fs.existsSync(BOTS_DIR) ? fs.readdirSync(BOTS_DIR).filter((n) => fs.existsSync(configPath(n))) : []);
 
-function allowanceProvisioningPendingError(name) {
-  const error = new Error(`A prior Paseo file allowance submission for "${name}" is unresolved. Check status and explicitly recover it before another grant.`);
-  error.code = "PASEO_FILE_ALLOWANCE_PROVISIONING_PENDING";
+function allowanceProvisioningPendingError(name, networkName) {
+  const error = new Error(`A prior ${networkName} file allowance submission for "${name}" is unresolved. Check status and explicitly recover it before another grant.`);
+  error.code = "TESTNET_FILE_ALLOWANCE_PROVISIONING_PENDING";
   return error;
 }
 
-function readAllowanceProvisioningLock(address) {
+function readAllowanceProvisioningLock(networkProfile, address) {
   try {
-    return JSON.parse(fs.readFileSync(allowanceProvisioningLockPath(address), "utf8"));
+    return JSON.parse(fs.readFileSync(allowanceProvisioningLockPath(networkProfile, address), "utf8"));
   } catch (error) {
     if (error?.code === "ENOENT") return null;
     // A malformed local marker is fail-closed. It can only be cleared through
@@ -258,8 +319,8 @@ function readAllowanceProvisioningLock(address) {
   }
 }
 
-function clearAllowanceProvisioningLock(address) {
-  try { fs.unlinkSync(allowanceProvisioningLockPath(address)); }
+function clearAllowanceProvisioningLock(networkProfile, address) {
+  try { fs.unlinkSync(allowanceProvisioningLockPath(networkProfile, address)); }
   catch (error) { if (error?.code !== "ENOENT") throw error; }
 }
 
@@ -267,13 +328,16 @@ function clearAllowanceProvisioningLock(address) {
 // bot name. The marker is deliberately never time-expired: it changes to
 // unresolved immediately before signAndSubmit, so clearing it requires an
 // explicit, read-only recovery after an ambiguous result or interrupted CLI.
-function acquireAllowanceProvisioningLock(name, address) {
-  const lockPath = allowanceProvisioningLockPath(address);
+function acquireAllowanceProvisioningLock(name, networkProfile, address) {
+  const profile = FILE_DELIVERY_PROFILES[networkProfile];
+  if (!profile) throw new Error(`No managed allowance lock profile exists for "${String(networkProfile)}"`);
+  const lockPath = allowanceProvisioningLockPath(networkProfile, address);
   const token = randomBytes(18).toString("hex");
   try {
     fs.writeFileSync(lockPath, `${JSON.stringify({
       token,
       state: "checking",
+      networkProfile,
       address,
       pid: process.pid,
       createdAt: new Date().toISOString(),
@@ -283,14 +347,14 @@ function acquireAllowanceProvisioningLock(name, address) {
       mode: 0o600,
     });
   } catch (error) {
-    if (error?.code === "EEXIST") throw allowanceProvisioningPendingError(name);
+    if (error?.code === "EEXIST") throw allowanceProvisioningPendingError(name, profile.networkName);
     throw error;
   }
   return {
     markUnresolved: (operation) => {
-      const existing = readAllowanceProvisioningLock(address);
+      const existing = readAllowanceProvisioningLock(networkProfile, address);
       if (existing?.token !== token) {
-        throw new Error("Paseo allowance provisioning marker changed before submission");
+        throw new Error(`${profile.networkName} allowance provisioning marker changed before submission`);
       }
       fs.writeFileSync(lockPath, `${JSON.stringify({
         ...existing,
@@ -300,8 +364,8 @@ function acquireAllowanceProvisioningLock(name, address) {
       })}\n`, { encoding: "utf8", mode: 0o600 });
     },
     release: () => {
-      const existing = readAllowanceProvisioningLock(address);
-      if (existing?.token === token) clearAllowanceProvisioningLock(address);
+      const existing = readAllowanceProvisioningLock(networkProfile, address);
+      if (existing?.token === token) clearAllowanceProvisioningLock(networkProfile, address);
     },
   };
 }
@@ -469,7 +533,12 @@ function configuredT3amsTrustedSigningKeys(cfg, transport = configuredTransport(
 
 function t3amsEnvironment(cfg, transport = configuredTransport(cfg)) {
   if (transport !== "t3ams") return {};
-  const values = { BOT_T3AMS_TRUSTED_SIGNING_KEYS: JSON.stringify(configuredT3amsTrustedSigningKeys(cfg, transport)) };
+  const values = {
+    BOT_T3AMS_TRUSTED_SIGNING_KEYS: JSON.stringify(configuredT3amsTrustedSigningKeys(cfg, transport)),
+    // A custom People endpoint does not identify a matching Bulletin chain.
+    // Fail closed for media instead of silently selecting a named testnet.
+    BOT_T3AMS_BULLETIN_RPC: configuredNetworkProfile(cfg.networkProfile)?.bulletin.rpcEndpoint ?? "",
+  };
   if (cfg.t3amsDisplayName != null) values.BOT_T3AMS_DISPLAY_NAME = normalizeT3amsDisplayName(cfg.t3amsDisplayName);
   if (cfg.t3amsAutoAcceptWorkspaces != null) {
     if (typeof cfg.t3amsAutoAcceptWorkspaces !== "boolean") {
@@ -512,15 +581,16 @@ async function warnForT3amsSdkDeployPreflight(transport) {
 
 function configuredFileDelivery(cfg) {
   if (cfg.fileDelivery == null) return null;
+  const profile = FILE_DELIVERY_PROFILES[cfg.networkProfile];
   if (typeof cfg.fileDelivery !== "object" || Array.isArray(cfg.fileDelivery)
-      || cfg.fileDelivery.profile !== PASEO_TESTNET_FILE_DELIVERY.profile
-      || cfg.networkProfile !== "paseo") {
+      || profile == null
+      || cfg.fileDelivery.profile !== profile.profile) {
     fail(`Invalid fileDelivery configuration for "${cfg.name ?? "this bot"}".`);
   }
   if (isPublicBot(cfg)) {
     fail(`"${cfg.name ?? "This bot"}" is public, so testnet file delivery is disabled to protect its finite storage allowance.`);
   }
-  return PASEO_TESTNET_FILE_DELIVERY;
+  return profile;
 }
 
 function fileDeliveryEnvironment(cfg) {
@@ -530,6 +600,10 @@ function fileDeliveryEnvironment(cfg) {
     BOT_HOP_UPLOAD_NODE: profile.uploadNode,
     BOT_HOP_ALLOWED_NODES: profile.allowedNodes.join(","),
   };
+}
+
+function networkEnvironment(cfg) {
+  return { BOT_NETWORK_PROFILE: cfg.networkProfile ?? "" };
 }
 
 function seedFromHex(seedHex) {
@@ -593,23 +667,24 @@ async function provisionTestnetFileAllowance(name, cfg, { optional = true, accou
   let provisioningLock = null;
   let retainLock = false;
   try {
-    provisioningLock = acquireAllowanceProvisioningLock(name, allowance.address);
+    provisioningLock = acquireAllowanceProvisioningLock(name, profile.networkProfile, allowance.address);
     step(`Provisioning ${profile.bulletinNetwork} file allowance…`);
-    const result = await ensurePaseoFileAllowance({
+    const result = await ensureTestnetFileAllowance({
       address: allowance.address,
+      networkProfile: profile.networkProfile,
       onSubmissionStarting: provisioningLock.markUnresolved,
     });
     if (result.statusVerified === false) {
       retainLock = true;
-      ok("Paseo testnet file allowance transaction finalized.");
-    } else if (!hasSufficientPaseoFileAllowance(result)) {
-      warn("The Paseo faucet transaction finalized, but the resulting allowance is still too low or too close to expiry.");
+      ok(`${profile.networkName} file allowance transaction finalized.`);
+    } else if (!hasSufficientTestnetFileAllowance(result)) {
+      warn(`The ${profile.networkName} faucet transaction finalized, but the resulting allowance is still too low or too close to expiry.`);
     } else if (result.action === "already-authorized") {
-      ok("Paseo testnet file allowance is already ready.");
+      ok(`${profile.networkName} file allowance is already ready.`);
     } else if (result.action === "refreshed") {
-      ok("Paseo testnet file allowance expiry was refreshed.");
+      ok(`${profile.networkName} file allowance expiry was refreshed.`);
     } else {
-      ok("Paseo testnet file allowance is ready.");
+      ok(`${profile.networkName} file allowance is ready.`);
     }
     note(fileAllowanceStatusText(result));
     if (result.statusVerified === false) {
@@ -620,12 +695,12 @@ async function provisionTestnetFileAllowance(name, cfg, { optional = true, accou
     return { ...result, account: allowance };
   } catch (error) {
     const message = String(error?.message ?? error);
-    if (error instanceof PaseoAllowanceFinalizationUnknownError) {
+    if (error instanceof TestnetAllowanceFinalizationUnknownError) {
       // The marker was written before signAndSubmit. Keep it until an operator
       // checks current state and explicitly recovers the local guard.
       try { provisioningLock?.markUnresolved("unknown"); } catch { /* marker is already retained */ }
       retainLock = true;
-      warn("The public Paseo faucet may have accepted this allowance grant. Do not retry it yet.");
+      warn(`The public ${profile.networkName} faucet may have accepted this allowance grant. Do not retry it yet.`);
       note(`Wait for finalization, then check:  pca storage ${name} status`);
       note(`After verifying the result, clear the local guard:  pca storage ${name} recover`);
       if (!optional) process.exitCode = 1;
@@ -643,7 +718,7 @@ async function provisionTestnetFileAllowance(name, cfg, { optional = true, accou
         error: message,
       };
     }
-    if (error?.code === "PASEO_FILE_ALLOWANCE_PROVISIONING_PENDING") {
+    if (error?.code === "TESTNET_FILE_ALLOWANCE_PROVISIONING_PENDING") {
       warn(message);
       note(`Check the current state:  pca storage ${name} status`);
       note(`After verifying it, recover the local guard:  pca storage ${name} recover`);
@@ -661,8 +736,8 @@ async function provisionTestnetFileAllowance(name, cfg, { optional = true, accou
         error: message,
       };
     }
-    if (!optional) throw new Error(`Paseo testnet file allowance could not be provisioned: ${message}`);
-    warn(`Couldn't provision the Paseo testnet file allowance: ${message}`);
+    if (!optional) throw new Error(`${profile.networkName} file allowance could not be provisioned: ${message}`);
+    warn(`Couldn't provision the ${profile.networkName} file allowance: ${message}`);
     note(`Check it locally:  pca storage ${name} status`);
     note(`Grant it only if needed:  pca storage ${name} grant`);
     note(`If the public testnet faucet is unavailable, use ${profile.consoleUrl}.`);
@@ -690,9 +765,9 @@ function printTestnetFileAllowanceGuide(cfg, seed, provisioned = null) {
     note(`The faucet transaction needs a verified status check:  pca storage ${cfg.name} status`);
     note(`Then clear the local guard before another grant:  pca storage ${cfg.name} recover`);
   } else if (["authorized", "refreshed", "refreshed-and-authorized"].includes(provisioned?.action)) {
-    note("The local PCA CLI provisioned this derived account through the public Paseo testnet faucet.");
+    note(`The local PCA CLI provisioned this derived account through the public ${profile.networkName} faucet.`);
   } else if (provisioned?.action === "already-authorized") {
-    note("This derived account already has usable Paseo testnet storage allowance.");
+    note(`This derived account already has usable ${profile.networkName} storage allowance.`);
   } else {
     note(`Check it:  pca storage ${cfg.name} status`);
     note(`Grant it only if needed:  pca storage ${cfg.name} grant`);
@@ -800,9 +875,23 @@ async function cmdCreate(name, flags) {
   const transport = String(flags.transport ?? DEFAULT_TRANSPORT).toLowerCase();
   if (!TRANSPORTS.includes(transport)) fail(`--transport must be one of: ${TRANSPORTS.join(", ")}`);
   warnMissingBrainCli(brain);
-  const networkProfile = flags.network == null || flags.network === "paseo" ? "paseo" : null;
-  const endpoint = networkProfile === "paseo" ? DEFAULT_ENDPOINT : String(flags.endpoint ?? flags.network);
-  const backendUrl = flags.backend ? String(flags.backend) : DEFAULT_BACKENDS.paseo;
+  const requestedNetwork = String(flags.network ?? DEFAULT_NETWORK_PROFILE);
+  const profile = configuredNetworkProfile(requestedNetwork);
+  if (!profile && !requestedNetwork.startsWith("wss://")) {
+    fail(`--network must be one of ${NAMED_NETWORK_IDS.join(", ")} or a full wss:// People endpoint.`);
+  }
+  const endpoint = String(flags.endpoint ?? profile?.peopleEndpoints[0] ?? requestedNetwork);
+  let endpointUrl;
+  try { endpointUrl = new URL(endpoint); }
+  catch { fail("--network/--endpoint must be a valid wss:// People endpoint."); }
+  if (endpointUrl.protocol !== "wss:" || endpointUrl.username || endpointUrl.password) {
+    fail("--network/--endpoint must be a credential-free wss:// People endpoint.");
+  }
+  const networkProfile = profile?.id ?? null;
+  const fileDeliveryProfile = FILE_DELIVERY_PROFILES[networkProfile] ?? null;
+  const backendUrl = flags.backend
+    ? String(flags.backend)
+    : profile?.identityBackendUrl ?? DEFAULT_BACKENDS.paseo;
   const allowInputs = [
     ...String(flags.allow ?? "").split(",").map((s) => s.trim()).filter(Boolean),
     ...(flags.owner ? [String(flags.owner)] : []),
@@ -850,6 +939,10 @@ async function cmdCreate(name, flags) {
   if (register && !/^[a-z]{6,}(\.\d{2})?$/.test(wantUsername)) {
     fail(`To register, the name/username must be 6+ lowercase letters. Pass --username <letters> (or --no-register).`);
   }
+  if (register && requiresIdentityRegistrationAuth({ networkProfile, backendUrl })
+      && !hasIdentityRegistrationCredential()) {
+    fail(`${identityCredentialMessage()}\n  Create without registering:  pca create ${name} --no-register`);
+  }
   // If a specific .NN was requested, check it's free BEFORE any crypto or
   // registration — a taken number should fail fast and friendly, not as a raw
   // backend error. (No request = the network auto-assigns a free number.)
@@ -874,7 +967,8 @@ async function cmdCreate(name, flags) {
   ok("Generated your bot's identity");
 
   fs.mkdirSync(botDir(name), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(secretPath(name), `${JSON.stringify({ mnemonic, seedHex: bytesToHex(seed) }, null, 2)}\n`, { mode: 0o600 });
+  const secret = { mnemonic, seedHex: bytesToHex(seed) };
+  saveSecret(name, secret);
   const config = {
     name, endpoint, backendUrl, brain, transport, allow, allowLabels,
     ...(Object.keys(t3amsTrustedSigningKeys).length > 0 ? { t3amsTrustedSigningKeys } : {}),
@@ -883,7 +977,9 @@ async function cmdCreate(name, flags) {
     ...(networkProfile ? { networkProfile } : {}),
     // Testnet uploads can spend a finite Bulletin allowance. Configure the
     // known HOP profile only for an allowlisted bot, never a public one.
-    ...(networkProfile === "paseo" && allow.length > 0 ? { fileDelivery: { profile: PASEO_TESTNET_FILE_DELIVERY.profile } } : {}),
+    ...(fileDeliveryProfile && allow.length > 0
+      ? { fileDelivery: { profile: fileDeliveryProfile.profile } }
+      : {}),
     ...(flags.model != null ? { model: flagValue(flags.model, "model") } : {}), // pin per-brain model
     bridgePort: portFlag(flags.port ?? 8799),
     bridgeToken: newBridgeToken(),
@@ -896,7 +992,7 @@ async function cmdCreate(name, flags) {
   if (register) {
     // Registration can fail or stay unconfirmed; the bot dir already exists, so
     // don't hard-exit — leave it resumable via `pca register`.
-    reg = await runRegistration(name, config, { mnemonic, wantUsername, digits: wantDigits, wait: flags.wait });
+    reg = await runRegistration(name, config, { secret, wantUsername, digits: wantDigits, wait: flags.wait });
   } else {
     note("Skipped registration (--no-register). Register later:  pca register " + name);
   }
@@ -938,7 +1034,7 @@ async function cmdCreate(name, flags) {
   if (config.fileDelivery) {
     console.log();
     printTestnetFileAllowanceGuide(config, seed, provisionedAllowance);
-  } else if (networkProfile === "paseo" && allow.length === 0) {
+  } else if (fileDeliveryProfile && allow.length === 0) {
     note("Testnet outbound file delivery is disabled for this public bot to protect a finite storage allowance.");
   }
 }
@@ -949,17 +1045,43 @@ async function cmdCreate(name, flags) {
 // on failure it explains how to retry, so a bot dir is never a dead end.
 // Returns "registered" | "pending" (claim ok, confirmation outstanding) |
 // "failed" (no claim happened) so callers can set an honest exit code.
-async function runRegistration(name, config, { mnemonic, wantUsername, digits, wait }) {
+async function runRegistration(name, config, { secret, wantUsername, digits, wait }) {
   if (BANDERSNATCH_BIN && !fs.existsSync(BANDERSNATCH_BIN)) {
     fail(`PCA_BANDERSNATCH_CLI points at ${BANDERSNATCH_BIN}, which doesn't exist.`);
   }
   const save = () => saveConfig(name, config);
   if (!config.username) {
-    if (!mnemonic) { warn(`No mnemonic stored for "${name}" (imported bot?), so it can't be registered here.`); return "failed"; }
+    if (!secret?.mnemonic) { warn(`No mnemonic stored for "${name}" (imported bot?), so it can't be registered here.`); return "failed"; }
     step("Registering your bot on the network…");
     let result;
     try {
-      result = await registerIdentity({ mnemonic, username: wantUsername, digits: digits ?? null, backendUrl: config.backendUrl, bandersnatchBin: BANDERSNATCH_BIN });
+      let identitySession = null;
+      if (requiresIdentityRegistrationAuth(config)) {
+        identitySession = await acquireIdentitySession({
+          backendUrl: config.backendUrl,
+          accessToken: process.env.PCA_IDENTITY_TOKEN,
+          enrollmentVoucher: process.env.PCA_IDENTITY_VOUCHER,
+          savedSession: secret.identityRegistrationSession,
+          persistSession: (session) => {
+            secret.identityRegistrationSession = session;
+            saveSecret(name, secret);
+          },
+        });
+        if (!identitySession) throw new Error(identityCredentialMessage());
+      } else if (process.env.PCA_IDENTITY_TOKEN?.trim()) {
+        identitySession = await acquireIdentitySession({
+          backendUrl: config.backendUrl,
+          accessToken: process.env.PCA_IDENTITY_TOKEN,
+        });
+      }
+      result = await registerIdentity({
+        mnemonic: secret.mnemonic,
+        username: wantUsername,
+        digits: digits ?? null,
+        backendUrl: config.backendUrl,
+        bandersnatchBin: BANDERSNATCH_BIN,
+        identityToken: identitySession?.token,
+      });
     } catch (e) {
       warn(`Registration didn't complete: ${e instanceof Error ? e.message : String(e)}`);
       note(`Retry when ready:  pca register ${name}`);
@@ -967,17 +1089,25 @@ async function runRegistration(name, config, { mnemonic, wantUsername, digits, w
     }
     config.username = result.username;
     save();
+    if (secret.identityRegistrationSession != null) {
+      delete secret.identityRegistrationSession;
+      saveSecret(name, secret);
+    }
     ok(`Registered as ${result.username}`);
   } else if (config.registered) {
     ok(`Already registered as ${config.username}.`); return "registered";
   } else {
+    if (secret?.identityRegistrationSession != null) {
+      delete secret.identityRegistrationSession;
+      saveSecret(name, secret);
+    }
     step(`Username ${config.username} already claimed; waiting for the network to confirm…`);
   }
   const waitMs = Number(wait ?? 180) * 1000;
   step(`Waiting for the network to confirm (up to ${Math.round(waitMs / 1000)}s)…`);
   let attested = false;
   try {
-    attested = await withPeopleApi(config.endpoint, (api) =>
+    attested = await withPeopleApi(config, (api) =>
       waitForAttestation(api, config.address, { timeoutMs: waitMs, onTick: () => process.stdout.write(".") }));
     process.stdout.write("\n");
   } catch (e) { process.stdout.write("\n"); warn(`Couldn't reach the network: ${e instanceof Error ? e.message : String(e)}`); }
@@ -998,7 +1128,7 @@ async function cmdRegister(name, flags) {
   const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
   const wantUsername = String(flags.username ?? cfg.username ?? name);
   const wantDigits = flags.digits ? String(flags.digits) : (/\.(\d{2})$/.exec(wantUsername)?.[1] ?? null);
-  const reg = await runRegistration(name, cfg, { mnemonic: secret.mnemonic, wantUsername, digits: wantDigits, wait: flags.wait });
+  const reg = await runRegistration(name, cfg, { secret, wantUsername, digits: wantDigits, wait: flags.wait });
   if (reg === "failed") process.exitCode = 1;
   else await provisionTestnetFileAllowance(name, cfg);
 }
@@ -1178,7 +1308,7 @@ async function cmdInfo(name) {
   let reachedNetwork = true;
   if (cfg.username && !cfg.registered) {
     try {
-      messageable = await withPeopleApi(cfg.endpoint, async (api) =>
+      messageable = await withPeopleApi(cfg, async (api) =>
         withTimeout(api.query.Resources.Consumers.getValue(cfg.address), 12_000, "network check")
           .then((consumer) => consumer?.identifier_key != null));
       if (messageable) { cfg.registered = true; saveConfig(name, cfg); }
@@ -1225,27 +1355,31 @@ function storageCommandUsage(name = "<botname>") {
 }
 
 // The storage command is intentionally a local operator command. Bot-core's
-// runtime never imports its fixed Paseo faucet helper.
+// runtime never imports the named-testnet faucet helper.
 async function cmdStorage(positional, flags = {}) {
   const [name, rawAction = "status", ...extra] = positional;
   if (!name) fail(storageCommandUsage());
   if (extra.length) fail(storageCommandUsage(name));
   const cfg = readConfig(name);
-  if (!configuredFileDelivery(cfg)) {
-    fail(`"${name}" has no managed private Paseo testnet file-delivery profile. Automatic allowance provisioning is unavailable.`);
+  const delivery = configuredFileDelivery(cfg);
+  if (!delivery) {
+    fail(`"${name}" has no managed private testnet file-delivery profile. Automatic allowance provisioning is unavailable.`);
   }
   const account = fileAllowanceAccountForBot(name);
   const action = String(rawAction).toLowerCase();
   if (action === "status") {
-    step(`Checking ${PASEO_TESTNET_FILE_DELIVERY.bulletinNetwork} file allowance…`);
-    const status = await getPaseoFileAllowanceStatus({ address: account.address });
+    step(`Checking ${delivery.bulletinNetwork} file allowance…`);
+    const status = await getTestnetFileAllowanceStatus({
+      address: account.address,
+      networkProfile: delivery.networkProfile,
+    });
     printFileAllowanceStatus(account, status);
-    const recoveryPending = readAllowanceProvisioningLock(account.address) != null;
+    const recoveryPending = readAllowanceProvisioningLock(delivery.networkProfile, account.address) != null;
     if (recoveryPending) {
       warn("A previous local faucet submission remains guarded until it is explicitly recovered.");
       note(`After verifying this status:  pca storage ${name} recover`);
     }
-    if (!hasSufficientPaseoFileAllowance(status)) {
+    if (!hasSufficientTestnetFileAllowance(status)) {
       note(recoveryPending
         ? `Grant or top it up only after recovery, if needed:  pca storage ${name} grant`
         : `Grant or top it up locally:  pca storage ${name} grant`);
@@ -1258,15 +1392,18 @@ async function cmdStorage(positional, flags = {}) {
     return;
   }
   if (action === "recover") {
-    step(`Checking ${PASEO_TESTNET_FILE_DELIVERY.bulletinNetwork} file allowance before recovery…`);
-    const status = await getPaseoFileAllowanceStatus({ address: account.address });
+    step(`Checking ${delivery.bulletinNetwork} file allowance before recovery…`);
+    const status = await getTestnetFileAllowanceStatus({
+      address: account.address,
+      networkProfile: delivery.networkProfile,
+    });
     printFileAllowanceStatus(account, status);
-    if (!readAllowanceProvisioningLock(account.address)) {
+    if (!readAllowanceProvisioningLock(delivery.networkProfile, account.address)) {
       note("No unresolved local faucet submission is recorded.");
       return;
     }
-    if (hasSufficientPaseoFileAllowance(status)) {
-      clearAllowanceProvisioningLock(account.address);
+    if (hasSufficientTestnetFileAllowance(status)) {
+      clearAllowanceProvisioningLock(delivery.networkProfile, account.address);
       ok("Verified allowance is sufficient; cleared the local recovery guard.");
       return;
     }
@@ -1276,7 +1413,7 @@ async function cmdStorage(positional, flags = {}) {
       process.exitCode = 1;
       return;
     }
-    clearAllowanceProvisioningLock(account.address);
+    clearAllowanceProvisioningLock(delivery.networkProfile, account.address);
     warn("Cleared the local recovery guard without submitting a faucet transaction.");
     note(`After verifying the prior transaction is no longer pending, grant only if needed:  pca storage ${name} grant`);
     return;
@@ -1333,6 +1470,7 @@ function cmdRun(name, flags = {}) {
     ...process.env,
     BOT_SEED_HEX: secret.seedHex,
     BOT_ENDPOINT: cfg.endpoint,
+    ...networkEnvironment(cfg),
     BOT_BRIDGE_PORT: String(bridgePort),
     BOT_BRIDGE_TOKEN: bridgeToken,
     BOT_ALLOWED_PEERS: cfg.allow.join(","),
@@ -1465,6 +1603,7 @@ async function cmdDeploy(name, flags) {
   const envLines = [
     envLine("BOT_SEED_HEX", secret.seedHex),
     envLine("BOT_ENDPOINT", cfg.endpoint),
+    ...Object.entries(networkEnvironment(cfg)).map(([key, value]) => envLine(key, value)),
     envLine("BOT_BRAIN", cfg.brain),
     envLine("BOT_TRANSPORT", transport),
     ...Object.entries(transportEnv).map(([key, value]) => envLine(key, value)),
@@ -1698,6 +1837,7 @@ async function deployHarnessStack(name, cfg, secret, flags, host, harness) {
   const botEnv = [
     envLine("BOT_SEED_HEX", secret.seedHex),
     envLine("BOT_ENDPOINT", cfg.endpoint),
+    ...Object.entries(networkEnvironment(cfg)).map(([key, value]) => envLine(key, value)),
     envLine("BOT_BRAIN", "bridge"),
     envLine("BOT_TRANSPORT", transport),
     ...Object.entries(transportEnv).map(([key, value]) => envLine(key, value)),
@@ -2122,7 +2262,7 @@ function usage() {
   pca project <name> [add <alias> <path> | rm <alias>]   projects a direct-engine bot can work in
                                        (in chat: /project <alias>[@branch] — branches get isolated git worktrees)
   pca model <name> [show|set|allow|lock|open]            inspect or set a direct bot's model policy
-  pca storage <name> [status|grant|recover]  check, provision, or recover the private Paseo testnet file allowance
+  pca storage <name> [status|grant|recover]  check, provision, or recover a private named-testnet file allowance
   pca t3ams setup <path-to-t3ams-spa>  build + install the local T3ams SDK (once, before the first T3ams bot)
   pca trust <name> [<owner> <key>]     list a T3ams bot's pending first-contact keys, or approve one
   pca info <name>                      show address + how to message it
@@ -2148,7 +2288,14 @@ create flags:
   --greet          (run/deploy) the bot opens the chat with its owner on first start — proof of life
   --no-register    create the identity locally without registering (finish later with pca register)
   --wait <secs>    how long to wait for on-chain confirmation (default 180)
-  --network <ep>   target People network: paseo (default) or a full wss:// endpoint. Private Paseo bots get the named testnet file-delivery profile and local automatic allowance provisioning.
+  --network <ep>   target People network: paseo (default), devnet, or a compatible full wss:// endpoint. Private named-testnet bots get automatic file-delivery setup and local allowance provisioning.
+
+Products Devnet (--network devnet) username writes require a single-use operator
+voucher. Read it without adding it to shell history, then export it for create/register:
+  read -s PCA_IDENTITY_VOUCHER
+  export PCA_IDENTITY_VOUCHER
+PCA_IDENTITY_TOKEN may instead supply an already-issued backend bearer token.
+Default Paseo registration does not require either credential.
 
 model controls:  show current policy  ·  set <model> pins the default model  ·  allow <a,b>
   restricts chat-side switching  ·  lock disables it  ·  open permits it only for allowlisted bots

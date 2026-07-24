@@ -19,7 +19,8 @@
 // on-chain identifier-key lookup. No faucet-specific code (coinage/stripe/etc.).
 //
 // Env: BOT_SEED_HEX (root mini-secret),
-//   BOT_ENDPOINT (default Paseo), BOT_BRIDGE_PORT (8799), BOT_BRIDGE_HOST (127.0.0.1),
+//   BOT_ENDPOINT (default Paseo Next v2), BOT_NETWORK_PROFILE (devnet|paseo),
+//   BOT_BRIDGE_PORT (8799), BOT_BRIDGE_HOST (127.0.0.1),
 //   BOT_ACK_TEXT, BOT_ALLOWED_PEERS (comma-sep peer account hexes; empty = allow all),
 //   BOT_REQUEST_LOOKBACK_DAYS (7), BOT_REQUEST_FUTURE_DAYS (2), BOT_POLL_MS (2000),
 //   BOT_THINKING_TEXT + BOT_THINKING_AFTER_MS (5000) — ack sent if no reply by then,
@@ -82,7 +83,14 @@ import { ToolPolicyError, hasToolCapability, toolPolicyFromEnvironment, toolPoli
 import { createKeyedDispatcher } from "./lib/keyed-dispatcher.mjs";
 import { createClient as createPapiClient } from "polkadot-api";
 import { getWsProvider, WsEvent } from "polkadot-api/ws";
-import { paseoPeopleNext } from "./lib/descriptors.mjs";
+import { paseoPeopleNext, productsDevnetPeople } from "./lib/descriptors.mjs";
+import {
+  DEFAULT_NETWORK_PROFILE,
+  PASEO,
+  PRODUCTS_DEVNET,
+  configuredNetworkProfile,
+  peopleEndpointsFor,
+} from "./lib/network-config.mjs";
 import { createLazyClient, createPapiStatementStoreAdapter } from "@novasamatech/statement-store";
 import { ss58Address } from "@polkadot-labs/hdkd-helpers";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
@@ -124,8 +132,17 @@ const numberEnv = (name, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER, int
   }
   return value;
 };
-const DEFAULT_ENDPOINT = "wss://paseo-people-next-system-rpc.polkadot.io";
-const endpoint = env.BOT_ENDPOINT ?? DEFAULT_ENDPOINT;
+const explicitNetworkProfile = (env.BOT_NETWORK_PROFILE ?? "").trim();
+const networkProfile = explicitNetworkProfile
+  ? configuredNetworkProfile(explicitNetworkProfile)
+  : env.BOT_ENDPOINT?.trim() ? null : configuredNetworkProfile(DEFAULT_NETWORK_PROFILE);
+if (explicitNetworkProfile && !networkProfile) {
+  console.error("BOT_NETWORK_PROFILE must be devnet, paseo, or empty for a compatible custom endpoint");
+  process.exit(2);
+}
+const endpoint = env.BOT_ENDPOINT?.trim() || networkProfile?.peopleEndpoints[0] || PRODUCTS_DEVNET.peopleEndpoints[0];
+const endpoints = peopleEndpointsFor(endpoint, networkProfile?.id);
+const peopleDescriptor = networkProfile?.id === PASEO.id ? paseoPeopleNext : productsDevnetPeople;
 const seedHex = (env.BOT_SEED_HEX ?? "").trim();
 const bridgePort = numberEnv("BOT_BRIDGE_PORT", 8799, { min: 0, max: 65_535 });
 // The bridge exposes decrypted inbound messages and can publish as the bot.
@@ -573,15 +590,15 @@ if (hopUploadNode) {
 // peers). Note a disconnected socket does NOT fail requests — they're buffered
 // and re-sent on reconnect — so socket state and per-call timeouts are the two
 // outage signals; query success alone can't distinguish "empty" from "down".
-const wsProvider = getWsProvider(endpoint);
+const wsProvider = getWsProvider(endpoints);
 const lazyClient = createLazyClient(wsProvider);
 const statementStore = createPapiStatementStoreAdapter(lazyClient);
-const papiProvider = getWsProvider(endpoint);
+const papiProvider = getWsProvider(endpoints);
 const socketConnected = (p) => p.getStatus?.().type === WsEvent.CONNECTED;
 const chainConnected = () => socketConnected(wsProvider) && socketConnected(papiProvider);
 const requestRpc = lazyClient.getRequestFn();
 const papiClient = createPapiClient(papiProvider);
-const peopleApi = papiClient.getTypedApi(paseoPeopleNext);
+const peopleApi = papiClient.getTypedApi(peopleDescriptor);
 // Every chain submit shares the query deadline: submitAppStatement retries
 // rejections, but a hung socket never rejects — it would await forever.
 const submitBounded = (args) => withTimeout(submitAppStatement(requestRpc, args), queryTimeoutMs, "statement submit");

@@ -59,9 +59,11 @@ and prints a link. Open it — or search for the username in the Polkadot app �
 and send a message. `--greet` makes the bot message its owner first, as a
 proof of life.
 
-The project currently targets the Paseo testnet. From a source checkout, run
-`npm install` at the repo root and use `npm run pca -- <command>` in place of
-`pca <command>`.
+The default is Paseo Next v2. Polkadot Products Devnet remains available with
+`pca create … --network devnet`; its identity backend requires a single-use
+operator enrollment voucher or bearer token for username writes. From a source
+checkout, run `npm install` at the repo root and use
+`npm run pca -- <command>` in place of `pca <command>`.
 
 The same flow works for [T3ams](https://www.shawntabrizi.com/polkadot-chat-agents/guide/t3ams)
 bots with `--transport t3ams` — one extra setup command (`pca t3ams setup`)
@@ -102,9 +104,11 @@ Before deploying it for real use cases, you are responsible for:
 - Securing your own fork or deployment environment (keys, secrets, network configuration)
 - Tracking the latest tagged release/commits for security fixes; older releases are not backported (exceptions might apply)
 
-In particular, `~/.pca/bots/<name>/secret.json` holds the bot's root seed —
-whoever has it controls the bot — and `session-state.json` holds the session
-keys for open conversations. Back them up and never commit them.
+In particular, `~/.pca/bots/<name>/secret.json` holds the bot's root seed—and
+may temporarily hold a refreshable Devnet registration session while a
+username claim is being retried—so whoever has it controls the bot.
+`session-state.json` holds the session keys for open conversations. Back them
+up and never commit them.
 
 For Parity's security disclosure process, and Bug Bounty program, feel free to visit: https://parity.io/bug-bounty
 

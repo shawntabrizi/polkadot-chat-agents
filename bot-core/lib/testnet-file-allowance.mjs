@@ -1,31 +1,54 @@
-// Internal CLI helper for testnet-only Bulletin file allowance provisioning.
+// Internal CLI helper for named-testnet Bulletin file allowance provisioning.
 //
-// Paseo's public Bulletin Faucet signs TransactionStorage.authorize_account
-// with the well-known //Eve development key. This helper performs that exact
-// fixed-network operation locally so bot operators do not need to use the web
-// console. It is deliberately not configurable: production and custom network
-// provisioning require their own authorization flows and must never inherit a
-// public development signer.
+// The supported testnets' public Bulletin Faucets sign
+// TransactionStorage.authorize_account with the well-known //Eve development
+// key. This helper performs that operation only for named, genesis-pinned
+// profiles. Production and custom network provisioning require their own
+// authorization flows and must never inherit a public development signer.
 
 import { DEV_PHRASE, mnemonicToMiniSecret } from "@polkadot-labs/hdkd-helpers";
 import { createClient, Enum } from "polkadot-api";
 import { getPolkadotSigner } from "polkadot-api/signer";
 import { getWsProvider } from "polkadot-api/ws";
-import { bulletinPaseoNextV2 } from "./descriptors.mjs";
+import { bulletinPaseoNextV2, productsDevnetBulletin } from "./descriptors.mjs";
+import {
+  DEFAULT_NETWORK_PROFILE,
+  PASEO,
+  PRODUCTS_DEVNET,
+} from "./network-config.mjs";
 import { withTimeout } from "../vendor/lib/async-utils.mjs";
 import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
 
-export const PASEO_BULLETIN_RPC = "wss://paseo-bulletin-next-rpc.polkadot.io";
+const ALLOWANCE_NETWORKS = Object.freeze({
+  [PRODUCTS_DEVNET.id]: Object.freeze({
+    id: PRODUCTS_DEVNET.id,
+    name: PRODUCTS_DEVNET.bulletin.name,
+    rpcEndpoint: PRODUCTS_DEVNET.bulletin.rpcEndpoint,
+    descriptor: productsDevnetBulletin,
+  }),
+  [PASEO.id]: Object.freeze({
+    id: PASEO.id,
+    name: PASEO.bulletin.name,
+    rpcEndpoint: PASEO.bulletin.rpcEndpoint,
+    descriptor: bulletinPaseoNextV2,
+  }),
+});
+
+export function testnetFileAllowanceNetwork(profileId = DEFAULT_NETWORK_PROFILE) {
+  const network = ALLOWANCE_NETWORKS[profileId];
+  if (!network) throw new Error(`No managed testnet file allowance is configured for network profile "${String(profileId)}"`);
+  return network;
+}
 // Match Playground CLI's automatic testnet allocation. This clears bot-core's
 // 50 MiB file cap with room for HOP encryption and metadata overhead.
-export const PASEO_FILE_ALLOWANCE_TRANSACTIONS = 1_000;
-export const PASEO_FILE_ALLOWANCE_BYTES = 100_000_000n;
-export const PASEO_FILE_ALLOWANCE_MIN_TRANSACTIONS = 32;
-export const PASEO_FILE_ALLOWANCE_MIN_BYTES = 64n * 1024n * 1024n;
+export const TESTNET_FILE_ALLOWANCE_TRANSACTIONS = 1_000;
+export const TESTNET_FILE_ALLOWANCE_BYTES = 100_000_000n;
+export const TESTNET_FILE_ALLOWANCE_MIN_TRANSACTIONS = 32;
+export const TESTNET_FILE_ALLOWANCE_MIN_BYTES = 64n * 1024n * 1024n;
 // Do not call an active authorization healthy when it is about to expire. The
 // Bulletin pallet keeps the old expiry on an unexpired authorize_account call.
-export const PASEO_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS = 256;
-export const PASEO_FILE_ALLOWANCE_TIMEOUT_MS = 30_000;
+export const TESTNET_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS = 256;
+export const TESTNET_FILE_ALLOWANCE_TIMEOUT_MS = 30_000;
 const AT_BEST = Object.freeze({ at: "best" });
 const inFlightProvisioning = new Map();
 const unresolvedProvisioning = new Set();
@@ -33,11 +56,11 @@ const unresolvedProvisioning = new Set();
 // A submission can reach the chain after the local RPC deadline. Callers must
 // check status before considering another grant, otherwise an automatic retry
 // would add another finite faucet allocation.
-export class PaseoAllowanceFinalizationUnknownError extends Error {
-  constructor(cause = null) {
-    super("The Paseo Bulletin Faucet submission may have reached the chain, but finalization could not be confirmed. Check allowance status before retrying.");
-    this.name = "PaseoAllowanceFinalizationUnknownError";
-    this.code = "PASEO_ALLOWANCE_FINALIZATION_UNKNOWN";
+export class TestnetAllowanceFinalizationUnknownError extends Error {
+  constructor(networkName, cause = null) {
+    super(`The ${networkName} Faucet submission may have reached the chain, but finalization could not be confirmed. Check allowance status before retrying.`);
+    this.name = "TestnetAllowanceFinalizationUnknownError";
+    this.code = "TESTNET_ALLOWANCE_FINALIZATION_UNKNOWN";
     if (cause != null) this.cause = cause;
   }
 }
@@ -62,7 +85,7 @@ function remainingExtent(authorization, allowanceField, usedField) {
   return remaining > 0n ? remaining : 0n;
 }
 
-export function describePaseoFileAllowance(authorization, currentBlock) {
+export function describeTestnetFileAllowance(authorization, currentBlock) {
   const expiresAt = expirationBlock(authorization);
   const block = integer(currentBlock);
   const remainingTransactions = remainingExtent(authorization, "transactions_allowance", "transactions");
@@ -81,33 +104,33 @@ export function describePaseoFileAllowance(authorization, currentBlock) {
   };
 }
 
-function hasSufficientPaseoFileAllowanceQuota(status) {
+function hasSufficientTestnetFileAllowanceQuota(status) {
   return status.remainingTransactions != null
-    && status.remainingTransactions >= PASEO_FILE_ALLOWANCE_MIN_TRANSACTIONS
+    && status.remainingTransactions >= TESTNET_FILE_ALLOWANCE_MIN_TRANSACTIONS
     && status.remainingBytes != null
-    && status.remainingBytes >= PASEO_FILE_ALLOWANCE_MIN_BYTES;
+    && status.remainingBytes >= TESTNET_FILE_ALLOWANCE_MIN_BYTES;
 }
 
-export function hasSufficientPaseoFileAllowance(status) {
+export function hasSufficientTestnetFileAllowance(status) {
   return status.active
     && status.remainingBlocks != null
-    && status.remainingBlocks >= PASEO_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS
-    && hasSufficientPaseoFileAllowanceQuota(status);
+    && status.remainingBlocks >= TESTNET_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS
+    && hasSufficientTestnetFileAllowanceQuota(status);
 }
 
-function needsPaseoFileAllowanceRefresh(status) {
+function needsTestnetFileAllowanceRefresh(status) {
   return status.active
     && status.remainingBlocks != null
-    && status.remainingBlocks < PASEO_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS;
+    && status.remainingBlocks < TESTNET_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS;
 }
 
-export function createPaseoFaucetSigner() {
+export function createTestnetFaucetSigner() {
   const pair = deriveSr25519PairFromSeed(mnemonicToMiniSecret(DEV_PHRASE), "//Eve");
   return getPolkadotSigner(pair.publicKey, "Sr25519", pair.sign);
 }
 
-export function createPaseoBulletinClient() {
-  return createClient(getWsProvider(PASEO_BULLETIN_RPC));
+export function createTestnetBulletinClient(networkProfile = DEFAULT_NETWORK_PROFILE) {
+  return createClient(getWsProvider(testnetFileAllowanceNetwork(networkProfile).rpcEndpoint));
 }
 
 function normalizedAllowanceAddress(address) {
@@ -117,28 +140,28 @@ function normalizedAllowanceAddress(address) {
   return address.trim();
 }
 
-async function assertPaseoBulletinGenesis(client, timeoutMs) {
-  const expected = String(bulletinPaseoNextV2.genesis ?? "").toLowerCase();
+async function assertTestnetBulletinGenesis(client, network, timeoutMs) {
+  const expected = String(network.descriptor.genesis ?? "").toLowerCase();
   if (!/^0x[0-9a-f]{64}$/.test(expected)) {
-    throw new Error("The bundled Paseo Bulletin descriptor has no valid genesis hash");
+    throw new Error(`The bundled ${network.name} descriptor has no valid genesis hash`);
   }
   const chainSpec = await withTimeout(
     client.getChainSpecData(),
     timeoutMs,
-    "Paseo Bulletin chain identity query",
+    `${network.name} chain identity query`,
   );
   const actual = String(chainSpec?.genesisHash ?? "").toLowerCase();
   if (actual !== expected) {
-    throw new Error(`Refusing to use the Paseo Bulletin Faucet on an unexpected chain (expected ${expected}, received ${actual || "no genesis hash"})`);
+    throw new Error(`Refusing to use the ${network.name} Faucet on an unexpected chain (expected ${expected}, received ${actual || "no genesis hash"})`);
   }
 }
 
-async function readAllowance(api, address, timeoutMs) {
+async function readAllowance(api, address, networkName, timeoutMs) {
   const [authorization, block] = await withTimeout(Promise.all([
     api.query.TransactionStorage.Authorizations.getValue(Enum("Account", address), AT_BEST),
     api.query.System.Number.getValue(AT_BEST),
-  ]), timeoutMs, "Paseo Bulletin allowance query");
-  return describePaseoFileAllowance(authorization, block);
+  ]), timeoutMs, `${networkName} allowance query`);
+  return describeTestnetFileAllowance(authorization, block);
 }
 
 function pendingAllowanceStatus() {
@@ -154,7 +177,8 @@ function pendingAllowanceStatus() {
 }
 
 async function submitFaucetTransaction({
-  address,
+  provisioningKey,
+  networkName,
   operation,
   transaction,
   signer,
@@ -170,20 +194,20 @@ async function submitFaucetTransaction({
     result = await withTimeout(
       transaction.signAndSubmit(signer),
       timeoutMs,
-      `Paseo Bulletin Faucet ${operation} transaction`,
+      `${networkName} Faucet ${operation} transaction`,
     );
   } catch (error) {
     // Once signAndSubmit has started, a timeout or transport failure is
     // ambiguous: the signed extrinsic may finalize after the client closes.
-    unresolvedProvisioning.add(address);
-    throw new PaseoAllowanceFinalizationUnknownError(error);
+    unresolvedProvisioning.add(provisioningKey);
+    throw new TestnetAllowanceFinalizationUnknownError(networkName, error);
   }
   if (result?.ok === false) {
-    throw new Error(`Paseo Bulletin Faucet ${operation} transaction was finalized without success`);
+    throw new Error(`${networkName} Faucet ${operation} transaction was finalized without success`);
   }
   if (result?.ok !== true) {
-    unresolvedProvisioning.add(address);
-    throw new PaseoAllowanceFinalizationUnknownError();
+    unresolvedProvisioning.add(provisioningKey);
+    throw new TestnetAllowanceFinalizationUnknownError(networkName);
   }
   return result;
 }
@@ -201,8 +225,10 @@ function shareProvisioning(address, provision) {
   return run;
 }
 
-async function provisionPaseoFileAllowance({
+async function provisionTestnetFileAllowance({
   address,
+  network,
+  provisioningKey,
   makeClient,
   createSigner,
   timeoutMs,
@@ -212,21 +238,22 @@ async function provisionPaseoFileAllowance({
   try {
     // The signer is a public development key. Verify the fixed genesis before
     // obtaining a typed API or constructing a transaction with it.
-    await assertPaseoBulletinGenesis(client, timeoutMs);
-    const api = client.getTypedApi(bulletinPaseoNextV2);
-    const before = await readAllowance(api, address, timeoutMs);
-    if (hasSufficientPaseoFileAllowance(before)) {
+    await assertTestnetBulletinGenesis(client, network, timeoutMs);
+    const api = client.getTypedApi(network.descriptor);
+    const before = await readAllowance(api, address, network.name, timeoutMs);
+    if (hasSufficientTestnetFileAllowance(before)) {
       return { action: "already-authorized", ...before };
     }
 
     const signer = createSigner();
     const transactions = [];
-    const refreshNeeded = needsPaseoFileAllowanceRefresh(before);
+    const refreshNeeded = needsTestnetFileAllowanceRefresh(before);
     if (refreshNeeded) {
       transactions.push({
         operation: "refresh",
         result: await submitFaucetTransaction({
-          address,
+          provisioningKey,
+          networkName: network.name,
           operation: "refresh",
           transaction: api.tx.TransactionStorage.refresh_account_authorization({ who: address }),
           signer,
@@ -235,16 +262,17 @@ async function provisionPaseoFileAllowance({
         }),
       });
     }
-    if (!before.active || !hasSufficientPaseoFileAllowanceQuota(before)) {
+    if (!before.active || !hasSufficientTestnetFileAllowanceQuota(before)) {
       transactions.push({
         operation: "authorize",
         result: await submitFaucetTransaction({
-          address,
+          provisioningKey,
+          networkName: network.name,
           operation: "authorize",
           transaction: api.tx.TransactionStorage.authorize_account({
             who: address,
-            transactions: PASEO_FILE_ALLOWANCE_TRANSACTIONS,
-            bytes: PASEO_FILE_ALLOWANCE_BYTES,
+            transactions: TESTNET_FILE_ALLOWANCE_TRANSACTIONS,
+            bytes: TESTNET_FILE_ALLOWANCE_BYTES,
           }),
           signer,
           timeoutMs,
@@ -261,7 +289,7 @@ async function provisionPaseoFileAllowance({
     // status output useful. Do not fall back to the pre-grant status: it would
     // incorrectly display a finalized grant as "not authorized".
     try {
-      const after = await readAllowance(api, address, timeoutMs);
+      const after = await readAllowance(api, address, network.name, timeoutMs);
       return {
         action,
         ...after,
@@ -273,7 +301,7 @@ async function provisionPaseoFileAllowance({
       // A finalized faucet call without a verified post-state must not be
       // automatically retried: authorize_account is additive and the query
       // outage may be hiding the allocation that just landed.
-      unresolvedProvisioning.add(address);
+      unresolvedProvisioning.add(provisioningKey);
       return {
         action,
         ...pendingAllowanceStatus(),
@@ -287,38 +315,53 @@ async function provisionPaseoFileAllowance({
   }
 }
 
-// Check and, only when needed, authorize an account using the public Paseo
-// faucet. Dependency injection keeps the transaction decision testable without
-// a real network or faucet submission.
-export async function ensurePaseoFileAllowance({
+// Check and, only when needed, authorize an account on a supported named
+// testnet. Dependency injection keeps the decision testable without a real
+// network or faucet submission.
+export async function ensureTestnetFileAllowance({
   address,
-  createClient: makeClient = createPaseoBulletinClient,
-  createSigner = createPaseoFaucetSigner,
-  timeoutMs = PASEO_FILE_ALLOWANCE_TIMEOUT_MS,
+  networkProfile = DEFAULT_NETWORK_PROFILE,
+  createClient: makeClient = null,
+  createSigner = createTestnetFaucetSigner,
+  timeoutMs = TESTNET_FILE_ALLOWANCE_TIMEOUT_MS,
   onSubmissionStarting = null,
 } = {}) {
   const target = normalizedAllowanceAddress(address);
-  if (unresolvedProvisioning.has(target)) throw new PaseoAllowanceFinalizationUnknownError();
-  return shareProvisioning(target, () => provisionPaseoFileAllowance({
+  const network = testnetFileAllowanceNetwork(networkProfile);
+  const provisioningKey = `${network.id}:${target}`;
+  if (unresolvedProvisioning.has(provisioningKey)) {
+    throw new TestnetAllowanceFinalizationUnknownError(network.name);
+  }
+  return shareProvisioning(provisioningKey, () => provisionTestnetFileAllowance({
     address: target,
-    makeClient,
+    network,
+    provisioningKey,
+    makeClient: makeClient ?? (() => createTestnetBulletinClient(network.id)),
     createSigner,
     timeoutMs,
     onSubmissionStarting,
   }));
 }
 
-export async function getPaseoFileAllowanceStatus({
+export async function getTestnetFileAllowanceStatus({
   address,
-  createClient: makeClient = createPaseoBulletinClient,
-  timeoutMs = PASEO_FILE_ALLOWANCE_TIMEOUT_MS,
+  networkProfile = DEFAULT_NETWORK_PROFILE,
+  createClient: makeClient = null,
+  timeoutMs = TESTNET_FILE_ALLOWANCE_TIMEOUT_MS,
 } = {}) {
   const target = normalizedAllowanceAddress(address);
-  const client = makeClient();
+  const network = testnetFileAllowanceNetwork(networkProfile);
+  const provisioningKey = `${network.id}:${target}`;
+  const client = (makeClient ?? (() => createTestnetBulletinClient(network.id)))();
   try {
-    await assertPaseoBulletinGenesis(client, timeoutMs);
-    const status = await readAllowance(client.getTypedApi(bulletinPaseoNextV2), target, timeoutMs);
-    if (hasSufficientPaseoFileAllowance(status)) unresolvedProvisioning.delete(target);
+    await assertTestnetBulletinGenesis(client, network, timeoutMs);
+    const status = await readAllowance(
+      client.getTypedApi(network.descriptor),
+      target,
+      network.name,
+      timeoutMs,
+    );
+    if (hasSufficientTestnetFileAllowance(status)) unresolvedProvisioning.delete(provisioningKey);
     return status;
   } finally {
     client.destroy?.();

@@ -29,7 +29,7 @@ import {
 } from "./vendor/app-chat-codec.mjs";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
 
-const DEFAULT_ENDPOINT = "wss://paseo-people-next-system-rpc.polkadot.io";
+const DEFAULT_ENDPOINT = "wss://people-paseo.rotko.net";
 const FLAGS = new Set(["seed-hex", "bot-account", "bot-identifier-key", "endpoint", "wait-secs"]);
 
 function parseArgs(argv) {

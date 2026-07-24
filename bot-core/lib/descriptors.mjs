@@ -3,4 +3,9 @@
 // consumer hoisting), so `prepare` generates at dev-install/pack time and this
 // module re-exports the committed-to-tarball dist by relative path — no
 // file:-protocol dependency involved.
-export { paseoPeopleNext, bulletinPaseoNextV2 } from "../vendor/descriptors/index.js";
+export {
+  paseoPeopleNext,
+  bulletinPaseoNextV2,
+  productsDevnetPeople,
+  productsDevnetBulletin,
+} from "../vendor/descriptors/index.js";

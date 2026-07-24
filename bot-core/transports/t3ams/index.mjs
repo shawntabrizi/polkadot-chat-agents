@@ -53,12 +53,25 @@ import { deriveSr25519PairFromSeed } from "../../vendor/lib/wallet-keys.mjs";
 import { submitAppStatement, scaleEncodeBytes } from "../../vendor/app-chat-codec.mjs";
 import { createLazyClient } from "@novasamatech/statement-store";
 import { getWsProvider, WsEvent } from "polkadot-api/ws";
+import {
+  DEFAULT_NETWORK_PROFILE,
+  PRODUCTS_DEVNET,
+  configuredNetworkProfile,
+  peopleEndpointsFor,
+} from "../../lib/network-config.mjs";
 
 const env = process.env;
 const enc = new TextEncoder();
-const DEFAULT_ENDPOINT = "wss://paseo-people-next-system-rpc.polkadot.io";
-const DEFAULT_BULLETIN_ENDPOINT = "wss://paseo-bulletin-next-rpc.polkadot.io";
-const endpoint = (env.BOT_ENDPOINT ?? DEFAULT_ENDPOINT).trim();
+const explicitNetworkProfile = (env.BOT_NETWORK_PROFILE ?? "").trim();
+const networkProfile = explicitNetworkProfile
+  ? configuredNetworkProfile(explicitNetworkProfile)
+  : env.BOT_ENDPOINT?.trim() ? null : configuredNetworkProfile(DEFAULT_NETWORK_PROFILE);
+if (explicitNetworkProfile && !networkProfile) {
+  console.error("BOT_NETWORK_PROFILE must be devnet, paseo, or empty for a compatible custom endpoint");
+  process.exit(2);
+}
+const endpoint = env.BOT_ENDPOINT?.trim() || networkProfile?.peopleEndpoints[0] || PRODUCTS_DEVNET.peopleEndpoints[0];
+const endpoints = peopleEndpointsFor(endpoint, networkProfile?.id);
 const seedHex = (env.BOT_SEED_HEX ?? "").trim();
 const transportName = (env.BOT_TRANSPORT ?? "").trim().toLowerCase();
 if (transportName !== "t3ams") {
@@ -290,7 +303,7 @@ const agentReplyOutboxMaxTotalBytes = numberEnv(
 // operator who wants metadata-only bot behavior.  Otherwise use the exact
 // Bulletin network configured by the current T3ams SPA.
 const bulletinRpc = env.BOT_T3AMS_BULLETIN_RPC == null
-  ? DEFAULT_BULLETIN_ENDPOINT
+  ? networkProfile?.bulletin.rpcEndpoint ?? ""
   : env.BOT_T3AMS_BULLETIN_RPC.trim();
 const t3amsHopAllowInsecure = env.BOT_T3AMS_HOP_ALLOW_INSECURE === "1"; // test-only ws:// mock support
 const t3amsHopTimeoutMs = numberEnv("BOT_T3AMS_HOP_TIMEOUT_MS", 120_000, { min: 1000, max: 86_400_000 });
@@ -396,7 +409,7 @@ const publicWorkspaceCap = numberEnv("BOT_T3AMS_PUBLIC_WORKSPACE_CAP", 8, { min:
 const publicPeerAdmissions = numberEnv("BOT_T3AMS_PUBLIC_PEER_ADMISSIONS_PER_HOUR", 32, { min: 1, max: 256 });
 const publicWorkspaceAdmissions = numberEnv("BOT_T3AMS_PUBLIC_WORKSPACE_ADMISSIONS_PER_HOUR", 4, { min: 1, max: 256 });
 
-const wsProvider = getWsProvider(endpoint);
+const wsProvider = getWsProvider(endpoints);
 const lazyClient = createLazyClient(wsProvider);
 const requestRpc = lazyClient.getRequestFn();
 const isChainConnected = () => wsProvider.getStatus?.().type === WsEvent.CONNECTED;

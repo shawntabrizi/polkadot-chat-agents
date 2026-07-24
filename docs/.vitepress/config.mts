@@ -35,6 +35,7 @@ export default defineConfig({
           items: [
             { text: "Introduction", link: "/guide/introduction" },
             { text: "Create your first bot", link: "/guide/first-bot" },
+            { text: "Use Products Devnet", link: "/guide/devnet" },
             { text: "Deploy to a server", link: "/guide/deploy" },
             { text: "Private & public bots", link: "/guide/access" },
           ],

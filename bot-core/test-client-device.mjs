@@ -72,7 +72,7 @@ const expiryFactory = (attempt = 0) => {
   return p;
 };
 
-const lazy = createLazyClient(getWsProvider(opt("endpoint") ?? "wss://paseo-people-next-system-rpc.polkadot.io"));
+const lazy = createLazyClient(getWsProvider(opt("endpoint") ?? "wss://people-paseo.rotko.net"));
 const store = createPapiStatementStoreAdapter(lazy);
 const requestRpc = lazy.getRequestFn();
 

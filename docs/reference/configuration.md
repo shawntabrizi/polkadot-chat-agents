@@ -24,7 +24,9 @@ mirrors them, and if it and the code disagree, the code wins.
 commit or log it. The agent CLI a direct-engine bot spawns is deliberately
 *not* given this file. Its child environment is a scrubbed allowlist with the
 seed and all secrets removed; see [Private & public bots](/guide/access) for
-the security model.
+the security model. A local `secret.json` can also temporarily contain a
+refreshable identity-backend session while a Devnet username claim is
+incomplete; protect it to the same standard.
 
 ---
 
@@ -37,6 +39,7 @@ As `pca deploy` generates it (container paths shown):
 
 # identity & network
 BOT_SEED_HEX=0x2222…            # root mini-secret; wallet/chat/identifier keys derive from it (required)
+BOT_NETWORK_PROFILE=paseo       # paseo (default) | devnet; keeps matching off-chain services together
 BOT_ENDPOINT=wss://paseo-people-next-system-rpc.polkadot.io  # statement-store RPC node it polls & publishes to
 BOT_USERNAME=codebot.61         # registered network username (display/search); cosmetic to the transport
 BOT_ALLOWED_PEERS=40d4fd…,7015… # peer account hexes allowed to message it. EMPTY = public (anyone)
@@ -74,6 +77,7 @@ log in the CLI once against the mounted home instead.
 
 ```sh
 BOT_SEED_HEX=0x…
+BOT_NETWORK_PROFILE=paseo
 BOT_ENDPOINT=wss://paseo-people-next-system-rpc.polkadot.io
 BOT_BRAIN=bridge                # hand each message to an external agent framework over the bridge
 BOT_ALLOWED_PEERS=40d4fd…,7015…
@@ -189,8 +193,8 @@ BOT_MEDIA_MAX_INFLIGHT_BYTES=33554432
 # trusted HOP host suffixes.
 BOT_HOP_ALLOWED_NODES=<trusted-hop-host>
 
-# Keep outbound HOP file delivery disabled. Private Paseo's automatic grant
-# intentionally does not apply to public bots; inbound /file put remains
+# Keep outbound HOP file delivery disabled. Named-testnet automatic grants
+# intentionally do not apply to public bots; inbound /file put remains
 # quota-bounded.
 # BOT_HOP_UPLOAD_NODE=
 ```
@@ -233,9 +237,31 @@ variables `pca deploy` writes into `bot.env` automatically.
 |---|---|---|
 | `BOT_TRANSPORT` | `polkadot-app` | `polkadot-app` or `t3ams`. Set by `pca create --transport …`; selects the matching runner. **gen** |
 | `BOT_SEED_HEX` | — (required) | Root mini-secret; all keys derive from it. **gen** |
-| `BOT_ENDPOINT` | Paseo people-next wss | Statement-store RPC node to poll and publish to. **gen** |
+| `BOT_NETWORK_PROFILE` | `paseo` when no custom endpoint is supplied | `paseo` or `devnet`; selects the matching People descriptor, fallback RPCs, identity service, and Bulletin service. Empty means a compatible custom endpoint. **gen** |
+| `BOT_ENDPOINT` | Paseo Next v2 People wss | Statement-store RPC node to poll and publish to. **gen** |
 | `BOT_USERNAME` | `""` | Registered network username (display/search only). **gen** |
 | `BOT_PEER_IDENTIFIER_KEYS` | `""` | `peerhex=keyhex,…` — pin identifier keys, skipping the on-chain lookup (tests / fixed fleets). |
+
+Named profiles are deliberately complete rather than aliases for one RPC:
+
+| Profile | People RPC | Identity backend | Bulletin / HOP |
+|---|---|---|---|
+| `paseo` (default) | `wss://paseo-people-next-system-rpc.polkadot.io` | `https://identity-backend-next.parity-testnet.parity.io` | `wss://paseo-bulletin-next-rpc.polkadot.io` and the two `paseo-hop-next-*` nodes |
+| `devnet` | `wss://people-paseo.rotko.net` (with the other Products Devnet community RPCs as fallbacks) | `https://polkadot-app.api.polkadotcommunity.foundation` | `wss://bullet.sik.rocks` plus the Products Devnet HOP node set |
+
+Two CLI-only environment variables authorize username registration; neither is
+passed to a running or deployed bot:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PCA_IDENTITY_VOUCHER` | — | Single-use, base64-encoded 32-byte Products Devnet enrollment voucher. `pca` exchanges it for a backend session and never saves the voucher. |
+| `PCA_IDENTITY_TOKEN` | — | Existing identity-backend bearer token for controlled automation. The voucher flow is preferred for normal headless enrollment. |
+
+If a Devnet voucher has been exchanged but registration has not completed,
+`secret.json` temporarily stores the access and refresh tokens so
+`pca register <name>` can retry without consuming another voucher. The session
+is removed after the username claim succeeds. Paseo registration does not use
+these variables.
 
 ### Access control
 
@@ -411,24 +437,32 @@ mnemonic-derived Bandersnatch person proof and a live `AsResources`
 transaction extension. Keep that proof off the VPS. `/health` reports the
 allowance account and whether an upload node is configured.
 
-### Paseo testnet file delivery
+### Named-testnet file delivery
 
-For a private bot created with the named `--network paseo` profile (the default),
-`pca` automatically writes the matching HOP settings:
+For a private bot on Paseo (the default), `pca` automatically writes:
 
 ```sh
 BOT_HOP_UPLOAD_NODE=wss://paseo-hop-next-0.polkadot.io
 BOT_HOP_ALLOWED_NODES=paseo-hop-next-0.polkadot.io,paseo-hop-next-1.polkadot.io
 ```
 
+The explicit `--network devnet` profile writes the Products Devnet settings
+instead:
+
+```sh
+BOT_HOP_UPLOAD_NODE=wss://bullet.sik.rocks
+BOT_HOP_ALLOWED_NODES=bullet.sik.rocks,bulletin-paseo.tservices.es,bullet.tunastaking.eu
+```
+
 On a successful normal `pca create`, `pca register`, or non-dry-run `pca deploy`,
-the local CLI asks the public Bulletin Paseo Next v2 testnet faucet to provision
-the derived account. It leaves sufficient capacity alone, refreshes an allowance
-near expiry, and requests a bounded allocation only when capacity is missing or
-low. No Console visit is needed for normal onboarding, and the action never
-sends the bot mnemonic or a production person proof to the faucet. The derived
-SS58 account shown by `pca info <bot>` is the target, not the bot's main chat
-wallet, and the faucet's availability and quota remain testnet operator policy.
+the local CLI asks the selected profile's public Bulletin testnet faucet to
+provision the derived account. It leaves sufficient capacity alone, refreshes
+an allowance near expiry, and requests a bounded allocation only when capacity
+is missing or low. No Console visit is needed for normal onboarding, and the
+action never sends the bot mnemonic or a production person proof to the faucet.
+The derived SS58 account shown by `pca info <bot>` is the target, not the bot's
+main chat wallet, and faucet availability and quota remain testnet operator
+policy.
 
 Use `pca storage <bot> status` to inspect the result. Run `grant` only if the
 status says capacity is missing, low, or expired. Each attempt writes a local
@@ -560,7 +594,7 @@ opaque bridge media handle.
 | `BOT_T3AMS_REPLY_OUTBOX_MAX_BYTES` | max(one reply, min(128 MiB, `32 ×` one reply)) | Global serialized-byte cap for incomplete durable direct-agent final replies (up to 4 GiB). |
 | `BOT_T3AMS_ATTACHMENT_MAX_DURATION_MS` | 604800000 (7 days) | Maximum declared audio/video duration accepted as attachment metadata. Set `0` to permit only a zero duration; 31 days is the hard cap. |
 | `BOT_T3AMS_ATTACHMENT_MIME_TYPES` | `*/*` | Comma-separated admission policy. Exact MIME types (for example `image/png`) and `type/*` patterns (for example `image/*`) narrow the broad default. |
-| `BOT_T3AMS_BULLETIN_RPC` | `wss://paseo-bulletin-next-rpc.polkadot.io` | Trusted T3ams Bulletin RPC for encrypted downloads and uploads. Set explicitly empty for metadata-only mode. |
+| `BOT_T3AMS_BULLETIN_RPC` | Selected named profile (`wss://paseo-bulletin-next-rpc.polkadot.io` on default Paseo) | Trusted T3ams Bulletin RPC for encrypted downloads and uploads. `--network devnet` selects `wss://bullet.sik.rocks`; set explicitly empty for metadata-only mode. |
 | `BOT_T3AMS_HOP_ALLOW_INSECURE` | `0` | `1` permits insecure `ws://` only for a local test mock. |
 | `BOT_T3AMS_HOP_TIMEOUT_MS` | 120000 | Whole encrypted download/upload deadline. |
 | `BOT_T3AMS_HOP_RPC_FRAME_MAX_BYTES` | 4.5 MB | Largest accepted Bulletin/HOP RPC frame. |
@@ -685,8 +719,8 @@ durable completed turn without rerunning the model.
 Bulletin capacity is separate from the Statement Store allowance that pays for
 text, live edits, typing, and reactions. Before enabling outbound T3ams files,
 provision and monitor the T3ams Bulletin upload allowance independently. The
-default transport's `pca storage`/Paseo faucet flow does not preflight or grant
-that T3ams allowance.
+default transport's `pca storage` named-testnet faucet flow does not preflight
+or grant that T3ams allowance.
 
 The bridge token authorizes access to cached media and every file in every
 conversation vault, so do not publish the bridge port or inject that token

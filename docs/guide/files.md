@@ -127,13 +127,13 @@ Bulletin capacity.
 
 ### Default Polkadot-app return path
 
-For a private bot created with the default `--network paseo` profile, this works
-without a separate portal step. `pca create`, `pca register`, and a normal
-(non-dry-run) `pca deploy` use the local CLI to check a separate file-delivery
-account and request or refresh its fixed Paseo testnet allowance when needed.
-The allowance belongs to that separate account, not the bot's chat wallet, and
-the automatic Paseo testnet request never sends the bot seed or a production
-person proof to the faucet.
+For a private bot created on the default Paseo profile—or explicitly with
+`--network devnet`—this works without a separate portal step. `pca create`,
+`pca register`, and a normal (non-dry-run) `pca deploy` use the local CLI to
+check a separate file-delivery account and request or refresh the selected
+testnet's allowance when needed. The allowance belongs to that separate
+account, not the bot's chat wallet, and the automatic testnet request never
+sends the bot seed or a production person proof to the faucet.
 
 Check the allowance only when file return is not ready:
 
@@ -162,11 +162,12 @@ separately if the status still needs it.
 ## What is deliberately not automatic
 
 For the default Polkadot-app transport, the automatic allowance is limited to
-private bots on the named Paseo testnet profile. Public bots and custom network
-endpoints are excluded so strangers cannot spend a finite upload allowance by
-default. A public bot receives an attachment reference, but only downloads its
-bytes after you configure trusted `BOT_HOP_ALLOWED_NODES`; keep outbound file
-delivery disabled unless you have deliberately funded and bounded it.
+private bots on the named Products Devnet and Paseo profiles. Public bots and
+custom network endpoints are excluded so strangers cannot spend a finite
+upload allowance by default. A public bot receives an attachment reference,
+but only downloads its bytes after you configure trusted
+`BOT_HOP_ALLOWED_NODES`; keep outbound file delivery disabled unless you have
+deliberately funded and bounded it.
 
 T3ams has no automatic Bulletin upload grant. Public T3ams bots should keep the
 attachment count, size, MIME admission policy, media cache, file vault, and
@@ -176,7 +177,7 @@ way to make the bot fetch an arbitrary HTTP, filesystem, or data URL.
 
 Production needs an explicit local operator flow with the original
 mnemonic-derived person proof. Keep that proof off the VPS and out of the bot
-runtime. The [configuration reference](/reference/configuration#paseo-testnet-file-delivery)
+runtime. The [configuration reference](/reference/configuration#named-testnet-file-delivery)
 explains the runtime HOP settings; it does not automate production allocation.
 
 ## Framework bots
