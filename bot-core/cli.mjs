@@ -1508,7 +1508,7 @@ function runLocal(cmd, args, { capture = false } = {}) {
 // tag during every deploy.
 const DEPLOY_ENGINES = {
   echo:     { pkg: null },
-  claude:   { pkg: "@anthropic-ai/claude-code@2.1.207" },
+  claude:   { pkg: "@anthropic-ai/claude-code@2.1.220" },
   codex:    { pkg: "@openai/codex@0.144.1" },
   opencode: { pkg: "opencode-ai@1.17.18" },
 };
@@ -1854,7 +1854,7 @@ async function deployHarnessStack(name, cfg, secret, flags, host, harness) {
   let compose, setup, afterUp;
   if (harness === "openclaw") {
     compose = `services:\n${botService}\n  openclaw:\n    build: ./image\n    container_name: ${hn}\n    restart: unless-stopped\n${LOG_OPTS}    env_file:\n      - ./gateway.env\n    volumes:\n      - ./openclaw-home:/home/node\n      - ./plugin:/plugin:ro\n${harnessBotDependency}    command: ["openclaw", "gateway"]\n`;
-    files["image/Dockerfile"] = `FROM ${NODE_IMAGE}\nRUN npm install --global --no-audit --no-fund openclaw@2026.6.11 @anthropic-ai/claude-code@2.1.207 && npm cache clean --force\nENV HOME=/home/node\nWORKDIR /home/node\nUSER node\nCMD ["openclaw", "gateway"]\n`;
+    files["image/Dockerfile"] = `FROM ${NODE_IMAGE}\nRUN npm install --global --no-audit --no-fund openclaw@2026.6.11 @anthropic-ai/claude-code@2.1.220 && npm cache clean --force\nENV HOME=/home/node\nWORKDIR /home/node\nUSER node\nCMD ["openclaw", "gateway"]\n`;
     files["gateway.env"] = `${envLine("OPENCLAW_GATEWAY_TOKEN", randomBytes(32).toString("base64url"))}\n${envLine("POLKADOT_BRIDGE_TOKEN", bridgeToken)}\n`;
     // Runs inside the one-off setup container (home volume mounted) after `models set`
     // has created the config; merges in gateway mode + our channel.
