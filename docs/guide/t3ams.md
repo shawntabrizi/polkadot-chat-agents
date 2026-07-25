@@ -31,13 +31,22 @@ public npm.
 pca t3ams setup <path-to-t3ams-spa>    # once: build + install the T3ams SDK
 
 pca create teamhelper --transport t3ams --brain claude --owner yourname.42
-pca run teamhelper --greet
+BOT_T3AMS_TOPIC_NAMESPACE=<namespace> pca run teamhelper --greet
 ```
+
+**The topic namespace is not optional.** The T3ams app scopes every
+statement-store topic to its deployment's namespace — the first label of the
+host it is served from (`app.example.dot` → `app`; also shown in the app under
+Settings → Debug → topic context). A bot without the matching
+`BOT_T3AMS_TOPIC_NAMESPACE` derives unscoped topics and is silently deaf:
+healthy logs, zero messages. For a deployed bot, set the variable in the
+bot's `bot.env`.
 
 `--greet` makes the bot message you first: your T3ams client pairs with it
 automatically and the conversation appears with a greeting — no need to search
-for the bot. (Without `--greet`, find the bot by its username in T3ams and DM
-it instead.)
+for the bot. The greeting text itself arrives right after your app's accept
+completes the pairing (it cannot be encrypted before your app shares its key).
+(Without `--greet`, find the bot by its username in T3ams and DM it instead.)
 
 Either way, first contact needs one approval before the bot answers: the bot
 parks the signing key your account presented and logs it. Compare it with the
