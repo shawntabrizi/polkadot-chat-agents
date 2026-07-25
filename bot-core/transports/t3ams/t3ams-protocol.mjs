@@ -1585,6 +1585,9 @@ export function createT3amsProtocol({
         wsId: payload.wsId,
         signingPubKeyHex: bareHex(bcts.formatXID(identity.signingPublicKey.taggedCborData())),
         agreementPubKeyHex: identity.agreementPublicKey == null ? null : bareHex(bcts.formatXID(identity.agreementPublicKey)),
+        // The join expression itself carries no name; the app names the new
+        // member from the sealed payload (else it invents a placeholder).
+        senderName: displayName,
       };
       // Mirror the app's sealPayload exactly: a bare sealForRecipients seal,
       // which its decodeSealedInvitePayload opens via the subject leaf.
