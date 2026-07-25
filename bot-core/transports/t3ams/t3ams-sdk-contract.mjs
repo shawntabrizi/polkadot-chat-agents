@@ -53,6 +53,7 @@ export const T3AMS_SDK_FUNCTION_EXPORTS = Object.freeze([
   "removeReactionExpression",
   "restoreIdentity",
   "sealDMEnvelope",
+  "sealForRecipients",
   "sendChannelMessageExpression",
   "setTopicNamespace",
   "signGSTPRequest",
