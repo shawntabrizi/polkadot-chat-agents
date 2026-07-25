@@ -43,6 +43,7 @@ import { createT3amsLiveRevocation } from "./t3ams-live-revocation.mjs";
 import { installT3amsSubscriptionRouteSet } from "./t3ams-subscription-set.mjs";
 import { createT3amsKnownChats } from "./t3ams-known-chats.mjs";
 import { deliverAgentReplyBeforeArtifacts } from "./t3ams-agent-turn.mjs";
+import { computeT3amsHealth } from "./t3ams-health.mjs";
 import {
   agentSessionKeyForT3ams,
   bridgeReplyThreadRootForT3ams,
@@ -63,6 +64,8 @@ import {
 
 const env = process.env;
 const enc = new TextEncoder();
+const processStartedAt = Date.now() - Math.round(process.uptime() * 1000);
+const botCoreVersion = JSON.parse(fs.readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version;
 const explicitNetworkProfile = (env.BOT_NETWORK_PROFILE ?? "").trim();
 const networkProfile = explicitNetworkProfile
   ? configuredNetworkProfile(explicitNetworkProfile)
@@ -865,6 +868,9 @@ const subscriptions = new Map();
 const subscriptionRetryTimers = new Map();
 const subscriptionRetryAttempts = new Map();
 let subscriptionReconcileTimer = null;
+let lastStatementAt = null;
+let lastIngressPageAt = null;
+let lastSubscriptionRefreshAt = null;
 // A known DM needs both its carrier and ops route so user redactions/edits
 // reconcile before dispatch. Leave room for the default known-chat roster as
 // well as workspace control/channel routes.
@@ -954,8 +960,11 @@ const subscription = (id, topic, callback, accepts = () => true, { force = false
   let installationError = null;
   try {
     unsubscribe = subscribePages({ matchAll: [topic] }, (page) => {
+      lastIngressPageAt = Date.now();
       subscriptionRetryAttempts.delete(id);
-      for (const statement of page.statements ?? []) {
+      const statements = page.statements ?? [];
+      if (statements.length > 0) lastStatementAt = lastIngressPageAt;
+      for (const statement of statements) {
         const data = asBytes(statement.data);
         if (!(data instanceof Uint8Array)) continue;
         if (!accepts(statement)) continue;
@@ -2529,12 +2538,19 @@ const syncTopology = (change = null) => {
 // message handlers are idempotent/durable, so a replay is safer than a bot
 // that silently stops hearing DMs or mentions.
 const subscriptionRefreshMs = numberEnv("BOT_T3AMS_SUBSCRIPTION_REFRESH_MS", 120_000, { min: 10_000, max: 3_600_000 });
+const ingressFreshnessWindowMs = Math.max(30_000, (subscriptionRefreshMs * 2) + 10_000);
 const subscriptionRefreshTimer = setInterval(() => {
   if (subscriptions.size === 0) return;
   log("T3AMS_SUBSCRIPTION_REFRESH", { count: subscriptions.size, intervalMs: subscriptionRefreshMs });
   syncSubscriptions({ forceIds: new Set(subscriptions.keys()) });
+  lastSubscriptionRefreshAt = Date.now();
 }, subscriptionRefreshMs);
 subscriptionRefreshTimer.unref?.();
+// TODO: replace this refresh-success proxy with a private self-published
+// statement heartbeat once the protocol defines a carrier that does not spend
+// a user's public message allowance or leak an operator-only liveness signal.
+// Until then retained-page arrivals plus the existing forced refresh cadence
+// are the cheapest observable proof that ingress is still being exercised.
 // Statement subscriptions are retained views, not destructive queues. When
 // the bounded journal is full, reconnect once it drains so an uncommitted
 // carrier is reconciled from its retained source instead of being forgotten.
@@ -3753,9 +3769,46 @@ const bridge = http.createServer(async (request, response) => {
     if (!authorized(request)) return json(response, 401, { success: false, error: "unauthorized" });
     const url = new URL(request.url ?? "/", "http://localhost");
     if (request.method === "GET" && url.pathname === "/health") {
+      const chainConnected = isChainConnected();
+      const health = computeT3amsHealth({
+        chainConnected,
+        subscriptionCount: subscriptions.size,
+        freshnessWindowMs: ingressFreshnessWindowMs,
+        processStartedAt,
+        lastStatementAt,
+        lastIngressPageAt,
+        lastSubscriptionRefreshAt,
+        deadLetterCount: deadLetters.length,
+        ingress,
+      });
+      const isoTimestamp = (timestamp) => Number.isFinite(timestamp)
+        ? new Date(timestamp).toISOString()
+        : null;
       return json(response, 200, {
-        ok: isChainConnected(), transport: "t3ams", account: material.accountIdHex, identifierKey: null,
-        xid: selfXidHex, username, subscriptions: subscriptions.size,
+        ok: chainConnected,
+        healthy: health.healthy,
+        transport: "t3ams",
+        version: botCoreVersion,
+        startedAt: isoTimestamp(processStartedAt),
+        namespace: topicNamespace,
+        account: material.accountIdHex,
+        identifierKey: null,
+        xid: selfXidHex,
+        username,
+        subscriptions: subscriptions.size,
+        ingress: {
+          fresh: health.ingressFresh,
+          freshnessWindowMs: ingressFreshnessWindowMs,
+          heartbeatAgeMs: health.heartbeatAgeMs,
+          lastStatementAt: isoTimestamp(lastStatementAt),
+          lastStatementAgeMs: health.lastStatementAgeMs,
+          lastPageAt: isoTimestamp(lastIngressPageAt),
+          lastPageAgeMs: health.lastIngressPageAgeMs,
+          lastRefreshAt: isoTimestamp(lastSubscriptionRefreshAt),
+          lastRefreshAgeMs: health.lastSubscriptionRefreshAgeMs,
+        },
+        deadLetterCount: health.deadLetterCount,
+        oldestPendingIngressAgeMs: health.oldestPendingIngressAgeMs,
         ...(publicDirectAgent && agentRuntime != null ? {
           direct: { public: true, queue: agentRuntime.queueStats() },
         } : {}),

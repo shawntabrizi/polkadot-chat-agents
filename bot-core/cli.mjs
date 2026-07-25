@@ -1554,11 +1554,11 @@ const KEY_FLAGS = { ANTHROPIC_API_KEY: "anthropic-key", OPENAI_API_KEY: "openai-
 // before it has rebuilt its retained inbox/workspace subscriptions. Keep the
 // readiness check inside the container: it authenticates to the loopback-only
 // bridge with the container's token, without exposing either the port or token
-// on the VPS. The endpoint's `ok` means the chain is connected; a nonzero
-// subscription count proves the bot is also listening for messages.
+// on the VPS. The endpoint's `healthy` signal combines chain connectivity, an
+// installed retained route set, and the transport's ingress-refresh heartbeat.
 const t3amsBotHealthcheck = (transport) =>
   transport === "t3ams"
-    ? `    healthcheck:\n      test: ["CMD", "node", "-e", "const port=process.env.BOT_BRIDGE_PORT||'8799';fetch('http://127.0.0.1:'+port+'/health',{headers:{authorization:'Bearer '+(process.env.BOT_BRIDGE_TOKEN||'')},signal:AbortSignal.timeout(4000)}).then(async(r)=>{let h;try{h=await r.json()}catch{process.exit(1);return}process.exit(r.ok&&h?.ok===true&&h.transport==='t3ams'&&Number.isInteger(h.subscriptions)&&h.subscriptions>0?0:1)}).catch(()=>process.exit(1))"]\n      interval: 5s\n      timeout: 5s\n      retries: 3\n      start_period: 20s\n`
+    ? `    healthcheck:\n      test: ["CMD", "node", "-e", "const port=process.env.BOT_BRIDGE_PORT||'8799';fetch('http://127.0.0.1:'+port+'/health',{headers:{authorization:'Bearer '+(process.env.BOT_BRIDGE_TOKEN||'')},signal:AbortSignal.timeout(4000)}).then(async(r)=>{let h;try{h=await r.json()}catch{process.exit(1);return}process.exit(r.ok&&h?.healthy===true&&h.transport==='t3ams'?0:1)}).catch(()=>process.exit(1))"]\n      interval: 5s\n      timeout: 5s\n      retries: 3\n      start_period: 20s\n`
     : "";
 
 // This waits on the healthcheck above rather than on a log line. Keep the
@@ -2062,7 +2062,15 @@ function cmdLogs(name, flags) {
 }
 
 const healthLine = (h) => {
-  const chain = h.ok ? c("reaching the network", "32") : c(`not reaching the network (last ok ${Math.round((h.lastPollAgoMs ?? 0) / 1000)}s ago)`, "31");
+  if (h.transport === "t3ams") {
+    const health = h.healthy
+      ? c("healthy", "32")
+      : c(h.ok ? "unhealthy (ingress is not fresh)" : "unhealthy (not reaching the network)", "31");
+    return `${h.username || "(no username)"} · ${health}`;
+  }
+  const chain = h.ok
+    ? c("reaching the network", "32")
+    : c(`not reaching the network (last ok ${Math.round((h.lastPollAgoMs ?? 0) / 1000)}s ago)`, "31");
   return `${h.username || "(no username)"} · ${chain}`;
 };
 

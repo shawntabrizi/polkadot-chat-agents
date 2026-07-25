@@ -358,7 +358,8 @@ test("T3ams deploys use authenticated bridge health for readiness", () => {
     let result = runCli(botsDir, ["deploy", "t3amshealth", "--host", "root@example.test", "--dry-run"]);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /healthcheck:\n      test: \["CMD", "node", "-e", ".*BOT_BRIDGE_TOKEN.*"\]/);
-    assert.match(result.stdout, /h\?\.ok===true.*h\.transport==='t3ams'.*h\.subscriptions.*>0/);
+    assert.match(result.stdout, /h\?\.healthy===true.*h\.transport==='t3ams'/);
+    assert.doesNotMatch(result.stdout, /h\?\.ok===true.*h\.subscriptions.*>0/);
     assert.match(result.stdout, /interval: 5s\n      timeout: 5s\n      retries: 3\n      start_period: 20s/);
     assert.doesNotMatch(result.stdout, new RegExp(bridgeToken));
 
