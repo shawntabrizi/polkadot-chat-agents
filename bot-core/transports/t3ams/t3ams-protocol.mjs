@@ -79,6 +79,7 @@ const emptyT3amsState = () => ({
   admissions: { publicPeers: [], publicWorkspaces: [] },
   pendingTrust: {},
   greeted: {},
+  pendingGreetings: {},
 });
 
 // Outstanding self-initiated first contacts (greet): XID → last request time.
@@ -88,6 +89,16 @@ const T3AMS_GREETED_CAP = 128;
 // The T3ams host keeps inbox statements for ~24h; re-greet an unpaired peer
 // only when the previous request is about to age out of that replay window.
 export const T3AMS_GREET_RESEND_MS = 20 * 60 * 60 * 1000;
+function normalizePendingGreetings(raw) {
+  const result = {};
+  for (const [xid, text] of Object.entries(raw)) {
+    if (!/^[0-9a-f]{64}$/.test(xid) || typeof text !== "string" || text.trim() === "") continue;
+    result[xid] = text.slice(0, 4096);
+    if (Object.keys(result).length >= T3AMS_GREETED_CAP) break;
+  }
+  return result;
+}
+
 function normalizeGreeted(raw) {
   const result = {};
   for (const [xidHex, at] of Object.entries(raw)) {
@@ -156,6 +167,7 @@ export function normalizeT3amsState(raw) {
     },
     pendingTrust: normalizePendingTrust(object(raw.pendingTrust)),
     greeted: normalizeGreeted(object(raw.greeted)),
+    pendingGreetings: normalizePendingGreetings(object(raw.pendingGreetings)),
   };
 }
 
@@ -542,6 +554,8 @@ function decodeInboxMessage(bcts, data) {
     }
     const signing = extractBytes(bcts, expression, "signingPubKey");
     const signingPubKeyHex = signing == null ? null : bareHex(bcts.formatXID(signing));
+    const agreement = extractBytes(bcts, expression, "agreementPubKey");
+    const agreementPubKeyHex = agreement == null ? null : bareHex(bcts.formatXID(agreement));
     let verified = false;
     if (signingPubKeyHex != null) {
       const key = peerSigningKey(bcts, { signingPubKeyHex });
@@ -553,6 +567,7 @@ function decodeInboxMessage(bcts, data) {
       senderName,
       timestamp,
       signingPubKeyHex,
+      agreementPubKeyHex,
       verified,
       username: extractString(bcts, expression, "username"),
       ...(sealed == null ? {} : { sealed }),
@@ -621,6 +636,7 @@ export function createT3amsProtocol({
   bcts,
   identity,
   displayName,
+  username = null,
   state: initialState,
   submit,
   isPeerAllowed = () => true,
@@ -908,8 +924,11 @@ export function createT3amsProtocol({
         current,
         sealed,
         null,
-        null,
+        username,
         identity.signingPublicKey.taggedCborData(),
+        null,
+        null,
+        identity.agreementPublicKey,
       );
       const { envelope } = bcts.createGSTPRequest(expression);
       const signed = bcts.signGSTPRequest(envelope, identity.signingPrivateKey);
@@ -1135,7 +1154,7 @@ export function createT3amsProtocol({
     const decode = (blob) => {
       try {
         if (!(blob instanceof Uint8Array) || blob.byteLength > T3AMS_MAX_ENVELOPE_BYTES) return null;
-        const signed = bcts.decryptDMEnvelope(bcts.envelopeFromBytes(blob), hexToBytes(peerHex), identity.xid);
+        const signed = bcts.unsealDMEnvelope(bcts.envelopeFromBytes(blob), identity.xid, identity.agreementPrivateKey);
         if (!verifySigned(bcts, signed, peerSigningKey(bcts, peer))) return null;
         const expression = parseRequest(bcts, signed);
         if (expression == null || bcts.extractFunctionName(expression) !== "sendMessage") return null;
@@ -1288,7 +1307,7 @@ export function createT3amsProtocol({
     const peer = state.peers[peerHex];
     if (peer == null || !(data instanceof Uint8Array) || data.byteLength > T3AMS_MAX_ENVELOPE_BYTES) return null;
     try {
-      const signed = bcts.decryptDMEnvelope(bcts.envelopeFromBytes(data), hexToBytes(peerHex), identity.xid);
+      const signed = bcts.unsealDMEnvelope(bcts.envelopeFromBytes(data), identity.xid, identity.agreementPrivateKey);
       if (!verifySigned(bcts, signed, peerSigningKey(bcts, peer))) return null;
       const expression = parseRequest(bcts, signed);
       if (expression == null) return null;
@@ -1401,13 +1420,19 @@ export function createT3amsProtocol({
         displayName: decoded.senderName ?? "",
         username: decoded.username ?? null,
         signingPubKeyHex: decoded.signingPubKeyHex,
+        ...(decoded.agreementPubKeyHex != null ? { agreementPubKeyHex: decoded.agreementPubKeyHex } : {}),
       });
       if (peer == null) return null;
-      // A request needs one acknowledgement per retained peer pairing. Mark
-      // it only after the RPC write succeeds: a full submit queue or a lost
-      // allowance must leave the retained request eligible for replay.
+      // Acknowledge each FRESH request (a re-request means the peer lost or
+      // never had our keys — e.g. its app was reinstalled), but not the
+      // store's replay of a request already answered: replays carry the
+      // original timestamp, so the watermark dedups them. Mark it only after
+      // the RPC write succeeds: a full submit queue or a lost allowance must
+      // leave the retained request eligible for replay.
+      const requestAt = Number(decoded.timestamp);
+      const lastAcknowledgedAt = Number(peer.lastAcknowledgedRequestAt);
       const shouldAcknowledge = decoded.kind === "request"
-        && !Number.isSafeInteger(Number(peer.handshakeAcceptedAt));
+        && (!Number.isSafeInteger(lastAcknowledgedAt) || requestAt > lastAcknowledgedAt);
       if (shouldAcknowledge) {
         const inbox = bcts.derivePersonalInboxChannel(hexToBytes(senderXidHex));
         const expression = bcts.dmAcceptExpression(
@@ -1415,13 +1440,17 @@ export function createT3amsProtocol({
           displayName,
           now(),
           null,
-          null,
+          username,
           identity.signingPublicKey.taggedCborData(),
+          null,
+          null,
+          identity.agreementPublicKey,
         );
         const { envelope } = bcts.createGSTPRequest(expression);
         const signed = bcts.signGSTPRequest(envelope, identity.signingPrivateKey);
         await submitStatement({ channel: inbox, topics: [inbox], data: bcts.envelopeToBytes(signed) });
-        peer.handshakeAcceptedAt = now();
+        peer.lastAcknowledgedRequestAt = requestAt;
+        if (!Number.isSafeInteger(Number(peer.handshakeAcceptedAt))) peer.handshakeAcceptedAt = now();
         persist();
       }
       if (decoded.kind === "accept" && !Number.isSafeInteger(Number(peer.handshakeAcceptedAt))) {
@@ -1434,6 +1463,18 @@ export function createT3amsProtocol({
         // Paired (either direction) — the outstanding-greet marker is done.
         delete state.greeted[senderXidHex];
         persist();
+      }
+      const pendingGreeting = state.pendingGreetings[senderXidHex];
+      if (pendingGreeting != null && peer.agreementPubKeyHex != null) {
+        // The greeting could not be sealed before the peer shared its
+        // agreement key; deliver it now that the pairing is complete.
+        delete state.pendingGreetings[senderXidHex];
+        persist();
+        const conversation = { kind: "dm", peerXidHex: senderXidHex };
+        const chatId = t3amsConversationKey(conversation);
+        rememberConversation({ chatId, conversation, threadRootId: null });
+        try { await sendRichText(chatId, pendingGreeting); }
+        catch (error) { log("BOT_GREET_FAILED", { to: senderXidHex, error: String(error?.message ?? error) }); }
       }
       // dmMessageRequest carries the first sealed message in the inbox.  The
       // normal pairwise subscription also replays it, so it is intentionally
@@ -1467,11 +1508,18 @@ export function createT3amsProtocol({
     try {
       if (!(decoded.sealed instanceof Uint8Array) || decoded.sealed.byteLength > T3AMS_MAX_ENVELOPE_BYTES) return null;
       const envelope = bcts.envelopeFromBytes(decoded.sealed);
-      payload = JSON.parse(bcts.decryptDMEnvelope(envelope, hexToBytes(senderXidHex), identity.xid).extractString());
+      payload = JSON.parse(bcts.unsealDMEnvelope(envelope, identity.xid, identity.agreementPrivateKey).extractString());
     } catch {
       return null;
     }
     if (payload == null || typeof payload !== "object" || !validWorkspaceId(payload.wsId) || payload.stateDoc == null) return null;
+    const inviterAgreement = typeof payload.inviterAgreementPubKeyHex === "string" && payload.inviterAgreementPubKeyHex.trim() !== ""
+      ? hexToBytes(bareHex(payload.inviterAgreementPubKeyHex))
+      : null;
+    if (inviterAgreement == null) {
+      log("T3AMS_WORKSPACE_INVITE_KEYLESS", { sender: senderXidHex });
+      return null;
+    }
     if (!isSafeWorkspaceDocument(payload.stateDoc, payload.wsId) || !trustedRosterBindingsValid(payload.stateDoc)) return null;
     const inviteChannels = payload.channels == null
       ? []
@@ -1523,8 +1571,12 @@ export function createT3amsProtocol({
         signingPubKeyHex: bareHex(bcts.formatXID(identity.signingPublicKey.taggedCborData())),
         agreementPubKeyHex: identity.agreementPublicKey == null ? null : bareHex(bcts.formatXID(identity.agreementPublicKey)),
       };
-      const sealed = bcts.encryptDMEnvelope(bcts.Envelope.new(JSON.stringify(replyPayload)), identity.xid, hexToBytes(senderXidHex));
-      const join = bcts.workspaceJoinExpression(identity.xid, displayName, bcts.envelopeToBytes(sealed), now());
+      const sealed = bcts.sealDMEnvelope(
+        bcts.Envelope.new(JSON.stringify(replyPayload)),
+        { xid: identity.xid, agreementPublicKey: identity.agreementPublicKey },
+        { xid: hexToBytes(senderXidHex), agreementPublicKey: inviterAgreement },
+      );
+      const join = bcts.workspaceJoinExpression(identity.xid, bcts.envelopeToBytes(sealed), now());
       const { envelope } = bcts.createGSTPRequest(join);
       const signed = bcts.signGSTPRequest(envelope, identity.signingPrivateKey);
       const inbox = bcts.derivePersonalInboxChannel(hexToBytes(senderXidHex));
@@ -1875,6 +1927,17 @@ export function createT3amsProtocol({
     }
   };
 
+  // Sealing to a peer requires the X25519 agreement key it shared during the
+  // DM handshake. A peer paired before that key was recorded must re-pair.
+  const requirePeerAgreementKey = (peerXidHex) => {
+    const hex = state.peers[bareHex(peerXidHex)]?.agreementPubKeyHex;
+    if (typeof hex === "string" && hex !== "") return hexToBytes(hex);
+    const error = new Error("peer has not shared an X25519 agreement key; ask them to reopen the DM");
+    error.code = "T3AMS_PEER_AGREEMENT_KEY_MISSING";
+    error.t3amsTerminal = true;
+    throw error;
+  };
+
   // DM operations (edits, deletes, reactions) ride the DM message channel;
   // both sides discriminate by expression, not by route.
   const submitDmOperation = async (conversation, expression, guard = null) => {
@@ -1882,7 +1945,11 @@ export function createT3amsProtocol({
     const operationChannel = bcts.derivePersonalDMChannel(identity.xid, peer);
     const { envelope } = bcts.createGSTPRequest(expression(peer));
     const signed = bcts.signGSTPRequest(envelope, identity.signingPrivateKey);
-    const sealed = bcts.encryptDMEnvelope(signed, identity.xid, peer);
+    const sealed = bcts.sealDMEnvelope(
+      signed,
+      { xid: identity.xid, agreementPublicKey: identity.agreementPublicKey },
+      { xid: peer, agreementPublicKey: requirePeerAgreementKey(conversation.peerXidHex) },
+    );
     assertOutboundGuard(guard);
     await submitOutboundStatement({
       channel: operationChannel,
@@ -2011,7 +2078,7 @@ export function createT3amsProtocol({
         ...(rootId != null ? { threadRootId: hexToBytes(rootId) } : {}),
         ...(attachments.length > 0 ? { attachments } : {}),
       });
-      const sent = bcts.createEncryptedDMMessage(message, identity, peer);
+      const sent = bcts.createEncryptedDMMessage(message, identity, peer, requirePeerAgreementKey(conversation.peerXidHex));
       blob = bcts.envelopeToBytes(sent.envelope);
       statement = {
         channel: bcts.derivePersonalDMChannel(identity.xid, peer),
@@ -2097,8 +2164,11 @@ export function createT3amsProtocol({
       bcts.PERSONAL_SCOPE,
       now(),
       null,
-      null,
+      username,
       identity.signingPublicKey.taggedCborData(),
+      null,
+      null,
+      identity.agreementPublicKey,
     );
     const { envelope } = bcts.createGSTPRequest(expression);
     const signed = bcts.signGSTPRequest(envelope, identity.signingPrivateKey);
@@ -2107,10 +2177,10 @@ export function createT3amsProtocol({
     state.greeted[key] = now();
     persist();
     if (typeof text === "string" && text.trim() !== "") {
-      const conversation = { kind: "dm", peerXidHex: key };
-      const chatId = t3amsConversationKey(conversation);
-      rememberConversation({ chatId, conversation, threadRootId: null });
-      await sendRichText(chatId, text);
+      // The greeting cannot be sealed until the peer's accept shares its
+      // agreement key; park it and deliver when the pairing completes.
+      state.pendingGreetings[key] = text;
+      persist();
     }
     return true;
   };

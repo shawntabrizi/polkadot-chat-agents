@@ -2549,6 +2549,7 @@ protocol = createT3amsProtocol({
   bcts,
   identity,
   displayName,
+  username,
   state: restored?.t3ams ?? null,
   submit,
   isPeerAllowed: isAllowed,

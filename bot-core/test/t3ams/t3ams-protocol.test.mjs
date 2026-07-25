@@ -85,7 +85,7 @@ function directMessageFixture({ root = null, pinned = true } = {}) {
     formatXID: xid,
     envelopeFromBytes: (value) => envelopes.get(value) ?? value,
     parseMessageCarrier: (value) => value.carrier ?? null,
-    decryptDMEnvelope: (value) => value.signed,
+    unsealDMEnvelope: (value) => value.signed,
     parseGSTPMessage: (value) => ({ type: "request", body: value.expression }),
     extractFunctionName: (value) => value.functionName,
     extractParameter: (value, name) => value.parameters[name] ?? null,
@@ -188,7 +188,7 @@ test("authenticated DM edit/delete operations normalize independently of message
   const bcts = {
     formatXID: xid,
     envelopeFromBytes: (value) => envelopes.get(value) ?? value,
-    decryptDMEnvelope: (value) => value.signed,
+    unsealDMEnvelope: (value) => value.signed,
     parseGSTPMessage: (value) => ({ type: "request", body: value.expression }),
     extractFunctionName: (value) => value.functionName,
     extractParameter: (value, name) => value.parameters[name] ?? null,
@@ -427,6 +427,7 @@ test("state normalization returns a fresh empty current-version state for invali
     admissions: { publicPeers: [], publicWorkspaces: [] },
     pendingTrust: {},
     greeted: {},
+    pendingGreetings: {},
   };
   for (const raw of [null, [], "not-json", { v: T3AMS_STATE_VERSION - 1 }, { v: T3AMS_STATE_VERSION + 1 }]) {
     assert.deepEqual(normalizeT3amsState(raw), expected);
@@ -564,8 +565,8 @@ function outboundOperationFixture({ kind = "dm", isPrivate = false, privateKey =
       calls.push(["sign", envelope, tag(signingKey)]);
       return { signed: envelope };
     },
-    encryptDMEnvelope: (signed, from, to) => {
-      calls.push(["encrypt-dm", signed, tag(from), tag(to)]);
+    sealDMEnvelope: (signed, sender, recipient) => {
+      calls.push(["encrypt-dm", signed, tag(sender.xid), tag(recipient.xid)]);
       return { encrypted: signed };
     },
     encryptWorkspaceChannelEnvelope: (signed, key) => {
@@ -611,10 +612,13 @@ function outboundOperationFixture({ kind = "dm", isPrivate = false, privateKey =
     ...(isPrivate && privateKey ? {
       keys: { [`${workspaceId}:${channelId}`]: { current: { keyHex: "aa".repeat(32), version: 1 }, previous: [] } },
     } : {}),
-  } : undefined;
+  } : {
+    v: T3AMS_STATE_VERSION,
+    peers: { [xid(peer)]: { xidHex: xid(peer), agreementPubKeyHex: "e7".repeat(32) } },
+  };
   const protocol = createT3amsProtocol({
     bcts,
-    identity: { xid: self, signingPrivateKey: bytes(0x99) },
+    identity: { xid: self, signingPrivateKey: bytes(0x99), agreementPublicKey: bytes(0x77) },
     displayName: "Atlas",
     state,
     submit: async (statement) => { submitted.push(statement); },
@@ -771,7 +775,7 @@ function outboundDmWakeFixture({ established = true, rejectWake = false, submit:
     },
     log: (event, extra) => events.push({ event, ...extra }),
   });
-  if (established) assert.ok(protocol.addPeer(xid(peer), { signingPubKeyHex: "11" }));
+  if (established) assert.ok(protocol.addPeer(xid(peer), { signingPubKeyHex: "11", agreementPubKeyHex: "e7".repeat(32) }));
   const chatId = t3amsConversationKey({ kind: "dm", peerXidHex: xid(peer) });
   assert.equal(protocol.restoreInboundConversation({
     accepted: true,
@@ -808,9 +812,14 @@ test("an established DM mirrors one carrier to the recipient inbox and bounds re
 });
 
 test("DM inbox wakes are skipped for unknown peers and never fail the primary carrier", async () => {
+  // An unknown peer never shared an agreement key: the carrier cannot be
+  // sealed at all, and the failure is terminal rather than retried.
   const unknown = outboundDmWakeFixture({ established: false });
-  await unknown.protocol.sendText(unknown.chatId, "first contact reply");
-  assert.equal(unknown.submitted.length, 1);
+  await assert.rejects(
+    unknown.protocol.sendText(unknown.chatId, "first contact reply"),
+    { code: "T3AMS_PEER_AGREEMENT_KEY_MISSING" },
+  );
+  assert.equal(unknown.submitted.length, 0);
 
   const failing = outboundDmWakeFixture({ rejectWake: true });
   const result = await failing.protocol.sendText(failing.chatId, "reply survives wake failure");
@@ -988,6 +997,7 @@ function greetFixture({ pins = {}, state = null } = {}) {
   const self = bytes(0xa1);
   const peer = bytes(0xb2);
   const signingKey = bytes(0x5c);
+  const agreementKey = bytes(0x5d);
   const acceptSigned = {
     expression: {
       functionName: "dmAccept",
@@ -996,6 +1006,7 @@ function greetFixture({ pins = {}, state = null } = {}) {
         senderName: parameter("Peer"),
         timestamp: parameter(2),
         signingPubKey: parameter(signingKey),
+        agreementPubKey: parameter(agreementKey),
       },
     },
   };
@@ -1038,19 +1049,31 @@ function greetFixture({ pins = {}, state = null } = {}) {
   return { protocol, self, peer, signingKey, submitted, events };
 }
 
-test("greet sends a signed request to the peer inbox and the greeting on the DM channel", async () => {
-  const { protocol, self, peer, submitted } = greetFixture();
+test("greet sends a signed inbox request and parks the greeting until the accept", async () => {
+  const { protocol, self, peer, submitted } = greetFixture({
+    pins: { ["b2".repeat(32)]: "5c".repeat(32) },
+  });
   assert.equal(await protocol.greetPeer(xid(peer), "hi, I'm alive"), true);
 
-  assert.equal(submitted.length, 2);
+  // The greeting cannot be sealed before the peer shares its agreement key,
+  // so only the inbox request goes out and the text is parked.
+  assert.equal(submitted.length, 1);
   assert.equal(submitted[0].channel, `inbox:${xid(peer)}`, "first contact goes to the peer's personal inbox");
-  assert.equal(submitted[1].channel, `dm:${xid(self)}:${xid(peer)}`, "the greeting rides the pairwise DM channel");
+  assert.equal(protocol.snapshot().pendingGreetings[xid(peer)], "hi, I'm alive");
   assert.ok(Number.isSafeInteger(protocol.snapshot().greeted[xid(peer)]));
 
   // Within the resend window a second greet is a no-op, so a crash-restart
   // loop cannot spam the owner's inbox.
   assert.equal(await protocol.greetPeer(xid(peer), "hi again"), false);
+  assert.equal(submitted.length, 1);
+
+  // The peer's accept carries its agreement key; the parked greeting ships
+  // on the pairwise DM channel.
+  const change = await protocol.receiveInbox(Uint8Array.of(8));
+  assert.equal(change?.kind, "peer");
   assert.equal(submitted.length, 2);
+  assert.equal(submitted[1].channel, `dm:${xid(self)}:${xid(peer)}`, "the greeting rides the pairwise DM channel");
+  assert.equal(protocol.snapshot().pendingGreetings[xid(peer)], undefined);
 });
 
 test("a greeted peer's accept parks its key when unpinned and pairs after approval", async () => {
