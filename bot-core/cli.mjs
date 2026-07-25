@@ -23,7 +23,7 @@ import {
   ss58Address,
   ss58Decode,
 } from "@polkadot-labs/hdkd-helpers";
-import { createClient as createPapiClient } from "polkadot-api";
+import { createClient as createPapiClient, Binary } from "polkadot-api";
 import { getWsProvider } from "polkadot-api/ws";
 import { paseoPeopleNext, productsDevnetPeople } from "./lib/descriptors.mjs";
 import {
@@ -134,24 +134,27 @@ function toAccountHex(addr) {
   try {
     const [publicKey] = ss58Decode(s);
     return Array.from(publicKey, (b) => b.toString(16).padStart(2, "0")).join("");
-  } catch { fail(`"${addr}" isn't a valid address — use your app username (e.g. myname.42), your address (5…), or a 0x… account id.`); }
+  } catch { fail(`"${addr}" isn't a valid address — use your app username (e.g. myname.42 or realname.dot), your address (5…), or a 0x… account id.`); }
 }
 
-// Accept what a human actually knows: an app username (myname.42), an SS58
-// address, or account hex. Usernames resolve to the account via the identity
-// backend (the same registry the app's search uses).
-async function resolvePeer(input, backendUrl) {
+// Accept what a human actually knows: a network username — lite ("myname.42")
+// or full-personhood ("realname", also written "realname.dot") — an SS58
+// address, or account hex. Usernames resolve to the owning account on the
+// People chain (Resources.UsernameOwnerOf), the same mapping the apps use.
+async function resolvePeer(input, netCfg) {
   const s = String(input).trim().replace(/^@/, "");
-  if (/^[a-z]{6,}(\.\d{2,})?$/.test(s)) {
-    let data;
+  const bare = s.toLowerCase().endsWith(".dot") ? s.slice(0, -".dot".length) : s;
+  if (/^[a-z][a-z0-9-]{2,}(\.\d{2,})?$/.test(bare)) {
+    let owner = null;
     try {
-      const res = await fetch(new URL(`/api/v1/usernames/${s}`, backendUrl));
-      if (!res.ok) throw new Error(String(res.status));
-      data = await res.json();
-    } catch { fail(`Couldn't find the username "${s}" on the network — check the spelling (it's shown in the app under your profile).`); }
-    if (!data?.candidateAccountId) fail(`Username "${s}" has no account on the network yet.`);
-    note(`${s} → ${data.candidateAccountId}`);
-    return toAccountHex(data.candidateAccountId);
+      owner = await withPeopleApi(netCfg, (api) =>
+        withTimeout(api.query.Resources.UsernameOwnerOf.getValue(Binary.fromText(bare)), 15_000, "username lookup"));
+    } catch { fail(`Couldn't reach the network to resolve "${bare}" — try again, or use the address (5…) or 0x… account id instead.`); }
+    if (typeof owner !== "string" || owner === "") {
+      fail(`Couldn't find the username "${bare}" on the network — check the spelling (it's shown in the app under your profile).`);
+    }
+    note(`${bare} → ${owner}`);
+    return toAccountHex(owner);
   }
   return toAccountHex(s);
 }
@@ -472,7 +475,7 @@ function normalizeT3amsSigningKey(value, label = "T3ams signing key") {
   return key;
 }
 
-async function requestedT3amsTrustedSigningKeys(value, backendUrl) {
+async function requestedT3amsTrustedSigningKeys(value, netCfg) {
   if (value == null) return {};
   if (typeof value === "boolean" || String(value).trim() === "") {
     fail("--t3ams-peer-key requires owner=tagged-cbor-public-key (comma-separate multiple pins).");
@@ -483,7 +486,7 @@ async function requestedT3amsTrustedSigningKeys(value, backendUrl) {
     if (at <= 0 || at === entry.length - 1 || entry.indexOf("=", at + 1) !== -1) {
       fail(`Invalid --t3ams-peer-key entry "${entry}". Use owner=tagged-cbor-public-key.`);
     }
-    const account = await resolvePeer(entry.slice(0, at), backendUrl);
+    const account = await resolvePeer(entry.slice(0, at), netCfg);
     if (keys[account] != null) fail(`Duplicate T3ams signing-key pin for ${entry.slice(0, at)}.`);
     keys[account] = normalizeT3amsSigningKey(entry.slice(at + 1), `T3ams signing key for ${entry.slice(0, at)}`);
   }
@@ -889,7 +892,7 @@ async function cmdCreate(name, flags) {
   const allow = [];
   const allowLabels = {}; // hex -> what the human typed (username/address), for display
   for (const input of allowInputs) {
-    const hex = await resolvePeer(input, backendUrl);
+    const hex = await resolvePeer(input, { endpoint, networkProfile });
     allow.push(hex);
     allowLabels[hex] = String(input).trim().replace(/^@/, "");
   }
@@ -912,7 +915,7 @@ async function cmdCreate(name, flags) {
       ? false
       : null;
   const t3amsTrustedSigningKeys = transport === "t3ams"
-    ? await requestedT3amsTrustedSigningKeys(flags["t3ams-peer-key"], backendUrl)
+    ? await requestedT3amsTrustedSigningKeys(flags["t3ams-peer-key"], { endpoint, networkProfile })
     : {};
   // Accounts without a --t3ams-peer-key pin aren't rejected: their first DM
   // is parked by the bot until the operator verifies the presented key out of
@@ -2152,7 +2155,7 @@ async function cmdTrust(args) {
     return;
   }
 
-  const account = await resolvePeer(owner, cfg.backendUrl);
+  const account = await resolvePeer(owner, cfg);
   if (!cfg.allow.includes(account)) fail(`${owner} isn't on "${name}"'s allowlist.`);
   if (keyArg == null) fail(`Which key? List the pending requests first:  pca trust ${name}`);
   const wanted = String(keyArg).trim().replace(/^0x/i, "").toLowerCase();
@@ -2256,7 +2259,7 @@ function usage() {
 
 create flags:
   --transport <name> select the message transport: polkadot-app (default) or t3ams
-  --owner <who>    lock the bot to you — your app username (myname.42), address, or 0x hex (recommended)
+  --owner <who>    lock the bot to you — your app username (myname.42 or realname.dot), address, or 0x hex (recommended)
   --allow a,b      allowlist several owners (usernames/addresses/hex, comma-separated)
   --t3ams-peer-key owner=hex[,owner=hex]
                    pre-verified tagged-CBOR signing-key pin for a private T3ams owner; without it,
