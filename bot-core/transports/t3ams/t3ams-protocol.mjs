@@ -1504,15 +1504,25 @@ export function createT3amsProtocol({
       log("T3AMS_WORKSPACE_INVITE_FORGED", { sender: senderXidHex });
       return null;
     }
+    // Every rejection below names its reason: a silently dropped invite is
+    // indistinguishable from a deaf bot and costs hours to diagnose.
+    const rejectInvite = (reason, extra = {}) => {
+      log("T3AMS_WORKSPACE_INVITE_REJECTED", { sender: senderXidHex, reason, ...extra });
+      return null;
+    };
     let payload;
     try {
-      if (!(decoded.sealed instanceof Uint8Array) || decoded.sealed.byteLength > T3AMS_MAX_ENVELOPE_BYTES) return null;
+      if (!(decoded.sealed instanceof Uint8Array) || decoded.sealed.byteLength > T3AMS_MAX_ENVELOPE_BYTES) {
+        return rejectInvite("sealed-payload-invalid");
+      }
       const envelope = bcts.envelopeFromBytes(decoded.sealed);
       payload = JSON.parse(bcts.unsealDMEnvelope(envelope, identity.xid, identity.agreementPrivateKey).extractString());
-    } catch {
-      return null;
+    } catch (error) {
+      return rejectInvite("unseal-failed", { error: String(error?.message ?? error).slice(0, 160) });
     }
-    if (payload == null || typeof payload !== "object" || !validWorkspaceId(payload.wsId) || payload.stateDoc == null) return null;
+    if (payload == null || typeof payload !== "object" || !validWorkspaceId(payload.wsId) || payload.stateDoc == null) {
+      return rejectInvite("payload-shape");
+    }
     const inviterAgreement = typeof payload.inviterAgreementPubKeyHex === "string" && payload.inviterAgreementPubKeyHex.trim() !== ""
       ? hexToBytes(bareHex(payload.inviterAgreementPubKeyHex))
       : null;
@@ -1520,12 +1530,15 @@ export function createT3amsProtocol({
       log("T3AMS_WORKSPACE_INVITE_KEYLESS", { sender: senderXidHex });
       return null;
     }
-    if (!isSafeWorkspaceDocument(payload.stateDoc, payload.wsId) || !trustedRosterBindingsValid(payload.stateDoc)) return null;
+    if (!isSafeWorkspaceDocument(payload.stateDoc, payload.wsId)) return rejectInvite("unsafe-state-doc", { wsId: payload.wsId });
+    if (!trustedRosterBindingsValid(payload.stateDoc)) return rejectInvite("roster-binding-conflict", { wsId: payload.wsId });
     const inviteChannels = payload.channels == null
       ? []
       : safeChannelEntries(payload.channels, { max: channelLimit });
-    if (inviteChannels == null) return null;
-    if (!payload.stateDoc.members?.some((member) => bareHex(member?.xid) === senderXidHex)) return null;
+    if (inviteChannels == null) return rejectInvite("channel-entries-invalid", { wsId: payload.wsId });
+    if (!payload.stateDoc.members?.some((member) => bareHex(member?.xid) === senderXidHex)) {
+      return rejectInvite("inviter-not-a-member", { wsId: payload.wsId });
+    }
     let workspace = stateWorkspace(state, payload.wsId);
     if (workspace == null) {
       const atCapacity = Object.keys(state.workspaces).length >= workspaceLimit;
