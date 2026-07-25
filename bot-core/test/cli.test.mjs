@@ -131,26 +131,17 @@ test("T3ams deployment preflight accepts an importable BCTS SDK without native-g
   const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
   try {
     writeBot(botsDir, "t3amssdk", { transport: "t3ams" });
-    const genericSdk = path.join(botsDir, "generic-bcts.mjs");
-    fs.writeFileSync(genericSdk, "export const sdk = 'generic';\n");
     const loaderArgs = ["--experimental-loader", T3AMS_BCTS_LOADER];
 
-    let result = runCli(
-      botsDir,
-      ["deploy", "t3amssdk", "--host", "root@example.test", "--dry-run"],
-      { PCA_TEST_T3AMS_BCTS_MODULE: pathToFileURL(genericSdk).href },
-      loaderArgs,
-    );
+    let result = runCli(botsDir, ["deploy", "t3amssdk", "--host", "root@example.test", "--dry-run"]);
     assert.equal(result.status, 0, result.stderr);
     assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /native[ -]?group/i);
 
     writeBot(botsDir, "t3amsharnesssdk", { brain: "bridge", transport: "t3ams" });
-    result = runCli(
-      botsDir,
-      ["deploy", "t3amsharnesssdk", "--host", "root@example.test", "--harness", "openclaw", "--dry-run"],
-      { PCA_TEST_T3AMS_BCTS_MODULE: pathToFileURL(genericSdk).href },
-      loaderArgs,
-    );
+    result = runCli(botsDir, [
+      "deploy", "t3amsharnesssdk", "--host", "root@example.test",
+      "--harness", "openclaw", "--dry-run",
+    ]);
     assert.equal(result.status, 0, result.stderr);
     assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /native[ -]?group/i);
 
@@ -180,6 +171,19 @@ test("T3ams deployment preflight accepts an importable BCTS SDK without native-g
     assert.match(result.stderr, /Could not import the local @t3ams\/bcts package required for T3ams deployment/i);
     assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /Checking root@example\.test|ssh root@example\.test/i);
     assert.deepEqual(readBot(botsDir, "t3amsharnesssdk"), harnessBefore);
+
+    const wrongSdk = path.join(botsDir, "wrong-bcts.mjs");
+    fs.writeFileSync(wrongSdk, "export const sdk = 'wrong';\n");
+    result = runCli(
+      botsDir,
+      ["deploy", "t3amssdk", "--host", "root@example.test"],
+      { PCA_TEST_T3AMS_BCTS_MODULE: pathToFileURL(wrongSdk).href },
+      loaderArgs,
+    );
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /incompatible with this T3ams transport/i);
+    assert.match(result.stderr, /T3ams SDK contract mismatch at "Envelope"/);
+    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /Checking root@example\.test|ssh root@example\.test/i);
   } finally {
     fs.rmSync(botsDir, { recursive: true, force: true });
   }

@@ -20,6 +20,7 @@ import { RUNNERS, resolveEngine, assertEngineToolPolicy, toolPolicyEnforcement }
 import { ToolPolicyError, hasToolCapability, toolPolicyFromEnvironment, toolPolicySummary } from "../../lib/tool-policy.mjs";
 import { deriveT3amsBulletinUploadSigner, deriveT3amsIdentity } from "./t3ams-identity.mjs";
 import { createT3amsProtocol, hexToBytes, bareHex } from "./t3ams-protocol.mjs";
+import { assertT3amsSdkContract } from "./t3ams-sdk-contract.mjs";
 import { createT3amsMedia } from "./t3ams-media.mjs";
 import { createT3amsMediaAnalyzer, mediaAnalyzerKind, renderUntrustedAttachmentAnalysis } from "./t3ams-media-analyzer.mjs";
 import { createT3amsMediaAnalysisBudget } from "./t3ams-media-budget.mjs";
@@ -135,6 +136,12 @@ try {
   bcts = await import(bctsModule);
 } catch (error) {
   console.error(`Unable to load T3ams SDK module "${bctsModule}". Build and install the local @t3ams/bcts tarball in bot-core (or set BOT_T3AMS_BCTS_MODULE for pca run): ${String(error?.message ?? error)}`);
+  process.exit(2);
+}
+try {
+  assertT3amsSdkContract(bcts);
+} catch (error) {
+  console.error(String(error?.message ?? error));
   process.exit(2);
 }
 

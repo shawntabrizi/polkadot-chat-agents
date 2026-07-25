@@ -58,6 +58,7 @@ import {
   getTestnetFileAllowanceStatus,
   hasSufficientTestnetFileAllowance,
 } from "./lib/testnet-file-allowance.mjs";
+import { assertT3amsSdkContract } from "./transports/t3ams/t3ams-sdk-contract.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // Proofs run via the vendored wasm build by default (no Rust toolchain needed);
@@ -554,15 +555,24 @@ const t3amsSdkInstallHint = () => "Install the matching local T3ams BCTS tarball
 
 async function inspectT3amsSdkForDeploy(transport) {
   if (transport !== "t3ams") return { ok: true };
+  let bcts;
   try {
     // Importing is the real deployment requirement. A package.json check can
     // pass while a packed SDK or one of its transitive dependencies fails to
     // load in the bot process.
-    await import("@t3ams/bcts");
+    bcts = await import("@t3ams/bcts");
   } catch (error) {
     return {
       ok: false,
       message: `Could not import the local @t3ams/bcts package required for T3ams deployment: ${String(error?.message ?? error)}. ${t3amsSdkInstallHint()}`,
+    };
+  }
+  try {
+    assertT3amsSdkContract(bcts);
+  } catch (error) {
+    return {
+      ok: false,
+      message: `The local @t3ams/bcts package is incompatible with this T3ams transport: ${String(error?.message ?? error)}. ${t3amsSdkInstallHint()}`,
     };
   }
   return { ok: true };
