@@ -138,6 +138,20 @@ try {
   process.exit(2);
 }
 
+// The T3ams SPA scopes every derived statement-store channel/topic to its
+// deployment host's namespace (e.g. host "app.example.dot" → "app"), so
+// deployments sharing a store neither receive nor evict each other's
+// statements. The bot must derive with the SAME namespace as the SPA its
+// peers use, or their handshakes land on topics the bot never watches.
+const topicNamespace = (env.BOT_T3AMS_TOPIC_NAMESPACE ?? "").trim();
+if (topicNamespace !== "") {
+  if (typeof bcts.setTopicNamespace !== "function") {
+    console.error(`BOT_T3AMS_TOPIC_NAMESPACE is set ("${topicNamespace}") but this @t3ams/bcts build has no setTopicNamespace export. Rebuild the SDK from a T3ams checkout that supports scoped topics.`);
+    process.exit(2);
+  }
+  bcts.setTopicNamespace(topicNamespace);
+}
+
 let material;
 try {
   material = deriveT3amsIdentity(seedHex);
@@ -4221,5 +4235,5 @@ void protocol.replayPendingTrust().then(async () => {
   }
 });
 bridge.listen(bridgePort, bridgeHost, () => {
-  log("BOT_LISTENING", { transport: "t3ams", endpoint, account: material.accountIdHex, xid: selfXidHex, username, brain });
+  log("BOT_LISTENING", { transport: "t3ams", endpoint, account: material.accountIdHex, xid: selfXidHex, username, brain, topicNamespace });
 });
