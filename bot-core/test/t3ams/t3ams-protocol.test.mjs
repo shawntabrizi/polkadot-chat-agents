@@ -578,13 +578,10 @@ function outboundOperationFixture({ kind = "dm", isPrivate = false, privateKey =
       return Uint8Array.of(encoded);
     },
     derivePersonalDMChannel: (from, to) => `dm:${tag(from)}:${tag(to)}`,
-    derivePersonalDMOpsChannel: (from, to) => `dm-ops:${tag(from)}:${tag(to)}`,
-    derivePersonalDMTypingChannel: (from, to) => `dm-typing:${tag(from)}:${tag(to)}`,
     createDMTopics: (channel, from, selfSend) => [`dm-topic:${channel}:${tag(from)}:${selfSend}`],
     editMessageExpression: (...args) => ({ functionName: "editMessage", args }),
     addReactionExpression: (...args) => ({ functionName: "addReaction", args }),
     removeReactionExpression: (...args) => ({ functionName: "removeReaction", args }),
-    typingIndicatorExpression: (...args) => ({ functionName: "typing", args }),
     deriveWorkspaceKey: (ws) => Uint8Array.of(0x11, String(ws).length),
     derivePublicChannelOpsChannel: (id) => `public-ops:${tag(id)}`,
     derivePrivateChannelOpsChannel: (id) => `private-ops:${tag(id)}`,
@@ -639,20 +636,19 @@ function outboundOperationFixture({ kind = "dm", isPrivate = false, privateKey =
   return { protocol, self, peer, workspaceId, channelId, chatId, targetId, calls, submitted };
 }
 
-test("DM edits, reactions, and typing use recipient-bound encrypted operation channels", async () => {
+test("DM edits and reactions ride the DM message channel; DM typing is a wire no-op", async () => {
   const fixture = outboundOperationFixture();
   const { protocol, chatId, targetId, peer, self, calls, submitted } = fixture;
 
   assert.deepEqual(await protocol.editText(chatId, targetId, "replacement"), { messageId: targetId, edited: true });
   await protocol.sendReaction(chatId, targetId, "👍");
-  assert.deepEqual(await protocol.sendTyping(chatId), { sent: true, throttled: false });
-  assert.deepEqual(await protocol.sendTyping(chatId), { sent: false, throttled: true });
+  // The T3ams protocol has no DM typing route; nothing may reach the wire.
+  assert.deepEqual(await protocol.sendTyping(chatId), { sent: false, throttled: false });
 
-  assert.equal(submitted.length, 3);
-  assert.equal(submitted[0].channel, `dm-ops:${xid(self)}:${xid(peer)}`);
-  assert.deepEqual(submitted[0].topics, [`dm-topic:dm-ops:${xid(self)}:${xid(peer)}:${xid(self)}:true`]);
-  assert.equal(submitted[1].channel, `dm-ops:${xid(self)}:${xid(peer)}`);
-  assert.equal(submitted[2].channel, `dm-typing:${xid(self)}:${xid(peer)}`);
+  assert.equal(submitted.length, 2);
+  assert.equal(submitted[0].channel, `dm:${xid(self)}:${xid(peer)}`);
+  assert.deepEqual(submitted[0].topics, [`dm-topic:dm:${xid(self)}:${xid(peer)}:${xid(self)}:true`]);
+  assert.equal(submitted[1].channel, `dm:${xid(self)}:${xid(peer)}`);
 
   const expressions = calls.filter(([kind]) => kind === "request").map(([, expression]) => expression);
   assert.equal(expressions[0].functionName, "editMessage");
@@ -661,11 +657,8 @@ test("DM edits, reactions, and typing use recipient-bound encrypted operation ch
   assert.equal(xid(expressions[0].args[3]), xid(peer), "DM edit must bind the peer as recipient");
   assert.equal(expressions[1].functionName, "addReaction");
   assert.equal(xid(expressions[1].args[3]), xid(peer), "DM reaction must bind the peer as recipient");
-  assert.equal(expressions[2].functionName, "typing");
-  assert.equal(expressions[2].args[1], true);
-  assert.equal(xid(expressions[2].args[3]), xid(peer), "DM typing must bind the peer as recipient");
   assert.deepEqual(calls.filter(([kind]) => kind === "encrypt-dm").map(([, , from, to]) => [from, to]), [
-    [xid(self), xid(peer)], [xid(self), xid(peer)], [xid(self), xid(peer)],
+    [xid(self), xid(peer)], [xid(self), xid(peer)],
   ]);
 });
 

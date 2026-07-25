@@ -141,7 +141,8 @@ It permits only an entirely unleased `/send`, `/react`, or `/typing`; it never
 turns a supplied stale lease into a valid one. Leave this capability unset when
 proactive output is not needed.
 
-Edits and deletes are authenticated on a separate retained operation route.
+Edits and deletes are authenticated retained operations (workspace channels
+carry them on a dedicated ops route; DM operations share the DM channel).
 bot-core reconciles them before queued work is dispatched: an edit updates the
 pending prompt/context and a deletion removes pending work or stops an active
 direct-agent turn. It cannot retract a reply already published before the bot

@@ -2464,21 +2464,21 @@ const syncSubscriptions = ({ forceIds = new Set() } = {}) => {
   }
   for (const peerXidHex of protocol.peerIds()) {
     const peer = hexToBytes(peerXidHex);
-    const dmChannel = bcts.derivePersonalDMChannel(identity.xid, peer);
     // The pairwise topic is keyed by the remote peer. Using our own XID here
     // would subscribe to the wrong half of the DM channel and miss replies.
-    const dmRoutes = [
-      { id: `dm:${peerXidHex}`, channel: dmChannel, message: true },
-      { id: `dmops:${peerXidHex}`, channel: bcts.derivePersonalDMOpsChannel(identity.xid, peer), message: false },
-    ];
-    subscribeGroup(dmRoutes.map((route) => ({
-      id: route.id,
-      topic: bcts.createDMTopics(route.channel, peer, true)[0],
-      callback: (data) => route.message
-        ? routeInbound(protocol.receiveDm(peerXidHex, data))
-        : routeInboundOperation(protocol.receiveDmOperation(peerXidHex, data)),
-      accepts: (statement) => bytesEqual(asBytes(statement.channel), route.channel),
-    })));
+    // Messages and edit/delete/reaction operations share this one channel;
+    // the decoders discriminate by expression.
+    const dmChannel = bcts.derivePersonalDMChannel(identity.xid, peer);
+    subscribeGroup([{
+      id: `dm:${peerXidHex}`,
+      topic: bcts.createDMTopics(dmChannel, peer, true)[0],
+      callback: (data) => {
+        const message = protocol.receiveDm(peerXidHex, data);
+        if (message != null) return routeInbound(message);
+        return routeInboundOperation(protocol.receiveDmOperation(peerXidHex, data));
+      },
+      accepts: (statement) => bytesEqual(asBytes(statement.channel), dmChannel),
+    }]);
   }
   for (const [id, active] of subscriptions) {
     if (desired.has(id)) continue;

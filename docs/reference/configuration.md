@@ -762,7 +762,9 @@ and `/project`; it does not control a bridge framework's own command vocabulary.
 
 ### T3ams message-operation reconciliation
 
-Edits and deletes are authenticated on T3ams's separate operation slots. The
+Edits and deletes are authenticated retained operations: workspace channels
+carry them on dedicated ops routes, while DM operations share the DM message
+channel and are discriminated by expression. The
 bot keeps a bounded persisted index so a retained edit or deletion can arrive before
 the message carrier: an edit updates not-yet-dispatched work and channel
 context, while a deletion removes queued work and stops an in-flight direct
@@ -774,7 +776,7 @@ received the operation. Reactions and typing are not model prompts.
 | `BOT_T3AMS_MESSAGE_LIFECYCLE_MAX_RECORDS` | max(1024, `4 × BOT_INBOUND_CAP`) | Bound for recently seen message/edit/delete state. |
 | `BOT_T3AMS_MESSAGE_LIFECYCLE_TTL_MS` | 21600000 (6 hours) | Retention for that reconciliation state; `0` expires it immediately. |
 | `BOT_T3AMS_MESSAGE_LIFECYCLE_MAX_BYTES` | 8 MiB | Aggregate persisted lifecycle-state budget; oldest records are evicted before it grows beyond this limit. |
-| `BOT_T3AMS_SUBSCRIPTION_CAP` | 1024 | Maximum active T3ams subscriptions. A known DM needs both its carrier and edit/delete operation route. |
+| `BOT_T3AMS_SUBSCRIPTION_CAP` | 1024 | Maximum active T3ams subscriptions. A known DM uses one route; messages and edit/delete/reaction operations share its channel. |
 | `BOT_T3AMS_SUBSCRIPTION_REFRESH_MS` | 120000 (2 min) | Retained-subscription refresh cadence. Tune only when the Statement Store and VPS have been sized for the resulting replay traffic. |
 | `BOT_T3AMS_INGRESS_CALLBACK_CAP` | 128 | Queued subscription callbacks. A defensive limit, not a traffic target. |
 | `BOT_T3AMS_SUBMIT_QUEUE_CAP` | 128 | Queued outbound submissions. A full queue (or an exhausted allowance) leaves the prompt in the durable journal and retries with backoff; restore publishing allowance to resume those replies. |

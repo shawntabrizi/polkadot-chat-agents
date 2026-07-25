@@ -1875,9 +1875,11 @@ export function createT3amsProtocol({
     }
   };
 
-  const submitDmOperation = async (conversation, expression, channel, guard = null) => {
+  // DM operations (edits, deletes, reactions) ride the DM message channel;
+  // both sides discriminate by expression, not by route.
+  const submitDmOperation = async (conversation, expression, guard = null) => {
     const peer = hexToBytes(conversation.peerXidHex);
-    const operationChannel = channel(peer);
+    const operationChannel = bcts.derivePersonalDMChannel(identity.xid, peer);
     const { envelope } = bcts.createGSTPRequest(expression(peer));
     const signed = bcts.signGSTPRequest(envelope, identity.signingPrivateKey);
     const sealed = bcts.encryptDMEnvelope(signed, identity.xid, peer);
@@ -1911,7 +1913,6 @@ export function createT3amsProtocol({
       await submitDmOperation(
         conversation,
         (peer) => bcts.editMessageExpression(hexToBytes(target), replacement, editedAt, peer),
-        (peer) => bcts.derivePersonalDMOpsChannel(identity.xid, peer),
         guard,
       );
     } else {
@@ -1938,7 +1939,6 @@ export function createT3amsProtocol({
       await submitDmOperation(
         conversation,
         (peer) => (removed ? bcts.removeReactionExpression : bcts.addReactionExpression)(hexToBytes(target), reaction, reactedAt, peer),
-        (peer) => bcts.derivePersonalDMOpsChannel(identity.xid, peer),
         guard,
       );
     } else {
@@ -1965,23 +1965,21 @@ export function createT3amsProtocol({
     const previous = lastTypingAt.get(chatId) ?? 0;
     if (!force && current - previous < interval) return { sent: false, throttled: true };
     if (conversation.kind === "dm") {
-      await submitDmOperation(
-        conversation,
-        (peer) => bcts.typingIndicatorExpression(bcts.derivePersonalDMChannel(identity.xid, peer), true, current, peer),
-        (peer) => bcts.derivePersonalDMTypingChannel(identity.xid, peer),
-        guard,
-      );
-    } else {
-      await submitWorkspaceOperation(
-        conversation,
-        () => bcts.channelTypingExpression(identity.xid, current),
-        (channelEntry, channelId) => channelEntry.isPrivate
-          ? bcts.derivePrivateChannelTypingChannel(channelId)
-          : bcts.derivePublicChannelTypingChannel(channelId),
-        "show typing",
-        guard,
-      );
+      // The T3ams protocol has no DM typing route (typing is a
+      // workspace-channel operation). Keep the fence so a stale bridge
+      // worker still learns its claim is dead, then no-op.
+      assertOutboundGuard(guard);
+      return { sent: false, throttled: false };
     }
+    await submitWorkspaceOperation(
+      conversation,
+      () => bcts.channelTypingExpression(identity.xid, current),
+      (channelEntry, channelId) => channelEntry.isPrivate
+        ? bcts.derivePrivateChannelTypingChannel(channelId)
+        : bcts.derivePublicChannelTypingChannel(channelId),
+      "show typing",
+      guard,
+    );
     lastTypingAt.delete(chatId);
     lastTypingAt.set(chatId, current);
     while (lastTypingAt.size > conversationLimit) lastTypingAt.delete(lastTypingAt.keys().next().value);
