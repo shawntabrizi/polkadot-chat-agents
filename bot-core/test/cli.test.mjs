@@ -398,6 +398,38 @@ test("T3ams deploys use authenticated bridge health for readiness", () => {
   }
 });
 
+test("status warns when a deployed T3ams bot reports a different version", () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-bin-"));
+  try {
+    writeBot(botsDir, "oldstatus", {
+      transport: "t3ams",
+      deploy: { host: "root@example.test", container: "pca-oldstatus" },
+    });
+    const ssh = path.join(binDir, "ssh");
+    fs.writeFileSync(ssh, [
+      "#!/bin/sh",
+      "printf '%s\\n' 'Up 1 minute (healthy)'",
+      "printf '%s\\n' '{\"ok\":true,\"healthy\":true,\"transport\":\"t3ams\",\"version\":\"0.0.0\",\"username\":\"oldstatus\"}'",
+      "printf '%s\\n' '\"event\":\"BOT_LISTENING\"'",
+      "",
+    ].join("\n"));
+    fs.chmodSync(ssh, 0o755);
+
+    const result = runCli(botsDir, ["status", "oldstatus"], {
+      PATH: `${binDir}${path.delimiter}${process.env.PATH}`,
+    });
+    const localVersion = JSON.parse(fs.readFileSync(path.join(HERE, "..", "package.json"), "utf8")).version;
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /oldstatus · healthy/);
+    assert.match(result.stdout, new RegExp(`reports pca 0\\.0\\.0, but this CLI is ${localVersion.replaceAll(".", "\\.")}`));
+    assert.match(result.stdout, /Redeploy it/);
+  } finally {
+    fs.rmSync(botsDir, { recursive: true, force: true });
+    fs.rmSync(binDir, { recursive: true, force: true });
+  }
+});
+
 test("pca model persists a safe policy and serializes it for direct deploys", () => {
   const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
   const name = "modelbot";

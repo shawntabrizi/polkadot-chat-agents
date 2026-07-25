@@ -44,6 +44,7 @@ import { installT3amsSubscriptionRouteSet } from "./t3ams-subscription-set.mjs";
 import { createT3amsKnownChats } from "./t3ams-known-chats.mjs";
 import { deliverAgentReplyBeforeArtifacts } from "./t3ams-agent-turn.mjs";
 import { computeT3amsHealth } from "./t3ams-health.mjs";
+import { nextT3amsDeliveryFailure } from "./t3ams-delivery-failure.mjs";
 import {
   agentSessionKeyForT3ams,
   bridgeReplyThreadRootForT3ams,
@@ -719,6 +720,15 @@ for (const raw of Array.isArray(restored?.ingress) ? restored.ingress.slice(-ing
     createdAt: Number.isSafeInteger(raw.createdAt) ? raw.createdAt : Date.now(),
     attempts: Number.isSafeInteger(raw.attempts) && raw.attempts >= 0 ? raw.attempts : 0,
     retryAt: Number.isSafeInteger(raw.retryAt) && raw.retryAt > Date.now() ? raw.retryAt : 0,
+    failureSignature: typeof raw.failureSignature === "string" && /^[a-f0-9]{64}$/.test(raw.failureSignature)
+      ? raw.failureSignature
+      : null,
+    consecutiveFailures: Number.isSafeInteger(raw.consecutiveFailures)
+        && raw.consecutiveFailures >= 0
+        && raw.consecutiveFailures <= 100
+      ? raw.consecutiveFailures
+      : 0,
+    stuckReported: raw.stuckReported === true,
     completedAt: Number.isSafeInteger(raw.completedAt) && raw.completedAt > 0 ? raw.completedAt : 0,
     revision,
     artifactOutbox: restoredOutbox.outbox,
@@ -770,6 +780,9 @@ const stateSnapshot = () => ({
     createdAt: entry.createdAt,
     attempts: entry.attempts ?? 0,
     retryAt: entry.retryAt ?? 0,
+    failureSignature: entry.failureSignature ?? null,
+    consecutiveFailures: entry.consecutiveFailures ?? 0,
+    stuckReported: entry.stuckReported === true,
     completedAt: entry.completedAt ?? 0,
     revision: entry.revision ?? 0,
     ...(entry.artifactOutbox == null ? {} : { agentArtifactOutbox: snapshotAgentArtifactOutbox(entry.artifactOutbox) }),
@@ -1998,6 +2011,9 @@ const admitIngress = async (event, routed) => mutateIngress(async () => {
     createdAt: Date.now(),
     attempts: 0,
     retryAt: 0,
+    failureSignature: null,
+    consecutiveFailures: 0,
+    stuckReported: false,
     completedAt: 0,
     revision: 0,
     artifactOutbox: null,
@@ -2243,6 +2259,8 @@ const reconcileQueuedIngressOperation = async (operation, lifecycle) => mutateIn
     // handing old text/files to a command, engine, or echo response.
     entry.revision = (Number(entry.revision) || 0) + 1;
     entry.retryAt = 0;
+    entry.failureSignature = null;
+    entry.consecutiveFailures = 0;
     revokeDirectLiveTurn(entry, "✎ Message updated — restarting.");
     // A bridge worker only owns a specific leased version of an inbound row.
     // Releasing the old lease forces a new poll of the edited prompt and, in
@@ -3189,23 +3207,51 @@ const deadLetterIngressTurn = async (entry, error, expectedRevision) => mutateIn
   return false;
 });
 const deferIngressTurn = async (entry, error, expectedRevision) => {
-  const delay = await mutateIngress(async () => {
+  const outcome = await mutateIngress(async () => {
     const current = ingress.find((candidate) => candidate.id === entry.id);
     if (current == null || ingressRevision(current) !== expectedRevision) return null;
     current.attempts = Math.min(100, (Number(current.attempts) || 0) + 1);
     const retryDelay = Math.min(60_000, 1000 * (2 ** Math.min(current.attempts - 1, 6)));
     current.retryAt = Date.now() + retryDelay;
+    const failure = nextT3amsDeliveryFailure(current, error);
+    current.failureSignature = failure.failureSignature;
+    current.consecutiveFailures = failure.consecutiveFailures;
+    current.stuckReported = failure.stuckReported;
     const saved = await persistCritical();
     if (!saved) {
+      // Do not consume the one-time escalation until its marker is durable.
+      // Replace the failed snapshot so a restart cannot emit it twice.
+      if (failure.escalate) {
+        current.stuckReported = false;
+        persist();
+      }
       ingressDurable = false;
       scheduleIngressDurabilityRetry();
     } else {
       ingressDurable = true;
     }
-    return retryDelay;
+    return {
+      retryDelay,
+      id: current.id,
+      ageMs: Math.max(0, Date.now() - current.createdAt),
+      error: failure.error,
+      consecutiveFailures: failure.consecutiveFailures,
+      escalate: saved && failure.escalate,
+    };
   });
-  if (delay != null) scheduleIngressPump(delay);
-  log("T3AMS_DISPATCH_FAILED", { error: String(error?.message ?? error) });
+  if (outcome != null) scheduleIngressPump(outcome.retryDelay);
+  log("T3AMS_DISPATCH_FAILED", {
+    id: outcome?.id ?? entry.id,
+    error: String(error?.message ?? error),
+    ...(outcome == null ? {} : { consecutiveFailures: outcome.consecutiveFailures }),
+  });
+  if (outcome?.escalate) {
+    log("T3AMS_DELIVERY_STUCK", {
+      id: outcome.id,
+      ageMs: outcome.ageMs,
+      error: outcome.error,
+    });
+  }
 };
 const executeIngressTurn = async (entry, expectedRevision) => {
   if (!ingressEntryCurrent(entry.id, expectedRevision)) return null;

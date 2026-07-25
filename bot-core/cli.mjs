@@ -63,6 +63,7 @@ import { runT3amsLoopbackProbe } from "./transports/t3ams/t3ams-doctor.mjs";
 import { deriveT3amsIdentityFromSeed } from "./transports/t3ams/t3ams-identity.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+const BOT_CORE_VERSION = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8")).version;
 // Proofs run via the vendored wasm build by default (no Rust toolchain needed);
 // set PCA_BANDERSNATCH_CLI to a natively built binary to override.
 const BANDERSNATCH_BIN = process.env.PCA_BANDERSNATCH_CLI ?? null;
@@ -2074,6 +2075,16 @@ const healthLine = (h) => {
   return `${h.username || "(no username)"} · ${chain}`;
 };
 
+const warnForRuntimeVersion = (health) => {
+  if (health?.transport !== "t3ams") return;
+  const reported = typeof health.version === "string" ? health.version.trim() : "";
+  if (!reported) {
+    warn(`The running bot does not report a version and predates versioned T3ams health. Restart or redeploy it with pca ${BOT_CORE_VERSION}.`);
+  } else if (reported !== BOT_CORE_VERSION) {
+    warn(`The running bot reports pca ${reported}, but this CLI is ${BOT_CORE_VERSION}. Redeploy it to keep the transport and SDK contract in sync.`);
+  }
+};
+
 async function cmdStatus(name, flags) {
   const cfg = readConfig(name);
   const hostValue = flags.host ? flags.host : cfg.deploy?.host;
@@ -2107,6 +2118,7 @@ async function cmdStatus(name, flags) {
     }
     ok(`"${name}" is running locally.`);
     note(healthLine(h));
+    warnForRuntimeVersion(h);
     return;
   }
   const cn = containerName(cfg.deploy?.container ?? `pca-${name.replace(/\./g, "-")}`);
@@ -2125,7 +2137,10 @@ async function cmdStatus(name, flags) {
     try {
       const parsed = JSON.parse(health);
       if (parsed.error === "unauthorized") warn("Bridge authentication failed. This deployment predates bridge tokens; rerun pca deploy to rotate it.");
-      else note(healthLine(parsed));
+      else {
+        note(healthLine(parsed));
+        warnForRuntimeVersion(parsed);
+      }
     } catch { /* ignore */ }
   } else if (health) note(`health: ${health}`);
   if (lastEvent) note(`last event: ${lastEvent}`);
@@ -2566,7 +2581,7 @@ const { flags, positional } = parseFlags(process.argv.slice(2));
 const [command, arg] = positional;
 if (flags.help === true || flags.h === true) { usage(); process.exit(0); }
 if (flags.version === true || flags.V === true || command === "version") {
-  console.log(JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8")).version);
+  console.log(BOT_CORE_VERSION);
   process.exit(0);
 }
 {
