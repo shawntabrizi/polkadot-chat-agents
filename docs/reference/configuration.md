@@ -574,7 +574,7 @@ capacity review supports changing them.
 | `BOT_T3AMS_PUBLIC_PEER_ADMISSIONS_PER_HOUR` | 32 | New public DM pairings admitted per hour. |
 | `BOT_T3AMS_PUBLIC_WORKSPACE_ADMISSIONS_PER_HOUR` | 4 | New public workspace enrollments admitted per hour. |
 | `BOT_T3AMS_KNOWN_CHAT_CAP` | public TOFU: `BOT_T3AMS_PUBLIC_PEER_CAP`; otherwise 500 | Bound on persisted known chats and native-agent session state. Active durable ingress items are protected until they finish. |
-| `BOT_T3AMS_TOPIC_NAMESPACE` | `""` (unscoped) | Statement-store topic namespace, which MUST match the T3ams app deployment your peers use (the app derives it from its host: `app.example.dot` → `app`; check Settings → Debug → topic context). A mismatch makes the bot deaf: peers' handshakes land on topics it never watches. |
+| `BOT_T3AMS_TOPIC_NAMESPACE` | `""` (unscoped) | Statement-store topic namespace, saved by `pca create --t3ams-namespace <ns>` and emitted by `pca run`/`pca deploy`. It MUST match the T3ams app deployment your peers use (the app derives it from its host: `app.example.dot` → `app`; check Settings → Debug → topic context). A mismatch makes the bot deaf: peers' handshakes land on topics it never watches. |
 
 ### T3ams media and file vault
 

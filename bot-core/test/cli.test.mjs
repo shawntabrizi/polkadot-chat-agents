@@ -197,11 +197,14 @@ test("private T3ams creation persists a supplied pin and defers a missing one to
     assert.equal(result.status, 0, result.stderr);
     assert.equal("t3amsTrustedSigningKeys" in readBot(botsDir, "unpinnedbot"), false);
     assert.match(result.stdout, /pca trust unpinnedbot/);
+    assert.match(result.stdout, /derive unscoped topics and be invisible to namespaced app deployments/i);
+    assert.match(result.stdout, /Settings → Debug → topic context/);
 
     result = runCli(botsDir, [
       "create", "pinnedbot", "--brain", "echo", "--transport", "t3ams",
       "--owner", `0x${ACCOUNT}`,
       "--t3ams-peer-key", `0x${ACCOUNT}=11`,
+      "--t3ams-namespace", "team-app",
       "--t3ams-display-name", "Pinned Bot",
       "--t3ams-no-auto-accept-workspaces",
       "--no-register",
@@ -209,12 +212,14 @@ test("private T3ams creation persists a supplied pin and defers a missing one to
     assert.equal(result.status, 0, result.stderr);
     const config = readBot(botsDir, "pinnedbot");
     assert.deepEqual(config.t3amsTrustedSigningKeys, { [ACCOUNT]: "11" });
+    assert.equal(config.t3amsNamespace, "team-app");
     assert.equal(config.t3amsDisplayName, "Pinned Bot");
     assert.equal(config.t3amsAutoAcceptWorkspaces, false);
 
     result = runCli(botsDir, ["deploy", "pinnedbot", "--host", "root@example.test", "--dry-run"]);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /^BOT_T3AMS_DISPLAY_NAME=Pinned Bot$/m);
+    assert.match(result.stdout, /^BOT_T3AMS_TOPIC_NAMESPACE=team-app$/m);
     assert.match(result.stdout, /^BOT_T3AMS_AUTO_ACCEPT_WORKSPACES=0$/m);
   } finally {
     fs.rmSync(botsDir, { recursive: true, force: true });
@@ -224,9 +229,10 @@ test("private T3ams creation persists a supplied pin and defers a missing one to
 test("create persists the selected transport and deployment passes it to the runtime", () => {
   const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
   try {
-    let result = runCli(botsDir, ["create", "t3amsbot", "--brain", "echo", "--transport", "t3ams", "--no-register"]);
+    let result = runCli(botsDir, ["create", "t3amsbot", "--brain", "echo", "--transport", "t3ams", "--t3ams-namespace", "app", "--no-register"]);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(readBot(botsDir, "t3amsbot").transport, "t3ams");
+    assert.equal(readBot(botsDir, "t3amsbot").t3amsNamespace, "app");
     assert.match(result.stdout, /Message your bot in T3ams:/);
     assert.match(result.stdout, /no registered DotNS username yet/);
     assert.doesNotMatch(result.stdout, /polkadotapp:\/\//);
@@ -234,6 +240,7 @@ test("create persists the selected transport and deployment passes it to the run
     result = runCli(botsDir, ["info", "t3amsbot"]);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Reach this bot in T3ams:/);
+    assert.match(result.stdout, /namespace: app/);
     assert.match(result.stdout, /no registered DotNS username yet/);
     assert.doesNotMatch(result.stdout, /polkadotapp:\/\//);
 
@@ -251,6 +258,7 @@ test("create persists the selected transport and deployment passes it to the run
     result = runCli(botsDir, ["deploy", "t3amsbot", "--host", "root@example.test", "--dry-run"]);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /^BOT_TRANSPORT=t3ams$/m);
+    assert.match(result.stdout, /^BOT_T3AMS_TOPIC_NAMESPACE=app$/m);
     assert.match(result.stdout, /command: \["node", "t3ams\.mjs"\]/);
 
     writeBot(botsDir, "t3amsdirect", {
@@ -315,6 +323,16 @@ test("create persists the selected transport and deployment passes it to the run
     assert.equal(result.status, 1);
     assert.match(result.stderr, /--transport must be one of: polkadot-app, t3ams/);
     assert.equal(fs.existsSync(path.join(botsDir, "invalidbot")), false);
+
+    result = runCli(botsDir, ["create", "blanknamespace", "--transport", "t3ams", "--t3ams-namespace", "   ", "--no-register"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /--t3ams-namespace must be non-empty/);
+    assert.equal(fs.existsSync(path.join(botsDir, "blanknamespace")), false);
+
+    result = runCli(botsDir, ["create", "wrongtransport", "--t3ams-namespace", "app", "--no-register"]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /T3ams namespace.*require --transport t3ams/);
+    assert.equal(fs.existsSync(path.join(botsDir, "wrongtransport")), false);
   } finally {
     fs.rmSync(botsDir, { recursive: true, force: true });
   }

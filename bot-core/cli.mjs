@@ -528,6 +528,7 @@ function t3amsEnvironment(cfg, transport = configuredTransport(cfg)) {
   if (transport !== "t3ams") return {};
   const values = {
     BOT_T3AMS_TRUSTED_SIGNING_KEYS: JSON.stringify(configuredT3amsTrustedSigningKeys(cfg, transport)),
+    BOT_T3AMS_TOPIC_NAMESPACE: cfg.t3amsNamespace == null ? "" : normalizeT3amsNamespace(cfg.t3amsNamespace),
     // A custom People endpoint does not identify a matching Bulletin chain.
     // Fail closed for media instead of silently selecting a named testnet.
     BOT_T3AMS_BULLETIN_RPC: configuredNetworkProfile(cfg.networkProfile)?.bulletin.rpcEndpoint ?? "",
@@ -540,6 +541,13 @@ function t3amsEnvironment(cfg, transport = configuredTransport(cfg)) {
     values.BOT_T3AMS_AUTO_ACCEPT_WORKSPACES = cfg.t3amsAutoAcceptWorkspaces ? "1" : "0";
   }
   return values;
+}
+
+function normalizeT3amsNamespace(value) {
+  const namespace = String(value).trim();
+  if (namespace === "") fail("--t3ams-namespace must be non-empty.");
+  if (/[\0\r\n]/.test(namespace)) fail("--t3ams-namespace cannot contain a newline or NUL byte.");
+  return namespace;
 }
 
 const t3amsSdkInstallHint = () => "Install the matching local T3ams BCTS tarball in bot-core, for example: npm install /path/to/t3ams-bcts-*.tgz";
@@ -899,9 +907,9 @@ async function cmdCreate(name, flags) {
   if (transport !== "t3ams" && flags["t3ams-peer-key"] != null) {
     fail("--t3ams-peer-key is only valid with --transport t3ams.");
   }
-  if (transport !== "t3ams" && (flags["t3ams-display-name"] != null
+  if (transport !== "t3ams" && (flags["t3ams-namespace"] != null || flags["t3ams-display-name"] != null
       || flags["t3ams-auto-accept-workspaces"] != null || flags["t3ams-no-auto-accept-workspaces"] != null)) {
-    fail("T3ams display-name and workspace-enrollment flags require --transport t3ams.");
+    fail("T3ams namespace, display-name, and workspace-enrollment flags require --transport t3ams.");
   }
   if (flags["t3ams-auto-accept-workspaces"] === true && flags["t3ams-no-auto-accept-workspaces"] === true) {
     fail("Use only one of --t3ams-auto-accept-workspaces or --t3ams-no-auto-accept-workspaces.");
@@ -909,6 +917,15 @@ async function cmdCreate(name, flags) {
   const t3amsDisplayName = flags["t3ams-display-name"] == null
     ? null
     : normalizeT3amsDisplayName(flagValue(flags["t3ams-display-name"], "t3ams-display-name"));
+  const t3amsNamespace = flags["t3ams-namespace"] == null
+    ? null
+    : typeof flags["t3ams-namespace"] === "boolean"
+      ? fail("--t3ams-namespace requires a value.")
+      : normalizeT3amsNamespace(flags["t3ams-namespace"]);
+  if (transport === "t3ams" && t3amsNamespace == null) {
+    warn("No T3ams topic namespace configured. This bot will derive unscoped topics and be invisible to namespaced app deployments.");
+    note("Find the matching namespace in the T3ams app under Settings → Debug → topic context, then recreate with --t3ams-namespace <ns>.");
+  }
   const t3amsAutoAcceptWorkspaces = flags["t3ams-auto-accept-workspaces"] === true
     ? true
     : flags["t3ams-no-auto-accept-workspaces"] === true
@@ -961,6 +978,7 @@ async function cmdCreate(name, flags) {
   const config = {
     name, endpoint, backendUrl, brain, transport, allow, allowLabels,
     ...(Object.keys(t3amsTrustedSigningKeys).length > 0 ? { t3amsTrustedSigningKeys } : {}),
+    ...(t3amsNamespace != null ? { t3amsNamespace } : {}),
     ...(t3amsDisplayName != null ? { t3amsDisplayName } : {}),
     ...(t3amsAutoAcceptWorkspaces != null ? { t3amsAutoAcceptWorkspaces } : {}),
     ...(networkProfile ? { networkProfile } : {}),
@@ -1312,6 +1330,9 @@ async function cmdInfo(name) {
   console.log(`${c(name, "1")}${cfg.username ? ` (${cfg.username})` : ""}`);
   console.log(`  brain:    ${cfg.brain}`);
   console.log(`  transport: ${transport}`);
+  if (transport === "t3ams") {
+    console.log(`  namespace: ${cfg.t3amsNamespace == null ? c("(unscoped)", "33") : normalizeT3amsNamespace(cfg.t3amsNamespace)}`);
+  }
   console.log(`  network:  ${cfg.endpoint}`);
   console.log(`  address:  ${cfg.address}`);
   const allowShown = cfg.allow.map((hex) => cfg.allowLabels[hex] ?? shortAllowEntry(hex));
@@ -2321,7 +2342,7 @@ Bots live in ${BOTS_DIR} (override with PCA_BOTS_DIR).`);
 // typo (--modle) or a misplaced flag (--greet on create) — and silently
 // ignoring it means the user believes a setting took effect when it didn't.
 const COMMAND_FLAGS = {
-  create: ["brain", "transport", "owner", "allow", "t3ams-peer-key", "t3ams-display-name", "t3ams-auto-accept-workspaces", "t3ams-no-auto-accept-workspaces", "public", "network", "endpoint", "backend", "username", "digits", "model", "port", "wait", "no-register"],
+  create: ["brain", "transport", "owner", "allow", "t3ams-peer-key", "t3ams-namespace", "t3ams-display-name", "t3ams-auto-accept-workspaces", "t3ams-no-auto-accept-workspaces", "public", "network", "endpoint", "backend", "username", "digits", "model", "port", "wait", "no-register"],
   register: ["username", "digits", "wait"],
   run: ["model", "allowed-tools", "tool-scope", "greet"],
   deploy: ["host", "harness", "anthropic-key", "openai-key", "openrouter-key", "gemini-key", "groq-key", "allowed-tools", "tool-scope", "media-analyzer", "model", "dry-run", "remote-dir", "greet"],
