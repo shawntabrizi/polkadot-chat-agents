@@ -20,6 +20,8 @@ every command, including `project`, `model`, and `storage`.
 | `pca project <name> …` | Manage the project registry (`add`, `rm`). |
 | `pca model <name> …` | Manage the `/model` switching policy (`allow`, `open`). |
 | `pca storage <name> [status, grant, or recover]` | Inspect, provision, or recover a private named-testnet file allowance. |
+| `pca t3ams setup <path>` | Build, install, and verify the local `@t3ams/bcts` SDK. |
+| `pca t3ams doctor <name>` | Preflight the SDK/engine/namespace and prove live T3ams inbox reachability. |
 
 ## Common flags
 
@@ -41,8 +43,24 @@ every command, including `project`, `model`, and `storage`.
 | `--allowed-tools <read,write,bash>` | run, deploy | Select exact lowercase portable direct-agent capabilities. `write` includes `read`; `bash` includes both. |
 | `--tool-scope workspace\|container` | run, deploy | Scope native file tools to the selected workspace (default) or deliberately to all files visible to the non-root agent account in its container. Bash uses the agent process boundary in either scope. |
 | `--dry-run` | deploy | Print the generated files without deploying. |
+| `--as <account-seed-hex>` | t3ams doctor | Probe an allowlisted bot as an already allowlisted and signing-key-pinned identity. |
 
 Bots live in `~/.pca/bots/<name>/` (override with `PCA_BOTS_DIR`).
+
+## T3ams doctor
+
+`pca t3ams doctor <name>` checks the local SDK contract and, for a direct
+Claude/Codex/OpenCode brain, runs one no-tools prompt through the configured
+model to catch an expired CLI login. It warns about an unscoped namespace.
+Finally it publishes a signed `dmMessageRequest` from an ephemeral identity and
+requires the running bot's signed `dmAccept` with the expected agreement key
+within 90 seconds. A hard failure makes the command exit non-zero.
+
+For an allowlisted bot, pass `--as <account-seed-hex>` for an account already
+on the allowlist whose derived T3ams signing key matches the bot's verified pin.
+The alias `--seed-hex` is available when supplying a funded Statement Store
+identity after an allowance failure. Both forms expose a secret in process
+arguments; avoid shared shell history.
 
 ## Automatic Products Devnet registration
 

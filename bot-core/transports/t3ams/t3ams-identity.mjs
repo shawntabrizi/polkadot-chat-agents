@@ -51,6 +51,13 @@ function requireSeed(seed) {
   return new Uint8Array(seed);
 }
 
+export function deriveT3amsAccountXid(accountId) {
+  if (!(accountId instanceof Uint8Array) || accountId.length !== 32) {
+    throw new Error("T3ams account ID must be exactly 32 bytes");
+  }
+  return sha256(concatBytes(encoder.encode(T3AMS_ACCOUNT_XID_DOMAIN), accountId));
+}
+
 /**
  * Derive T3ams-compatible bot identity material from the PCA mini-secret.
  *
@@ -65,7 +72,7 @@ export function deriveT3amsIdentityFromSeed(seed) {
   const signingPrivateKey = sha256(concatBytes(encoder.encode(T3AMS_IDENTITY_SIGN_DOMAIN), botSeed));
   const agreementPrivateKey = sha256(concatBytes(encoder.encode(T3AMS_IDENTITY_AGREEMENT_DOMAIN), botSeed));
   const accountId = new Uint8Array(deriveSr25519PairFromSeed(botSeed, "//wallet").publicKey);
-  const xid = sha256(concatBytes(encoder.encode(T3AMS_ACCOUNT_XID_DOMAIN), accountId));
+  const xid = deriveT3amsAccountXid(accountId);
 
   return {
     accountId,

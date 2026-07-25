@@ -8,6 +8,7 @@ import {
   T3AMS_IDENTITY_SIGN_DOMAIN,
   botSeedFromHex,
   bytesToHex,
+  deriveT3amsAccountXid,
   deriveT3amsBulletinUploadSigner,
   deriveT3amsBulletinUploadSignerFromSeed,
   deriveT3amsIdentity,
@@ -45,6 +46,7 @@ test("T3ams bot material is deterministic, domain separated, and account-XID anc
   const accountId = deriveSr25519PairFromSeed(seed, "//wallet").publicKey;
   assert.deepEqual(first.accountId, accountId);
   assert.deepEqual(first.xid, sha256(concat(enc.encode(T3AMS_ACCOUNT_XID_DOMAIN), accountId)));
+  assert.deepEqual(deriveT3amsAccountXid(accountId), first.xid);
   assert.equal(first.accountIdHex, bytesToHex(accountId));
   assert.equal(first.xidHex, bytesToHex(first.xid));
 });
@@ -54,6 +56,7 @@ test("T3ams bot identity rejects malformed BOT_SEED_HEX without exposing it", ()
     assert.throws(() => botSeedFromHex(value), /exactly 32 bytes/);
   }
   assert.throws(() => deriveT3amsIdentityFromSeed(new Uint8Array(31)), /exactly 32 bytes/);
+  assert.throws(() => deriveT3amsAccountXid(new Uint8Array(31)), /exactly 32 bytes/);
 });
 
 test("T3ams Bulletin uploads use the dedicated allowance signer, not the bot wallet", () => {

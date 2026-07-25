@@ -59,6 +59,8 @@ import {
   hasSufficientTestnetFileAllowance,
 } from "./lib/testnet-file-allowance.mjs";
 import { assertT3amsSdkContract } from "./transports/t3ams/t3ams-sdk-contract.mjs";
+import { runT3amsLoopbackProbe } from "./transports/t3ams/t3ams-doctor.mjs";
+import { deriveT3amsIdentityFromSeed } from "./transports/t3ams/t3ams-identity.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // Proofs run via the vendored wasm build by default (no Rust toolchain needed);
@@ -2205,14 +2207,202 @@ async function cmdTrust(args) {
   note(`Restart the bot (pca run ${name}) — the parked request replays and the chat opens.`);
 }
 
+function runT3amsDoctorEnginePreflight(cfg) {
+  const runner = resolveEngine(cfg.brain);
+  if (runner == null) return { ok: false, reason: `no direct runner exists for ${cfg.brain}` };
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "pca-t3ams-doctor-engine-"));
+  try {
+    const args = runner.buildArgs({
+      prompt: "Reply with exactly OK.",
+      model: cfg.model ?? null,
+      policy: DEFAULT_TOOL_POLICY,
+      workingDirectory: workspace,
+    });
+    const runnerEnv = typeof runner.buildEnvironment === "function"
+      ? runner.buildEnvironment({ policy: DEFAULT_TOOL_POLICY, workingDirectory: workspace })
+      : {};
+    const result = spawnSync(runner.command, args, {
+      cwd: workspace,
+      env: { ...process.env, ...runnerEnv },
+      encoding: "utf8",
+      timeout: 60_000,
+      maxBuffer: 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    if (result.error?.code === "ENOENT") return { ok: false, reason: `${runner.command} is not installed` };
+    if (result.error?.code === "ETIMEDOUT") return { ok: false, reason: `${runner.command} did not finish within 60 seconds` };
+    if (result.error != null) return { ok: false, reason: `${runner.command} could not start` };
+    if (result.status !== 0) return { ok: false, reason: `${runner.command} exited with status ${result.status ?? "unknown"}` };
+    return { ok: true };
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+}
+
+const doctorFailure = (label, detail, remediation) => {
+  console.log(`${c("✗", "31")} ${label}: ${detail}`);
+  note(`Remediation: ${remediation}`);
+};
+const doctorSkipped = (label, detail) => console.log(`${c("–", "90")} ${label}: ${detail}`);
+
+async function cmdT3amsDoctor(name, flags) {
+  const cfg = readConfig(name);
+  if (configuredTransport(cfg) !== "t3ams") {
+    fail(`"${name}" is not a T3ams bot. Doctor applies only to bots created with --transport t3ams.`);
+  }
+  if (flags.as != null && flags["seed-hex"] != null) {
+    fail("Use only one doctor identity flag: --as <account-seed-hex> or --seed-hex <account-seed-hex>.");
+  }
+  const suppliedSeed = flags.as ?? flags["seed-hex"] ?? null;
+  const probeSeed = suppliedSeed == null
+    ? randomBytes(32)
+    : seedFromHex(flagValue(suppliedSeed, flags.as != null ? "as" : "seed-hex"));
+  let failures = 0;
+  let bcts = null;
+
+  console.log(`${c(name, "1")} T3ams doctor`);
+  const sdk = await inspectT3amsSdkForDeploy("t3ams");
+  if (sdk.ok) {
+    bcts = await import("@t3ams/bcts");
+    ok("SDK present and protocol contract matches");
+  } else {
+    failures += 1;
+    doctorFailure("SDK contract", sdk.message, "Run pca t3ams setup <path-to-t3ams-spa>, then retry.");
+  }
+
+  const namespace = cfg.t3amsNamespace == null ? "" : normalizeT3amsNamespace(cfg.t3amsNamespace);
+  if (namespace === "") {
+    warn("Namespace: unscoped topics are configured; this is invisible to namespaced T3ams app deployments.");
+    note("Remediation: find Settings → Debug → topic context in the app and recreate the bot with --t3ams-namespace <ns>.");
+  } else {
+    ok(`Namespace configured: ${namespace}`);
+  }
+
+  if (DIRECT_BRAIN_CLIS.has(cfg.brain)) {
+    const engine = runT3amsDoctorEnginePreflight(cfg);
+    if (engine.ok) {
+      ok(`OAuth/model preflight completed through ${cfg.brain}${cfg.model ? ` (${cfg.model})` : ""}`);
+    } else {
+      failures += 1;
+      doctorFailure(
+        "OAuth/model preflight",
+        engine.reason,
+        `Refresh the ${cfg.brain} CLI login and verify${cfg.model ? ` model "${cfg.model}"` : " its default model"}, then retry.`,
+      );
+    }
+  } else {
+    doctorSkipped("OAuth/model preflight", `${cfg.brain} does not use a direct engine CLI`);
+  }
+
+  let botSeed = null;
+  try {
+    const secret = JSON.parse(fs.readFileSync(secretPath(name), "utf8"));
+    botSeed = seedFromHex(secret.seedHex);
+  } catch (error) {
+    failures += 1;
+    doctorFailure("Loopback proof", "the bot's local secret is unavailable", `Restore ${secretPath(name)} from backup before probing this identity.`);
+  }
+
+  let loopbackBlocked = botSeed == null || bcts == null;
+  if (bcts == null && botSeed != null) {
+    failures += 1;
+    doctorFailure("Loopback proof", "the SDK contract prerequisite failed", "Repair the local T3ams SDK, then retry.");
+  }
+  if (!loopbackBlocked && cfg.allow.length > 0 && suppliedSeed == null) {
+    failures += 1;
+    loopbackBlocked = true;
+    doctorFailure(
+      "Loopback proof",
+      "the bot is allowlisted, so a throwaway identity will be rejected",
+      "Rerun with --as <account-seed-hex> for an allowlisted identity.",
+    );
+  }
+  if (!loopbackBlocked && cfg.allow.length > 0) {
+    const probeMaterial = deriveT3amsIdentityFromSeed(probeSeed);
+    const probeAccount = probeMaterial.accountIdHex.slice(2).toLowerCase();
+    if (!cfg.allow.includes(probeAccount)) {
+      failures += 1;
+      loopbackBlocked = true;
+      doctorFailure(
+        "Loopback proof",
+        `the supplied doctor identity (${probeMaterial.accountIdHex}) is not allowlisted`,
+        "Use --as with the 32-byte seed for an account already on this bot's allowlist.",
+      );
+    } else {
+      const pins = configuredT3amsTrustedSigningKeys(cfg, "t3ams");
+      const probeIdentity = bcts.restoreIdentity(probeMaterial.signingPrivateKey, probeMaterial.agreementPrivateKey);
+      const probeSigningKey = Buffer.from(probeIdentity.signingPublicKey.taggedCborData()).toString("hex");
+      if (pins[probeAccount] !== probeSigningKey) {
+        failures += 1;
+        loopbackBlocked = true;
+        doctorFailure(
+          "Loopback proof",
+          "the supplied doctor's signing identity does not match the allowlisted account's verified T3ams key",
+          "Use the seed for the pinned T3ams identity, or verify and update the account's signing-key pin before retrying.",
+        );
+      }
+    }
+  }
+
+  if (!loopbackBlocked) {
+    try {
+      await runT3amsLoopbackProbe({
+        bcts,
+        endpoints: peopleEndpointsFor(cfg.endpoint, cfg.networkProfile),
+        namespace,
+        botAccountIdHex: cfg.account,
+        botSeed,
+        probeSeed,
+      });
+      ok("Loopback proof received the bot's signed dmAccept with its agreementPubKey");
+    } catch (error) {
+      failures += 1;
+      if (error?.code === "T3AMS_DOCTOR_ALLOWANCE_REQUIRED") {
+        doctorFailure(
+          "Loopback proof",
+          "doctor identity needs statement allowance",
+          "Run against a funded account with --seed-hex <account-seed-hex> (or the equivalent --as flag).",
+        );
+      } else if (error?.code === "T3AMS_DOCTOR_TIMEOUT") {
+        doctorFailure(
+          "Loopback proof",
+          error.message,
+          "Start or restart the bot, confirm its endpoint and namespace match this config, then retry.",
+        );
+      } else {
+        doctorFailure(
+          "Loopback proof",
+          String(error?.message ?? error),
+          "Check the configured Statement Store endpoint and the bot logs, then retry.",
+        );
+      }
+    }
+  }
+
+  console.log();
+  if (failures === 0) {
+    console.log(`${c("PASS", "32")} T3ams doctor: all hard checks passed.`);
+  } else {
+    console.log(`${c("FAIL", "31")} T3ams doctor: ${failures} hard check${failures === 1 ? "" : "s"} failed.`);
+    process.exitCode = 1;
+  }
+}
+
 // T3ams bots need the local @t3ams/bcts SDK, which is not on public npm — it
 // is built inside a T3ams SPA checkout and installed into bot-core as a
 // tarball. This automates that dance (build → pack → install → verify) so the
 // manual four-step recipe in the docs becomes one command.
-async function cmdT3ams(args) {
-  const [sub, spaPath] = args;
-  if (sub !== "setup") fail(`Unknown t3ams subcommand "${sub ?? ""}". Use: pca t3ams setup <path-to-t3ams-spa>`);
+async function cmdT3ams(args, flags = {}) {
+  const [sub, spaPath, ...extra] = args;
+  if (sub === "doctor") {
+    if (!spaPath || extra.length > 0) fail("Usage: pca t3ams doctor <bot> [--as <account-seed-hex>]");
+    await cmdT3amsDoctor(spaPath, flags);
+    return;
+  }
+  if (sub !== "setup") fail(`Unknown t3ams subcommand "${sub ?? ""}". Use: pca t3ams setup <path-to-t3ams-spa> or pca t3ams doctor <bot>`);
+  if (Object.keys(flags).length > 0) fail("pca t3ams setup does not accept doctor identity flags.");
   if (!spaPath) fail("Where is your T3ams SPA checkout? Use: pca t3ams setup <path-to-t3ams-spa>");
+  if (extra.length > 0) fail("Usage: pca t3ams setup <path-to-t3ams-spa>");
   const root = path.resolve(String(spaPath));
   // Accept the SPA root or the bcts package dir itself.
   const bctsDir = [path.join(root, "packages", "bcts"), root].find((dir) => {
@@ -2285,6 +2475,7 @@ function usage() {
   pca model <name> [show|set|allow|lock|open]            inspect or set a direct bot's model policy
   pca storage <name> [status|grant|recover]  check, provision, or recover a private named-testnet file allowance
   pca t3ams setup <path-to-t3ams-spa>  build + install the local T3ams SDK (once, before the first T3ams bot)
+  pca t3ams doctor <name>              prove SDK, engine login, namespace, and live bot reachability
   pca trust <name> [<owner> <key>]     list a T3ams bot's pending first-contact keys, or approve one
   pca info <name>                      show address + how to message it
 
@@ -2360,7 +2551,7 @@ const COMMAND_FLAGS = {
   status: ["host"],
   stop: ["host"],
   delete: ["yes"],
-  list: [], info: [], help: [], project: [], model: [], storage: ["yes"], t3ams: [], trust: [],
+  list: [], info: [], help: [], project: [], model: [], storage: ["yes"], t3ams: ["as", "seed-hex"], trust: [],
 };
 
 const { flags, positional } = parseFlags(process.argv.slice(2));
@@ -2393,7 +2584,7 @@ try {
     case "project": cmdProject(positional.slice(1)); break;
     case "model": cmdModel(positional.slice(1)); break;
     case "storage": await cmdStorage(positional.slice(1), flags); break;
-    case "t3ams": await cmdT3ams(positional.slice(1)); break;
+    case "t3ams": await cmdT3ams(positional.slice(1), flags); break;
     case "trust": await cmdTrust(positional.slice(1)); break;
     case "info": await cmdInfo(arg); break;
     case "help": usage(); break;

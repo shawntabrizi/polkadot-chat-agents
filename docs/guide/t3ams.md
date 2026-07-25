@@ -247,3 +247,31 @@ full flow.
 
 The [configuration reference](/reference/configuration#t3ams-media-and-file-vault)
 lists the transport-specific limits, cache controls, and channel settings.
+
+## Troubleshooting
+
+Run the doctor while the bot is running locally or deployed:
+
+```bash
+pca t3ams doctor teamhelper
+```
+
+It checks the installed BCTS SDK contract, the saved topic namespace, and a
+direct engine's current login/model access. Its loopback proof then creates a
+throwaway T3ams identity, publishes a signed first-contact request to the bot's
+personal inbox, and waits up to 90 seconds for the bot's signed `dmAccept` with
+its agreement key. That proves the configured endpoint and namespace lead to a
+live, protocol-compatible bot subscription.
+
+An allowlisted bot rejects the throwaway identity by design. Probe it with a
+32-byte seed whose derived account and T3ams signing key are already
+allowlisted and pinned:
+
+```bash
+pca t3ams doctor teamhelper --as <account-seed-hex>
+```
+
+The doctor does not fund its identity. If Statement Store rejects the request
+for missing allowance, use a funded seed with `--as` (the equivalent
+`--seed-hex` spelling is also accepted). Treat either form as a secret-bearing
+command and keep it out of shared shell history.
