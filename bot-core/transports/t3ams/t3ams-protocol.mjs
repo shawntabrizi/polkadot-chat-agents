@@ -546,11 +546,11 @@ function decodeInboxMessage(bcts, data) {
     const sender = extractBytes(bcts, expression, "senderXid");
     const senderName = extractString(bcts, expression, "senderName");
     const timestamp = extractNumber(bcts, expression, "timestamp");
-    if (sender == null || senderName == null || timestamp == null) return null;
+    if (sender == null || timestamp == null) return null;
     const senderXidHex = bareHex(bcts.formatXID(sender));
     const sealed = extractBytes(bcts, expression, "sealed");
     if (kind === "wsInvite" || kind === "wsJoin") {
-      return sealed == null ? null : { kind, senderXidHex, senderName, timestamp, sealed, signed: envelope };
+      return sealed == null ? null : { kind, senderXidHex, senderName: senderName ?? "", timestamp, sealed, signed: envelope };
     }
     const signing = extractBytes(bcts, expression, "signingPubKey");
     const signingPubKeyHex = signing == null ? null : bareHex(bcts.formatXID(signing));
