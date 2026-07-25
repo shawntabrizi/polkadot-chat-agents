@@ -1516,7 +1516,9 @@ export function createT3amsProtocol({
         return rejectInvite("sealed-payload-invalid");
       }
       const envelope = bcts.envelopeFromBytes(decoded.sealed);
-      payload = JSON.parse(bcts.unsealDMEnvelope(envelope, identity.xid, identity.agreementPrivateKey).extractString());
+      // sealForRecipients leaves a hasRecipient assertion on the envelope,
+      // so the JSON leaf lives on the subject, not the whole envelope.
+      payload = JSON.parse(bcts.unsealDMEnvelope(envelope, identity.xid, identity.agreementPrivateKey).subject().extractString());
     } catch (error) {
       return rejectInvite("unseal-failed", { error: String(error?.message ?? error).slice(0, 160) });
     }
@@ -1584,11 +1586,12 @@ export function createT3amsProtocol({
         signingPubKeyHex: bareHex(bcts.formatXID(identity.signingPublicKey.taggedCborData())),
         agreementPubKeyHex: identity.agreementPublicKey == null ? null : bareHex(bcts.formatXID(identity.agreementPublicKey)),
       };
-      const sealed = bcts.sealDMEnvelope(
+      // Mirror the app's sealPayload exactly: a bare sealForRecipients seal,
+      // which its decodeSealedInvitePayload opens via the subject leaf.
+      const sealed = bcts.sealForRecipients(
         bcts.Envelope.new(JSON.stringify(replyPayload)),
-        { xid: identity.xid, agreementPublicKey: identity.agreementPublicKey },
-        { xid: hexToBytes(senderXidHex), agreementPublicKey: inviterAgreement },
-      );
+        [{ xid: hexToBytes(senderXidHex), agreementPublicKey: inviterAgreement }],
+      ).encrypted;
       const join = bcts.workspaceJoinExpression(identity.xid, bcts.envelopeToBytes(sealed), now());
       const { envelope } = bcts.createGSTPRequest(join);
       const signed = bcts.signGSTPRequest(envelope, identity.signingPrivateKey);
