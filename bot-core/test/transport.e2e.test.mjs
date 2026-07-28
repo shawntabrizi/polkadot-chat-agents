@@ -674,7 +674,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
     BOT_OUTBOUND_ACK_GRACE_MS: "2000",
   };
 
-  test("live reply: placeholder becomes progress frames, then the answer", async () => {
+  test("live reply: placeholder becomes progress frames, then a status line; the answer is a new message", async () => {
     const node = await startMockStatementNode();
     const stateDir = tmpState();
     const bot = await startBot({ endpoint: node.url, stateDir, extraEnv: liveBrainEnv });
@@ -690,13 +690,18 @@ describe("transport e2e", { concurrency: 8 }, () => {
       const edits = [...r.out.matchAll(/\[BOT EDIT ([0-9A-F-]+)\] (.*)/g)];
       assert.ok(edits.length >= 2, `expected progress + final edits, got:\n${r.out}`);
       assert.ok(edits.every((m) => placeholders.includes(m[1])), `edits must target placeholders:\n${r.out}`);
-      // A progress frame carried the tool action line; a final edit carried the answer.
+      // A progress frame carried the tool action line; the terminal edit is a
+      // one-line status summary of what the turn cost, NOT the answer.
       assert.match(r.out, /▸ \$ npm test/, `no tool action frame:\n${r.out}`);
-      assert.match(r.out, /\[BOT EDIT [0-9A-F-]+\] live final answer/, `final-as-edit missing:\n${r.out}`);
-      // The ONLY plain sends are the placeholders themselves — answers arrived
-      // as edits, never as second bubbles.
+      assert.match(r.out, /\[BOT EDIT [0-9A-F-]+\] ✓ \d+s/, `terminal status line missing:\n${r.out}`);
+      // The answer must arrive as a NEW bubble: an edit raises no phone
+      // notification, so a user who locked their phone mid-turn would never
+      // learn the answer landed.
+      assert.match(r.out, /\[BOT [0-9A-F-]+\] live final answer/, `answer must be a new message:\n${r.out}`);
+      assert.doesNotMatch(r.out, /\[BOT EDIT [0-9A-F-]+\] live final answer/, `answer must not be an edit:\n${r.out}`);
+      // Two plain sends per turn now: the placeholder, then the answer.
       const plainSends = bot.events.filter((e) => e.event === "BOT_SENT_TEXT" && !e.editOf);
-      assert.equal(plainSends.length, placeholders.length, `unexpected plain sends: ${JSON.stringify(plainSends)}`);
+      assert.equal(plainSends.length, placeholders.length * 2, `unexpected plain sends: ${JSON.stringify(plainSends)}`);
     } finally {
       await bot.stop();
       await node.close();
@@ -723,7 +728,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
     }
   });
 
-  test("live reply: bridge auto-upgrade finalizes the placeholder", async () => {
+  test("live reply: a bridge plain send retires the placeholder to a status line", async () => {
     const node = await startMockStatementNode();
     const stateDir = tmpState();
     const bot = await startBot({
@@ -760,12 +765,15 @@ describe("transport e2e", { concurrency: 8 }, () => {
         }
         throw new Error("inbound item never arrived");
       })();
-      // Wait for the placeholder, then answer with a PLAIN send: it must be
-      // auto-upgraded into the placeholder's final edit.
+      // Wait for the placeholder, then answer with a PLAIN send: the placeholder
+      // retires to a status line and the answer becomes its own message, so the
+      // harness gets back a NEW id rather than the placeholder's.
       const placeholder = await bot.waitFor((e) => e.event === "BOT_LIVE_PLACEHOLDER", { label: "BOT_LIVE_PLACEHOLDER" });
       const sent = await post("/send", { chat_id: item.chat_id, text: "answer from harness" });
       assert.equal(sent.success, true, JSON.stringify(sent));
-      assert.equal(sent.message_id, placeholder.messageId, "plain send must finalize the open placeholder");
+      assert.notEqual(sent.message_id, placeholder.messageId, "the answer must not reuse the placeholder message");
+      const status = await bot.waitFor((e) => e.event === "BOT_LIVE_STATUS", { label: "BOT_LIVE_STATUS" });
+      assert.equal(status.messageId, placeholder.messageId, "the status line must land on the placeholder");
       // Follow-up streaming edit from the harness flows through the throttled lane.
       const revised = await post("/send", { chat_id: item.chat_id, text: "answer from harness (revised)", edit_of: sent.message_id });
       assert.equal(revised.success, true, JSON.stringify(revised));
@@ -774,7 +782,11 @@ describe("transport e2e", { concurrency: 8 }, () => {
       // which opener-only runs never get (the opener is ACKed via the accept
       // message). The observable behavior is what matters here.
       const r = await clientP;
-      assert.match(r.out, new RegExp(`\\[BOT EDIT ${placeholder.messageId}\\] answer from harness`), `upgrade edit not seen:\n${r.out}`);
+      // The placeholder carries the status line; the answer is its own bubble,
+      // and the harness's follow-up edit lands on the answer, not the placeholder.
+      assert.match(r.out, new RegExp(`\\[BOT EDIT ${placeholder.messageId}\\] ✓ `), `status line not seen:\n${r.out}`);
+      assert.match(r.out, new RegExp(`\\[BOT ${sent.message_id}\\] answer from harness`), `answer bubble not seen:\n${r.out}`);
+      assert.match(r.out, new RegExp(`\\[BOT EDIT ${sent.message_id}\\] answer from harness \\(revised\\)`), `revised edit not seen:\n${r.out}`);
     } finally {
       await bot.stop();
       await node.close();

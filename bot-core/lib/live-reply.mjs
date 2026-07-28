@@ -1,6 +1,11 @@
 // Live replies: one placeholder message that is edited in place through a
-// turn's lifecycle (thinking -> progress -> final answer) instead of a
-// throwaway "thinking…" bubble plus a separate answer.
+// turn's lifecycle (thinking -> progress -> a one-line status summary of what
+// the turn cost). The answer itself is then sent as a NEW message, never as a
+// final edit of the placeholder, for two reasons:
+//   - a new message raises a phone notification; an edit does not, so a user
+//     who locks their phone mid-turn otherwise never learns the answer landed;
+//   - the placeholder stays small (one line), so the scrollback shows a
+//     compact activity receipt above the answer instead of a duplicate of it.
 //
 // The protocol constraints this module exists to enforce:
 //  - The placeholder must be ACKed by the peer before any edit goes out: the
@@ -142,7 +147,11 @@ export const createLiveReplies = ({
     return lane.ackState === "pending" ? "failed" : lane.ackState;
   };
 
-  const finalize = async (lane, text, guard = lane.defaultGuard) => {
+  // `ifUnfetched` is the text to send when the placeholder was never fetched.
+  // Callers that retire the placeholder to a terminal status line pass the
+  // answer here: a status line for progress the peer never saw is noise, so
+  // the unfetched slot should hold the answer instead.
+  const finalize = async (lane, text, guard = lane.defaultGuard, ifUnfetched = null) => {
     if (lane.finalized) throw new Error("live message already finalized");
     lane.finalized = true;
     clearLaneTimer(lane);
@@ -161,10 +170,11 @@ export const createLiveReplies = ({
         await send({ peerHex: lane.peerHex, text, editOf: lane.messageId, guard });
         return { messageId: lane.messageId, edited: true };
       }
-      // Peer never fetched the placeholder: send the answer as a plain message
-      // that supersedes it, so the slot ends up holding only the answer.
+      // Peer never fetched the placeholder: send a plain message that
+      // supersedes it, so the slot ends up holding only that message.
       log("BOT_LIVE_FALLBACK", { to: lane.peerHex, placeholder: lane.messageId });
-      const sent = await send({ peerHex: lane.peerHex, text, supersedes: [lane.messageId], guard });
+      const fallback = ifUnfetched ?? text;
+      const sent = await send({ peerHex: lane.peerHex, text: fallback, supersedes: [lane.messageId], guard });
       return { messageId: sent.messageId, edited: false };
     } catch (error) {
       // An ordinary terminal transport failure remains retryable through the
@@ -198,6 +208,7 @@ export const createLiveReplies = ({
           lane,
           t,
           Object.hasOwn(options, "guard") ? options.guard : lane.defaultGuard,
+          options.ifUnfetched ?? null,
         ),
       };
     },
@@ -232,19 +243,28 @@ export const createLiveReplies = ({
     async finalizeExisting(peerHex, messageId, text, options = {}) {
       let lane = lanes.get(messageId);
       if (!lane) { lane = makeLane(peerHex, messageId, "assumed"); lane.ackResolvers = []; }
-      return finalize(lane, text, Object.hasOwn(options, "guard") ? options.guard : lane.defaultGuard);
+      return finalize(
+        lane,
+        text,
+        Object.hasOwn(options, "guard") ? options.guard : lane.defaultGuard,
+        options.ifUnfetched ?? null,
+      );
     },
   };
 };
 
 // Progress rendering: a header with a live elapsed clock and a step counter,
 // plus a rolling window of the most recent action lines.
-export const createProgressTracker = ({ label = "working", maxActions = 3, now = () => Date.now() } = {}) => {
-  const startedAt = now();
+// `startedAt` lets a caller anchor the clock to when the TURN began rather than
+// when the tracker was constructed. A placeholder is only posted after a
+// thinking delay, so a tracker built at that moment would under-report the
+// turn's real duration by exactly that delay.
+export const createProgressTracker = ({ label = "working", maxActions = 3, now = () => Date.now(), startedAt = null } = {}) => {
+  const anchor = startedAt ?? now();
   const actions = [];
   let step = 0;
   const elapsed = () => {
-    const secs = Math.max(0, Math.round((now() - startedAt) / 1000));
+    const secs = Math.max(0, Math.round((now() - anchor) / 1000));
     return secs >= 60 ? `${Math.floor(secs / 60)}m ${String(secs % 60).padStart(2, "0")}s` : `${secs}s`;
   };
   return {
@@ -255,11 +275,43 @@ export const createProgressTracker = ({ label = "working", maxActions = 3, now =
       if (actions.length > maxActions) actions.shift();
     },
     get step() { return step; },
+    elapsed,
     render() {
       const header = `⏳ ${label} · ${elapsed()}${step > 0 ? ` · step ${step}` : ""}`;
       return [header, ...actions.map((a) => `▸ ${a}`)].join("\n");
     },
   };
+};
+
+// Compact token counts: the status line has to fit on one line, so 12_400 ->
+// "12.4k". Exact below 1000 so short turns stay legible.
+const compactCount = (n) => {
+  if (!Number.isFinite(n) || n <= 0) return null;
+  if (n < 1000) return String(Math.round(n));
+  const k = n / 1000;
+  // One decimal keeps 12.4k informative; drop it past 100k where it is noise,
+  // and drop a bare ".0" so an exact 1000 reads "1k".
+  const s = k < 100 ? k.toFixed(1) : String(Math.round(k));
+  return `${s.endsWith(".0") ? s.slice(0, -2) : s}k`;
+};
+
+// The placeholder's terminal frame: what the turn cost, on one line. Every
+// field is optional — a bridge harness reports no token usage, and a turn that
+// called no tools has no steps — so the line only ever states what is known.
+export const renderTurnStats = ({ elapsed = null, steps = 0, usage = null, prefix = "✓" } = {}) => {
+  const parts = [];
+  if (elapsed) parts.push(String(elapsed));
+  if (steps > 0) parts.push(`${steps} step${steps === 1 ? "" : "s"}`);
+  const inTokens = compactCount(usage?.inputTokens);
+  const outTokens = compactCount(usage?.outputTokens);
+  // Engines report the two counts independently, so a one-sided usage event
+  // must still surface — labelled, since "1.8k tokens" alone is ambiguous.
+  if (inTokens && outTokens) parts.push(`${inTokens}→${outTokens} tokens`);
+  else if (outTokens) parts.push(`${outTokens} out tokens`);
+  else if (inTokens) parts.push(`${inTokens} in tokens`);
+  const cost = usage?.costUsd;
+  if (Number.isFinite(cost) && cost > 0) parts.push(`$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}`);
+  return parts.length ? `${prefix} ${parts.join(" · ")}` : prefix;
 };
 
 // A turn may do useful work before its visible placeholder can be created:
@@ -269,7 +321,10 @@ export const createProgressTracker = ({ label = "working", maxActions = 3, now =
 // work that has already happened. This deliberately owns no timers or
 // transport state; the caller remains responsible for throttling/finalizing
 // the actual live reply.
-export const createDeferredProgressTracker = (options = {}) => {
+// `renderFrames: false` keeps the tracker counting while publishing nothing on
+// its own — for BOT_LIVE_PROGRESS=0, where the terminal status line still wants
+// a step count but per-tool frames must not cost a statement publish each.
+export const createDeferredProgressTracker = ({ renderFrames = true, ...options } = {}) => {
   const tracker = createProgressTracker(options);
   let handle = null;
   let disposed = false;
@@ -279,7 +334,7 @@ export const createDeferredProgressTracker = (options = {}) => {
   // stream never promotes a partial response into a durable final message.
   let liveText = null;
   const flush = () => {
-    if (disposed || handle == null || handle.finalized) return;
+    if (disposed || !renderFrames || handle == null || handle.finalized) return;
     handle.update(liveText ?? tracker.render());
   };
   return {
@@ -310,6 +365,7 @@ export const createDeferredProgressTracker = (options = {}) => {
       handle = null;
     },
     get step() { return tracker.step; },
+    elapsed: tracker.elapsed,
     render: () => liveText ?? tracker.render(),
   };
 };

@@ -128,9 +128,10 @@ authenticated text without making the bot listen or reply to every room message.
 
 For a slow direct-brain turn, the bot emits a native typing signal and then a
 thinking message. Tool/activity progress edits that same message in place, and
-the final answer replaces it; a long answer continues in ordered follow-up
-messages. This gives the conversation one evolving reply instead of an orphaned
-thinking bubble followed by a separate answer.
+when the turn finishes it collapses to a one-line status summary — elapsed
+time, step count, and token usage. The answer follows as a new message (long
+answers as ordered parts). The status line keeps the scrollback compact while
+the new message raises the phone notification an edit never would.
 
 Bridge frameworks receive the same lifecycle. They can use `POST /send` with
 `edit_of` for coalesced streaming edits, `POST /react` for real T3ams emoji

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createDeferredProgressTracker, createLiveReplies, createProgressTracker } from "../lib/live-reply.mjs";
+import { createDeferredProgressTracker, createLiveReplies, createProgressTracker, renderTurnStats } from "../lib/live-reply.mjs";
 
 // Deterministic clock + timers: advance() fires due timers in order.
 const makeClock = () => {
@@ -346,4 +346,84 @@ test("deferred progress can safely replace activity with a transient live draft"
   assert.equal(tracker.render(), "✍️ Writing a reply…\nThis is the visible draft");
   tracker.setLiveText("");
   assert.match(updates.at(-1), /downloading photo\.jpg/);
+});
+
+test("finalize sends ifUnfetched instead of the status line when the ACK never comes", async () => {
+  const h = makeHarness({ finalAckWaitMs: 5000 });
+  const handle = await h.live.begin("peer", "thinking…");
+  // The placeholder was never fetched, so a status line describing progress the
+  // peer never saw would be noise: the answer must take the slot instead.
+  const finalizeP = handle.finalize("✓ 6s · 1 step", { ifUnfetched: "the answer" });
+  await h.clock.advance(5001);
+  const result = await finalizeP;
+  assert.equal(result.edited, false);
+  const last = h.sent.at(-1);
+  assert.equal(last.editOf, null, "fallback must be a plain message");
+  assert.equal(last.text, "the answer", "the unfetched slot must hold the answer, not the status line");
+  assert.deepEqual(last.supersedes, [handle.messageId]);
+});
+
+test("finalize still edits the status line in when the peer ACKed", async () => {
+  const h = makeHarness();
+  const handle = await h.live.begin("peer", "thinking…");
+  await h.ack("REQ-1");
+  const result = await handle.finalize("✓ 6s · 1 step", { ifUnfetched: "the answer" });
+  assert.equal(result.edited, true);
+  assert.equal(result.messageId, handle.messageId);
+  const last = h.sent.at(-1);
+  assert.equal(last.editOf, handle.messageId);
+  assert.equal(last.text, "✓ 6s · 1 step", "an ACKed placeholder keeps the status line");
+});
+
+test("renderTurnStats fits one line and states only what is known", () => {
+  assert.equal(
+    renderTurnStats({ elapsed: "42s", steps: 3, usage: { inputTokens: 12_400, outputTokens: 1800 } }),
+    "✓ 42s · 3 steps · 12.4k→1.8k tokens",
+  );
+  // A bridge harness reports no usage; a no-tool turn has no steps.
+  assert.equal(renderTurnStats({ elapsed: "6s", steps: 1 }), "✓ 6s · 1 step");
+  assert.equal(renderTurnStats({ elapsed: "2s" }), "✓ 2s");
+  // Exact counts below 1k stay legible; cost only shows when non-zero.
+  assert.equal(
+    renderTurnStats({ elapsed: "1m 05s", steps: 0, usage: { inputTokens: 900, outputTokens: 120, costUsd: 0.0031 } }),
+    "✓ 1m 05s · 900→120 tokens · $0.0031",
+  );
+  assert.equal(renderTurnStats({}), "✓", "nothing known still yields a terminal glyph");
+});
+
+test("a tracker anchored to turn start reports the turn's duration, not the placeholder's age", () => {
+  let t = 0;
+  const now = () => t;
+  // The turn began at 0; the placeholder is only posted 5s later.
+  t = 5000;
+  const anchored = createProgressTracker({ now, startedAt: 0 });
+  const unanchored = createProgressTracker({ now });
+  t = 13_000;
+  assert.equal(anchored.elapsed(), "13s", "must measure from turn start");
+  assert.equal(unanchored.elapsed(), "8s", "an unanchored tracker loses the thinking delay");
+});
+
+test("a deferred tracker exposes elapsed for the terminal status line", () => {
+  let t = 0;
+  const tracker = createDeferredProgressTracker({ now: () => t, startedAt: 0 });
+  t = 4000;
+  assert.equal(tracker.elapsed(), "4s");
+});
+
+test("renderTurnStats labels one-sided token usage", () => {
+  assert.equal(renderTurnStats({ elapsed: "3s", usage: { outputTokens: 1800 } }), "✓ 3s · 1.8k out tokens");
+  assert.equal(renderTurnStats({ elapsed: "3s", usage: { inputTokens: 12_400 } }), "✓ 3s · 12.4k in tokens");
+});
+
+test("a quiet deferred tracker counts steps without publishing frames", () => {
+  const updates = [];
+  // BOT_LIVE_PROGRESS=0: maxActions 0 drops the action lines, renderFrames false
+  // stops the tracker publishing on its own.
+  const tracker = createDeferredProgressTracker({ label: "working", maxActions: 0, renderFrames: false });
+  tracker.attach({ finalized: false, update: (text) => updates.push(text) });
+  tracker.add("ran a tool");
+  tracker.add("ran another");
+  assert.equal(updates.length, 0, "a quiet tracker must not publish frames");
+  assert.equal(tracker.step, 2, "steps are still counted for the status line");
+  assert.doesNotMatch(tracker.render(), /▸/, "no action lines in the rendered frame");
 });

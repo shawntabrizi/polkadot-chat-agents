@@ -385,7 +385,7 @@ Docker sockets, or home directories into a bot container.
 | `BOT_LIVE_HEARTBEAT_MS` | 5000 | Typing refresh and elapsed-clock frame cadence; stays below the T3ams client's 6-second typing expiry. |
 | `BOT_LIVE_ACK_TIMEOUT_MS` | 60000 | Give up gating edits on the peer's ACK after this. |
 | `BOT_LIVE_FINAL_ACK_WAIT_MS` | 10000 | Wait for the placeholder ACK before finalizing. |
-| `BOT_LIVE_PROGRESS` | `1` | `0` = placeholder and final only (no per-tool progress frames). |
+| `BOT_LIVE_PROGRESS` | `1` | `0` = placeholder and terminal status line only (no per-tool progress frames). |
 | `BOT_LIVE_TTL_MS` | 600000 | A placeholder never finalized resolves to a timeout note. |
 | `BOT_LIVE_TIMEOUT_TEXT` | auto | That timeout note's text. |
 | `BOT_OUTBOUND_ACK_GRACE_MS` | 60000 | How long an un-ACKed statement holds the channel slot before a queued one takes over. |

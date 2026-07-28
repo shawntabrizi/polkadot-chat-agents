@@ -174,7 +174,7 @@ bot-core logs one JSON line per event. The ones worth grepping:
 | `BOT_CALL_OFFER` / `BOT_CALL_DECLINED` | WebRTC call offer received / auto-declined |
 | `BOT_COINAGE_RECEIVED` | peer sent a Coinage payment (informational; the bot cannot claim it) |
 | `BOT_UNDECODABLE_MESSAGE` / `BOT_UNSUPPORTED_CONTENT` | message kind the codec can't parse / doesn't know |
-| `BOT_LIVE_PLACEHOLDER` / `BOT_LIVE_FALLBACK` | thinking placeholder posted / peer never ACKed it, answer sent plain |
+| `BOT_LIVE_PLACEHOLDER` / `BOT_LIVE_STATUS` / `BOT_LIVE_FALLBACK` | thinking placeholder posted / retired to its status line / peer never ACKed it, answer superseded it instead |
 | `BOT_LIVE_ACK_TIMEOUT` / `BOT_LIVE_EDIT_FAILED` / `BOT_LIVE_FINALIZE_FAILED` | live-reply edge cases (progress dropped, final fell back) |
 | `BOT_AI_FAILED` / `BOT_AI_AUTH_REVOKED` / `BOT_AI_IDLE_TIMEOUT` | direct-engine turn failed / needs re-login / was killed by the idle backstop |
 | `BOT_STOP` / `BOT_RESUME_INVALIDATED` | user /stop cancelled a turn / resume tokens dropped after an engine, model, or workspace change |
