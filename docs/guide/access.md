@@ -81,7 +81,7 @@ the model can talk its way around. The deployer chooses one portable policy:
 | Choice | Effect |
 |---|---|
 | no tool flag | No capabilities and workspace scope. |
-| `--allowed-tools read,write,bash` | Exact lowercase outcome capabilities. `write` includes `read`; `bash` includes both. |
+| `--allowed-tools read,write,bash,web` | Exact lowercase outcome capabilities. `write` includes `read`; `bash` includes both. `web` is independent of all three and is NOT limited by `--tool-scope`. `subagents` is also independent, and grants no reach of its own — a subagent inherits the parent's tools. |
 | `--tool-scope workspace` | Default native file-tool scope; a read-capable turn can also inspect its current staged attachment. Bash uses the agent process boundary. |
 | `--tool-scope container` | Deliberately broad native file-tool access to files visible to the non-root agent account, including its OAuth home. Bash uses the agent process boundary. |
 

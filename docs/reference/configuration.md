@@ -56,7 +56,7 @@ BOT_BRIDGE_PORT=8799            # port the bridge listens on
 BOT_BRIDGE_TOKEN=Xk3…≥32chars   # shared secret; every bridge request must present it. MANDATORY (process exits without it)
 
 # portable tool policy (direct engines)
-BOT_AI_TOOL_CAPABILITIES=       # default: no tools; comma-separated read,write,bash
+BOT_AI_TOOL_CAPABILITIES=       # default: no tools; comma-separated read,write,bash,web,subagents
 BOT_AI_TOOL_SCOPE=workspace     # workspace (default) | container
 BOT_AI_AGENT_UID=1000           # spawned agent CLI is dropped to this uid — cannot read /state or the seed
 BOT_AI_AGENT_GID=1000           # …and this gid (transport stays root solely to hold the seed)
@@ -357,6 +357,7 @@ intentionally returns a direct bot to the no-tools default.
 | `--allowed-tools read` | inspect staged/workspace files |
 | `--allowed-tools read,write` | normal file outcomes (`write` includes `read`) |
 | `--allowed-tools read,write,bash` | files plus command execution |
+| `--allowed-tools read,write,bash,web` | the above plus web search/fetch (unscoped egress) |
 | `--tool-scope workspace` | native file tools confined to the selected project and staged attachments |
 | `--tool-scope container` | native file tools see everything the non-root agent account can |
 | *(no tool flag)* | no-tools default, workspace scope |

@@ -22,7 +22,7 @@ Google, xAI, OpenRouter, local models, and more.
 
 ## Tool policy
 
-Use `pca deploy --allowed-tools read,write,bash` to select exact lowercase
+Use `pca deploy --allowed-tools read,write,bash,web` to select exact lowercase
 outcome capabilities. `write` includes `read`, and `bash` includes both.
 `--tool-scope workspace|container` scopes native file tools. The default is no
 capabilities and workspace scope.

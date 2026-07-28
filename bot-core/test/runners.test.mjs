@@ -339,3 +339,103 @@ test("codex turn.completed carries token usage", () => {
   assert.equal(ev.kind, "result");
   assert.deepEqual(ev.usage, { inputTokens: 900, outputTokens: 88 });
 });
+
+test("web capability compiles to each engine's own web tools", () => {
+  const web = { capabilities: "web", scope: "workspace" };
+  const none = { capabilities: "", scope: "workspace" };
+
+  // claude: web tools must appear in BOTH --tools (availability) and
+  // --allowedTools (approval). Under --permission-mode dontAsk an available but
+  // unapproved tool fails the turn instead of prompting.
+  const claudeArgs = RUNNERS.claude.buildArgs({ prompt: "hi", policy: web });
+  const tools = claudeArgs[claudeArgs.indexOf("--tools") + 1];
+  const allowed = claudeArgs[claudeArgs.indexOf("--allowedTools") + 1];
+  for (const t of ["WebSearch", "WebFetch"]) {
+    assert.match(tools, new RegExp(t), `${t} missing from --tools`);
+    assert.match(allowed, new RegExp(t), `${t} missing from --allowedTools`);
+  }
+  // Web is not file access: no file tool is granted alongside it.
+  assert.doesNotMatch(tools, /Read|Write|Edit|Bash/);
+
+  // …and stays absent without the capability.
+  const bare = RUNNERS.claude.buildArgs({ prompt: "hi", policy: none });
+  assert.equal(bare[bare.indexOf("--tools") + 1], "");
+
+  // codex: flip the feature flag on, and stop forcing the disable override.
+  const codexOn = RUNNERS.codex.buildArgs({ prompt: "hi", policy: web }).join(" ");
+  assert.match(codexOn, /tools\.web_search=true/);
+  // The feature flag alone leaves Codex on cached results. Its config validator
+  // enumerates disabled|cached|indexed|live, so the granted branch must pick
+  // `live` to actually match what the capability advertises.
+  assert.match(codexOn, /web_search="live"/);
+  assert.doesNotMatch(codexOn, /web_search="disabled"/);
+  const codexOff = RUNNERS.codex.buildArgs({ prompt: "hi", policy: none }).join(" ");
+  assert.match(codexOff, /tools\.web_search=false/);
+  assert.match(codexOff, /web_search="disabled"/);
+});
+
+test("subagents compiles to each engine's delegation tool", () => {
+  const sub = { capabilities: "subagents", scope: "workspace" };
+  const none = { capabilities: "", scope: "workspace" };
+
+  // claude: Agent must be both available and approved, and must not drag in
+  // any file or web tool — a subagent inherits whatever the parent has.
+  const args = RUNNERS.claude.buildArgs({ prompt: "hi", policy: sub });
+  assert.equal(args[args.indexOf("--tools") + 1], "Agent");
+  assert.match(args[args.indexOf("--allowedTools") + 1], /Agent/);
+
+  // codex: flip its multi_agent feature rather than leaving it forced off.
+  const on = RUNNERS.codex.buildArgs({ prompt: "hi", policy: sub }).join(" ");
+  assert.match(on, /features\.multi_agent=true/);
+  const off = RUNNERS.codex.buildArgs({ prompt: "hi", policy: none }).join(" ");
+  assert.match(off, /features\.multi_agent=false/);
+
+  // opencode: `task` is its delegation tool, blocked by the deny-first default.
+  // Its permissions ride OPENCODE_PERMISSION in the environment, not argv.
+  const permitted = JSON.parse(RUNNERS.opencode.buildEnvironment({ policy: sub }).OPENCODE_PERMISSION);
+  assert.equal(permitted.task, "allow");
+  assert.equal(permitted["*"], "deny", "the catch-all must still deny everything else");
+  const denied = JSON.parse(RUNNERS.opencode.buildEnvironment({ policy: none }).OPENCODE_PERMISSION);
+  assert.equal(denied.task, undefined, "no delegation without the capability");
+});
+
+test("web opens both fetch and search on opencode", () => {
+  // OpenCode gates search separately from fetch; allowing only webfetch left
+  // every search denied by the deny-first catch-all.
+  const on = JSON.parse(RUNNERS.opencode.buildEnvironment({ policy: { capabilities: "web" } }).OPENCODE_PERMISSION);
+  assert.equal(on.webfetch, "allow");
+  assert.equal(on.websearch, "allow");
+  assert.equal(on["*"], "deny");
+  const off = JSON.parse(RUNNERS.opencode.buildEnvironment({ policy: { capabilities: "" } }).OPENCODE_PERMISSION);
+  assert.equal(off.webfetch, undefined);
+  assert.equal(off.websearch, undefined);
+});
+
+test("enforcement summaries admit what the file scope does not contain", () => {
+  // Every enforcement detail describes FILE containment. Granting web or
+  // subagents must not leave an operator reading "path-scoped file-tool rules"
+  // and inferring a boundary that does not cover them.
+  const files = toolPolicyEnforcement("claude", { capabilities: "read", scope: "workspace" });
+  assert.match(files.detail, /path-scoped/);
+  assert.equal(files.unscoped, undefined);
+
+  const web = toolPolicyEnforcement("claude", { capabilities: "read,web", scope: "workspace" });
+  assert.match(web.detail, /web tools reach any URL/);
+  assert.deepEqual([...web.unscoped], ["web tools reach any URL"]);
+
+  const both = toolPolicyEnforcement("claude", { capabilities: "read,web,subagents", scope: "workspace" });
+  assert.match(both.detail, /web tools reach any URL; subagents inherit this same policy/);
+
+  // No capabilities at all stays the plain "disabled" summary.
+  assert.equal(toolPolicyEnforcement("claude", { capabilities: "" }).kind, "none");
+});
+
+test("codex delegation events become subagent progress lines", () => {
+  // codex exec --json reports delegation as item.started/collab_tool_call.
+  const [ev] = RUNNERS.codex.parseEvent({
+    type: "item.started",
+    item: { type: "collab_tool_call", description: "review the auth module" },
+  });
+  assert.equal(ev.kind, "action");
+  assert.match(ev.title, /^subagent: review the auth module/);
+});
