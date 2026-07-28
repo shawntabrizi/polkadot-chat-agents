@@ -3,6 +3,16 @@
 // POST /inbound/ack, POST /send {chat_id,text?,file_path?,reply_to?,edit_of?,thread_root_id?,delivery_id?,lease_id?},
 // GET/PUT/DELETE /files/:chat/:path (peer-scoped artifact vault), and GET
 // /media/:id (authenticated attachment retrieval, cached or on-demand).
+//
+// Addressing: OpenClaw names peers channel-namespaced (`polkadot:<hex>`) — our
+// own gateway emits that form as `from` and `reply.to`. Core hands it straight
+// back on any send that did not originate inside an inbound gateway turn
+// (attached results, heartbeat typing, and crucially delivery-recovery replays
+// after a restart), but bot-core's routes only accept the bare peer id and
+// reject the namespaced form with `invalid chat_id`. Every chat id is therefore
+// normalized at this single boundary into bot-core rather than at each call
+// site. Inbound `chat_id`s are already bare, so it is a no-op for the gateway's
+// own replies.
 
 // Attachment metadata as bot-core exposes it. `url` is an authenticated,
 // opaque bridge capability; it may download into bot-core's private cache on
@@ -97,6 +107,15 @@ export type BridgeClient = ReturnType<typeof createBridge>;
 
 type BridgeResponse = { success?: boolean; error?: string; [key: string]: unknown };
 
+// Strip the OpenClaw channel namespace from a peer address. Idempotent: a bare
+// peer id passes through unchanged. Exported for tests.
+const CHANNEL_ADDRESS_PREFIX = "polkadot:";
+export const peerChatId = (chatId: string): string => (
+  typeof chatId === "string" && chatId.startsWith(CHANNEL_ADDRESS_PREFIX)
+    ? chatId.slice(CHANNEL_ADDRESS_PREFIX.length)
+    : chatId
+);
+
 const responseJson = async <T>(response: Response): Promise<T> => {
   try {
     return await response.json() as T;
@@ -124,6 +143,7 @@ export function createBridge(baseUrl: string, token: string, proactiveToken = ""
     return { "x-bridge-proactive-token": proactive };
   };
   const fileUrl = (chatId: string, filePath: string): string => {
+    chatId = peerChatId(chatId);
     if (!chatId) throw new Error("cannot access a file vault with an empty chat id");
     if (!filePath) throw new Error("cannot access an empty file path");
     // Encode the whole vault-relative path so a slash remains part of the
@@ -177,7 +197,7 @@ export function createBridge(baseUrl: string, token: string, proactiveToken = ""
         throw new Error("polkadot bridge edits cannot include filePath");
       }
       const body = {
-        chat_id: chatId,
+        chat_id: peerChatId(chatId),
         text,
         ...(typeof options.filePath === "string" ? { file_path: options.filePath } : {}),
         ...(typeof options.replyTo === "string" ? { reply_to: options.replyTo } : {}),
@@ -235,7 +255,7 @@ export function createBridge(baseUrl: string, token: string, proactiveToken = ""
         method: "POST",
         headers: { ...headers, ...proactiveHeaders(options.proactive === true), "content-type": "application/json" },
         body: JSON.stringify({
-          chat_id: chatId,
+          chat_id: peerChatId(chatId),
           message_id: messageId,
           emoji,
           remove,
@@ -251,7 +271,7 @@ export function createBridge(baseUrl: string, token: string, proactiveToken = ""
         method: "POST",
         headers: { ...headers, ...proactiveHeaders(options.proactive === true), "content-type": "application/json" },
         body: JSON.stringify({
-          chat_id: chatId,
+          chat_id: peerChatId(chatId),
           ...(typeof options.deliveryId === "string" ? { delivery_id: options.deliveryId } : {}),
           ...(typeof options.leaseId === "string" ? { lease_id: options.leaseId } : {}),
         }),

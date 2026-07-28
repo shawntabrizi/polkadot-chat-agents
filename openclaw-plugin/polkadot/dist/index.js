@@ -59,6 +59,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 // src/bridge.ts
+var CHANNEL_ADDRESS_PREFIX = "polkadot:";
+var peerChatId = (chatId) => typeof chatId === "string" && chatId.startsWith(CHANNEL_ADDRESS_PREFIX) ? chatId.slice(CHANNEL_ADDRESS_PREFIX.length) : chatId;
 var responseJson = async (response) => {
   try {
     return await response.json();
@@ -84,6 +86,7 @@ function createBridge(baseUrl, token, proactiveToken = "") {
     return { "x-bridge-proactive-token": proactive };
   };
   const fileUrl = (chatId, filePath) => {
+    chatId = peerChatId(chatId);
     if (!chatId) throw new Error("cannot access a file vault with an empty chat id");
     if (!filePath) throw new Error("cannot access an empty file path");
     return `${base}/files/${encodeURIComponent(chatId)}/${encodeURIComponent(filePath)}`;
@@ -131,7 +134,7 @@ function createBridge(baseUrl, token, proactiveToken = "") {
         throw new Error("polkadot bridge edits cannot include filePath");
       }
       const body = {
-        chat_id: chatId,
+        chat_id: peerChatId(chatId),
         text,
         ...typeof options.filePath === "string" ? { file_path: options.filePath } : {},
         ...typeof options.replyTo === "string" ? { reply_to: options.replyTo } : {},
@@ -174,7 +177,7 @@ function createBridge(baseUrl, token, proactiveToken = "") {
         method: "POST",
         headers: { ...headers, ...proactiveHeaders(options.proactive === true), "content-type": "application/json" },
         body: JSON.stringify({
-          chat_id: chatId,
+          chat_id: peerChatId(chatId),
           message_id: messageId,
           emoji,
           remove,
@@ -189,7 +192,7 @@ function createBridge(baseUrl, token, proactiveToken = "") {
         method: "POST",
         headers: { ...headers, ...proactiveHeaders(options.proactive === true), "content-type": "application/json" },
         body: JSON.stringify({
-          chat_id: chatId,
+          chat_id: peerChatId(chatId),
           ...typeof options.deliveryId === "string" ? { delivery_id: options.deliveryId } : {},
           ...typeof options.leaseId === "string" ? { lease_id: options.leaseId } : {}
         })
