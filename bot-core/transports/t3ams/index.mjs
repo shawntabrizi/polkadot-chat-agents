@@ -1621,7 +1621,7 @@ const markAgentReplyPart = async (context, reply, nextPart) => {
 const deliverPersistedAgentReply = async (chatId, context, reply, turnStats = null) => {
   disarmThinking(chatId, context.turnContext);
   if (reply.parts.length > 1) log("T3AMS_REPLY_CHUNKED", { chatId, parts: reply.parts.length, chars: reply.text.length });
-  // Retire the placeholder to a one-line status summary and let the answer go
+  // Retire the placeholder to a short status receipt and let the answer go
   // out as new messages — an edit raises no notification. Only on the first
   // pass: placeholders live in memory, so a delivery resumed after a restart
   // has none left and its parts simply continue from the durable cursor.
@@ -1961,7 +1961,7 @@ const deliverAgentReply = async (chatId, text, suppliedTurnContext = null, turnS
   const placeholder = await takeLivePlaceholder(chatId, turnContext);
   let deliveredFirst = false;
   if (placeholder != null) {
-    // The placeholder retires to a status summary; the answer follows as new
+    // The placeholder retires to a status receipt; the answer follows as new
     // messages so it raises a notification. Finalization is intentionally not
     // best-effort: a terminal delivery failure is surfaced to the durable
     // ingress journal for retry. Progress edits and typing above stay non-fatal.
@@ -4147,7 +4147,7 @@ const bridge = http.createServer(async (request, response) => {
       if (placeholder != null) {
         // A bridge lease records the triggering thread before the harness
         // begins work, so the placeholder is already in the correct T3ams
-        // reply/thread. It retires to a one-line status summary and the answer
+        // reply/thread. It retires to a short status receipt and the answer
         // follows as its own message, which is what raises a notification. A
         // harness reports no token usage, so the line is elapsed + steps only.
         const status = renderTurnStats({

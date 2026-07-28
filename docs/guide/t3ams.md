@@ -128,10 +128,19 @@ authenticated text without making the bot listen or reply to every room message.
 
 For a slow direct-brain turn, the bot emits a native typing signal and then a
 thinking message. Tool/activity progress edits that same message in place, and
-when the turn finishes it collapses to a one-line status summary — elapsed
-time, step count, and token usage. The answer follows as a new message (long
-answers as ordered parts). The status line keeps the scrollback compact while
-the new message raises the phone notification an edit never would.
+when the turn finishes it collapses to a short status receipt:
+
+```
+✓ Answered in 42s · 3 steps
+claude-opus-5 · Context 30.4k tokens · reply 5k · ~$0.0123
+```
+
+The answer follows as a new message (long answers as ordered parts). The
+receipt keeps the scrollback compact while the new message raises the phone
+notification an edit never would. Line 2 is dropped entirely when the engine
+reports no usage, so a bridge harness or an `opencode` brain simply shows line
+one. "Context" is everything sent to the model — system prompt, history, and the
+user's message — which is why it dwarfs the reply even on a short question.
 
 Bridge frameworks receive the same lifecycle. They can use `POST /send` with
 `edit_of` for coalesced streaming edits, `POST /react` for real T3ams emoji

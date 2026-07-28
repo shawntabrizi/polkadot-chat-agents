@@ -166,7 +166,7 @@ const ackText = env.BOT_ACK_TEXT ?? (brain === "bridge" ? "Connecting you to the
 const thinkingText = env.BOT_THINKING_TEXT ?? "🤔 One moment — thinking…";
 const thinkingAfterMs = numberEnv("BOT_THINKING_AFTER_MS", 5000, { min: 0, max: 86_400_000 });
 // Live replies: the thinking placeholder is edited through progress and then
-// collapses to a one-line status summary of what the turn cost; the answer
+// collapses to a short status receipt of what the turn cost; the answer
 // follows as a new message, which is what raises a phone notification.
 // Edit cadence guardrails live in lib/live-reply.mjs.
 const liveMinEditMs = numberEnv("BOT_LIVE_EDIT_MIN_MS", 3000, { min: 100, max: 86_400_000 });
@@ -873,7 +873,7 @@ const armThinking = (peerHex) => {
     thinkingTimers.delete(k);
     if (livePlaceholders.has(k)) return; // a previous turn's placeholder is still open
     // The placeholder is a LIVE message: it is edited through progress frames
-    // and finally collapses to a one-line status summary of the turn.
+    // and finally collapses to a short status receipt for the turn.
     livePlaceholders.set(k, (async () => {
       const handle = await liveReplies.begin(k, thinkingText);
       // Already counting since turn start; attaching lets any pre-placeholder
@@ -1078,7 +1078,7 @@ const sendReaction = async (peerHex, targetMessageId, emoji, removed = false) =>
 // three capabilities and stays otherwise unaware of resume tokens, projects
 // or commands. This `chat` surface is the in-process twin of the HTTP bridge.
 
-// Deliver a final answer. The live placeholder retires to a one-line status
+// Deliver a final answer. The live placeholder retires to a short status
 // summary (elapsed, steps, tokens) and the answer goes out as NEW messages —
 // an edit raises no phone notification, so finalizing the answer onto the
 // placeholder left a locked-phone user unaware their answer had landed.
@@ -2186,7 +2186,7 @@ const startBridge = () => {
         let firstId = null;
         const lp = await takeLivePlaceholder(chatId);
         if (lp) {
-          // The placeholder retires to a one-line status summary and the answer
+          // The placeholder retires to a short status receipt and the answer
           // goes out as new messages — see deliverToChat. A harness reports no
           // token usage, so the line carries elapsed time and step count only.
           // A quoted answer can never BE the placeholder anyway.
