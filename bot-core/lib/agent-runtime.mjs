@@ -610,8 +610,10 @@ export const createAgentRuntime = ({
     const k = norm(sessionKey);
     if (job?.cancelled) { resolve({ stopped: true }); return; }
     let child;
+    // Resolved outside the spawn try: the close handler below reports it with
+    // the turn's usage, and would otherwise read it out of scope.
+    const turnModel = peerModelOverrides.get(k) ?? model;
     try {
-      const turnModel = peerModelOverrides.get(k) ?? model;
       const resume = peerResume.get(k) ?? null;
       const effort = peerEffortOverrides.get(k) ?? reasoning ?? "";
       const turn = {
@@ -734,7 +736,7 @@ export const createAgentRuntime = ({
       if (outputExceeded) return finish(null);
       const finalAnswer = (resultText ?? answer).trim();
       if (errored) { log("BOT_AI_FAILED", { to: peerHex, error: String(errored).slice(-300) }); return finish(null); }
-      if (code === 0 || finalAnswer) { recordUsage(peerHex, usage, k); return finish({ answer: finalAnswer, usage }); }
+      if (code === 0 || finalAnswer) { recordUsage(peerHex, usage, k); return finish({ answer: finalAnswer, usage, model: turnModel || null }); }
       // Classify the failure so the operator knows the remedy (re-auth vs. retry).
       const authRevoked = /401|unauthorized|refresh token|could not be refreshed|log ?out and sign in/i.test(err);
       log(authRevoked ? "BOT_AI_AUTH_REVOKED" : "BOT_AI_FAILED", { to: peerHex, code, stderr: err.trim().slice(-500) });
@@ -930,7 +932,13 @@ export const createAgentRuntime = ({
             persist();
             outgoing += "\n\n(Tip: send /help to see my commands.)";
           }
-          await sendTurn(peerHex, outgoing, artifactHandoff?.artifacts ?? [], deliveryContext, result.usage ?? null);
+          await sendTurn(
+            peerHex,
+            outgoing,
+            artifactHandoff?.artifacts ?? [],
+            deliveryContext,
+            { ...(result.usage ?? {}), ...(result.model ? { model: result.model } : {}) },
+          );
         });
         return true;
       } finally {

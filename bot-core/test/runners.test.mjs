@@ -311,6 +311,29 @@ test("claude result events carry token/cost usage", () => {
   assert.equal(bare.usage, undefined);
 });
 
+test("input tokens include the cached prompt, not just the uncached residue", () => {
+  // Claude Code reports `input_tokens` as the UNCACHED remainder. An agent turn
+  // caches its system prompt and history, so the residue is tiny — reporting it
+  // raw showed a ~30k-token turn as "16 input tokens".
+  const [ev] = RUNNERS.claude.parseEvent({
+    type: "result", result: "done", is_error: false,
+    usage: {
+      input_tokens: 16,
+      cache_read_input_tokens: 28_000,
+      cache_creation_input_tokens: 2_400,
+      output_tokens: 5_000,
+    },
+  });
+  assert.equal(ev.usage.inputTokens, 30_416, "must sum uncached + cache reads + cache writes");
+  assert.equal(ev.usage.outputTokens, 5_000);
+  // Engines that report no cache fields are unaffected.
+  const [plain] = RUNNERS.claude.parseEvent({
+    type: "result", result: "done", is_error: false,
+    usage: { input_tokens: 1200, output_tokens: 345 },
+  });
+  assert.equal(plain.usage.inputTokens, 1200);
+});
+
 test("codex turn.completed carries token usage", () => {
   const [ev] = RUNNERS.codex.parseEvent({ type: "turn.completed", usage: { input_tokens: 900, output_tokens: 88 } });
   assert.equal(ev.kind, "result");

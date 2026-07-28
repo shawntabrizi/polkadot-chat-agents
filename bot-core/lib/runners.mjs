@@ -19,7 +19,8 @@ import {
 //   { kind: "text",    text }       — a chunk of the answer (accumulate)
 //   { kind: "result",  text, ok, usage? } — terminal; text may be "" (use
 //       accumulated); usage is { inputTokens?, outputTokens?, costUsd? } when
-//       the CLI reported it
+//       the CLI reported it. Not every engine reports all three: claude has
+//       tokens + cost, codex has tokens only, opencode reports none.
 //   { kind: "error",   message }    — terminal failure
 // parseEvent is PURE (obj -> Event[]); the caller accumulates and picks the
 // answer, which keeps every engine unit-testable against fixture JSONL.
@@ -202,6 +203,18 @@ export const toolPolicyEnforcement = (engineName, policyInput = DEFAULT_TOOL_POL
   return { kind: "permission-policy", detail: "OpenCode deny-first file-tool policy" };
 };
 
+// The engines report `input_tokens` as the UNCACHED remainder only: the real
+// prompt size is that plus whatever was read from, or written to, the prompt
+// cache. An agent turn caches its system prompt and history, so the residue is
+// often a couple of dozen tokens — reporting it raw makes a 30k-token turn look
+// like "16 input tokens". Sum the three so the number means the prompt.
+// Absent cache fields simply contribute zero, so this is safe for any engine.
+const totalInputTokens = (usage) => {
+  const parts = [usage?.input_tokens, usage?.cache_read_input_tokens, usage?.cache_creation_input_tokens]
+    .filter((n) => typeof n === "number" && Number.isFinite(n));
+  return parts.length ? parts.reduce((a, b) => a + b, 0) : null;
+};
+
 // ---- claude (Claude Code) --------------------------------------------------
 // Invocation & event schema verified live against the claude CLI.
 const claude = {
@@ -267,7 +280,7 @@ const claude = {
     if (obj?.type === "result") {
       if (obj.is_error) return [{ kind: "error", message: String(obj.result ?? obj.subtype ?? "claude error") }];
       const usage = {
-        ...(obj.usage?.input_tokens != null ? { inputTokens: obj.usage.input_tokens } : {}),
+        ...(totalInputTokens(obj.usage) != null ? { inputTokens: totalInputTokens(obj.usage) } : {}),
         ...(obj.usage?.output_tokens != null ? { outputTokens: obj.usage.output_tokens } : {}),
         ...(obj.total_cost_usd != null ? { costUsd: obj.total_cost_usd } : {}),
       };
@@ -327,7 +340,7 @@ const codex = {
     }
     if (obj?.type === "turn.completed") {
       const usage = {
-        ...(obj.usage?.input_tokens != null ? { inputTokens: obj.usage.input_tokens } : {}),
+        ...(totalInputTokens(obj.usage) != null ? { inputTokens: totalInputTokens(obj.usage) } : {}),
         ...(obj.usage?.output_tokens != null ? { outputTokens: obj.usage.output_tokens } : {}),
       };
       return [{ kind: "result", text: "", ok: true, ...(Object.keys(usage).length ? { usage } : {}) }];

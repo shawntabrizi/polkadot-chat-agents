@@ -361,3 +361,40 @@ test("gateway privately stages inbound files and returns generated files through
     await rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("bridge strips the OpenClaw channel namespace from every chat id", async () => {
+  // OpenClaw hands back its own `polkadot:<hex>` address on sends that did not
+  // originate in an inbound turn — attached results, heartbeat typing, and
+  // delivery-recovery replays after a restart. bot-core rejects that form with
+  // `invalid chat_id`, which silently dropped recovered deliveries.
+  const { createBridge, peerChatId } = bridgeModule;
+  const bare = "40d4fd1f9b35d2449cfc2a2d008cbf023ecfef7dd6a6d1daaf4b290964e94966";
+  assert.equal(peerChatId(`polkadot:${bare}`), bare);
+  assert.equal(peerChatId(bare), bare, "already-bare ids pass through unchanged");
+
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: String(url), body: init?.body ? JSON.parse(init.body) : null });
+    return new Response(JSON.stringify({ success: true, message_id: "M1" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const bridge = createBridge("http://127.0.0.1:9999", "token");
+    await bridge.send(`polkadot:${bare}`, "hi");
+    await bridge.typing(`polkadot:${bare}`);
+    await bridge.react(`polkadot:${bare}`, "MSG-1", "👍");
+    for (const req of requests) {
+      assert.equal(req.body.chat_id, bare, `namespaced chat id reached ${req.url}`);
+    }
+    assert.equal(requests.length, 3);
+    // File-vault routes build the chat id into the URL path, not the body.
+    requests.length = 0;
+    await bridge.removeFile(`polkadot:${bare}`, "out.txt");
+    assert.match(requests[0].url, new RegExp(`/files/${bare}/`), "vault URL must use the bare id");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

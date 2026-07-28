@@ -76,9 +76,11 @@ opt-in, because an unaware harness would chat-reply to a reaction.
 The peer allowlist is enforced inside `bot-core` before a message reaches the
 bridge, so unlisted senders never reach the framework or spend model quota.
 Long replies sent via `/send` are split into ordered parts automatically. The
-"thinking" placeholder retires to a one-line status summary (elapsed time and
-step count) and the answer goes out as new messages — the harness just sends
-text.
+"thinking" placeholder retires to a short status receipt and the answer goes out
+as new messages — the harness just sends text. A harness reports no token usage,
+so its receipt carries elapsed time and step count only (`✓ Answered in 42s ·
+3 steps`); a direct engine adds a second line naming the model, context and
+reply token counts, and cost where the engine reports one.
 
 For a T3ams lease, bot-core can publish a typing signal and a thinking
 placeholder while the framework works. The first ordinary `POST /send` retires

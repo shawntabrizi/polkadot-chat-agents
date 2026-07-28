@@ -693,7 +693,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
       // A progress frame carried the tool action line; the terminal edit is a
       // one-line status summary of what the turn cost, NOT the answer.
       assert.match(r.out, /▸ \$ npm test/, `no tool action frame:\n${r.out}`);
-      assert.match(r.out, /\[BOT EDIT [0-9A-F-]+\] ✓ \d+s/, `terminal status line missing:\n${r.out}`);
+      assert.match(r.out, /\[BOT EDIT [0-9A-F-]+\] ✓ Answered in \d+s/, `terminal status line missing:\n${r.out}`);
       // The answer must arrive as a NEW bubble: an edit raises no phone
       // notification, so a user who locked their phone mid-turn would never
       // learn the answer landed.

@@ -375,20 +375,28 @@ test("finalize still edits the status line in when the peer ACKed", async () => 
   assert.equal(last.text, "✓ 6s · 1 step", "an ACKed placeholder keeps the status line");
 });
 
-test("renderTurnStats fits one line and states only what is known", () => {
+test("renderTurnStats keeps the human summary on line 1 and the accounting on line 2", () => {
+  // Line 1 is what a person wants (how long, how much work). Line 2 names each
+  // number instead of joining them with an arrow, and leads with the model so a
+  // /model override is visible in the answer's provenance.
   assert.equal(
-    renderTurnStats({ elapsed: "42s", steps: 3, usage: { inputTokens: 12_400, outputTokens: 1800 } }),
-    "✓ 42s · 3 steps · 12.4k→1.8k tokens",
+    renderTurnStats({
+      elapsed: "42s",
+      steps: 3,
+      usage: { model: "claude-opus-5", inputTokens: 30_416, outputTokens: 5000, costUsd: 0.0123 },
+    }),
+    "\u2713 Answered in 42s \u00b7 3 steps\nclaude-opus-5 \u00b7 Context 30.4k tokens \u00b7 reply 5k \u00b7 ~$0.0123",
   );
-  // A bridge harness reports no usage; a no-tool turn has no steps.
-  assert.equal(renderTurnStats({ elapsed: "6s", steps: 1 }), "✓ 6s · 1 step");
-  assert.equal(renderTurnStats({ elapsed: "2s" }), "✓ 2s");
-  // Exact counts below 1k stay legible; cost only shows when non-zero.
-  assert.equal(
-    renderTurnStats({ elapsed: "1m 05s", steps: 0, usage: { inputTokens: 900, outputTokens: 120, costUsd: 0.0031 } }),
-    "✓ 1m 05s · 900→120 tokens · $0.0031",
+  // Line 2 is dropped entirely when the engine reports no usage (opencode, and
+  // every bridge harness) — no brain needs a special case, none shows a zero.
+  assert.equal(renderTurnStats({ elapsed: "42s", steps: 3 }), "\u2713 Answered in 42s \u00b7 3 steps");
+  assert.equal(renderTurnStats({ elapsed: "2s" }), "\u2713 Answered in 2s");
+  assert.equal(renderTurnStats({}), "\u2713", "nothing known still yields a terminal glyph");
+  // Token magnitudes follow the operator's own status line: k, then M.
+  assert.match(
+    renderTurnStats({ elapsed: "9m 12s", steps: 41, usage: { inputTokens: 1_240_000, outputTokens: 62_000, costUsd: 3.4 } }),
+    /Context 1\.2M tokens \u00b7 reply 62k \u00b7 ~\$3\.40$/,
   );
-  assert.equal(renderTurnStats({}), "✓", "nothing known still yields a terminal glyph");
 });
 
 test("a tracker anchored to turn start reports the turn's duration, not the placeholder's age", () => {
@@ -410,9 +418,15 @@ test("a deferred tracker exposes elapsed for the terminal status line", () => {
   assert.equal(tracker.elapsed(), "4s");
 });
 
-test("renderTurnStats labels one-sided token usage", () => {
-  assert.equal(renderTurnStats({ elapsed: "3s", usage: { outputTokens: 1800 } }), "✓ 3s · 1.8k out tokens");
-  assert.equal(renderTurnStats({ elapsed: "3s", usage: { inputTokens: 12_400 } }), "✓ 3s · 12.4k in tokens");
+test("renderTurnStats labels one-sided token usage and trims cost padding", () => {
+  // Reply-only has to carry the unit itself — there is no "tokens" ahead of it.
+  assert.equal(renderTurnStats({ elapsed: "3s", usage: { outputTokens: 1800 } }), "\u2713 Answered in 3s\nReply 1.8k tokens");
+  assert.equal(renderTurnStats({ elapsed: "3s", usage: { inputTokens: 12_400 } }), "\u2713 Answered in 3s\nContext 12.4k tokens");
+  // Padding zeros go, but never below currency precision.
+  const cost = (c) => renderTurnStats({ elapsed: "1s", usage: { costUsd: c } }).split("\n")[1];
+  assert.equal(cost(0.021), "~$0.021");
+  assert.equal(cost(0.5), "~$0.50", "must not read as ~$0.5");
+  assert.equal(cost(12), "~$12.00");
 });
 
 test("a quiet deferred tracker counts steps without publishing frames", () => {

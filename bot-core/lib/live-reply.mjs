@@ -1,11 +1,11 @@
 // Live replies: one placeholder message that is edited in place through a
-// turn's lifecycle (thinking -> progress -> a one-line status summary of what
+// turn's lifecycle (thinking -> progress -> a short status receipt of what
 // the turn cost). The answer itself is then sent as a NEW message, never as a
 // final edit of the placeholder, for two reasons:
 //   - a new message raises a phone notification; an edit does not, so a user
 //     who locks their phone mid-turn otherwise never learns the answer landed;
-//   - the placeholder stays small (one line), so the scrollback shows a
-//     compact activity receipt above the answer instead of a duplicate of it.
+//   - the placeholder stays small (at most two lines), so the scrollback shows
+//     a compact activity receipt above the answer instead of a duplicate of it.
 //
 // The protocol constraints this module exists to enforce:
 //  - The placeholder must be ACKed by the peer before any edit goes out: the
@@ -285,33 +285,67 @@ export const createProgressTracker = ({ label = "working", maxActions = 3, now =
 
 // Compact token counts: the status line has to fit on one line, so 12_400 ->
 // "12.4k". Exact below 1000 so short turns stay legible.
+// Matches the k/M thresholds in the operator's own Claude Code status line, so
+// a token figure reads the same in both places.
 const compactCount = (n) => {
   if (!Number.isFinite(n) || n <= 0) return null;
   if (n < 1000) return String(Math.round(n));
-  const k = n / 1000;
-  // One decimal keeps 12.4k informative; drop it past 100k where it is noise,
+  const [value, unit] = n >= 1_000_000 ? [n / 1_000_000, "M"] : [n / 1000, "k"];
+  // One decimal keeps 12.4k informative; drop it past 100 where it is noise,
   // and drop a bare ".0" so an exact 1000 reads "1k".
-  const s = k < 100 ? k.toFixed(1) : String(Math.round(k));
-  return `${s.endsWith(".0") ? s.slice(0, -2) : s}k`;
+  const s = value < 100 ? value.toFixed(1) : String(Math.round(value));
+  return `${s.endsWith(".0") ? s.slice(0, -2) : s}${unit}`;
 };
 
-// The placeholder's terminal frame: what the turn cost, on one line. Every
-// field is optional — a bridge harness reports no token usage, and a turn that
-// called no tools has no steps — so the line only ever states what is known.
+// The placeholder's terminal frame: at most two lines.
+//
+// Line 1 is what a person wants to know — how long it took, how much work it
+// took, what it cost. Line 2 is the token accounting, and is omitted entirely
+// when the engine reports no usage (opencode and bridge harnesses report none,
+// codex reports tokens but no cost), so no brain needs a special case and none
+// renders a misleading zero.
+//
+// The token counts are NAMED rather than joined by an arrow. "Context" is
+// everything sent to the model — system prompt, conversation history, and the
+// user's message — which is why it dwarfs the reply and why a one-sentence
+// question can still show tens of thousands of tokens. An arrow between two
+// bare numbers reads like a conversion and explains neither.
 export const renderTurnStats = ({ elapsed = null, steps = 0, usage = null, prefix = "✓" } = {}) => {
-  const parts = [];
-  if (elapsed) parts.push(String(elapsed));
-  if (steps > 0) parts.push(`${steps} step${steps === 1 ? "" : "s"}`);
+  const headline = [];
+  if (elapsed) headline.push(`Answered in ${elapsed}`);
+  if (steps > 0) headline.push(`${steps} step${steps === 1 ? "" : "s"}`);
+  const first = headline.length ? `${prefix} ${headline.join(" · ")}` : prefix;
+
+  // Line 2 leads with which model answered, mirroring the operator's own status
+  // line (model first, metrics after). It matters here because a peer can
+  // override the model per conversation with /model, so the answer's provenance
+  // is not inferable from the bot's configuration.
+  const detail = [];
+  if (typeof usage?.model === "string" && usage.model.trim()) detail.push(usage.model.trim());
   const inTokens = compactCount(usage?.inputTokens);
   const outTokens = compactCount(usage?.outputTokens);
-  // Engines report the two counts independently, so a one-sided usage event
-  // must still surface — labelled, since "1.8k tokens" alone is ambiguous.
-  if (inTokens && outTokens) parts.push(`${inTokens}→${outTokens} tokens`);
-  else if (outTokens) parts.push(`${outTokens} out tokens`);
-  else if (inTokens) parts.push(`${inTokens} in tokens`);
+  if (inTokens) detail.push(`Context ${inTokens} tokens`);
+  // Engines report the two counts independently. When only the reply is known
+  // it has to carry the unit itself, since there is no "tokens" ahead of it.
+  if (outTokens) detail.push(inTokens ? `reply ${outTokens}` : `Reply ${outTokens} tokens`);
   const cost = usage?.costUsd;
-  if (Number.isFinite(cost) && cost > 0) parts.push(`$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}`);
-  return parts.length ? `${prefix} ${parts.join(" · ")}` : prefix;
+  // "~" because the engine's own figure is an estimate, same signal the
+  // operator's status line uses. Sub-dollar turns are the norm, so keep 4
+  // decimals until the figure is big enough that cents are the interesting part.
+  if (Number.isFinite(cost) && cost > 0) {
+    // Sub-dollar turns are the norm, so allow 4 decimals — but trim padding
+    // zeros ($0.0210 -> $0.021) while never dropping below currency precision
+    // ($0.5 -> $0.50). A dollar or more reads as ordinary currency.
+    let figure;
+    if (cost < 1) {
+      const [whole, frac = ""] = cost.toFixed(4).replace(/0+$/, "").split(".");
+      figure = `${whole}.${frac.padEnd(2, "0")}`;
+    } else {
+      figure = cost.toFixed(2);
+    }
+    detail.push(`~$${figure}`);
+  }
+  return detail.length ? `${first}\n${detail.join(" · ")}` : first;
 };
 
 // A turn may do useful work before its visible placeholder can be created:
