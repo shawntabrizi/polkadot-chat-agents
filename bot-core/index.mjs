@@ -44,7 +44,7 @@
 //   Live replies: BOT_LIVE_EDIT_MIN_MS (3000) / BOT_LIVE_EDIT_MAX_MS (15000)
 //   edit throttle, BOT_LIVE_HEARTBEAT_MS (15000) elapsed-clock frames,
 //   BOT_LIVE_ACK_TIMEOUT_MS (60000), BOT_LIVE_PROGRESS (1; 0 = placeholder and
-//   final only), BOT_LIVE_TTL_MS (600000) + BOT_LIVE_TIMEOUT_TEXT — placeholder
+//   status line only), BOT_LIVE_TTL_MS (600000) + BOT_LIVE_TIMEOUT_TEXT — placeholder
 //   resolves to a timeout note if no answer finalized it in time.
 //   Direct engines (BOT_BRAIN=claude|codex|opencode): BOT_AI_MODEL (opencode
 //   takes a provider/model slug), BOT_AI_ALLOWED_MODELS (comma-sep /model
@@ -77,7 +77,7 @@ import { downloadP2PFile, uploadP2PFile, validateHopUrl } from "./lib/hop-client
 import { createMediaStore } from "./lib/media-store.mjs";
 import { createFileStore } from "./lib/file-store.mjs";
 import { createFileCommandHandler } from "./lib/file-commands.mjs";
-import { createLiveReplies, createProgressTracker } from "./lib/live-reply.mjs";
+import { createDeferredProgressTracker, createLiveReplies, renderTurnStats } from "./lib/live-reply.mjs";
 import { RUNNERS, resolveEngine, ENGINES, assertEngineToolPolicy, toolPolicyEnforcement } from "./lib/runners.mjs";
 import { ToolPolicyError, hasToolCapability, toolPolicyFromEnvironment, toolPolicySummary } from "./lib/tool-policy.mjs";
 import { createKeyedDispatcher } from "./lib/keyed-dispatcher.mjs";
@@ -165,8 +165,9 @@ const ackText = env.BOT_ACK_TEXT ?? (brain === "bridge" ? "Connecting you to the
 // like the message was lost. Fast replies cancel it. Empty text disables it.
 const thinkingText = env.BOT_THINKING_TEXT ?? "🤔 One moment — thinking…";
 const thinkingAfterMs = numberEnv("BOT_THINKING_AFTER_MS", 5000, { min: 0, max: 86_400_000 });
-// Live replies: the thinking placeholder becomes ONE evolving message (edited
-// through progress into the final answer) instead of a throwaway bubble.
+// Live replies: the thinking placeholder is edited through progress and then
+// collapses to a one-line status summary of what the turn cost; the answer
+// follows as a new message, which is what raises a phone notification.
 // Edit cadence guardrails live in lib/live-reply.mjs.
 const liveMinEditMs = numberEnv("BOT_LIVE_EDIT_MIN_MS", 3000, { min: 100, max: 86_400_000 });
 const liveMaxEditMs = numberEnv("BOT_LIVE_EDIT_MAX_MS", 15_000, { min: liveMinEditMs, max: 86_400_000 });
@@ -851,20 +852,34 @@ const isAllowed = (peerHex) => allowedPeers.size === 0 || allowedPeers.has(norm(
 // replies — echo, a quick model, Hermes on a good day — produce no extra noise.
 const thinkingTimers = new Map(); // peerHex -> timeout
 const disarmThinking = (peerHex) => {
-  const t = thinkingTimers.get(norm(peerHex));
-  if (t) { clearTimeout(t); thinkingTimers.delete(norm(peerHex)); }
+  const k = norm(peerHex);
+  const t = thinkingTimers.get(k);
+  if (t) { clearTimeout(t); thinkingTimers.delete(k); }
+  // A fast reply (or a bridge file answer) can beat the placeholder entirely.
+  // The tracker was created eagerly at turn start, so drop it here or this
+  // peer's next slow turn would inherit this turn's start time and report an
+  // inflated elapsed. A live placeholder owns its tracker and disposes it in
+  // takeLivePlaceholder instead.
+  if (!livePlaceholders.has(k)) disposeProgressTracker(k);
 };
 const armThinking = (peerHex) => {
   const k = norm(peerHex);
   if (!thinkingText || !(thinkingAfterMs > 0) || thinkingTimers.has(k)) return;
+  // Anchor the tracker here, not inside the timeout: the placeholder appears
+  // thinkingAfterMs later, and everything before that — elapsed time and any
+  // tool steps — belongs to this turn.
+  progressTrackerFor(k);
   thinkingTimers.set(k, setTimeout(() => {
     thinkingTimers.delete(k);
     if (livePlaceholders.has(k)) return; // a previous turn's placeholder is still open
-    // The placeholder is a LIVE message: it will be edited through progress
-    // frames and finally become the answer itself.
+    // The placeholder is a LIVE message: it is edited through progress frames
+    // and finally collapses to a one-line status summary of the turn.
     livePlaceholders.set(k, (async () => {
       const handle = await liveReplies.begin(k, thinkingText);
-      const tracker = createProgressTracker({ label: "working" });
+      // Already counting since turn start; attaching lets any pre-placeholder
+      // work show up in the first visible frame.
+      const tracker = progressTrackerFor(k);
+      tracker.attach(handle);
       // Heartbeat: even with no tool events, the elapsed clock ticks so the
       // chat never looks stalled. Frames are throttled/coalesced downstream.
       const timer = setInterval(() => { if (!handle.finalized) handle.update(tracker.render()); }, liveHeartbeatMs);
@@ -1006,16 +1021,47 @@ const liveReplies = createLiveReplies({
 // peerHex -> Promise<{handle, tracker, timer} | null> for the current turn's
 // placeholder. Consumed (take) exactly once, by whoever delivers the answer.
 const livePlaceholders = new Map();
+// peerHex -> deferred progress tracker, created at TURN START and attached to
+// the placeholder once it exists. A turn does real work before its placeholder
+// appears (thinkingAfterMs), so a tracker built alongside the placeholder would
+// lose that elapsed time and every tool step taken during it. Mirrors the T3ams
+// transport, which has always worked this way.
+const pendingProgressTrackers = new Map();
+const progressTrackerFor = (peerHex) => {
+  const k = norm(peerHex);
+  let tracker = pendingProgressTrackers.get(k);
+  if (tracker == null) {
+    // maxActions 0 with progress disabled keeps steps counted for the terminal
+    // status line while no "▸ action" line enters a rendered frame.
+    tracker = createDeferredProgressTracker({
+      label: "working",
+      maxActions: liveProgress ? 3 : 0,
+      renderFrames: liveProgress,
+    });
+    pendingProgressTrackers.set(k, tracker);
+    if (pendingProgressTrackers.size > 500) {
+      const oldest = pendingProgressTrackers.keys().next().value;
+      pendingProgressTrackers.get(oldest)?.dispose();
+      pendingProgressTrackers.delete(oldest);
+    }
+  }
+  return tracker;
+};
+const disposeProgressTracker = (peerHex) => {
+  const k = norm(peerHex);
+  pendingProgressTrackers.get(k)?.dispose();
+  pendingProgressTrackers.delete(k);
+};
 const takeLivePlaceholder = async (peerHex) => {
   const k = norm(peerHex);
   const p = livePlaceholders.get(k);
-  if (!p) return null;
+  if (!p) { disposeProgressTracker(k); return null; }
   livePlaceholders.delete(k);
   const lp = await p.catch(() => null);
-  if (lp) { clearInterval(lp.timer); clearTimeout(lp.ttl); }
+  if (lp) { clearInterval(lp.timer); clearTimeout(lp.ttl); lp.tracker.detach(); }
+  disposeProgressTracker(k);
   return lp;
 };
-const peekLivePlaceholder = (peerHex) => livePlaceholders.get(norm(peerHex)) ?? null;
 
 // Reactions ride the same session channel but are not "replies": they never
 // disarm the thinking ack and carry no text of their own.
@@ -1032,34 +1078,40 @@ const sendReaction = async (peerHex, targetMessageId, emoji, removed = false) =>
 // three capabilities and stays otherwise unaware of resume tokens, projects
 // or commands. This `chat` surface is the in-process twin of the HTTP bridge.
 
-// Deliver a final answer: a long one is split into parts — the live
-// placeholder becomes the first part, the rest follow as messages (the
-// outbound lane keeps them ordered).
-const deliverToChat = async (peerHex, text) => {
+// Deliver a final answer. The live placeholder retires to a one-line status
+// summary (elapsed, steps, tokens) and the answer goes out as NEW messages —
+// an edit raises no phone notification, so finalizing the answer onto the
+// placeholder left a locked-phone user unaware their answer had landed.
+// If the peer never fetched the placeholder it is superseded by the answer
+// instead: a status line for progress nobody saw is pure noise.
+const deliverToChat = async (peerHex, text, _deliveryContext = null, turnStats = null) => {
   const parts = splitMessageText(text, replyChunkBytes);
   if (parts.length > 1) log("BOT_REPLY_CHUNKED", { to: peerHex, parts: parts.length, chars: text.length });
   const lp = await takeLivePlaceholder(peerHex);
-  let sentFirst = false;
+  // Only the unfetched-placeholder path consumes parts[0]; a finalize failure
+  // delivered nothing, so every part still has to go out.
+  let firstPartSent = false;
   if (lp) {
-    try { await lp.handle.finalize(parts[0]); sentFirst = true; }
-    catch (e) { log("BOT_LIVE_FINALIZE_FAILED", { to: peerHex, error: String(e?.message ?? e) }); }
+    const status = renderTurnStats({ elapsed: lp.tracker.elapsed(), steps: lp.tracker.step, usage: turnStats });
+    try {
+      const { edited } = await lp.handle.finalize(status, { ifUnfetched: parts[0] });
+      firstPartSent = !edited;
+      log("BOT_LIVE_STATUS", { to: peerHex, messageId: lp.handle.messageId, status, edited });
+    } catch (e) { log("BOT_LIVE_FINALIZE_FAILED", { to: peerHex, error: String(e?.message ?? e) }); }
   }
-  for (const part of sentFirst ? parts.slice(1) : parts) await sendText(peerHex, part);
+  for (const part of firstPartSent ? parts.slice(1) : parts) await sendText(peerHex, part);
 };
 
-// A turn is starting: arm the "thinking" placeholder and hand back the
-// progress hook (tool events become "▸ action" lines on it).
+// A turn is starting: anchor its progress tracker, arm the "thinking"
+// placeholder, and hand back the progress hook (tool events become "▸ action"
+// lines on it). The tracker retains actions emitted before the placeholder
+// exists and publishes nothing until one is attached.
+// BOT_LIVE_PROGRESS=0 suppresses the per-tool FRAMES, not the counting: the
+// terminal status line still reports how many steps the turn took.
 const beginTurnProgress = (peerHex) => {
+  const tracker = progressTrackerFor(peerHex);
   armThinking(peerHex);
-  if (!liveProgress) return null;
-  return (title) => {
-    const p = peekLivePlaceholder(peerHex);
-    p?.then((lp) => {
-      if (!lp || lp.handle.finalized) return;
-      lp.tracker.add(title);
-      lp.handle.update(lp.tracker.render());
-    }).catch(() => {});
-  };
+  return (title) => tracker.add(title);
 };
 
 // Project registry (BOT_AI_PROJECTS): validated aliases -> dirs, plus lazy
@@ -2133,16 +2185,21 @@ const startBridge = () => {
         if (parts.length > 1) log("BOT_REPLY_CHUNKED", { to: chatId, parts: parts.length, chars: text.length });
         let firstId = null;
         const lp = await takeLivePlaceholder(chatId);
-        if (lp && !replyTo) {
-          // Auto-upgrade: the first plain send for a peer with an open live
-          // placeholder becomes its final edit — every harness gets the
-          // thinking->answer single-message flow without code changes.
-          try { firstId = (await lp.handle.finalize(parts[0])).messageId; }
-          catch (e) { log("BOT_LIVE_FINALIZE_FAILED", { to: chatId, error: String(e?.message ?? e) }); }
-        } else if (lp) {
-          // The answer goes out as a quote, which cannot BE the placeholder —
-          // retire the placeholder to a terminal glyph so it never dangles.
-          lp.handle.finalize("✓").catch((e) => log("BOT_LIVE_FINALIZE_FAILED", { to: chatId, error: String(e?.message ?? e) }));
+        if (lp) {
+          // The placeholder retires to a one-line status summary and the answer
+          // goes out as new messages — see deliverToChat. A harness reports no
+          // token usage, so the line carries elapsed time and step count only.
+          // A quoted answer can never BE the placeholder anyway.
+          const status = renderTurnStats({ elapsed: lp.tracker.elapsed(), steps: lp.tracker.step });
+          if (replyTo) {
+            lp.handle.finalize(status).catch((e) => log("BOT_LIVE_FINALIZE_FAILED", { to: chatId, error: String(e?.message ?? e) }));
+          } else {
+            try {
+              const { edited, messageId } = await lp.handle.finalize(status, { ifUnfetched: parts[0] });
+              if (!edited) firstId = messageId; // the unfetched slot holds parts[0]
+              log("BOT_LIVE_STATUS", { to: chatId, messageId: lp.handle.messageId, status, edited });
+            } catch (e) { log("BOT_LIVE_FINALIZE_FAILED", { to: chatId, error: String(e?.message ?? e) }); }
+          }
         }
         for (const [i, part] of parts.entries()) {
           if (i === 0 && firstId) continue;

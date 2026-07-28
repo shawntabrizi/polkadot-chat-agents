@@ -11,7 +11,7 @@ import { createStateStore } from "../../lib/session-store.mjs";
 import { createAgentRuntime } from "../../lib/agent-runtime.mjs";
 import { resolveModelPolicy } from "../../lib/commands.mjs";
 import { splitMessageText } from "../../lib/chunk.mjs";
-import { createDeferredProgressTracker, createLiveReplies } from "../../lib/live-reply.mjs";
+import { createDeferredProgressTracker, createLiveReplies, renderTurnStats } from "../../lib/live-reply.mjs";
 import { createWorkspaces } from "../../lib/workspaces.mjs";
 import { createKeyedDispatcher } from "../../lib/keyed-dispatcher.mjs";
 import { createFileStore } from "../../lib/file-store.mjs";
@@ -1618,35 +1618,57 @@ const markAgentReplyPart = async (context, reply, nextPart) => {
     throw error;
   }
 };
-const deliverPersistedAgentReply = async (chatId, context, reply) => {
+const deliverPersistedAgentReply = async (chatId, context, reply, turnStats = null) => {
   disarmThinking(chatId, context.turnContext);
   if (reply.parts.length > 1) log("T3AMS_REPLY_CHUNKED", { chatId, parts: reply.parts.length, chars: reply.text.length });
+  // Retire the placeholder to a one-line status summary and let the answer go
+  // out as new messages — an edit raises no notification. Only on the first
+  // pass: placeholders live in memory, so a delivery resumed after a restart
+  // has none left and its parts simply continue from the durable cursor.
+  if (reply.nextPart === 0) {
+    // Fence BEFORE consuming the placeholder. Taking it first would strand the
+    // thinking bubble forever when an authenticated edit/delete has already
+    // bumped the revision: finalization would be fenced, but live revocation
+    // would find no placeholder to replace and its TTL is already cancelled.
+    if (!ingressEntryCurrent(context.id, context.revision)) throw artifactHandoffSuperseded();
+    const placeholder = await takeLivePlaceholder(chatId, context.turnContext);
+    if (placeholder != null) {
+      const status = renderTurnStats({
+        elapsed: placeholder.tracker.elapsed(),
+        steps: placeholder.tracker.step,
+        usage: turnStats,
+      });
+      // Not best-effort: a terminal delivery failure belongs in the durable
+      // ingress journal for retry, exactly as the answer's parts do.
+      const { edited } = await placeholder.handle.finalize(status, { ifUnfetched: reply.parts[0] });
+      log("T3AMS_LIVE_STATUS", { chatId, status, edited });
+      // An unfetched placeholder was superseded by parts[0]: that part is on
+      // the wire, so the durable cursor must advance past it.
+      if (!edited) await markAgentReplyPart(context, reply, 1);
+    }
+  }
   while (reply.nextPart < reply.parts.length) {
     if (!ingressEntryCurrent(context.id, context.revision)) throw artifactHandoffSuperseded();
     const index = reply.nextPart;
-    const part = reply.parts[index];
-    if (index === 0) {
-      const placeholder = await takeLivePlaceholder(chatId, context.turnContext);
-      if (placeholder != null) await placeholder.handle.finalize(part);
-      else await sendAgentReply(chatId, part, context.turnContext);
-    } else {
-      await sendAgentReply(chatId, part, context.turnContext);
-    }
+    await sendAgentReply(chatId, reply.parts[index], context.turnContext);
     await markAgentReplyPart(context, reply, index + 1);
   }
 };
-const deliverPersistedAgentTurn = async (chatId, context, { artifacts, reply }) => deliverAgentReplyBeforeArtifacts({
-  deliverReply: () => deliverPersistedAgentReply(chatId, context, reply),
+const deliverPersistedAgentTurn = async (chatId, context, { artifacts, reply }, turnStats = null) => deliverAgentReplyBeforeArtifacts({
+  deliverReply: () => deliverPersistedAgentReply(chatId, context, reply, turnStats),
   deliverArtifacts: () => deliverPersistedAgentArtifacts(chatId, context, artifacts),
 });
-const deliverAgentTurn = async (chatId, { text, artifacts = [] } = {}, suppliedTurnContext = null) => {
+// turnStats is the engine's per-turn usage; it is deliberately NOT persisted in
+// the outbox — a delivery resumed after a restart has no placeholder left to
+// render it onto.
+const deliverAgentTurn = async (chatId, { text, artifacts = [] } = {}, suppliedTurnContext = null, turnStats = null) => {
   const turnContext = turnContextFor(chatId, suppliedTurnContext);
   const context = activeAgentArtifactDeliveries.get(turnContext.laneKey) ?? null;
   if (context == null) {
     throw new Error("T3ams direct-agent delivery requires an active durable ingress turn");
   }
   const prepared = await prepareAgentTurnOutbox(context, { text, artifacts });
-  await deliverPersistedAgentTurn(chatId, context, prepared);
+  await deliverPersistedAgentTurn(chatId, context, prepared, turnStats);
 };
 // A crash can happen after copying a file but before its journal row reaches
 // disk. Reclaim those unreferenced directories on boot, and prune source bytes
@@ -1790,10 +1812,22 @@ const livePlaceholders = new Map(); // laneKey -> Promise<{handle, tracker, time
 // placeholder exists. Keep their compact activity state per serialized lane
 // so the first frame is useful instead of a blank generic spinner.
 const pendingProgressTrackers = new Map(); // laneKey -> deferred progress tracker
-const progressTrackerFor = (laneKey) => {
+// `startedAt` anchors the elapsed clock for whoever creates the tracker first.
+// A direct turn creates it at turn start; a bridge lease has no beginTurn call,
+// so its arm site must pass the arm time or the terminal status line would
+// report only the placeholder's age (short by the whole thinking delay).
+const progressTrackerFor = (laneKey, startedAt = null) => {
   let tracker = pendingProgressTrackers.get(laneKey);
   if (tracker == null) {
-    tracker = createDeferredProgressTracker({ label: "working" });
+    // With progress disabled the tracker still counts steps for the terminal
+    // status line, but renders no action lines and publishes no frames of its
+    // own — every T3ams edit is a Statement Store publish.
+    tracker = createDeferredProgressTracker({
+      label: "working",
+      startedAt,
+      maxActions: liveProgress ? 3 : 0,
+      renderFrames: liveProgress,
+    });
     pendingProgressTrackers.set(laneKey, tracker);
   }
   return tracker;
@@ -1831,7 +1865,11 @@ const disarmThinking = (chatId, supplied = null) => {
   const timer = thinkingTimers.get(context.laneKey);
   if (timer != null) clearTimeout(timer);
   thinkingTimers.delete(context.laneKey);
-  disposeProgressTracker(context.laneKey);
+  // A placeholder owns its tracker and disposes it in takeLivePlaceholder. That
+  // placeholder may still be publishing when the turn finishes, so disposing
+  // here would hand the in-flight publish a fresh, empty tracker and lose the
+  // turn's step count from the terminal status line.
+  if (!livePlaceholders.has(context.laneKey)) disposeProgressTracker(context.laneKey);
 };
 const takeLivePlaceholder = async (chatId, supplied = null) => {
   const context = turnContextFor(chatId, supplied);
@@ -1863,13 +1901,16 @@ const armThinking = (chatId, { guard = null, turnContext = null } = {}) => {
   const context = bindLiveReplyTarget(turnContextFor(chatId, turnContext));
   const laneKey = context.laneKey;
   if (!thinkingText || thinkingAfterMs <= 0 || thinkingTimers.has(laneKey) || livePlaceholders.has(laneKey)) return;
+  // Captured before the delay so a bridge turn's status line reports the turn's
+  // duration rather than the placeholder's age.
+  const armedAt = Date.now();
   const timer = setTimeout(() => {
     thinkingTimers.delete(laneKey);
     if (guard != null && !guard()) return;
     if (livePlaceholders.has(laneKey)) return;
     livePlaceholders.set(laneKey, (async () => {
       const handle = await liveReplies.begin(laneKey, thinkingText, { guard });
-      const tracker = progressTrackerFor(laneKey);
+      const tracker = progressTrackerFor(laneKey, armedAt);
       tracker.attach(handle);
       const heartbeat = setInterval(() => {
         bestEffortTyping(chatId, { guard });
@@ -1912,7 +1953,7 @@ const sendAgentReply = async (chatId, text, suppliedTurnContext = null) => {
   noteBotIssuedMessage(chatId, sent.messageId, createTurnContext(chatId, root));
   return sent;
 };
-const deliverAgentReply = async (chatId, text, suppliedTurnContext = null) => {
+const deliverAgentReply = async (chatId, text, suppliedTurnContext = null, turnStats = null) => {
   const turnContext = turnContextFor(chatId, suppliedTurnContext);
   disarmThinking(chatId, turnContext);
   const parts = splitMessageText(text, replyChunkBytes);
@@ -1920,11 +1961,18 @@ const deliverAgentReply = async (chatId, text, suppliedTurnContext = null) => {
   const placeholder = await takeLivePlaceholder(chatId, turnContext);
   let deliveredFirst = false;
   if (placeholder != null) {
-    // Finalization is intentionally not best-effort: a final-answer delivery
-    // failure is surfaced to the durable ingress journal for retry. Progress
-    // edits and typing above remain non-fatal.
-    await placeholder.handle.finalize(parts[0]);
-    deliveredFirst = true;
+    // The placeholder retires to a status summary; the answer follows as new
+    // messages so it raises a notification. Finalization is intentionally not
+    // best-effort: a terminal delivery failure is surfaced to the durable
+    // ingress journal for retry. Progress edits and typing above stay non-fatal.
+    const status = renderTurnStats({
+      elapsed: placeholder.tracker.elapsed(),
+      steps: placeholder.tracker.step,
+      usage: turnStats,
+    });
+    const { edited } = await placeholder.handle.finalize(status, { ifUnfetched: parts[0] });
+    log("T3AMS_LIVE_STATUS", { chatId, status, edited });
+    deliveredFirst = !edited; // only the unfetched path consumed parts[0]
   }
   for (const part of deliveredFirst ? parts.slice(1) : parts) await sendAgentReply(chatId, part, turnContext);
 };
@@ -1934,10 +1982,14 @@ const beginTurnProgress = (chatId, suppliedTurnContext = null) => {
   // to the same active ingress revision as the direct agent's final reply.
   const guard = directIngressSubmissionGuard(chatId, turnContext);
   bestEffortTyping(chatId, { guard });
-  const tracker = progressTrackerFor(turnContext.laneKey);
+  // Anchor the clock here — a direct turn starts now, not when the delayed
+  // placeholder appears.
+  const tracker = progressTrackerFor(turnContext.laneKey, Date.now());
   armThinking(chatId, { guard, turnContext });
-  if (!liveProgress) return null;
   const onAction = (title) => tracker.add(title);
+  // Progress disabled: keep counting steps for the status line, but hand back no
+  // streaming-draft hook, and the tracker itself publishes nothing.
+  if (!liveProgress) return onAction;
   // Claude's stream-json deltas contain user-visible final prose, not hidden
   // chain-of-thought. Render that prose into the same ACK-gated editable
   // placeholder, while retaining a bounded prefix until the terminal answer
@@ -4095,10 +4147,20 @@ const bridge = http.createServer(async (request, response) => {
       if (placeholder != null) {
         // A bridge lease records the triggering thread before the harness
         // begins work, so the placeholder is already in the correct T3ams
-        // reply/thread. `reply_to` is normally supplied by both shipped
-        // adapters and must not force a redundant \"✓\" plus a second bubble.
-        firstId = (await placeholder.handle.finalize(parts[0], { guard: claimGuard })).messageId;
-        noteBotIssuedMessage(chatId, firstId, turnContext);
+        // reply/thread. It retires to a one-line status summary and the answer
+        // follows as its own message, which is what raises a notification. A
+        // harness reports no token usage, so the line is elapsed + steps only.
+        const status = renderTurnStats({
+          elapsed: placeholder.tracker.elapsed(),
+          steps: placeholder.tracker.step,
+        });
+        const finalized = await placeholder.handle.finalize(status, { ifUnfetched: parts[0], guard: claimGuard });
+        log("T3AMS_LIVE_STATUS", { chatId, status, edited: finalized.edited });
+        if (!finalized.edited) {
+          // The unfetched placeholder was superseded by parts[0].
+          firstId = finalized.messageId;
+          noteBotIssuedMessage(chatId, firstId, turnContext);
+        }
       }
       for (const [index, part] of parts.entries()) {
         if (index === 0 && firstId != null) continue;

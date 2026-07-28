@@ -13,8 +13,12 @@
 //
 // chat surface:
 //   sendText(peerHex, text, context?)  — plain message (command replies, errors)
-//   deliver(peerHex, text, context?)   — final answer (chunking + live-placeholder
-//                              finalize live transport-side)
+//   deliver(peerHex, text, context?, turnStats?) — final answer (chunking +
+//                              live-placeholder finalize live transport-side).
+//                              turnStats is the engine's per-turn usage
+//                              ({ inputTokens, outputTokens, costUsd }) or null;
+//                              the transport renders it into the placeholder's
+//                              terminal status line.
 //   deliverArtifacts(peerHex, artifacts, context?) — optional final-turn files. Each
 //                              artifact is { filePath, filename, size }; the
 //                              callback consumes a transport-owned immutable
@@ -222,9 +226,9 @@ export const createAgentRuntime = ({
   const activeReplyHandoffs = new Set();
   let activeTurnCount = 0;
   let shuttingDown = false;
-  const sendReply = async (method, peerHex, text, deliveryContext = null) => {
+  const sendReply = async (method, peerHex, text, deliveryContext = null, turnStats = null) => {
     try {
-      await chat[method](peerHex, text, deliveryContext);
+      await chat[method](peerHex, text, deliveryContext, turnStats);
     } catch (error) {
       log("BOT_REPLY_FAILED", { error: String(error?.message ?? error) });
       if (throwOnReplyFailure) throw error;
@@ -239,10 +243,10 @@ export const createAgentRuntime = ({
       if (throwOnReplyFailure) throw error;
     }
   };
-  const sendTurn = async (peerHex, text, artifacts, deliveryContext = null) => {
+  const sendTurn = async (peerHex, text, artifacts, deliveryContext = null, turnStats = null) => {
     if (typeof chat?.deliverTurn === "function") {
       try {
-        await chat.deliverTurn(peerHex, { text, artifacts }, deliveryContext);
+        await chat.deliverTurn(peerHex, { text, artifacts }, deliveryContext, turnStats);
       } catch (error) {
         log("BOT_TURN_DELIVERY_FAILED", { to: peerHex, artifacts: artifacts.length, error: String(error?.message ?? error) });
         if (throwOnReplyFailure) throw error;
@@ -250,7 +254,7 @@ export const createAgentRuntime = ({
       return;
     }
     await sendArtifacts(peerHex, artifacts, deliveryContext);
-    await sendReply("deliver", peerHex, text, deliveryContext);
+    await sendReply("deliver", peerHex, text, deliveryContext, turnStats);
   };
   const runReplyHandoff = async (operation) => {
     const handoff = Promise.resolve().then(operation);
@@ -730,7 +734,7 @@ export const createAgentRuntime = ({
       if (outputExceeded) return finish(null);
       const finalAnswer = (resultText ?? answer).trim();
       if (errored) { log("BOT_AI_FAILED", { to: peerHex, error: String(errored).slice(-300) }); return finish(null); }
-      if (code === 0 || finalAnswer) { recordUsage(peerHex, usage, k); return finish({ answer: finalAnswer }); }
+      if (code === 0 || finalAnswer) { recordUsage(peerHex, usage, k); return finish({ answer: finalAnswer, usage }); }
       // Classify the failure so the operator knows the remedy (re-auth vs. retry).
       const authRevoked = /401|unauthorized|refresh token|could not be refreshed|log ?out and sign in/i.test(err);
       log(authRevoked ? "BOT_AI_AUTH_REVOKED" : "BOT_AI_FAILED", { to: peerHex, code, stderr: err.trim().slice(-500) });
@@ -926,7 +930,7 @@ export const createAgentRuntime = ({
             persist();
             outgoing += "\n\n(Tip: send /help to see my commands.)";
           }
-          await sendTurn(peerHex, outgoing, artifactHandoff?.artifacts ?? [], deliveryContext);
+          await sendTurn(peerHex, outgoing, artifactHandoff?.artifacts ?? [], deliveryContext, result.usage ?? null);
         });
         return true;
       } finally {

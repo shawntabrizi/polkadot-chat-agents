@@ -75,18 +75,21 @@ opt-in, because an unaware harness would chat-reply to a reaction.
 
 The peer allowlist is enforced inside `bot-core` before a message reaches the
 bridge, so unlisted senders never reach the framework or spend model quota.
-Long replies sent via `/send` are split into ordered parts automatically, and
-the "thinking" placeholder is finalized into the first part — the harness just
-sends text.
+Long replies sent via `/send` are split into ordered parts automatically. The
+"thinking" placeholder retires to a one-line status summary (elapsed time and
+step count) and the answer goes out as new messages — the harness just sends
+text.
 
 For a T3ams lease, bot-core can publish a typing signal and a thinking
-placeholder while the framework works. The first ordinary `POST /send` resolves
-that placeholder into the final answer. A framework may also stream
-`edit_of` updates: bot-core coalesces and throttles them to the advertised
-safe cadence, then flushes the newest frame when the lease is acknowledged.
-Only message IDs issued by the current bot process may be edited. When a
-thinking placeholder is finalized into the first part of an answer, the
-`message_id` returned by that `POST /send` is the placeholder's.
+placeholder while the framework works. The first ordinary `POST /send` retires
+that placeholder to its status line and publishes the answer as a fresh
+message, so the `message_id` returned is the answer's, never the placeholder's.
+An answer must be a new message rather than a final edit because an edit raises
+no phone notification: a user who locks their phone mid-turn would otherwise
+never learn the answer arrived. A framework may also stream `edit_of` updates:
+bot-core coalesces and throttles them to the advertised safe cadence, then
+flushes the newest frame when the lease is acknowledged. Only message IDs
+issued by the current bot process may be edited.
 
 For file delivery, store the framework's artifact with `PUT /files/<chat_id>/<path>`
 first, then send it with `POST /send` and that `file_path`. The bridge resolves
