@@ -35,8 +35,27 @@ The seed split protects the chat identity. The CLI retains its mounted OAuth
 home to authenticate and refresh its own session. Every direct engine starts
 with no capabilities and workspace scope. A deployer may select portable
 `read`, `write`, and `bash` capabilities with
-`--allowed-tools read,write,bash`; `write` includes `read` and `bash` includes
-both. `--tool-scope workspace|container` scopes native file tools.
+`--allowed-tools read,write,bash,web`; `write` includes `read` and `bash`
+includes both. `--tool-scope workspace|container` scopes native file tools.
+
+`web` grants the engine's **native** search/fetch tools and is deliberately
+orthogonal: it neither implies nor is implied by the file capabilities, and **no
+`--tool-scope` bounds it** — a filesystem scope cannot limit where the internet
+is.
+
+It is *not* the egress boundary, and it would be a mistake to treat it as one.
+`bash` already implies arbitrary egress: a shell reaches the network through the
+runtime that is necessarily present, so a bash-capable bot can fetch a URL with
+or without `web`. Withholding `web` narrows what the model reaches for, not what
+it is able to reach. **Granting `bash` means accepting egress**; grant `web` when
+you want the engine's own web tools to be part of how it works.
+
+`subagents` grants the engine's delegation tool — `Agent` on claude,
+`features.multi_agent` on codex, the `task` tool on opencode. It is also
+orthogonal, and it widens nothing on its own: **a subagent inherits the parent's
+compiled tool set**, so delegating from a bot with no `bash` produces subagents
+with no `bash`. Grant it when a bot should fan out across independent work; it
+multiplies model spend, so pair it with a conservative model policy.
 
 Workspace scopes native file tools to the normal project working area; container
 scope deliberately grants them the non-root agent account's container-visible

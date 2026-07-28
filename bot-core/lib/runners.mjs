@@ -95,11 +95,19 @@ const protectedPaths = (paths = []) => [...new Set(paths
 const withoutAllowedDescendants = (paths, allowedPaths) => paths
   .filter((directory) => !allowedPaths.some((allowedPath) => isAncestorPath(directory, allowedPath)));
 
+// Web tools take no path argument, so they are never scoped and appear verbatim
+// in both the availability list and the approval list.
+const CLAUDE_WEB_TOOLS = Object.freeze(["WebSearch", "WebFetch"]);
+
 const claudeTools = (policy) => {
   const tools = [];
   if (hasToolCapability(policy, "read")) tools.push("Read", "Glob", "Grep");
   if (hasToolCapability(policy, "write")) tools.push("Edit", "Write");
   if (hasToolCapability(policy, "bash")) tools.push("Bash");
+  if (hasToolCapability(policy, "web")) tools.push(...CLAUDE_WEB_TOOLS);
+  // A subagent inherits this same compiled tool set, so granting delegation
+  // never widens reach beyond what the capabilities above already allow.
+  if (hasToolCapability(policy, "subagents")) tools.push("Agent");
   return tools;
 };
 
@@ -113,6 +121,10 @@ const claudeApprovalRules = (policy, { readPaths, writePaths }) => {
     for (const directory of writePaths) rules.push(claudeRule("Edit", directory), claudeRule("Write", directory));
   }
   if (hasToolCapability(policy, "bash")) rules.push("Bash(*)");
+  // Unscoped: a path rule would be meaningless for a URL, and `dontAsk` fails
+  // any tool that is available but not approved.
+  if (hasToolCapability(policy, "web")) rules.push(...CLAUDE_WEB_TOOLS);
+  if (hasToolCapability(policy, "subagents")) rules.push("Agent");
   return rules;
 };
 
@@ -167,6 +179,17 @@ const opencodePermissions = (policy, { workingDirectory = "/workspace", attachme
     permissions.edit = policy.scope === "container" ? "allow" : opencodePathRules(scope.writePaths);
   }
   if (hasToolCapability(policy, "bash")) permissions.bash = "allow";
+  // Not path-keyed: the deny-first catch-all above blocks web access until the
+  // `web` capability opens it, and no filesystem scope applies to a URL.
+  if (hasToolCapability(policy, "web")) {
+    permissions.webfetch = "allow";
+    // OpenCode gates search separately from fetch; the deny-first catch-all
+    // above would otherwise block every search despite the granted capability.
+    permissions.websearch = "allow";
+  }
+  // OpenCode names its delegation tool `task` (already normalized to a
+  // "subagent: …" progress line by toolActionTitle).
+  if (hasToolCapability(policy, "subagents")) permissions.task = "allow";
   if (policy.scope === "container") {
     permissions.external_directory = "allow";
   } else {
@@ -190,6 +213,19 @@ export const assertEngineToolPolicy = (engineName, policyInput = DEFAULT_TOOL_PO
 export const toolPolicyEnforcement = (engineName, policyInput = DEFAULT_TOOL_POLICY) => {
   const policy = assertEngineToolPolicy(engineName, policyInput);
   if (!policy.capabilities.length) return { kind: "none", detail: "all native tools disabled" };
+  // Every detail below describes FILE containment. `web` is not contained by
+  // any of it, so an operator reading "path-scoped file-tool rules" would
+  // otherwise be told a boundary that does not cover the granted web tools.
+  const unscoped = [];
+  if (hasToolCapability(policy, "web")) unscoped.push("web tools reach any URL");
+  if (hasToolCapability(policy, "subagents")) unscoped.push("subagents inherit this same policy");
+  const withUnscoped = (result) => (unscoped.length
+    ? { ...result, detail: `${result.detail} (${unscoped.join("; ")})`, unscoped: Object.freeze([...unscoped]) }
+    : result);
+  return withUnscoped(fileEnforcement(engineName, policy));
+};
+
+const fileEnforcement = (engineName, policy) => {
   if (hasToolCapability(policy, "bash")) {
     return policy.scope === "workspace"
       ? { kind: "process-boundary", detail: "native file tools are workspace-scoped; Bash follows the agent process boundary" }
@@ -312,7 +348,15 @@ const codex = {
     args.push("-c", "default_permissions=\"pca\"");
     args.push("-c", codexPermissionProfile(policy, scope));
     args.push("-c", `features.shell_tool=${hasToolCapability(policy, "bash") ? "true" : "false"}`);
-    args.push("-c", "features.apps=false", "-c", "features.plugins=false", "-c", "features.multi_agent=false", "-c", "tools.web_search=false", "-c", "web_search=\"disabled\"");
+    args.push("-c", "features.apps=false", "-c", "features.plugins=false");
+    args.push("-c", `features.multi_agent=${hasToolCapability(policy, "subagents") ? "true" : "false"}`);
+    // Web search off unless the `web` capability was granted. `web_search`
+    // accepts disabled|cached|indexed|live (confirmed by Codex's own config
+    // validator); the feature flag alone leaves it on cached results, so select
+    // `live` explicitly to match what the capability advertises. `--search` is
+    // the interactive equivalent but is rejected by `codex exec`.
+    if (hasToolCapability(policy, "web")) args.push("-c", "tools.web_search=true", "-c", "web_search=\"live\"");
+    else args.push("-c", "tools.web_search=false", "-c", "web_search=\"disabled\"");
     // `exec resume <id> <prompt>` continues a thread; fresh runs take the prompt
     // positionally. The prompt goes last either way.
     if (resume) args.push("resume", resume, "--", prompt);
@@ -335,6 +379,12 @@ const codex = {
         if (it === "file_change" || it === "patch_apply") return [{ kind: "action", title: `editing ${(item.path ?? item.files?.[0] ?? "files")}` }];
         if (it === "web_search") return [{ kind: "action", title: `searching: ${item.query ?? ""}`.trim() }];
         if (it === "mcp_tool_call" || it === "tool_call") return [{ kind: "action", title: toolActionTitle(item.tool ?? item.name, item.arguments ?? {}) }];
+        // Codex reports delegation (e.g. spawn_agent) as its own item type.
+        // Without this branch a codex subagent turn shows no progress at all,
+        // while claude and opencode delegation both render a "subagent:" line.
+        if (it === "collab_tool_call") {
+          return [{ kind: "action", title: toolActionTitle("agent", { description: item.description ?? item.name ?? item.tool ?? "" }) }];
+        }
       }
       return [];
     }

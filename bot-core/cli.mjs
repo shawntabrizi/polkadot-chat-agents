@@ -1568,7 +1568,7 @@ const t3amsHealthWaitCommand = (container, tail = 30) =>
   `status=unknown; for i in $(seq 1 45); do status="$(docker inspect --format '{{.State.Health.Status}}' ${container} 2>/dev/null || true)"; [ "$status" = healthy ] && break; sleep 2; done; echo "T3AMS_BOT_HEALTH=$status"; docker logs --tail ${tail} ${container} 2>&1; [ "$status" = healthy ]`;
 
 async function cmdDeploy(name, flags) {
-  if (!name) fail("Usage: pca deploy <name> --host <ssh-target> [--harness openclaw|hermes] [--model <m>] [--allowed-tools <read,write,bash>] [--tool-scope workspace|container] [--media-analyzer] [--dry-run]");
+  if (!name) fail("Usage: pca deploy <name> --host <ssh-target> [--harness openclaw|hermes] [--model <m>] [--allowed-tools <read,write,bash,web,subagents>] [--tool-scope workspace|container] [--media-analyzer] [--dry-run]");
   const host = flags.host ? sshTarget(flags.host) : null;
   if (!host) fail(`--host <ssh-target> is required, e.g.  pca deploy ${name} --host root@1.2.3.4`);
   const cfg = readConfig(name);
@@ -2485,7 +2485,7 @@ function usage() {
 
   pca create <botname> [--brain echo|claude|codex|opencode|bridge] [--transport polkadot-app|t3ams] [--owner <your username or address>] [--public] [--network devnet] [--username name]
   pca register <name>                  finish/retry registration for an existing bot
-  pca run <name> [--model <m>] [--allowed-tools <read,write,bash>] [--tool-scope workspace|container] [--greet]
+  pca run <name> [--model <m>] [--allowed-tools <read,write,bash,web,subagents>] [--tool-scope workspace|container] [--greet]
                                        start the bot locally (foreground)
   pca deploy <name> --host <ssh>       ship it to a server and run it in Docker
   pca logs <name> [-f] [--tail N]      tail a deployed bot's logs
@@ -2537,7 +2537,7 @@ Paseo remains available explicitly with --network paseo.
 model controls:  show current policy  ·  set <model> pins the default model  ·  allow <a,b>
   restricts chat-side switching  ·  lock disables it  ·  open permits it only for allowlisted bots
 
-deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --model <m>  ·  --allowed-tools <read,write,bash>  ·  --tool-scope workspace|container  ·  --media-analyzer  ·  --dry-run
+deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --model <m>  ·  --allowed-tools <read,write,bash,web,subagents>  ·  --tool-scope workspace|container  ·  --media-analyzer  ·  --dry-run
   Needs Docker on the server + SSH access. Direct engines (echo/claude/codex/opencode)
   deploy with root-only transport state and a non-root agent CLI, with a persistent
   /workspace the agent works in; bridge bots deploy a two-container stack. Direct

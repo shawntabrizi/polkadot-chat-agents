@@ -51,3 +51,43 @@ test("tool policy environment round-trips its canonical form", () => {
   });
   assert.deepEqual(toolPolicyFromEnvironment(env), policy);
 });
+
+test("web is orthogonal to the filesystem capability ladder", () => {
+  // bash implies write+read, but neither implies web, and web implies nothing:
+  // a shell is not egress, and egress is not file access.
+  assert.deepEqual(createToolPolicy({ capabilities: "bash" }).capabilities, ["read", "write", "bash"]);
+  assert.deepEqual(createToolPolicy({ capabilities: "web" }).capabilities, ["web"]);
+  assert.deepEqual(
+    createToolPolicy({ capabilities: "web,bash" }).capabilities,
+    ["read", "write", "bash", "web"],
+    "web sorts last and does not disturb the ladder's implications",
+  );
+  assert.equal(hasToolCapability({ capabilities: "web" }, "read"), false);
+  assert.equal(hasToolCapability({ capabilities: "bash" }, "web"), false);
+});
+
+test("web survives an environment round-trip and is scope-independent", () => {
+  const env = toolPolicyEnvironment({ capabilities: "read,web", scope: "workspace" });
+  assert.equal(env.BOT_AI_TOOL_CAPABILITIES, "read,web");
+  assert.deepEqual(toolPolicyFromEnvironment(env).capabilities, ["read", "web"]);
+  // Scope bounds file tools only — the same web grant appears under both.
+  for (const scope of ["workspace", "container"]) {
+    assert.equal(hasToolCapability({ capabilities: "web", scope }, "web"), true);
+  }
+});
+
+test("subagents is orthogonal and grants no reach of its own", () => {
+  // Verified against Claude Code 2.1.220: a parent limited to Read+Agent
+  // produced a subagent reporting exactly "Agent, Read". Delegation inherits
+  // the parent's tools, so it must not imply — or be implied by — anything.
+  assert.deepEqual(createToolPolicy({ capabilities: "subagents" }).capabilities, ["subagents"]);
+  assert.equal(hasToolCapability({ capabilities: "subagents" }, "read"), false);
+  assert.equal(hasToolCapability({ capabilities: "subagents" }, "bash"), false);
+  assert.equal(hasToolCapability({ capabilities: "bash" }, "subagents"), false);
+  assert.equal(hasToolCapability({ capabilities: "web" }, "subagents"), false);
+  // Full grant keeps the ladder's order with both orthogonal capabilities last.
+  assert.deepEqual(
+    createToolPolicy({ capabilities: "subagents,web,bash" }).capabilities,
+    ["read", "write", "bash", "web", "subagents"],
+  );
+});

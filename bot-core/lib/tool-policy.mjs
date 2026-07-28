@@ -1,11 +1,27 @@
 // Portable direct-agent tool policy.
 //
 // This module is deliberately independent of each CLI's native tool names.
-// Operators choose the outcomes they want (`read`, `write`, and `bash`) and
-// the filesystem scope those tools may reach. Runners compile that policy to
-// the selected engine.
+// Operators choose the outcomes they want (`read`, `write`, `bash`, `web`, and
+// `subagents`) and the filesystem scope those tools may reach. Runners compile
+// that policy to the selected engine.
+//
+// `web` and `subagents` are deliberately ORTHOGONAL to the filesystem ladder:
+// neither implies nor is implied by read/write/bash.
+//
+//  - `web` is not constrained by `scope` either — a filesystem scope cannot
+//    bound where the internet is. It grants the engine's NATIVE web tools.
+//    It is NOT the egress boundary: `bash` already implies arbitrary egress,
+//    because a shell can reach the network through the runtime that is
+//    necessarily present (node, git, and anything else installed). Withholding
+//    `web` from a bash-capable bot narrows what the model reaches for, not what
+//    it is able to reach. Treat granting `bash` as accepting egress.
+//  - `subagents` widens nothing on its own: a spawned subagent inherits the
+//    parent's tool set (verified against Claude Code 2.1.220 — a parent limited
+//    to `Read,Agent` produced a subagent reporting exactly `Agent, Read`). It
+//    is a force multiplier on whatever the other capabilities already allow,
+//    which is why it grants no file or network reach by itself.
 
-export const TOOL_CAPABILITIES = Object.freeze(["read", "write", "bash"]);
+export const TOOL_CAPABILITIES = Object.freeze(["read", "write", "bash", "web", "subagents"]);
 export const TOOL_SCOPES = Object.freeze(["workspace", "container"]);
 
 export const DEFAULT_TOOL_POLICY = Object.freeze({
@@ -49,7 +65,10 @@ const canonicalCapabilities = (values, label) => {
   // tool names. A shell is inherently able to inspect and change files within
   // its selected filesystem scope, and edits require the ability to inspect
   // the target. Close those implications once here so every adapter receives
-  // the same unambiguous policy.
+  // the same unambiguous policy. `web` and `subagents` participate in none of
+  // it: granting egress is not granting file access, and delegation inherits
+  // whatever was already granted. Note this is about which TOOLS are exposed —
+  // a shell can still reach the network by other means (see the header).
   if (selected.has("bash")) {
     selected.add("write");
     selected.add("read");

@@ -40,7 +40,7 @@ every command, including `project`, `model`, and `storage`.
 | `--wait <seconds>` | create, register | How long to wait for on-chain registration confirmation. |
 | `--host <ssh>` | deploy, logs, status, stop | Target server (saved after first deploy). |
 | `--harness openclaw or hermes` | deploy | Agent framework for a bridge bot. |
-| `--allowed-tools <read,write,bash>` | run, deploy | Select exact lowercase portable direct-agent capabilities. `write` includes `read`; `bash` includes both. |
+| `--allowed-tools <read,write,bash,web,subagents>` | run, deploy | Select exact lowercase portable direct-agent capabilities. `write` includes `read`; `bash` includes both. `web` grants search/fetch and is orthogonal — no `--tool-scope` bounds it. `subagents` grants delegation; a subagent inherits the parent's tool set, so it widens nothing by itself. |
 | `--tool-scope workspace\|container` | run, deploy | Scope native file tools to the selected workspace (default) or deliberately to all files visible to the non-root agent account in its container. Bash uses the agent process boundary in either scope. |
 | `--dry-run` | deploy | Print the generated files without deploying. |
 | `--as <account-seed-hex>` | t3ams doctor | Probe an allowlisted bot as an already allowlisted and signing-key-pinned identity. |
