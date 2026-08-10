@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { RUNNERS, toolActionTitle, resolveEngine, ENGINES, toolPolicyEnforcement } from "../lib/runners.mjs";
 
 const policy = (capabilities = [], scope = "workspace") => ({ capabilities, scope });
@@ -32,7 +35,7 @@ test("toolActionTitle renders known tools as one-liners", () => {
 });
 
 test("resolveEngine / ENGINES", () => {
-  assert.deepEqual(ENGINES, ["claude", "codex", "opencode"]);
+  assert.deepEqual(ENGINES, ["claude", "codex", "opencode", "kimi"]);
   assert.ok(resolveEngine("claude"));
   assert.equal(resolveEngine("gemini"), null);
 });
@@ -266,6 +269,116 @@ test("opencode parseEvent: error event", () => {
   assert.match(out.error, /model not found/);
 });
 
+// ---- kimi ------------------------------------------------------------------
+// Point the runner at a fixture KIMI_CODE_HOME for the duration of fn.
+const withKimiHome = (home, fn) => {
+  const previous = process.env.KIMI_CODE_HOME;
+  process.env.KIMI_CODE_HOME = home;
+  try { return fn(); }
+  finally {
+    if (previous == null) delete process.env.KIMI_CODE_HOME;
+    else process.env.KIMI_CODE_HOME = previous;
+  }
+};
+
+test("kimi builds prompt-mode args with resume and model", () => {
+  const fresh = RUNNERS.kimi.buildArgs({ prompt: "hi", policy: policy(["read"]) });
+  assert.deepEqual(fresh.slice(0, 4), ["-p", "hi", "--output-format", "stream-json"]);
+  // Skill auto-discovery (user + project) is replaced with an empty directory,
+  // so a planted workspace skill can't inject a persona into later turns.
+  const sd = fresh.indexOf("--skills-dir");
+  assert.ok(sd > 0 && fs.statSync(fresh[sd + 1]).isDirectory());
+
+  const resumed = RUNNERS.kimi.buildArgs({ prompt: "next", model: "kimi-code/kimi-for-coding", resume: "session_abc" });
+  assert.equal(resumed[1], "next");
+  assert.ok(resumed.includes("-S") && resumed[resumed.indexOf("-S") + 1] === "session_abc");
+  assert.ok(resumed.includes("-m") && resumed[resumed.indexOf("-m") + 1] === "kimi-code/kimi-for-coding");
+
+  // A dash-prefixed chat message is the -p value, not a flag.
+  assert.equal(RUNNERS.kimi.buildArgs({ prompt: "-5 + 3?" })[1], "-5 + 3?");
+  assert.equal(RUNNERS.kimi.effortLevels, null, "prompt mode has no reasoning-effort flag");
+});
+
+test("kimi compiles the tool policy into an overlay KIMI_CODE_HOME", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "pca-kimi-test-home-"));
+  fs.mkdirSync(path.join(home, "sessions"));
+  fs.writeFileSync(path.join(home, "mcp.json"), "{}");
+  fs.mkdirSync(path.join(home, "skills"));
+  fs.writeFileSync(path.join(home, "config.toml"), 'default_model = "kimi-code/kimi-for-coding"\n');
+  withKimiHome(home, () => {
+    const env = RUNNERS.kimi.buildEnvironment({ policy: policy(["read", "web"]) });
+    assert.equal(env.KIMI_CODE_NO_AUTO_UPDATE, "1");
+    const overlay = env.KIMI_CODE_HOME;
+    assert.ok(overlay && overlay !== home, "the CLI must run against the overlay, not the real home");
+    // Sessions (and any login state) link through so resume/auth keep working;
+    // MCP servers and skills would widen PCA's policy, so they do not.
+    assert.equal(fs.readlinkSync(path.join(overlay, "sessions")), path.join(home, "sessions"));
+    assert.equal(fs.existsSync(path.join(overlay, "mcp.json")), false);
+    assert.equal(fs.existsSync(path.join(overlay, "skills")), false);
+    const config = fs.readFileSync(path.join(overlay, "config.toml"), "utf8");
+    assert.match(config, /default_model = "kimi-code\/kimi-for-coding"/, "the operator's own config carries over");
+    // Static deny rules per ungranted builtin (the [tools] switch is not
+    // honored in prompt mode — verified live against kimi 0.31.1).
+    assert.match(config, /\[\[permission\.rules\]\]\ndecision = "deny"\npattern = "Bash"/);
+    assert.match(config, /pattern = "Write"/);
+    assert.match(config, /pattern = "Agent"/);
+    assert.match(config, /pattern = "CronCreate"/);
+    assert.match(config, /pattern = "mcp__\*"/, "every MCP tool is denied — a planted workspace mcp.json must not widen a turn");
+    assert.doesNotMatch(config, /pattern = "Read"/);
+    assert.doesNotMatch(config, /pattern = "WebSearch"/);
+    assert.doesNotMatch(config, /pattern = "FetchURL"/);
+  });
+});
+
+test("kimi denies every builtin tool when no capability is granted", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "pca-kimi-test-home-"));
+  withKimiHome(home, () => {
+    const env = RUNNERS.kimi.buildEnvironment({ policy: policy() });
+    const config = fs.readFileSync(path.join(env.KIMI_CODE_HOME, "config.toml"), "utf8");
+    for (const tool of ["Read", "Write", "Bash", "WebSearch", "Agent", "CronCreate"]) {
+      assert.match(config, new RegExp(`pattern = "${tool}"`), `${tool} must be denied`);
+    }
+  });
+});
+
+test("kimi refuses a config that already owns the tool policy", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "pca-kimi-test-home-"));
+  fs.writeFileSync(path.join(home, "config.toml"), '[tools]\nenabled = ["Read"]\n');
+  withKimiHome(home, () => {
+    assert.throws(
+      () => RUNNERS.kimi.buildEnvironment({ policy: policy(["read"]) }),
+      /already sets \[tools\]/,
+    );
+  });
+});
+
+test("kimi parseEvent: tool action, text answer, terminal resume hint", () => {
+  const out = drive(RUNNERS.kimi, [
+    { role: "assistant", tool_calls: [{ type: "function", id: "t1", function: { name: "Bash", arguments: "{\"command\":\"ls\"}" } }] },
+    { role: "tool", tool_call_id: "t1", content: "file.txt\n" },
+    { role: "assistant", content: "the answer" },
+    { role: "meta", type: "session.resume_hint", session_id: "session_1", command: "kimi -r session_1" },
+  ]);
+  assert.equal(out.sessionId, "session_1");
+  assert.deepEqual(out.actions, ["$ ls"]);
+  assert.equal(out.answer, "the answer");
+  assert.equal(out.error, null);
+});
+
+test("kimi parseEvent: step narration with tool calls is not part of the answer", () => {
+  const out = drive(RUNNERS.kimi, [
+    { role: "assistant", content: "Let me check.", tool_calls: [{ function: { name: "Read", arguments: "{\"path\":\"/tmp/a.txt\"}" } }] },
+    { role: "assistant", content: "final" },
+  ]);
+  assert.deepEqual(out.actions, ["reading a.txt"]);
+  assert.equal(out.answer, "final");
+});
+
+test("kimi parseEvent: malformed tool arguments fall back to a bare title", () => {
+  const [ev] = RUNNERS.kimi.parseEvent({ role: "assistant", tool_calls: [{ function: { name: "Bash", arguments: "not json" } }] });
+  assert.deepEqual(ev, { kind: "action", title: "$ " });
+});
+
 // ---- custom (escape hatch) -------------------------------------------------
 test("custom engine reuses claude parsing but has no fixed command", () => {
   assert.equal(RUNNERS.custom.command, null);
@@ -297,6 +410,9 @@ test("runner reports the scope enforcement it actually provides", () => {
   const openCode = toolPolicyEnforcement("opencode", policy(["bash"]));
   assert.equal(openCode.kind, "process-boundary");
   assert.match(openCode.detail, /process boundary/);
+  // Kimi compiles to static deny rules per ungranted tool — no path scoping.
+  assert.equal(toolPolicyEnforcement("kimi", policy(["read"])).kind, "permission-policy");
+  assert.match(toolPolicyEnforcement("kimi", policy(["read"])).detail, /not path-scoped/);
 });
 
 test("claude result events carry token/cost usage", () => {

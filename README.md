@@ -28,8 +28,8 @@ drives directly, or an agent framework connected through a small HTTP bridge.
 
 ## Features
 
-- **Bring your own agent** — replies come from Claude Code, Codex, or opencode
-  (which reaches Anthropic, OpenAI, Google, local models, and more), or from an
+- **Bring your own agent** — replies come from Claude Code, Codex, Kimi Code, or
+  opencode (which reaches Anthropic, OpenAI, Google, local models, and more), or from an
   agent framework such as Hermes or OpenClaw.
 - **Private by default** — conversations are end-to-end encrypted, and a bot
   answers only the accounts you allowlist unless you explicitly make it public.

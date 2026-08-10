@@ -25,7 +25,7 @@ saved-file vault, so keep it when moving or backing up a bot.
 
 ## AI direct engines
 
-`claude`, `codex`, and `opencode` deploy as a **single container**: the
+`claude`, `codex`, `opencode`, and `kimi` deploy as a **single container**: the
 transport process holds the seed and writes `/state`, while the agent CLI it
 spawns is dropped to a non-root user — it can't read the seed or session state.
 The container is read-only except for its intended volumes and a size-capped
@@ -51,7 +51,8 @@ it is able to reach. **Granting `bash` means accepting egress**; grant `web` whe
 you want the engine's own web tools to be part of how it works.
 
 `subagents` grants the engine's delegation tool — `Agent` on claude,
-`features.multi_agent` on codex, the `task` tool on opencode. It is also
+`features.multi_agent` on codex, the `task` tool on opencode, `Agent`/`AgentSwarm`
+on kimi. It is also
 orthogonal, and it widens nothing on its own: **a subagent inherits the parent's
 compiled tool set**, so delegating from a bot with no `bash` produces subagents
 with no `bash`. Grant it when a bot should fan out across independent work; it

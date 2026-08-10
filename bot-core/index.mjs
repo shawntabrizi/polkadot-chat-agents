@@ -154,9 +154,9 @@ if (bridgeToken.length < 32) {
   console.error("BOT_BRIDGE_TOKEN must be set to a 32+ character random secret");
   process.exit(2);
 }
-const brain = (env.BOT_BRAIN ?? "bridge").trim().toLowerCase(); // bridge | echo | claude | codex | opencode
-if (!new Set(["echo", "claude", "codex", "opencode", "bridge"]).has(brain)) {
-  console.error("BOT_BRAIN must be echo, claude, codex, opencode, or bridge");
+const brain = (env.BOT_BRAIN ?? "bridge").trim().toLowerCase(); // bridge | echo | claude | codex | opencode | kimi
+if (!new Set(["echo", "claude", "codex", "opencode", "kimi", "bridge"]).has(brain)) {
+  console.error("BOT_BRAIN must be echo, claude, codex, opencode, kimi, or bridge");
   process.exit(2);
 }
 const ackText = env.BOT_ACK_TEXT ?? (brain === "bridge" ? "Connecting you to the agent…" : "");
@@ -191,7 +191,7 @@ const greet = env.BOT_GREET === "1" || env.BOT_GREET === "true";
 const greetText = env.BOT_GREET_TEXT ?? `👋 ${env.BOT_USERNAME || "Your bot"} here — I'm alive! Say hi, or /help for what I can do.`;
 
 // Direct engine "brains": bot-core runs a headless coding-agent CLI (claude /
-// codex / opencode) as an autonomous agent — verbatim prompt and native
+// codex / opencode / kimi) as an autonomous agent — verbatim prompt and native
 // session resume. Tools require an explicit operator choice. The engine table
 // (lib/runners.mjs) turns a
 // (prompt, model, resume) into argv and normalizes each CLI's JSONL stream;
@@ -246,7 +246,7 @@ if (env.BOT_AI_PROJECTS) {
 // Escape hatch: BOT_AI_CMD=<bin> [+ BOT_AI_ARGS=<JSON array> with "__PROMPT__"]
 // runs a custom CLI that speaks claude-shaped stream-json (also how the offline
 // e2e drives the loop with a mock `sh` script). Otherwise the engine is the
-// named brain (claude/codex/opencode); null for echo/bridge.
+// named brain (claude/codex/opencode/kimi); null for echo/bridge.
 const customCmd = (env.BOT_AI_CMD ?? "").trim();
 let customArgsTmpl = null;
 if (customCmd && env.BOT_AI_ARGS) {
@@ -256,7 +256,7 @@ if (customCmd && env.BOT_AI_ARGS) {
 const engine = customCmd ? RUNNERS.custom : resolveEngine(brain); // null unless a direct engine
 const engineCommand = customCmd || engine?.command;
 if (customCmd && (aiToolPolicy.capabilities.length || aiToolPolicy.scope !== "workspace")) {
-  console.error("BOT_AI_CMD owns its own tool boundary; BOT_AI_TOOL_CAPABILITIES and BOT_AI_TOOL_SCOPE are only supported by the built-in claude, codex, and opencode brains.");
+  console.error("BOT_AI_CMD owns its own tool boundary; BOT_AI_TOOL_CAPABILITIES and BOT_AI_TOOL_SCOPE are only supported by the built-in claude, codex, opencode, and kimi brains.");
   process.exit(2);
 }
 if (engine && !customCmd) {

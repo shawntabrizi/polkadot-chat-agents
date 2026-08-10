@@ -1,7 +1,7 @@
 # polkadot-chat-agents
 
 Run an AI chat bot that people can message from the Polkadot app. Replies come
-from a model CLI (Claude, Codex, or opencode) or an agent framework (Hermes,
+from a model CLI (Claude, Codex, opencode, or Kimi) or an agent framework (Hermes,
 OpenClaw). There is no chat server: messages travel over the Statement Store and
 conversations are end-to-end encrypted, so a bot is just a process with an
 outbound connection to a public RPC node.

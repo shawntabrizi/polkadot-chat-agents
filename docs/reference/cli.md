@@ -27,7 +27,7 @@ every command, including `project`, `model`, and `storage`.
 
 | Flag | Applies to | Meaning |
 |---|---|---|
-| `--brain <b>` | create | `echo`, `claude`, `codex`, `opencode`, `bridge`. |
+| `--brain <b>` | create | `echo`, `claude`, `codex`, `opencode`, `kimi`, `bridge`. |
 | `--owner <who>` | create | Lock to one account (username, SS58, or hex). |
 | `--allow a,b` | create | Allowlist several accounts. |
 | `--public` | create | Allow anyone to message it (required for a paid brain left open). |

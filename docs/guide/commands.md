@@ -1,6 +1,6 @@
 # In-chat commands
 
-Direct-engine bots (claude / codex / opencode) answer a small set of slash
+Direct-engine bots (claude / codex / opencode / kimi) answer a small set of slash
 commands themselves, instantly, without invoking the model. `/file` is a
 transport command handled before either a direct engine or a framework sees the
 message, so it also works with bridge and echo bots. Other slash commands are

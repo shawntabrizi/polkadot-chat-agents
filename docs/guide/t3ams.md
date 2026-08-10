@@ -138,7 +138,7 @@ claude-opus-5 · Context 30.4k tokens · reply 5k · ~$0.0123
 The answer follows as a new message (long answers as ordered parts). The
 receipt keeps the scrollback compact while the new message raises the phone
 notification an edit never would. Line 2 is dropped entirely when the engine
-reports no usage, so a bridge harness or an `opencode` brain simply shows line
+reports no usage, so a bridge harness or an `opencode`/`kimi` brain simply shows line
 one. "Context" is everything sent to the model — system prompt, history, and the
 user's message — which is why it dwarfs the reply even on a short question.
 

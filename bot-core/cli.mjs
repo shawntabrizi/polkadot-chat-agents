@@ -5,7 +5,7 @@
 // (override with PCA_BOTS_DIR). Blockchain details (keys, addresses, topics)
 // are handled for you; you just pick a name and a brain.
 //
-//   pca create <botname> [--brain echo|claude|codex|opencode|bridge] [--transport polkadot-app|t3ams] [--network devnet] [--allow 0x..,0x..]
+//   pca create <botname> [--brain echo|claude|codex|opencode|kimi|bridge] [--transport polkadot-app|t3ams] [--network devnet] [--allow 0x..,0x..]
 //   pca run <name>                  start the bot locally (foreground)
 //   pca deploy <name> --host <ssh>  ship it to a server and run it in Docker
 //   pca list                        list your bots
@@ -110,15 +110,15 @@ const NODE_IMAGE = "node:22.22.0-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048
 const HERMES_IMAGE = "nousresearch/hermes-agent@sha256:9c841866021c54c4596849f6135717e8a4d52ba510b7f52c50aef1de1a283973";
 // Cap container log growth on a VPS (json-file grows unbounded by default).
 const LOG_OPTS = `    logging:\n      driver: json-file\n      options: { max-size: "10m", max-file: "3" }\n`;
-const BRAINS = ["echo", "claude", "codex", "opencode", "bridge"];
+const BRAINS = ["echo", "claude", "codex", "opencode", "kimi", "bridge"];
 const DEFAULT_TRANSPORT = "polkadot-app";
 const TRANSPORTS = [DEFAULT_TRANSPORT, "t3ams"];
 // Brains that call a model and therefore spend your quota — never left open by default.
-const PAID_BRAINS = new Set(["claude", "codex", "opencode", "bridge"]);
+const PAID_BRAINS = new Set(["claude", "codex", "opencode", "kimi", "bridge"]);
 // Direct engines shell out to a same-named CLI on this machine. Warn (don't fail —
 // the bot may be destined for a server) when it isn't installed, or every message
 // dies with BOT_AI_SPAWN_FAILED and the user only sees the apology text.
-const DIRECT_BRAIN_CLIS = new Set(["claude", "codex", "opencode"]);
+const DIRECT_BRAIN_CLIS = new Set(["claude", "codex", "opencode", "kimi"]);
 function warnMissingBrainCli(brain) {
   if (!DIRECT_BRAIN_CLIS.has(brain) || process.env.BOT_AI_CMD) return;
   const r = spawnSync("which", [brain], { stdio: "ignore" });
@@ -1216,7 +1216,7 @@ function cmdModel(positional) {
   if (!name) fail(modelCommandUsage());
   const cfg = readConfig(name);
   if (!DIRECT_BRAIN_CLIS.has(cfg.brain)) {
-    fail(`Model controls apply only to direct claude, codex, or opencode bots. "${name}" uses the ${cfg.brain} brain.`);
+    fail(`Model controls apply only to direct claude, codex, opencode, or kimi bots. "${name}" uses the ${cfg.brain} brain.`);
   }
   const action = String(rawAction).toLowerCase();
   const policy = configuredModelPolicy(cfg);
@@ -1449,7 +1449,7 @@ function requestedDirectToolPolicy(brain, flags, command) {
   const toolPolicyFlagUsed = flags["allowed-tools"] != null || flags["tool-scope"] != null;
   if (!DIRECT_BRAIN_CLIS.has(brain)) {
     if (toolPolicyFlagUsed) {
-      fail(`--allowed-tools and --tool-scope require a built-in direct engine (claude, codex, or opencode); ${brain} has no direct-agent tools.`);
+      fail(`--allowed-tools and --tool-scope require a built-in direct engine (claude, codex, opencode, or kimi); ${brain} has no direct-agent tools.`);
     }
     return DEFAULT_TOOL_POLICY;
   }
@@ -1548,8 +1548,9 @@ const DEPLOY_ENGINES = {
   claude:   { pkg: "@anthropic-ai/claude-code@2.1.220" },
   codex:    { pkg: "@openai/codex@0.144.1" },
   opencode: { pkg: "opencode-ai@1.17.18" },
+  kimi:     { pkg: "@moonshot-ai/kimi-code@0.31.1" },
 };
-const KEY_FLAGS = { ANTHROPIC_API_KEY: "anthropic-key", OPENAI_API_KEY: "openai-key", OPENROUTER_API_KEY: "openrouter-key", GEMINI_API_KEY: "gemini-key", GROQ_API_KEY: "groq-key" };
+const KEY_FLAGS = { ANTHROPIC_API_KEY: "anthropic-key", OPENAI_API_KEY: "openai-key", OPENROUTER_API_KEY: "openrouter-key", GEMINI_API_KEY: "gemini-key", GROQ_API_KEY: "groq-key", KIMI_API_KEY: "kimi-key" };
 
 // A T3ams process can emit BOT_LISTENING before its websocket is connected or
 // before it has rebuilt its retained inbox/workspace subscriptions. Keep the
@@ -1583,10 +1584,10 @@ async function cmdDeploy(name, flags) {
   }
   if (cfg.brain === "bridge") {
     if (mediaAnalyzerEnabled) {
-      fail("--media-analyzer requires a T3ams direct-engine deployment (claude, codex, or opencode); bridge bots own their attachment runtime.");
+      fail("--media-analyzer requires a T3ams direct-engine deployment (claude, codex, opencode, or kimi); bridge bots own their attachment runtime.");
     }
     if (toolPolicyFlagUsed) {
-      fail("--allowed-tools and --tool-scope require a built-in direct engine (claude, codex, or opencode); bridge bots own their agent runtime.");
+      fail("--allowed-tools and --tool-scope require a built-in direct engine (claude, codex, opencode, or kimi); bridge bots own their agent runtime.");
     }
     const harness = flags.harness ? String(flags.harness).toLowerCase() : null;
     if (harness !== "openclaw" && harness !== "hermes") {
@@ -1595,9 +1596,9 @@ async function cmdDeploy(name, flags) {
     return deployHarnessStack(name, cfg, secret, flags, host, harness);
   }
   const spec = DEPLOY_ENGINES[cfg.brain];
-  if (!spec) fail(`deploy supports echo/claude/codex/opencode and --harness openclaw|hermes for bridge bots.\nFor "${cfg.brain}", set it up manually — see docs/guide/harnesses.md.`);
+  if (!spec) fail(`deploy supports echo/claude/codex/opencode/kimi and --harness openclaw|hermes for bridge bots.\nFor "${cfg.brain}", set it up manually — see docs/guide/harnesses.md.`);
   if (mediaAnalyzerEnabled && (transport !== "t3ams" || !spec.pkg)) {
-    fail("--media-analyzer requires a T3ams direct-engine deployment (claude, codex, or opencode); it has no effect for echo or bridge bots.");
+    fail("--media-analyzer requires a T3ams direct-engine deployment (claude, codex, opencode, or kimi); it has no effect for echo or bridge bots.");
   }
   if (!fs.existsSync(path.join(HERE, "node_modules")) || !fs.existsSync(path.join(HERE, ".papi"))) {
     fail(`bot-core dependencies missing. Run:  (cd ${HERE} && npm ci)  then retry.`);
@@ -2483,7 +2484,7 @@ async function cmdT3ams(args, flags = {}) {
 function usage() {
   console.log(`pca — Polkadot Chat Agents
 
-  pca create <botname> [--brain echo|claude|codex|opencode|bridge] [--transport polkadot-app|t3ams] [--owner <your username or address>] [--public] [--network devnet] [--username name]
+  pca create <botname> [--brain echo|claude|codex|opencode|kimi|bridge] [--transport polkadot-app|t3ams] [--owner <your username or address>] [--public] [--network devnet] [--username name]
   pca register <name>                  finish/retry registration for an existing bot
   pca run <name> [--model <m>] [--allowed-tools <read,write,bash,web,subagents>] [--tool-scope workspace|container] [--greet]
                                        start the bot locally (foreground)
@@ -2538,7 +2539,7 @@ model controls:  show current policy  ·  set <model> pins the default model  ·
   restricts chat-side switching  ·  lock disables it  ·  open permits it only for allowlisted bots
 
 deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (bridge bots)  ·  --model <m>  ·  --allowed-tools <read,write,bash,web,subagents>  ·  --tool-scope workspace|container  ·  --media-analyzer  ·  --dry-run
-  Needs Docker on the server + SSH access. Direct engines (echo/claude/codex/opencode)
+  Needs Docker on the server + SSH access. Direct engines (echo/claude/codex/opencode/kimi)
   deploy with root-only transport state and a non-root agent CLI, with a persistent
   /workspace the agent works in; bridge bots deploy a two-container stack. Direct
   agents start with no tools. --allowed-tools accepts portable lowercase
@@ -2548,14 +2549,14 @@ deploy flags:  --host root@1.2.3.4 (required)  ·  --harness openclaw|hermes (br
   non-root agent account's container-visible files. Bash always runs inside
   the bot container, so a workspace-scoped policy still uses the container as
   its Bash boundary. Every direct bot starts no-tools, including public Claude,
-  Codex, and OpenCode bots. Inbound attachments are staged per turn and become
+  Codex, OpenCode, and Kimi bots. Inbound attachments are staged per turn and become
   readable when the read capability is enabled. Alternatively,
   --media-analyzer adds an isolated API-only photo/document worker; provision
   its remote media.env with a provider API key and model first. The deploy output
   gives the one-time OAuth login command for direct engines; logs/status/stop reuse
   the saved host (override with --host).
 
-Brains:  echo (test)  ·  claude/codex/opencode (direct agent engines — verbatim prompts,
+Brains:  echo (test)  ·  claude/codex/opencode/kimi (direct agent engines — verbatim prompts,
   native session resume, tools in a container; opencode reaches many providers via
   --model provider/model)  ·  bridge (hand off to an agent harness)
 
@@ -2569,7 +2570,7 @@ const COMMAND_FLAGS = {
   create: ["brain", "transport", "owner", "allow", "t3ams-peer-key", "t3ams-namespace", "t3ams-display-name", "t3ams-auto-accept-workspaces", "t3ams-no-auto-accept-workspaces", "public", "network", "endpoint", "backend", "username", "digits", "model", "port", "wait", "no-register"],
   register: ["username", "digits", "wait"],
   run: ["model", "allowed-tools", "tool-scope", "greet"],
-  deploy: ["host", "harness", "anthropic-key", "openai-key", "openrouter-key", "gemini-key", "groq-key", "allowed-tools", "tool-scope", "media-analyzer", "model", "dry-run", "remote-dir", "greet"],
+  deploy: ["host", "harness", "anthropic-key", "openai-key", "openrouter-key", "gemini-key", "groq-key", "kimi-key", "allowed-tools", "tool-scope", "media-analyzer", "model", "dry-run", "remote-dir", "greet"],
   logs: ["host", "follow", "tail"],
   status: ["host"],
   stop: ["host"],

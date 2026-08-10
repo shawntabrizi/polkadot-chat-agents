@@ -256,7 +256,7 @@ bot-core (Node)
   identity + registration        cli.mjs create / lib/register.mjs
   transport                      index.mjs: poll, decode, ACK, send
   session persistence            lib/session-store.mjs
-  brains                         direct engine (claude/codex/opencode) or bridge
+  brains                         direct engine (claude/codex/opencode/kimi) or bridge
   agent runtime                  lib/agent-runtime.mjs (turns, per-peer state,
                                  commands) over lib/runners.mjs (engine table)
   HTTP bridge                    for agent frameworks
@@ -267,7 +267,7 @@ openclaw-plugin/polkadot (TS)    OpenClaw channel plugin over the bridge
 ```
 
 One transport, many brains. A **direct engine** runs a headless coding-agent
-CLI (claude/codex/opencode) as an autonomous agent: the message is passed
+CLI (claude/codex/opencode/kimi) as an autonomous agent: the message is passed
 verbatim (no injected persona), continuity is the CLI's native session via
 `--resume` (a token captured from its event stream, persisted per peer,
 invalidated on an engine/workspace change), and tools run in a persistent
@@ -290,7 +290,7 @@ Per-peer engine knobs: `/model` (operator-locked by default; an explicitly
 approved set or explicit non-public open policy permits switching),
 `/reasoning` (validated against the engine's levels — claude
 `--effort low|medium|high|xhigh|max`, codex `-c model_reasoning_effort=…`;
-opencode has none), `/project` (see workspaces below). Each turn's token/cost
+opencode and kimi have none), `/project` (see workspaces below). Each turn's token/cost
 usage from the CLI's result event is logged as `BOT_AI_USAGE` and tallied
 in-memory for `/usage`. Ordinary downloaded attachments are staged in a
 private per-turn directory before the engine runs and removed after the turn,

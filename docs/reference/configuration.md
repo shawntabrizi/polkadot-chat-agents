@@ -30,7 +30,7 @@ incomplete; protect it to the same standard.
 
 ---
 
-## Example: direct-engine bot (`claude` / `codex` / `opencode`)
+## Example: direct-engine bot (`claude` / `codex` / `opencode` / `kimi`)
 
 As `pca deploy` generates it (container paths shown):
 
@@ -45,7 +45,7 @@ BOT_USERNAME=codebot.61         # registered network username (display/search); 
 BOT_ALLOWED_PEERS=40d4fd…,7015… # peer account hexes allowed to message it. EMPTY = public (anyone)
 
 # brain
-BOT_BRAIN=claude                # claude|codex|opencode (direct CLI) · bridge (external) · echo (test)
+BOT_BRAIN=claude                # claude|codex|opencode|kimi (direct CLI) · bridge (external) · echo (test)
 
 # state & workspace (paths inside the container)
 BOT_STATE_DIR=/state            # session keys, dedup set, owed-reply journal, bot.pid, and saved peer files. Root-owned; survives restarts
@@ -275,7 +275,7 @@ session flow.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BOT_BRAIN` | `bridge` | `claude`\|`codex`\|`opencode` (direct CLI), `bridge` (external harness), `echo` (test). **gen** |
+| `BOT_BRAIN` | `bridge` | `claude`\|`codex`\|`opencode`\|`kimi` (direct CLI), `bridge` (external harness), `echo` (test). **gen** |
 | `BOT_ACK_TEXT` | "Connecting you to the agent…" (bridge) | First-contact acknowledgement text. |
 | `BOT_GREET` | `0` | `1` = message allowlisted owners once on startup (proof of life). **gen when --greet** |
 | `BOT_GREET_TEXT` | auto | Custom greeting text. |
@@ -318,10 +318,10 @@ the directory is sensitive even if no model session has been created.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BOT_AI_MODEL` | `""` | Pin the model passed to the CLI's own model flag (opencode: a `provider/model` slug). **gen when --model** |
+| `BOT_AI_MODEL` | `""` | Pin the model passed to the CLI's own model flag (opencode: a `provider/model` slug; kimi: a `config.toml` model alias). **gen when --model** |
 | `BOT_AI_ALLOWED_MODELS` | `""` | `/model` allowlist. Empty = switching locked; `a,b` = only those. Always wins over `BOT_AI_MODEL_SWITCHING`. **gen (direct)** |
 | `BOT_AI_MODEL_SWITCHING` | `locked` | `locked` \| `open`. `open` allows free `/model` switching but **requires a peer allowlist** (public bots must use an approved set instead; the process refuses `open` + public). **gen (direct)** |
-| `BOT_AI_REASONING` | `""` | Default reasoning effort; `/reasoning` overrides per peer and is validated against the engine's levels — claude `--effort low\|medium\|high\|xhigh\|max`, codex `-c model_reasoning_effort=…`, opencode none. |
+| `BOT_AI_REASONING` | `""` | Default reasoning effort; `/reasoning` overrides per peer and is validated against the engine's levels — claude `--effort low\|medium\|high\|xhigh\|max`, codex `-c model_reasoning_effort=…`, opencode and kimi none. |
 
 ### Direct engine — tools, sandboxing & limits
 

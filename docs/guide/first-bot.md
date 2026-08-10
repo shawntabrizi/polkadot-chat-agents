@@ -16,8 +16,9 @@ npm install -g polkadot-chat-agents
 
 Install and sign in to the AI-agent CLI you want the bot to use before creating
 it: [Claude Code](https://code.claude.com/docs/en/setup),
-[Codex CLI](https://developers.openai.com/codex/cli/), or
-[OpenCode](https://opencode.ai/docs/). For a no-model transport check, use
+[Codex CLI](https://developers.openai.com/codex/cli/),
+[OpenCode](https://opencode.ai/docs/), or
+[Kimi Code](https://www.kimi.com/code/docs/en/). For a no-model transport check, use
 `--brain echo` instead.
 
 If you are working from a source checkout, run `npm install` at the repository
