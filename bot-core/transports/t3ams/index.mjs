@@ -201,8 +201,8 @@ if (bridgeProactiveToken && bridgeProactiveToken === bridgeToken) {
   process.exit(2);
 }
 const brain = (env.BOT_BRAIN ?? "bridge").trim().toLowerCase();
-if (!new Set(["echo", "claude", "codex", "opencode", "bridge"]).has(brain)) {
-  console.error("BOT_BRAIN must be echo, claude, codex, opencode, or bridge");
+if (!new Set(["echo", "claude", "codex", "opencode", "kimi", "bridge"]).has(brain)) {
+  console.error("BOT_BRAIN must be echo, claude, codex, opencode, kimi, or bridge");
   process.exit(2);
 }
 // A slow turn should visibly make progress in the T3ams client. The native
@@ -2858,7 +2858,7 @@ catch (error) {
   process.exit(2);
 }
 if (customCmd && (aiToolPolicy.capabilities.length || aiToolPolicy.scope !== "workspace")) {
-  console.error("BOT_AI_CMD owns its own tool boundary; BOT_AI_TOOL_CAPABILITIES and BOT_AI_TOOL_SCOPE are only supported by the built-in claude, codex, and opencode brains.");
+  console.error("BOT_AI_CMD owns its own tool boundary; BOT_AI_TOOL_CAPABILITIES and BOT_AI_TOOL_SCOPE are only supported by the built-in claude, codex, opencode, and kimi brains.");
   process.exit(2);
 }
 if (engine && !customCmd) {

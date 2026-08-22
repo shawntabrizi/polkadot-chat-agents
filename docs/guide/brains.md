@@ -4,8 +4,8 @@ A bot's **brain** is what produces its replies. Pick it with `--brain` at
 `create`.
 
 Direct engines run a headless AI-agent CLI with verbatim prompts and native
-session memory (`--resume`). Claude, Codex, and OpenCode start with no tools;
-their deployer may select the same portable policy for either public or
+session memory (`--resume`). Claude, Codex, OpenCode, and Kimi start with no
+tools; their deployer may select the same portable policy for either public or
 allowlisted bots. The CLI retains its OAuth home inside that bot's container so
 it can authenticate; container-scoped native file tools and Bash can access it.
 
@@ -14,6 +14,7 @@ it can authenticate; container-scoped native file tools and Bash can access it.
 | `claude` | the `claude` CLI | Claude models | Claude Code login |
 | `codex` | the `codex` CLI | OpenAI models | ChatGPT / Codex login |
 | `opencode` | the `opencode` CLI | many providers via `--model provider/model` | `opencode auth login` |
+| `kimi` | the `kimi` CLI | Kimi (Moonshot) models via `-m <alias>` | `kimi login` |
 | `echo` | bot-core itself (repeats the message) | — | none |
 | `bridge` | an agent framework over the HTTP bridge | — | the framework's |
 
@@ -37,9 +38,20 @@ the dedicated bot container for a deployment, or the local process account for
 host repositories, credentials, Docker sockets, or home directories into a
 deployed bot container. See [Private & public bots](/guide/access) for the boundary.
 
+The `kimi` brain is the exception on file scoping: its CLI has no per-path tool
+rules, so PCA compiles the capability policy into static `[[permission.rules]]`
+deny entries (one per ungranted builtin tool) in an overlay `KIMI_CODE_HOME`
+generated per bot process — sessions and login state are symlinked through, MCP
+servers and skills are not. (The CLI's `[tools]` config switch is not honored
+in its prompt mode; the deny rules are.) Kimi file tools therefore reach the
+whole agent-visible filesystem whenever `read`/`write` is granted, and a Kimi
+`config.toml` that already sets `[tools]` or `[[permission.rules]]` is refused
+(PCA owns the tool policy).
+
 ## Pinning a model
 
-`--model` pins the model (`BOT_AI_MODEL`; a `provider/model` slug for opencode).
+`--model` pins the model (`BOT_AI_MODEL`; a `provider/model` slug for opencode,
+a `config.toml` model alias for kimi).
 Set it at `create` (saved to the bot) or override per run. `BOT_AI_CMD` /
 `BOT_AI_ARGS` wire in a custom CLI that speaks claude-shaped stream-json.
 

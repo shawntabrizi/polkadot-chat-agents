@@ -22,7 +22,7 @@ team-shared bot, or anything wired to your own subscription.
 ## Public
 
 To let anyone message the bot, you must pass `--public` at `create`. `pca`
-refuses to leave a paid brain (claude / codex / opencode / a framework) open
+refuses to leave a paid brain (claude / codex / opencode / kimi / a framework) open
 without it — an accidental public bot is an accidental open tab on your quota.
 
 A public bot is a real commitment: **you pay for every stranger's

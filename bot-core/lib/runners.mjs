@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
   DEFAULT_TOOL_POLICY,
@@ -204,7 +206,7 @@ const opencodePermissions = (policy, { workingDirectory = "/workspace", attachme
 
 export const assertEngineToolPolicy = (engineName, policyInput = DEFAULT_TOOL_POLICY) => {
   const policy = createToolPolicy(policyInput);
-  if (!["claude", "codex", "opencode", "custom"].includes(engineName)) {
+  if (!["claude", "codex", "opencode", "kimi", "custom"].includes(engineName)) {
     throw new ToolPolicyError(`No direct-agent tool-policy adapter exists for "${engineName}".`);
   }
   return policy;
@@ -236,6 +238,11 @@ const fileEnforcement = (engineName, policy) => {
     return { kind: "native-rules", detail: "Claude path-scoped file-tool rules" };
   }
   if (engineName === "codex") return { kind: "native-sandbox", detail: "Codex native workspace permission/sandbox profile" };
+  if (engineName === "kimi") {
+    // Kimi compiles to static permission deny rules per ungranted builtin
+    // tool; it has no per-path rules, so say so rather than implying a scope.
+    return { kind: "permission-policy", detail: "Kimi static permission deny rules (file tools are not path-scoped)" };
+  }
   return { kind: "permission-policy", detail: "OpenCode deny-first file-tool policy" };
 };
 
@@ -443,13 +450,170 @@ const opencode = {
   },
 };
 
+// ---- kimi (Kimi Code CLI) ---------------------------------------------------
+// `kimi -p <prompt> --output-format stream-json`. Invocation, event schema, and
+// `-S` session resume verified live against the kimi CLI. Prompt mode always
+// runs under the CLI's `auto` permission policy (it rejects --auto/--yolo
+// outright), so PCA's tool policy is compiled into config.toml instead — see
+// buildEnvironment. The CLI reports no usage events.
+const KIMI_CAPABILITY_TOOLS = {
+  read: ["Read", "Glob", "Grep", "ReadMediaFile"],
+  write: ["Edit", "Write"],
+  bash: ["Bash"],
+  web: ["WebSearch", "FetchURL"],
+  subagents: ["Agent", "AgentSwarm"],
+};
+
+// Builtin tools no PCA capability ever grants: plan mode blocks on a human,
+// AskUserQuestion has no one to answer in a chat turn, and cron schedules or
+// background tasks would outlive the bot's turn loop.
+const KIMI_NEVER_GRANTED = [
+  "EnterPlanMode", "ExitPlanMode", "TodoList", "AskUserQuestion", "Skill",
+  "TaskList", "TaskOutput", "TaskStop", "CronCreate", "CronList", "CronDelete",
+];
+
+const kimiTools = (policy) => {
+  const tools = [];
+  for (const [capability, names] of Object.entries(KIMI_CAPABILITY_TOOLS)) {
+    if (hasToolCapability(policy, capability)) tools.push(...names);
+  }
+  return tools;
+};
+
+// The `[tools] enabled/disabled` global switch is documented but NOT honored in
+// prompt mode (verified live against kimi 0.31.1: Bash ran under
+// `enabled = ["Read"]` and under `disabled = ["Bash"]`). Static
+// [[permission.rules]] denies ARE enforced in prompt mode — the CLI documents
+// that itself — so the policy compiles to one deny rule per ungranted builtin
+// tool. Granted tools auto-approve under prompt mode's `auto` policy.
+// The trailing "mcp__*" glob (glob deny verified live) covers every MCP tool:
+// PCA never grants MCP, and a write-capable turn could otherwise plant a
+// project-local .kimi-code/mcp.json in the shared workspace to widen later
+// turns.
+const kimiDeniedTools = (policy) => {
+  const granted = new Set(kimiTools(policy));
+  return [
+    ...[...Object.values(KIMI_CAPABILITY_TOOLS).flat(), ...KIMI_NEVER_GRANTED]
+      .filter((tool) => !granted.has(tool)),
+    "mcp__*",
+  ];
+};
+
+// Project AND user skill directories would inject a persona PCA never granted
+// (a write-capable turn could plant one in the shared workspace). kimi has no
+// --no-skills flag, but --skills-dir REPLACES skill auto-discovery, so point it
+// at a guaranteed-empty directory.
+let kimiNoSkillsDir = null;
+const kimiEmptySkillsDir = () => {
+  if (!kimiNoSkillsDir) {
+    kimiNoSkillsDir = path.join(os.tmpdir(), "pca-kimi-no-skills");
+    fs.mkdirSync(kimiNoSkillsDir, { recursive: true, mode: 0o700 });
+  }
+  return kimiNoSkillsDir;
+};
+
+// Kimi has no CLI flags for tool restriction: the only lever is config.toml,
+// and config is injectable only via KIMI_CODE_HOME, which also holds sessions
+// and OAuth credentials. So each process builds one OVERLAY home: symlinks
+// into the real home (symlinked sessions keep `-S` resume working, symlinked
+// login state keeps auth working) minus everything that would widen PCA's
+// policy — mcp.json/skills/plugins/agents add tools or a persona PCA never
+// granted (the same reason claude gets --setting-sources ""
+// --strict-mcp-config --disable-slash-commands) — plus a rewritten config.toml
+// carrying the compiled policy.
+const KIMI_OVERLAY_EXCLUDES = new Set(["config.toml", "mcp.json", "skills", "plugins", "agents"]);
+let kimiOverlayCache = null; // { key, home } — one overlay per process/policy
+
+const kimiOverlayHome = (policy) => {
+  const source = process.env.KIMI_CODE_HOME?.trim() || path.join(os.homedir(), ".kimi-code");
+  const denied = kimiDeniedTools(policy);
+  const key = JSON.stringify({ source, denied });
+  if (kimiOverlayCache?.key === key) return kimiOverlayCache.home;
+  const overlay = fs.mkdtempSync(path.join(os.tmpdir(), "pca-kimi-home-"));
+  let original = "";
+  try {
+    for (const entry of fs.readdirSync(source)) {
+      if (KIMI_OVERLAY_EXCLUDES.has(entry)) continue;
+      fs.symlinkSync(path.join(source, entry), path.join(overlay, entry));
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error; // a missing home is fine: fresh config below
+  }
+  try { original = fs.readFileSync(path.join(source, "config.toml"), "utf8"); }
+  catch (error) { if (error?.code !== "ENOENT") throw error; }
+  // Appending to a config that already owns tool rules would fight the
+  // operator's entries (first matching rule wins); silently dropping either
+  // side could weaken the policy. Refuse instead.
+  for (const line of original.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("#")) continue;
+    if (/^\[tools\]$/.test(trimmed) || /^\[\[permission\.rules\]\]$/.test(trimmed)) {
+      throw new ToolPolicyError(`kimi brain: ${path.join(source, "config.toml")} already sets [tools] or [[permission.rules]] — PCA compiles the tool policy itself; remove those sections.`);
+    }
+  }
+  const rules = denied
+    .map((tool) => `[[permission.rules]]\ndecision = "deny"\npattern = ${JSON.stringify(tool)}\nreason = "pca tool policy: capability not granted"`)
+    .join("\n\n");
+  const base = original.trimEnd();
+  fs.writeFileSync(path.join(overlay, "config.toml"), `${base ? `${base}\n\n` : ""}${rules}\n`, { mode: 0o600 });
+  kimiOverlayCache = { key, home: overlay };
+  return overlay;
+};
+
+const kimi = {
+  command: "kimi",
+  effortLevels: null, // Prompt mode exposes no reasoning-effort flag.
+  buildArgs({ prompt, model, resume, policy: policyInput = DEFAULT_TOOL_POLICY }) {
+    assertEngineToolPolicy("kimi", policyInput);
+    const args = ["-p", prompt, "--output-format", "stream-json", "--skills-dir", kimiEmptySkillsDir()];
+    if (resume) args.push("-S", resume);
+    if (model) args.push("-m", model);
+    return args;
+  },
+  buildEnvironment({ policy: policyInput = DEFAULT_TOOL_POLICY }) {
+    const policy = assertEngineToolPolicy("kimi", policyInput);
+    return {
+      KIMI_CODE_HOME: kimiOverlayHome(policy),
+      // A bot runs unattended; the CLI must not try to upgrade itself mid-turn.
+      KIMI_CODE_NO_AUTO_UPDATE: "1",
+    };
+  },
+  parseEvent(obj) {
+    // The terminal meta frame is the only place kimi reports the session id,
+    // and the stream's end marker. Result text stays empty so the runtime
+    // falls back to the accumulated assistant text.
+    if (obj?.role === "meta" && obj.type === "session.resume_hint" && obj.session_id) {
+      return [
+        { kind: "started", sessionId: String(obj.session_id) },
+        { kind: "result", text: "", ok: true },
+      ];
+    }
+    if (obj?.role === "assistant") {
+      const calls = Array.isArray(obj.tool_calls) ? obj.tool_calls : [];
+      const out = [];
+      for (const call of calls) {
+        let input = {};
+        try { input = JSON.parse(call?.function?.arguments ?? "{}"); } catch { /* keep {} */ }
+        out.push({ kind: "action", title: toolActionTitle(call?.function?.name, input) });
+      }
+      // A message carrying tool calls is step narration, not the answer; only
+      // tool-free assistant text is accumulated.
+      if (!calls.length && typeof obj.content === "string" && obj.content) {
+        out.push({ kind: "text", text: obj.content });
+      }
+      return out;
+    }
+    return [];
+  },
+};
+
 // Test/escape-hatch engine: BOT_AI_CMD/BOT_AI_ARGS with claude-shaped
 // stream-json output. Lets the offline e2e drive the full loop with a mock `sh`
 // script and no real CLI, and lets an operator wire an unlisted CLI that speaks
 // the same format.
 const custom = { ...claude, command: null };
 
-export const RUNNERS = { claude, codex, opencode, custom };
-export const ENGINES = ["claude", "codex", "opencode"]; // user-selectable
+export const RUNNERS = { claude, codex, opencode, kimi, custom };
+export const ENGINES = ["claude", "codex", "opencode", "kimi"]; // user-selectable
 
 export const resolveEngine = (name) => RUNNERS[name] ?? null;

@@ -203,14 +203,15 @@ Without a framework, bot-core runs a headless AI-agent CLI itself — as an
 autonomous agent, not a chat wrapper: the user's message is passed verbatim (no
 injected persona), conversation continuity is the CLI's own native session
 (`--resume`), and bot-core presents its progress and answer in the chat. Direct
-Claude, Codex, and OpenCode engines start with no tools; the deployer chooses a
-portable capability and scope policy explicitly.
+Claude, Codex, OpenCode, and Kimi engines start with no tools; the deployer
+chooses a portable capability and scope policy explicitly.
 
 | Engine | Invokes | Reaches | Authentication |
 |---|---|---|---|
 | `claude` | `claude -p --output-format stream-json …` | Claude models | Claude Code login |
 | `codex` | `codex exec --json …` | OpenAI models | `codex login` |
 | `opencode` | `opencode run --format json …` | **many providers** via `--model provider/model` (anthropic/…, openai/…, google/…, xai/…, openrouter/…, ollama/…) | `opencode auth login` |
+| `kimi` | `kimi -p … --output-format stream-json` | Kimi (Moonshot) models via `-m <alias>` | `kimi login` |
 
 opencode is the many-models path: one engine reaches ~any provider, so there is
 no need for per-vendor brains (`gemini`/`grok` were removed — use
@@ -225,12 +226,13 @@ Related settings:
 
 - `--model` on `create` (saved) or `run`/`deploy` (override) selects the model —
   `BOT_AI_MODEL`. For opencode it's a `provider/model` slug (the provider
-  selector); for claude/codex a plain model name.
+  selector); for claude/codex a plain model name; for kimi a model alias from
+  the CLI's `config.toml`.
 - `pca model <bot> show|set|allow|lock|open` controls chat-side `/model`.
   Switching is locked by default. `allow` persists an approved list;
   `open` is an explicit option for allowlisted bots only. Public bots cannot
   allow unrestricted switching.
-- Claude, Codex, and OpenCode start with no tools. Deploy a portable policy
+- Claude, Codex, OpenCode, and Kimi start with no tools. Deploy a portable policy
   with `--allowed-tools read,write,bash` and
   `--tool-scope workspace|container`. `write` includes `read`; `bash` includes
   both. The generated environment uses `BOT_AI_TOOL_CAPABILITIES` and

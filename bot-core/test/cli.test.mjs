@@ -91,7 +91,7 @@ test("commands require the current config contract without adding defaults", () 
     writeRawBot(botsDir, "retiredhermes", retiredHermesAlias);
     result = runCli(botsDir, ["info", "retiredhermes"]);
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /Invalid config\.json.*brain must be one of: echo, claude, codex, opencode, bridge/i);
+    assert.match(result.stderr, /Invalid config\.json.*brain must be one of: echo, claude, codex, opencode, kimi, bridge/i);
     assert.deepEqual(readBot(botsDir, "retiredhermes"), retiredHermesAlias);
   } finally {
     fs.rmSync(botsDir, { recursive: true, force: true });
