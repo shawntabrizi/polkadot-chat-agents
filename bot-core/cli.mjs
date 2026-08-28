@@ -2463,9 +2463,12 @@ async function cmdT3ams(args, flags = {}) {
     step("Installing it into bot-core…");
     // --no-save on purpose: the tarball isn't retrievable from the registry, so
     // recording it as a dependency would break npm ci for everyone else.
+    // --ignore-scripts: the tarball is already built, and one of its
+    // dependencies (@blockchaincommons/dcbor) ships an install-time script that
+    // references a file missing from its own package, which aborts the install.
     const install = spawnSync(
       "npm",
-      ["--prefix", HERE, "install", "--no-save", "--package-lock=false", path.join(packDir, tarballName)],
+      ["--prefix", HERE, "install", "--no-save", "--package-lock=false", "--ignore-scripts", path.join(packDir, tarballName)],
       { encoding: "utf8" },
     );
     if (install.status !== 0) {
