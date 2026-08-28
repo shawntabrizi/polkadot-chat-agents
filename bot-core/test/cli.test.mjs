@@ -13,6 +13,20 @@ const CLI = path.join(HERE, "..", "cli.mjs");
 const T3AMS_BCTS_LOADER = path.join(HERE, "fixtures", "t3ams", "bcts-loader.mjs");
 const ACCOUNT = "ab".repeat(32);
 
+import http from "node:http";
+import { spawn } from "node:child_process";
+// Async twin of runCli for tests that must keep the event loop free (an
+// in-process mock server has to answer while the CLI runs).
+const runCliAsync = (botsDir, args, extraEnv = {}) => new Promise((resolve) => {
+  const child = spawn(process.execPath, [CLI, ...args], {
+    cwd: path.join(HERE, ".."),
+    env: { ...process.env, ...extraEnv, PCA_BOTS_DIR: botsDir, NO_COLOR: "1" },
+  });
+  let stdout = "", stderr = "";
+  child.stdout.on("data", (d) => { stdout += d; });
+  child.stderr.on("data", (d) => { stderr += d; });
+  child.on("close", (status) => resolve({ status, stdout, stderr }));
+});
 const runCli = (botsDir, args, extraEnv = {}, nodeArgs = []) => spawnSync(process.execPath, [...nodeArgs, CLI, ...args], {
   cwd: path.join(HERE, ".."),
   encoding: "utf8",
@@ -838,6 +852,49 @@ test("pca trust lists parked T3ams keys and pins exactly the approved one", () =
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /signing key pinned/);
   } finally {
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
+});
+
+// npm's min-release-age silently installs an older version than `latest`, so
+// pca itself has to say when a newer release exists.
+test("pca --version notes a newer registry release, and stays quiet otherwise", async () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
+  let served = "99.0.0";
+  const server = http.createServer((req, res) => {
+    if (req.url !== "/polkadot-chat-agents/latest") { res.writeHead(404); res.end(); return; }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ version: served }));
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const registry = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const env = { PCA_REGISTRY_URL: registry, CI: "" };
+    let result = await runCliAsync(botsDir, ["--version"], env);
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /newer release is available: 99\.0\.0/);
+    assert.match(result.stdout, /min-release-age=0/, "names the npm setting that hides new releases");
+
+    served = "0.0.1"; // registry behind the local checkout: nothing to say
+    result = await runCliAsync(botsDir, ["--version"], env);
+    assert.equal(result.status, 0);
+    assert.doesNotMatch(result.stdout, /newer release/);
+
+    served = "99.0.0";
+    result = await runCliAsync(botsDir, ["--version"], { ...env, PCA_NO_UPDATE_CHECK: "1" });
+    assert.doesNotMatch(result.stdout, /newer release/, "opt-out is honored");
+    result = await runCliAsync(botsDir, ["--version"], { ...env, CI: "true" });
+    assert.doesNotMatch(result.stdout, /newer release/, "quiet in CI");
+
+    // An unreachable registry must never break or slow the command down much.
+    const started = Date.now();
+    result = await runCliAsync(botsDir, ["--version"], { PCA_REGISTRY_URL: "http://127.0.0.1:9", CI: "" });
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout.trim().split("\n")[0].length > 0, true);
+    assert.doesNotMatch(result.stdout, /newer release/);
+    assert.ok(Date.now() - started < 10_000);
+  } finally {
+    server.close();
     fs.rmSync(botsDir, { recursive: true, force: true });
   }
 });

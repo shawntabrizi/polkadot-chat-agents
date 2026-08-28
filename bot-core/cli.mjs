@@ -68,6 +68,36 @@ import { deriveT3amsIdentityFromSeed } from "./transports/t3ams/t3ams-identity.m
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BOT_CORE_VERSION = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8")).version;
+
+// Tell the operator when a newer release exists. npm's release cool-down
+// (min-release-age) silently installs an OLDER version than `latest` and
+// `npm outdated` applies the same cutoff, so nothing else surfaces this.
+// Best-effort only: short timeout, never fails a command, off in CI and with
+// PCA_NO_UPDATE_CHECK=1. Only greater versions count — a pre-release or a
+// local checkout ahead of the registry stays quiet.
+const parseSemver = (v) => {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(String(v ?? "").trim());
+  return m ? m.slice(1).map(Number) : null;
+};
+const semverGreater = (a, b) => {
+  const x = parseSemver(a), y = parseSemver(b);
+  if (!x || !y) return false;
+  for (let i = 0; i < 3; i += 1) if (x[i] !== y[i]) return x[i] > y[i];
+  return false;
+};
+async function noteNewerRelease({ timeoutMs = 3000 } = {}) {
+  if (process.env.PCA_NO_UPDATE_CHECK === "1" || process.env.CI) return null;
+  const registry = process.env.PCA_REGISTRY_URL?.trim() || "https://registry.npmjs.org";
+  try {
+    const res = await fetch(new URL("/polkadot-chat-agents/latest", registry), { signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) return null;
+    const latest = (await res.json())?.version;
+    if (!semverGreater(latest, BOT_CORE_VERSION)) return null;
+    note(`A newer release is available: ${latest} (you have ${BOT_CORE_VERSION}).`);
+    note("Update:  npm install -g polkadot-chat-agents@latest   (add --min-release-age=0 if npm keeps the old one)");
+    return latest;
+  } catch { return null; }
+}
 // Proofs run via the vendored wasm build by default (no Rust toolchain needed);
 // set PCA_BANDERSNATCH_CLI to a natively built binary to override.
 const BANDERSNATCH_BIN = process.env.PCA_BANDERSNATCH_CLI ?? null;
@@ -2092,6 +2122,7 @@ const warnForRuntimeVersion = (health) => {
 
 async function cmdStatus(name, flags) {
   const cfg = readConfig(name);
+  await noteNewerRelease();
   const hostValue = flags.host ? flags.host : cfg.deploy?.host;
   const host = hostValue ? sshTarget(hostValue) : null;
   const port = bridgePortFor(cfg);
@@ -2590,6 +2621,7 @@ const [command, arg] = positional;
 if (flags.help === true || flags.h === true) { usage(); process.exit(0); }
 if (flags.version === true || flags.V === true || command === "version") {
   console.log(BOT_CORE_VERSION);
+  await noteNewerRelease();
   process.exit(0);
 }
 {
