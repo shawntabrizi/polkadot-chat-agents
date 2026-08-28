@@ -5,7 +5,7 @@
 // plain WebSocket (custom hop_* methods, params as a single by-name object,
 // binary fields 0x-hex). Everything an attachment recipient needs derives from
 // the 32-byte claim ticket embedded in the message:
-//   aes key      = blake2b_256(key=ticket, data="encryption")   (AES-256-GCM)
+//   AEAD key     = blake2b_256(key=ticket, data="encryption")   (ChaCha20-Poly1305)
 //   claim keypair= sr25519 from seed blake2b_256(key=ticket, data="signer")
 // Claiming `identifier` yields an encrypted metadata blob that SCALE-decodes to
 // UploadedFile { totalSize u64, chunks Vec<Vec<u8>> }; each chunk hash is then
@@ -26,7 +26,7 @@ const CLAIM_CONTEXT = textEncoder.encode("hop-claim-v1:");
 const ACK_CONTEXT = textEncoder.encode("hop-ack-v1:");
 const SUBMIT_CONTEXT = textEncoder.encode("hop-submit-v1:");
 
-// The app uploads in 2 MB chunks; allow GCM overhead (12B nonce + 16B tag) plus
+// The app uploads in 2 MB chunks; allow AEAD overhead (12B nonce + 16B tag) plus
 // a little slack before calling a chunk oversized.
 const MAX_CHUNK_CIPHERTEXT = 2_000_000 + 64;
 const HOP_CHUNK_PLAINTEXT_BYTES = 2_000_000;
@@ -91,19 +91,19 @@ const encodeUploadedFile = (totalSize, chunkHashes) => concatBytes(
   ...chunkHashes.map(scaleEncodeBytes),
 );
 
-const aesGcmDecrypt = (rawKey, combined) => {
+const chacha20Poly1305Decrypt = (rawKey, combined) => {
   if (combined.length < 12 + 16) throw new Error("ciphertext too short");
   const nonce = combined.subarray(0, 12);
   const tag = combined.subarray(combined.length - 16);
   const ciphertext = combined.subarray(12, combined.length - 16);
-  const decipher = crypto.createDecipheriv("aes-256-gcm", rawKey, nonce);
+  const decipher = crypto.createDecipheriv("chacha20-poly1305", rawKey, nonce, { authTagLength: 16 });
   decipher.setAuthTag(tag);
   return new Uint8Array(Buffer.concat([decipher.update(ciphertext), decipher.final()]));
 };
 
-const aesGcmEncrypt = (rawKey, plain) => {
+const chacha20Poly1305Encrypt = (rawKey, plain) => {
   const nonce = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", rawKey, nonce);
+  const cipher = crypto.createCipheriv("chacha20-poly1305", rawKey, nonce, { authTagLength: 16 });
   const ciphertext = Buffer.concat([cipher.update(Buffer.from(plain)), cipher.final()]);
   return new Uint8Array(Buffer.concat([nonce, ciphertext, cipher.getAuthTag()]));
 };
@@ -331,7 +331,7 @@ export async function uploadP2PFile({
 
   const chunkSize = uploadChunkSize(maxRpcFrameBytes);
   const ticket = new Uint8Array(crypto.randomBytes(HASH_BYTES));
-  const aesKey = blake2b32(textEncoder.encode("encryption"), ticket);
+  const encryptionKey = blake2b32(textEncoder.encode("encryption"), ticket);
   const recipientPublicKey = getPublicKey(secretFromSeed(blake2b32(textEncoder.encode("signer"), ticket)));
   const recipient = multiSigner(recipientPublicKey);
   const signer = multiSigner(sender.publicKey);
@@ -369,12 +369,12 @@ export async function uploadP2PFile({
     const hashes = [];
     for (let position = 0; position < stat.size; position += chunkSize) {
       const plain = await readExact(handle, Math.min(chunkSize, stat.size - position), position);
-      const encrypted = aesGcmEncrypt(aesKey, plain);
+      const encrypted = chacha20Poly1305Encrypt(encryptionKey, plain);
       if (encrypted.length > MAX_CHUNK_CIPHERTEXT) throw new Error("HOP upload chunk exceeds protocol limit");
       hashes.push(await submit(encrypted));
     }
     const metadata = encodeUploadedFile(stat.size, hashes);
-    const identifier = await submit(aesGcmEncrypt(aesKey, metadata));
+    const identifier = await submit(chacha20Poly1305Encrypt(encryptionKey, metadata));
     const after = await handle.stat();
     if (after.size !== stat.size) throw new Error("source file changed while it was being uploaded");
     log("HOP_UPLOADED", { host: url.hostname, id: toHex(identifier).slice(0, 18), bytes: stat.size, chunks: hashes.length });
@@ -418,7 +418,7 @@ export async function downloadP2PFile({
     throw new Error("expected attachment content hash must be 32 bytes");
   }
 
-  const aesKey = blake2b32(textEncoder.encode("encryption"), claimTicket);
+  const encryptionKey = blake2b32(textEncoder.encode("encryption"), claimTicket);
   const secret = secretFromSeed(blake2b32(textEncoder.encode("signer"), claimTicket));
   const proofFor = (rawHash, context) =>
     toHex(new Uint8Array([1, ...sr25519Sign(secret, blake2b32(new Uint8Array([...context, ...rawHash])))]));
@@ -459,7 +459,7 @@ export async function downloadP2PFile({
       if (meta == null) {
         const encryptedMetadata = await claimBlob(identifier);
         if (Buffer.compare(blake2b32(encryptedMetadata), identifier) !== 0) throw new Error("HOP metadata hash mismatch");
-        meta = decodeUploadedFile(aesGcmDecrypt(aesKey, encryptedMetadata), maxBytes);
+        meta = decodeUploadedFile(chacha20Poly1305Decrypt(encryptionKey, encryptedMetadata), maxBytes);
         await ackBlob(identifier);
       }
       for (; chunkIndex < meta.chunkHashes.length; chunkIndex += 1) {
@@ -468,7 +468,7 @@ export async function downloadP2PFile({
         // The chunk hash is client-computed blake2b of the *encrypted* blob —
         // verify before decrypting so a wrong/poisoned blob fails loudly.
         if (Buffer.compare(blake2b32(encrypted), rawHash) !== 0) throw new Error("HOP chunk hash mismatch");
-        const plain = aesGcmDecrypt(aesKey, encrypted);
+        const plain = chacha20Poly1305Decrypt(encryptionKey, encrypted);
         received += plain.length;
         if (received > maxBytes || BigInt(received) > meta.totalSize) throw new Error("attachment exceeds declared size");
         parts.push(plain);

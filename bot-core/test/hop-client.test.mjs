@@ -110,7 +110,7 @@ test("tampered ciphertext fails the chunk hash check", async () => {
   await assert.rejects(() => download(node, file), /hash mismatch/);
 });
 
-test("tampered ciphertext with matching hash fails GCM auth", async () => {
+test("tampered ciphertext with matching hash fails ChaCha20-Poly1305 auth", async () => {
   const node = await startNode();
   const file = node.putFile(new Uint8Array(crypto.randomBytes(100_000)), { tamperChunk: true, rehashTamper: true });
   await assert.rejects(() => download(node, file), /unable to authenticate|Unsupported state/i);
