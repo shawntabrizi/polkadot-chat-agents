@@ -24,9 +24,11 @@ chain's store-and-forward message layer:
 - Statements persist in the store (bounded per account) until they expire, and
   reads are non-destructive, so a bot that was offline catches up by re-reading
   its topics.
-- Conversations are end-to-end encrypted. Each session derives AES keys from a
-  P256 ECDH shared secret between the parties' chat keys. The codec for all of
-  this is vendored in `bot-core/vendor/app-chat-codec.mjs`.
+- Conversations are end-to-end encrypted. Peers agree raw X25519 shared
+  secrets, use those raw bytes for topic/channel derivation, and derive
+  ChaCha20-Poly1305 keys with HKDF-SHA256 (empty salt and info). Frames are
+  `nonce12 || ciphertext || tag16`, with no AAD. The codec for all of this is
+  vendored in `bot-core/vendor/app-chat-codec.mjs`.
 - Exactly one process may serve a given bot identity at a time, or replies
   double-send.
 
@@ -42,7 +44,7 @@ shared secret.
 
 The bot can also open a chat (the `--greet` feature sends the owner a
 first-contact request). As initiator it must handle the peer's
-`multiChatAccepted` reply, which advertises the peer's *device* encryption
+`DeviceChatAccepted` reply, which advertises the peer's *device* encryption
 key — fold that into the session or the peer's device-channel replies go
 unseen (the mirror image of the per-device-channels rule below).
 
@@ -106,10 +108,11 @@ per-message; one undecodable message must not abort the batch.
 ### Persistence
 
 Session keys and channels exist only at the two endpoints; there is no server
-to rejoin. bot-core persists per-peer device keys, a dedup set, and the
-owed-replies journal to `BOT_STATE_DIR/session-state.json` and rebuilds
-sessions on startup (`makePeerSession` is deterministic), so restarts do not
-orphan open conversations or drop ACKed-but-unanswered messages.
+to rejoin. bot-core persists its random X25519 device private key, per-peer
+identity/device public keys, a dedup set, and the owed-replies journal to
+`BOT_STATE_DIR/session-state.json` and rebuilds sessions on startup
+(`makePeerSession` is deterministic), so restarts do not orphan open
+conversations or drop ACKed-but-unanswered messages.
 
 ### Ingress
 
@@ -154,8 +157,9 @@ The chat message carries only a reference —
 `{ identifier, claimTicket, wssUrl, meta }` — and the encrypted bytes live on
 a "HOP" store-and-forward node (JSON-RPC over WebSocket,
 `hop_claim`/`hop_ack`). Everything needed to fetch and decrypt derives from
-the 32-byte `claimTicket` in the message (AES-256-GCM key and the sr25519
+the 32-byte `claimTicket` in the message (ChaCha20-Poly1305 key and the sr25519
 claim keypair, both via keyed blake2b), so receiving needs no on-chain state.
+The HOP encryption key is used directly; it does not pass through HKDF.
 
 `lib/hop-client.mjs` downloads in the per-peer work queue strictly *after* the
 ACK; blobs land in `BOT_STATE_DIR/media/<identifierHex>.<ext>` (0600, TTL + a
@@ -187,8 +191,8 @@ host path.
 ### Sending files
 
 `lib/hop-client.mjs` implements `hop_submit`: it generates a fresh claim
-ticket, encrypts the chunks and metadata with AES-GCM, signs every submission
-from `//allowance//bulletin//chat`, and wraps the resulting reference in an
+ticket, encrypts the chunks and metadata with ChaCha20-Poly1305, signs every
+submission from `//allowance//bulletin//chat`, and wraps the resulting reference in an
 encrypted rich-text message. The upload endpoint is operator-pinned with
 `BOT_HOP_UPLOAD_NODE`; peer-supplied HOP endpoints are never used for uploads.
 
@@ -242,6 +246,12 @@ shipped as a committed wasm build and run via `node:wasi`), and submits the
 username claim to the backend, which attests the account on-chain. Base
 usernames are not unique; a two-digit discriminator (`mybot.07`) is assigned
 by the backend, or requested with `--digits`.
+
+The on-chain `identifier_key` is a fixed 65-byte RFC004 container:
+`0x00 || x25519_public_key32 || zero_padding32`. Other type bytes are rejected
+as unsupported. This is a breaking key migration: bots registered with a
+legacy P-256 identifier key must publish/re-register the X25519 container
+before current apps can message them.
 
 A decentralized issuance path (a consumer-delegation extrinsic in the
 `individuality` runtime, letting a person register identifier keys for

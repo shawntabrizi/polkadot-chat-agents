@@ -43,7 +43,7 @@ values; the account and identifier key are in its `config.json`).
 node bot-core/test-client.mjs \
   --seed-hex 0x<sender-root-seed> \
   --bot-account 0x<bot-account-hex> \
-  --bot-identifier-key 0x<bot-p256-hex> \
+  --bot-identifier-key 0x<bot-identifier-container-hex> \
   --wait-secs 45 \
   "hello" "a follow-up message"
 ```
@@ -67,7 +67,7 @@ including a multi-device envelope opener and an undecodable message in a batch:
 node bot-core/test-client-device.mjs \
   --seed-hex 0x<sender-root-seed> \
   --bot-account 0x<bot-account-hex> \
-  --bot-identifier-key 0x<bot-p256-hex> \
+  --bot-identifier-key 0x<bot-identifier-container-hex> \
   "hello from a device channel"
 ```
 
