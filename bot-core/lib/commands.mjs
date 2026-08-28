@@ -21,6 +21,30 @@ export const resolveModelPolicy = ({ configured = null, isPublic = false, allowO
   return allowOpen === true && !isPublic ? null : [];
 };
 
+// The command catalog is the single source of truth for both /help and the
+// operator context shown to an agent. Keep meanings user-facing: they are read
+// in chat as well as injected into the model's factual runtime description.
+export const commandCatalog = ({ allowedModels = null, effortLevels = null, hasProjects = false } = {}) => {
+  const modelSwitchingLocked = Array.isArray(allowedModels) && allowedModels.length === 0;
+  const modelSwitchingRestricted = Array.isArray(allowedModels) && allowedModels.length > 0;
+  const modelMeaning = modelSwitchingLocked
+    ? "show the active model"
+    : modelSwitchingRestricted
+      ? "show or select an approved model"
+      : "show or switch model";
+  return Object.freeze([
+    { command: "/help", meaning: "list these commands" },
+    { command: "/reset", meaning: "start a fresh session (forget our conversation so far)" },
+    { command: "/stop", meaning: "stop what I'm currently working on" },
+    { command: "/model", meaning: modelMeaning },
+    ...(effortLevels ? [{ command: "/reasoning", meaning: "dial my thinking depth (/reasoning <level>, /reasoning default)" }] : []),
+    ...(hasProjects ? [{ command: "/project", meaning: "pick the project I work in (/project <name>[@branch], /project default)" }] : []),
+    { command: "/file", meaning: "save, retrieve, list, or remove durable files" },
+    { command: "/usage", meaning: "show tokens and cost spent on this chat since my last restart" },
+    { command: "/ping", meaning: "check the bot is alive" },
+  ].map(Object.freeze));
+};
+
 export function createCommandHandler({
   clearResume,
   peerModelOverrides,
@@ -46,11 +70,7 @@ export function createCommandHandler({
   // allowedModels: null = open, [] = locked, [".."] = restricted set.
   const modelSwitchingLocked = Array.isArray(allowedModels) && allowedModels.length === 0;
   const modelSwitchingRestricted = Array.isArray(allowedModels) && allowedModels.length > 0;
-  const modelHelp = modelSwitchingLocked
-    ? "/model — show the active model"
-    : modelSwitchingRestricted
-      ? "/model — show or select an approved model"
-      : "/model — show or switch model";
+  const commands = commandCatalog({ allowedModels, effortLevels, hasProjects: hasProjects() });
   const projectLabel = (p) => (p ? `${p.alias}${p.branch ? `@${p.branch}` : ""}` : null);
   // Shared by "/project <spec>" and the bare "/<alias> [@branch]" shortcut.
   // Switching changes the turn cwd, and a resume token is scoped to its cwd —
@@ -75,14 +95,7 @@ export function createCommandHandler({
       case "help":
         return [
           "Commands:",
-          "/reset — start a fresh session (forget our conversation so far)",
-          "/stop — stop what I'm currently working on",
-          modelHelp,
-          ...(effortLevels ? ["/reasoning — dial my thinking depth (/reasoning <level>, /reasoning default)"] : []),
-          ...(hasProjects() ? ["/project — pick the project I work in (/project <name>[@branch], /project default)"] : []),
-          "/file — save, retrieve, list, or remove durable files",
-          "/usage — tokens and cost spent on this chat since my last restart",
-          "/ping — check the bot is alive",
+          ...commands.filter(({ command }) => command !== "/help").map(({ command, meaning }) => `${command} — ${meaning}`),
         ].join("\n");
       case "reset":
         // Drop the native session token so the next turn starts a fresh
