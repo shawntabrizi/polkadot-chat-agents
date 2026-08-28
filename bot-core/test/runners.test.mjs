@@ -313,8 +313,25 @@ test("kimi compiles the tool policy into an overlay KIMI_CODE_HOME", () => {
     // Sessions (and any login state) link through so resume/auth keep working;
     // MCP servers and skills would widen PCA's policy, so they do not.
     assert.equal(fs.readlinkSync(path.join(overlay, "sessions")), path.join(home, "sessions"));
-    assert.equal(fs.existsSync(path.join(overlay, "mcp.json")), false);
-    assert.equal(fs.existsSync(path.join(overlay, "skills")), false);
+    // Pinned by empty placeholders (not symlinks) so a write-capable turn cannot
+    // create them in the sticky overlay either.
+    assert.equal(fs.lstatSync(path.join(overlay, "mcp.json")).isSymbolicLink(), false);
+    assert.equal(fs.readFileSync(path.join(overlay, "mcp.json"), "utf8").trim(), "{}");
+    for (const dir of ["skills", "plugins", "agents"]) {
+      const st = fs.lstatSync(path.join(overlay, dir));
+      assert.ok(st.isDirectory() && !st.isSymbolicLink(), `${dir} is an empty placeholder directory`);
+      assert.deepEqual(fs.readdirSync(path.join(overlay, dir)), []);
+    }
+    // A dropped agent uid must be able to read the policy but never replace it:
+    // world-searchable sticky directory, world-readable config.
+    assert.equal(fs.statSync(overlay).mode & 0o1777, 0o1777);
+    assert.equal(fs.statSync(path.join(overlay, "config.toml")).mode & 0o777, 0o644);
+    // The directories kimi writes into exist in the REAL home so writes land
+    // there (through the symlinks) instead of dying with the overlay.
+    for (const dir of ["sessions", "credentials", "logs", "cache", "updates"]) {
+      assert.ok(fs.statSync(path.join(home, dir)).isDirectory(), `${dir} pre-created in the real home`);
+      assert.equal(fs.readlinkSync(path.join(overlay, dir)), path.join(home, dir));
+    }
     const config = fs.readFileSync(path.join(overlay, "config.toml"), "utf8");
     assert.match(config, /default_model = "kimi-code\/kimi-for-coding"/, "the operator's own config carries over");
     // Static deny rules per ungranted builtin (the [tools] switch is not
@@ -341,14 +358,31 @@ test("kimi denies every builtin tool when no capability is granted", () => {
   });
 });
 
-test("kimi refuses a config that already owns the tool policy", () => {
+test("kimi refuses a config that already owns the tool policy or installs hooks", () => {
+  for (const section of ['[tools]\nenabled = ["Read"]\n', '[[permission.rules]]\ndecision = "allow"\npattern = "Bash"\n', '[hooks]\n', '[[hooks.pre_tool_call]]\ncommand = "true"\n']) {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "pca-kimi-test-home-"));
+    fs.writeFileSync(path.join(home, "config.toml"), section);
+    withKimiHome(home, () => {
+      assert.throws(
+        () => RUNNERS.kimi.buildEnvironment({ policy: policy(["read"]) }),
+        /sets \[tools\], \[\[permission\.rules\]\] or \[hooks\]/,
+        `${section.split("\n")[0]} must be refused — hooks run before the deny rules`,
+      );
+    });
+  }
+});
+
+test("kimi picks up login state that appears after the first turn", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "pca-kimi-test-home-"));
-  fs.writeFileSync(path.join(home, "config.toml"), '[tools]\nenabled = ["Read"]\n');
   withKimiHome(home, () => {
-    assert.throws(
-      () => RUNNERS.kimi.buildEnvironment({ policy: policy(["read"]) }),
-      /already sets \[tools\]/,
-    );
+    const first = RUNNERS.kimi.buildEnvironment({ policy: policy(["read"]) }).KIMI_CODE_HOME;
+    assert.equal(RUNNERS.kimi.buildEnvironment({ policy: policy(["read"]) }).KIMI_CODE_HOME, first, "unchanged home reuses the overlay");
+    // The operator runs `kimi login` while the bot is up: the new entry must be
+    // visible to the very next turn, not after a restart.
+    fs.writeFileSync(path.join(home, "device_id"), "abc\n");
+    const second = RUNNERS.kimi.buildEnvironment({ policy: policy(["read"]) }).KIMI_CODE_HOME;
+    assert.notEqual(second, first);
+    assert.equal(fs.readlinkSync(path.join(second, "device_id")), path.join(home, "device_id"));
   });
 });
 

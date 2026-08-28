@@ -298,6 +298,10 @@ const buildEngineTurnEnvironment = ({ attachmentDir, outputDir, workingDirectory
     attachmentDir,
     outputDir,
     workingDirectory,
+    // Runners that stage files for the CLI (kimi's overlay home) must hand
+    // anything the agent writes to the identity the CLI actually runs as.
+    agentUid: aiAgentUid,
+    agentGid: aiAgentGid,
   }) ?? null;
 const lookbackDays = numberEnv("BOT_REQUEST_LOOKBACK_DAYS", 7, { min: 0, max: 365 });
 const futureDays = numberEnv("BOT_REQUEST_FUTURE_DAYS", 2, { min: 0, max: 30 });

@@ -87,7 +87,7 @@ the operator enables hard platform-attestation enforcement; it is not needed
 for the current Devnet. Paseo remains available with `--network paseo`. See
 [Use Products Devnet](/guide/devnet) for protocol and local testing details.
 
-Direct Claude, Codex, and OpenCode runs and deployments start with no tools:
+Direct Claude, Codex, OpenCode, and Kimi runs and deployments start with no tools:
 empty capabilities and workspace scope. The same portable policy is available
 to public and allowlisted bots, so every sender of a public bot can direct
 whatever capabilities its deployer selects.

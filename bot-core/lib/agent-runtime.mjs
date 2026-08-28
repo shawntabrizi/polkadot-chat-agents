@@ -606,6 +606,10 @@ export const createAgentRuntime = ({
 // an idle-silence backstop kills a wedged process (and unblocks the peer
 // queue). Returns { answer }, { stopped: true } (user /stop), or null on
 // failure.
+  // What the engine CLIs print when asked to resume a session they no longer
+  // have (kimi: `Session "x" not found.` / a session from another directory;
+  // claude: `No conversation found with session ID`).
+  const STALE_RESUME_PATTERN = /session ["']?[^"'\n]*["']? not found|no conversation found|different directory/i;
   const runEngine = (peerHex, userText, onAction = null, onPartial = null, cwd = workspace, job = null, outputDir = null, sessionKey = peerHex, attachmentDir = null) => new Promise((resolve) => {
     const k = norm(sessionKey);
     if (job?.cancelled) { resolve({ stopped: true }); return; }
@@ -613,8 +617,9 @@ export const createAgentRuntime = ({
     // Resolved outside the spawn try: the close handler below reports it with
     // the turn's usage, and would otherwise read it out of scope.
     const turnModel = peerModelOverrides.get(k) ?? model;
+    let resume = null;
     try {
-      const resume = peerResume.get(k) ?? null;
+      resume = peerResume.get(k) ?? null;
       const effort = peerEffortOverrides.get(k) ?? reasoning ?? "";
       const turn = {
         prompt: userText,
@@ -736,7 +741,20 @@ export const createAgentRuntime = ({
       if (outputExceeded) return finish(null);
       const finalAnswer = (resultText ?? answer).trim();
       if (errored) { log("BOT_AI_FAILED", { to: peerHex, error: String(errored).slice(-300) }); return finish(null); }
-      if (code === 0 || finalAnswer) { recordUsage(peerHex, usage, k); return finish({ answer: finalAnswer, usage, model: turnModel || null }); }
+      // A partial answer only counts when the CLI itself closed the turn with a
+      // result event; text accumulated before a mid-turn crash is not a reply.
+      if (code === 0 || (finalAnswer && resultText !== null)) { recordUsage(peerHex, usage, k); return finish({ answer: finalAnswer, usage, model: turnModel || null }); }
+      // The native session we tried to resume is gone (the CLI's session store
+      // was wiped, moved, or belongs to another directory). Every later turn
+      // would fail the same way until the peer typed /reset, so drop the token
+      // and run this turn once more as a fresh session.
+      if (resume && STALE_RESUME_PATTERN.test(err) && peerResume.get(k) === resume) {
+        peerResume.delete(k);
+        persist();
+        log("BOT_AI_RESUME_DROPPED", { to: peerHex, stderr: err.trim().slice(-200) });
+        runEngine(peerHex, userText, onAction, onPartial, cwd, job, outputDir, sessionKey, attachmentDir).then(finish);
+        return;
+      }
       // Classify the failure so the operator knows the remedy (re-auth vs. retry).
       const authRevoked = /401|unauthorized|refresh token|could not be refreshed|log ?out and sign in/i.test(err);
       log(authRevoked ? "BOT_AI_AUTH_REVOKED" : "BOT_AI_FAILED", { to: peerHex, code, stderr: err.trim().slice(-500) });

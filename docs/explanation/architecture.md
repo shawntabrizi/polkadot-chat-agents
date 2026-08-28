@@ -38,14 +38,14 @@ framework integration.
 
 ## Direct-agent boundary
 
-For Claude, Codex, and OpenCode bots, `pca deploy` separates the chat transport
+For Claude, Codex, OpenCode, and Kimi bots, `pca deploy` separates the chat transport
 from the agent CLI. The transport retains the signing seed and session state;
 the agent runs as a non-root user with its own workspace and provider-login
 home. The CLI process retains that home only to authenticate and refresh its
 session; container-scoped native file tools and Bash can access it inside that
 bot container.
 
-Direct Claude, Codex, and OpenCode start with no tools. Their deployer may
+Direct Claude, Codex, OpenCode, and Kimi start with no tools. Their deployer may
 select portable `read`, `write`, and `bash` capabilities and a scope, for
 either public or allowlisted bots:
 

@@ -158,7 +158,7 @@ no bridge port is published.
 A public bot has `BOT_ALLOWED_PEERS` unset or empty. It must assume arbitrary
 prompts, attachment floods, repeated requests, and attempts to spend model or
 storage capacity. Give it one narrow task, a pinned low-cost model, and a
-read-only or disposable workspace. Claude, Codex, and OpenCode use the same
+read-only or disposable workspace. Claude, Codex, OpenCode, and Kimi use the same
 portable direct-agent tool policy; this example leaves its conservative
 no-tools default in place.
 

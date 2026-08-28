@@ -243,6 +243,30 @@ test("usage-only state is excluded from durable session keys", async () => {
   assert.deepEqual(h.runtime.stateKeys(), []);
 });
 
+test("a stale native session is dropped and the turn retried fresh, once", async () => {
+  // First turn: a normal session S1. Second turn resumes S1, which the CLI no
+  // longer has (its store was wiped) — kimi's exact wording. The runtime must
+  // not park the peer behind /reset; it drops the token and re-runs the turn.
+  const fresh = (id, text) => `printf '{"type":"system","subtype":"init","session_id":"${id}"}\\n{"type":"result","result":"${text}"}\\n'`;
+  const h = makeRuntime({
+    buildArgs: ({ resume }) => ["-c", resume ? `echo 'Session "${resume}" not found.' >&2; exit 1` : fresh(resume ? "S2" : "S1", "hello")],
+  });
+  await h.runtime.handleMessage("peer", { text: "one", messageId: "M1", kind: "text" });
+  assert.deepEqual(h.runtime.peerSnapshot("peer"), { rs: "S1" });
+  await h.runtime.handleMessage("peer", { text: "two", messageId: "M2", kind: "text" });
+  assert.equal(h.delivered.length, 2);
+  assert.doesNotMatch(h.delivered[1], /couldn't reach my agent/, "the retried turn answers");
+  assert.ok(h.events.some((e) => e.event === "BOT_AI_RESUME_DROPPED"));
+  assert.deepEqual(h.runtime.peerSnapshot("peer"), { rs: "S1" }, "the fresh run's session is recorded");
+});
+
+test("a mid-turn crash with partial text is a failure, not an answer", async () => {
+  const h = makeRuntime({ script: `printf '{"type":"assistant","message":{"content":[{"type":"text","text":"half an"}]}}\\n'; echo boom >&2; exit 1` });
+  await h.runtime.handleMessage("peer", { text: "hi", messageId: "M1", kind: "text" });
+  assert.equal(h.delivered.length, 1);
+  assert.match(h.delivered[0], /couldn't reach my agent/);
+});
+
 test("an engine failure delivers the apology, not silence", async () => {
   const h = makeRuntime({ script: "echo nope >&2; exit 1" });
   await h.runtime.handleMessage("peer", { text: "hi", messageId: "M1", kind: "text" });

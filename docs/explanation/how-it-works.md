@@ -75,7 +75,7 @@ agent CLI runs as a non-root user in its own container and receives neither.
 The CLI does retain its provider-login home inside that bot container so it can
 authenticate, and container-scoped native file tools and Bash can access it.
 
-Direct Claude, Codex, and OpenCode therefore start with no tools. Their
+Direct Claude, Codex, OpenCode, and Kimi therefore start with no tools. Their
 deployer explicitly chooses portable capabilities and a scope for them, whether
 the bot is public or allowlisted:
 

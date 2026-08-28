@@ -502,12 +502,13 @@ const kimiDeniedTools = (policy) => {
 // Project AND user skill directories would inject a persona PCA never granted
 // (a write-capable turn could plant one in the shared workspace). kimi has no
 // --no-skills flag, but --skills-dir REPLACES skill auto-discovery, so point it
-// at a guaranteed-empty directory.
+// at a guaranteed-empty directory. Private temp dir, then opened to o+rx: the
+// agent may run as a different (dropped) uid and must be able to read it.
 let kimiNoSkillsDir = null;
 const kimiEmptySkillsDir = () => {
   if (!kimiNoSkillsDir) {
-    kimiNoSkillsDir = path.join(os.tmpdir(), "pca-kimi-no-skills");
-    fs.mkdirSync(kimiNoSkillsDir, { recursive: true, mode: 0o700 });
+    kimiNoSkillsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-kimi-no-skills-"));
+    fs.chmodSync(kimiNoSkillsDir, 0o755);
   }
   return kimiNoSkillsDir;
 };
@@ -521,41 +522,77 @@ const kimiEmptySkillsDir = () => {
 // granted (the same reason claude gets --setting-sources ""
 // --strict-mcp-config --disable-slash-commands) — plus a rewritten config.toml
 // carrying the compiled policy.
+//
+// Ownership matters because a deployment spawns the CLI as a dropped uid while
+// this process is root: the overlay is root-owned, world-searchable and
+// STICKY (/tmp semantics), so the agent can create its own top-level files
+// (device_id, migrations) but cannot remove or replace root's config.toml,
+// the symlinks, or the placeholders that pin the excluded entries. The real
+// home's writable subdirectories are pre-created (and handed to the agent
+// uid) so kimi writes sessions/logs/credentials THROUGH the symlinks instead of
+// into the overlay, where they would vanish with /tmp.
 const KIMI_OVERLAY_EXCLUDES = new Set(["config.toml", "mcp.json", "skills", "plugins", "agents"]);
-let kimiOverlayCache = null; // { key, home } — one overlay per process/policy
+const KIMI_HOME_WRITABLE_DIRS = ["sessions", "credentials", "logs", "cache", "updates"];
+let kimiOverlayCache = null; // { key, home } — one overlay per process/policy/home listing
 
-const kimiOverlayHome = (policy) => {
-  const source = process.env.KIMI_CODE_HOME?.trim() || path.join(os.homedir(), ".kimi-code");
+const kimiRealHome = () => process.env.KIMI_CODE_HOME?.trim() || path.join(os.homedir(), ".kimi-code");
+
+// Make sure the real home and the directories kimi writes into exist and are
+// owned by the agent identity. Only entries this function CREATES are chowned;
+// pre-existing state is left exactly as the operator set it up.
+const prepareKimiRealHome = (source, agentUid, agentGid) => {
+  const owner = process.getuid?.() === 0 && agentUid != null && agentUid !== 0
+    ? [agentUid, agentGid ?? agentUid]
+    : null;
+  const ensureDir = (dir, mode) => {
+    try { fs.mkdirSync(dir, { mode }); }
+    catch (error) { if (error?.code === "EEXIST") return; throw error; }
+    if (owner) fs.chownSync(dir, ...owner);
+  };
+  ensureDir(source, 0o700);
+  for (const name of KIMI_HOME_WRITABLE_DIRS) ensureDir(path.join(source, name), 0o700);
+};
+
+const kimiOverlayHome = (policy, { agentUid = null, agentGid = null } = {}) => {
+  const source = kimiRealHome();
+  prepareKimiRealHome(source, agentUid, agentGid);
   const denied = kimiDeniedTools(policy);
-  const key = JSON.stringify({ source, denied });
+  // The listing is part of the key: an entry that appears later (the operator
+  // runs `kimi login` after the bot started, the first session is created) must
+  // reach the next turn, not wait for a restart.
+  const entries = fs.readdirSync(source).filter((entry) => !KIMI_OVERLAY_EXCLUDES.has(entry)).sort();
+  const key = JSON.stringify({ source, denied, entries });
   if (kimiOverlayCache?.key === key) return kimiOverlayCache.home;
   const overlay = fs.mkdtempSync(path.join(os.tmpdir(), "pca-kimi-home-"));
+  for (const entry of entries) fs.symlinkSync(path.join(source, entry), path.join(overlay, entry));
+  // Root-owned placeholders for the excluded entries: with the sticky bit the
+  // agent cannot replace them, so a write-capable turn cannot smuggle an
+  // mcp.json, skill, plugin or agent persona into the next turn.
+  fs.writeFileSync(path.join(overlay, "mcp.json"), "{}\n", { mode: 0o644 });
+  for (const dir of ["skills", "plugins", "agents"]) fs.mkdirSync(path.join(overlay, dir), { mode: 0o755 });
   let original = "";
-  try {
-    for (const entry of fs.readdirSync(source)) {
-      if (KIMI_OVERLAY_EXCLUDES.has(entry)) continue;
-      fs.symlinkSync(path.join(source, entry), path.join(overlay, entry));
-    }
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error; // a missing home is fine: fresh config below
-  }
   try { original = fs.readFileSync(path.join(source, "config.toml"), "utf8"); }
   catch (error) { if (error?.code !== "ENOENT") throw error; }
   // Appending to a config that already owns tool rules would fight the
   // operator's entries (first matching rule wins); silently dropping either
-  // side could weaken the policy. Refuse instead.
+  // side could weaken the policy. Hooks run BEFORE the deny rules in kimi's
+  // permission chain and can approve anything, so they are refused too.
+  // Refuse instead of merging.
   for (const line of original.split("\n")) {
     const trimmed = line.trim();
     if (trimmed.startsWith("#")) continue;
-    if (/^\[tools\]$/.test(trimmed) || /^\[\[permission\.rules\]\]$/.test(trimmed)) {
-      throw new ToolPolicyError(`kimi brain: ${path.join(source, "config.toml")} already sets [tools] or [[permission.rules]] — PCA compiles the tool policy itself; remove those sections.`);
+    if (/^\[tools\]$/.test(trimmed) || /^\[\[permission\.rules\]\]$/.test(trimmed) || /^\[\[?hooks(\.|\]|\[)/.test(trimmed)) {
+      throw new ToolPolicyError(`kimi brain: ${path.join(source, "config.toml")} sets [tools], [[permission.rules]] or [hooks] — PCA compiles the tool policy itself; remove those sections.`);
     }
   }
   const rules = denied
     .map((tool) => `[[permission.rules]]\ndecision = "deny"\npattern = ${JSON.stringify(tool)}\nreason = "pca tool policy: capability not granted"`)
     .join("\n\n");
   const base = original.trimEnd();
-  fs.writeFileSync(path.join(overlay, "config.toml"), `${base ? `${base}\n\n` : ""}${rules}\n`, { mode: 0o600 });
+  fs.writeFileSync(path.join(overlay, "config.toml"), `${base ? `${base}\n\n` : ""}${rules}\n`, { mode: 0o644 });
+  // World-searchable + sticky, set last so nothing above was ever writable by
+  // anyone else mid-construction.
+  fs.chmodSync(overlay, 0o1777);
   kimiOverlayCache = { key, home: overlay };
   return overlay;
 };
@@ -570,10 +607,10 @@ const kimi = {
     if (model) args.push("-m", model);
     return args;
   },
-  buildEnvironment({ policy: policyInput = DEFAULT_TOOL_POLICY }) {
+  buildEnvironment({ policy: policyInput = DEFAULT_TOOL_POLICY, agentUid = null, agentGid = null }) {
     const policy = assertEngineToolPolicy("kimi", policyInput);
     return {
-      KIMI_CODE_HOME: kimiOverlayHome(policy),
+      KIMI_CODE_HOME: kimiOverlayHome(policy, { agentUid, agentGid }),
       // A bot runs unattended; the CLI must not try to upgrade itself mid-turn.
       KIMI_CODE_NO_AUTO_UPDATE: "1",
     };

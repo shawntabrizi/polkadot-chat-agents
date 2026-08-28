@@ -46,7 +46,7 @@ tight storage, queue, and model limits. The
 [public deployment profile](/reference/configuration#public-bot-deliberately-bounded)
 has a conservative starting point.
 
-Public direct bots can use Claude, Codex, or OpenCode with the same portable
+Public direct bots can use Claude, Codex, OpenCode, or Kimi with the same portable
 tool policy. They start with no tools, but their deployer may deliberately
 enable `read`, `write`, or `bash` and choose workspace or container scope. Every
 public sender can direct the chosen capabilities: `read` can inspect staged
@@ -74,7 +74,7 @@ for the full policy.
 
 ## Direct-agent tools and the trust boundary
 
-A direct Claude, Codex, or OpenCode deployment starts with no tools. That is
+A direct Claude, Codex, OpenCode, or Kimi deployment starts with no tools. That is
 the default for both `pca run` and `pca deploy`, rather than a permission prompt
 the model can talk its way around. The deployer chooses one portable policy:
 

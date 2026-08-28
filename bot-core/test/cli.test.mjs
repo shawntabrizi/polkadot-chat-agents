@@ -498,6 +498,7 @@ test("direct deployment uses one portable tool policy across every direct engine
       ["publicclaude", "claude", []],
       ["publiccodex", "codex", []],
       ["publicopencode", "opencode", []],
+      ["publickimi", "kimi", []],
     ];
     for (const [name, brain, allow] of directBots) {
       writeBot(botsDir, name, {
