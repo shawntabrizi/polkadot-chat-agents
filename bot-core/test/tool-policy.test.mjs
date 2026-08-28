@@ -30,6 +30,9 @@ test("tool policy closes write and bash capabilities consistently", () => {
 
 test("tool policy accepts only canonical lowercase portable capability names", () => {
   assert.deepEqual(parseToolCapabilities("read,bash"), ["read", "write", "bash"]);
+  // "all" expands at parse time to the explicit list, and only stands alone.
+  assert.deepEqual(parseToolCapabilities("all"), ["read", "write", "bash", "web", "subagents"]);
+  assert.throws(() => parseToolCapabilities("all,web"), /"all" stands alone/);
   for (const value of ["Read", "Bash", "Edit", "read,read", "read,,write"]) {
     assert.throws(() => parseToolCapabilities(value), ToolPolicyError, value);
   }

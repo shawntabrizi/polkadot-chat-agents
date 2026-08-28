@@ -44,9 +44,17 @@ const stringValue = (value, label) => {
 };
 
 const canonicalCapabilities = (values, label) => {
-  const listed = Array.isArray(values)
+  let listed = Array.isArray(values)
     ? values
     : stringValue(values ?? "", label).split(",");
+  // `all` is shorthand that expands HERE, at parse time: what a bot runs with
+  // is always the explicit list (printed, and written to bot.env), so a
+  // capability added in a later release never attaches itself to an existing
+  // deployment without the operator re-running the command.
+  if (listed.some((raw) => String(raw).trim() === "all")) {
+    if (listed.length !== 1) throw new ToolPolicyError(`${label}: "all" stands alone — it already means ${TOOL_CAPABILITIES.join(",")}.`);
+    listed = [...TOOL_CAPABILITIES];
+  }
   const selected = new Set();
   for (const raw of listed) {
     const capability = String(raw).trim();
@@ -55,7 +63,7 @@ const canonicalCapabilities = (values, label) => {
       throw new ToolPolicyError(`${label} cannot contain an empty capability.`);
     }
     if (!TOOL_CAPABILITIES.includes(capability)) {
-      throw new ToolPolicyError(`${label} contains unsupported capability "${capability}". Choose: ${TOOL_CAPABILITIES.join(", ")}.`);
+      throw new ToolPolicyError(`${label} contains unsupported capability "${capability}". Choose: ${TOOL_CAPABILITIES.join(", ")}, or all.`);
     }
     if (selected.has(capability)) throw new ToolPolicyError(`${label} contains duplicate capability "${capability}".`);
     selected.add(capability);

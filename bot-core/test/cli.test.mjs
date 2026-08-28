@@ -592,6 +592,11 @@ test("direct deployment uses one portable tool policy across every direct engine
     result = runCli(botsDir, ["run", "bridgebot", "--allowed-tools", "read"]);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /bridge has no direct-agent tools/i);
+    // --flag=value spelling must behave exactly like --flag value.
+    const eqForm = runCli(botsDir, ["run", "bridgebot", "--allowed-tools=read"]);
+    assert.equal(eqForm.status, result.status);
+    assert.doesNotMatch(eqForm.stderr, /Unknown flag/);
+    assert.equal(eqForm.stderr, result.stderr);
 
     writeBot(botsDir, "publicmedia", {
       name: "publicmedia",
