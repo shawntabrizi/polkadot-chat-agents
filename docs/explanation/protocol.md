@@ -250,8 +250,12 @@ by the backend, or requested with `--digits`.
 The on-chain `identifier_key` is a fixed 65-byte RFC004 container:
 `0x00 || x25519_public_key32 || zero_padding32`. Other type bytes are rejected
 as unsupported. This is a breaking key migration: bots registered with a
-legacy P-256 identifier key must publish/re-register the X25519 container
-before current apps can message them.
+legacy P-256 identifier key must publish the X25519 container before current
+apps can message them. `bot-core/scripts/rotate-identifier-key.mjs` does that
+without re-registering: run it with the bot's env (`BOT_SEED_HEX`,
+`BOT_ENDPOINT`, `BOT_NETWORK_PROFILE`) and it submits an owner-signed
+`Resources.update_identifier_key` when the on-chain key differs (`--dry-run`
+to only report). It is a deliberate operator step, not runtime self-healing.
 
 A decentralized issuance path (a consumer-delegation extrinsic in the
 `individuality` runtime, letting a person register identifier keys for
