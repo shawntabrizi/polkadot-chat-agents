@@ -18,6 +18,11 @@ const CLI = path.join(BOT_CORE, "cli.mjs");
 const T3AMS = path.join(BOT_CORE, "t3ams.mjs");
 const BOT_SEED_HEX = `0x${"61".repeat(32)}`;
 const BRIDGE_TOKEN = "doctor-test-bridge-token-is-long-enough";
+// Without the (unpublished) SDK the spawned bot never comes online and the
+// doctor waits for it; skip with a reason rather than hang CI to its timeout.
+const SDK_SKIP = fs.existsSync(path.join(BOT_CORE, "node_modules", "@t3ams", "bcts", "package.json"))
+  ? false
+  : "@t3ams/bcts is not installed (run pca t3ams setup)";
 
 function waitForOutput(child, pattern, timeoutMs = 10_000) {
   return new Promise((resolve, reject) => {
@@ -71,7 +76,7 @@ function runProcess(file, args, env, timeoutMs = 15_000) {
   });
 }
 
-test("pca t3ams doctor proves a live public bot inbox end to end", { timeout: 30_000 }, async () => {
+test("pca t3ams doctor proves a live public bot inbox end to end", { timeout: 30_000, skip: SDK_SKIP }, async () => {
   const node = await startMockStatementNode();
   const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-t3ams-doctor-"));
   const name = "doctorbot";
@@ -136,7 +141,7 @@ test("pca t3ams doctor proves a live public bot inbox end to end", { timeout: 30
   }
 });
 
-test("pca t3ams doctor detects an allowlist before using a throwaway identity", async () => {
+test("pca t3ams doctor detects an allowlist before using a throwaway identity", { skip: SDK_SKIP }, async () => {
   const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-t3ams-doctor-private-"));
   const name = "privatebot";
   const dir = path.join(botsDir, name);

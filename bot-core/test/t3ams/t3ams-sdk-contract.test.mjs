@@ -1,13 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import * as bcts from "@t3ams/bcts";
 import {
   T3AMS_SDK_FUNCTION_ARITIES,
   T3AMS_SDK_FUNCTION_EXPORTS,
   assertT3amsSdkContract,
 } from "../../transports/t3ams/t3ams-sdk-contract.mjs";
 
-test("installed T3ams SDK satisfies the complete transport contract", () => {
+// The SDK is not on npm (`pca t3ams setup` builds it from the T3ams checkout),
+// so CI has no copy: skip with a reason instead of failing on the import.
+let bcts = null;
+try { bcts = await import("@t3ams/bcts"); } catch { /* not installed */ }
+const skip = bcts ? false : "@t3ams/bcts is not installed (run pca t3ams setup)";
+
+test("installed T3ams SDK satisfies the complete transport contract", { skip }, () => {
   assert.equal(T3AMS_SDK_FUNCTION_EXPORTS.includes("dmAcceptExpression"), true);
   assert.deepEqual(T3AMS_SDK_FUNCTION_ARITIES, {
     createEncryptedDMMessage: 5,
@@ -16,7 +21,7 @@ test("installed T3ams SDK satisfies the complete transport contract", () => {
   assert.equal(assertT3amsSdkContract(bcts), true);
 });
 
-test("T3ams SDK contract reports the exact missing or wrong symbol", () => {
+test("T3ams SDK contract reports the exact missing or wrong symbol", { skip }, () => {
   assert.throws(
     () => assertT3amsSdkContract({ ...bcts, derivePersonalInboxChannel: undefined }),
     (error) => error.symbol === "derivePersonalInboxChannel"
@@ -34,7 +39,7 @@ test("T3ams SDK contract reports the exact missing or wrong symbol", () => {
   );
 });
 
-test("T3ams SDK contract catches an omitted optional trailing agreement key", () => {
+test("T3ams SDK contract catches an omitted optional trailing agreement key", { skip }, () => {
   assert.throws(
     () => assertT3amsSdkContract({
       ...bcts,
