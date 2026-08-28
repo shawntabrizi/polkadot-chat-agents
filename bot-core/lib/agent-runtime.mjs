@@ -37,6 +37,22 @@ import { spawn } from "node:child_process";
 import { createCommandHandler } from "./commands.mjs";
 
 const norm = (hex) => String(hex).trim().replace(/^0x/i, "").toLowerCase();
+
+// A model with no tools sometimes writes a tool call as prose — literal
+// <function_calls>/<invoke> markup. The claude runner tells the model not to,
+// but a prompt is not a guarantee; this is. Blocks are removed, and a reply
+// that was nothing but markup becomes an honest note rather than silence.
+const TOOL_MARKUP_BLOCK = /<function_calls>[\s\S]*?<\/function_calls>|<invoke\b[\s\S]*?<\/invoke>|<\/?function_calls>/g;
+// Shown to the peer whenever markup was removed: the model wanted a tool, so
+// say why nothing happened and who can change that.
+export const TOOL_MARKUP_NOTE = "Tools are disabled for this bot, so I can't run commands or read files here. Its operator can enable them with --allowed-tools (for example: pca run <bot> --allowed-tools read,write,bash).";
+export const stripToolMarkup = (text) => {
+  const value = String(text ?? "");
+  if (!TOOL_MARKUP_BLOCK.test(value)) return { text: value, stripped: false };
+  TOOL_MARKUP_BLOCK.lastIndex = 0;
+  const cleaned = value.replace(TOOL_MARKUP_BLOCK, "").replace(/\n{3,}/g, "\n\n").trim();
+  return { text: cleaned ? `${cleaned}\n\n${TOOL_MARKUP_NOTE}` : TOOL_MARKUP_NOTE, stripped: true };
+};
 const trimMap = (map, cap) => { while (map.size > cap) map.delete(map.keys().next().value); };
 const trimSet = (set, cap) => { while (set.size > cap) set.delete(set.values().next().value); };
 
@@ -739,7 +755,9 @@ export const createAgentRuntime = ({
       if (lineBuf && !discardingLine && !outputExceeded) onLine(lineBuf);
       if (job?.cancelled) return finish({ stopped: true });
       if (outputExceeded) return finish(null);
-      const finalAnswer = (resultText ?? answer).trim();
+      const sanitized = stripToolMarkup((resultText ?? answer).trim());
+      if (sanitized.stripped) log("BOT_AI_TOOL_MARKUP_STRIPPED", { to: peerHex });
+      const finalAnswer = sanitized.text;
       if (errored) { log("BOT_AI_FAILED", { to: peerHex, error: String(errored).slice(-300) }); return finish(null); }
       // A partial answer only counts when the CLI itself closed the turn with a
       // result event; text accumulated before a mid-turn crash is not a reply.

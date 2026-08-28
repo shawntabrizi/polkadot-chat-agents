@@ -262,7 +262,7 @@ const totalInputTokens = (usage) => {
 // Invocation & event schema verified live against the claude CLI.
 // See buildArgs: a no-tools turn must be told so, or the model emits tool-call
 // markup as prose. Kept engine-specific — codex/opencode/kimi do not do this.
-const CLAUDE_NO_TOOLS_PROMPT = "You have NO tools in this session: no Bash, no file access, no web. Never write tool-call markup such as <invoke> or <function_calls>; if a request needs a tool, say plainly that you cannot run commands here and answer from knowledge instead.";
+const CLAUDE_NO_TOOLS_PROMPT = "You have NO tools in this session: no Bash, no file access, no web. Never write tool-call markup such as <invoke> or <function_calls>. If a request needs a tool, say plainly that tools are disabled for this bot and that its operator can enable them with --allowed-tools (for example: pca run <bot> --allowed-tools read,write,bash), then answer from knowledge as far as you can.";
 
 const claude = {
   command: "claude",

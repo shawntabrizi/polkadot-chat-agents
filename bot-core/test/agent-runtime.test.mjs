@@ -8,6 +8,8 @@ import {
   createAgentRuntime,
   isSafePrivateStagingRoot,
   isSafePrivilegedStagingParent,
+  stripToolMarkup,
+  TOOL_MARKUP_NOTE,
 } from "../lib/agent-runtime.mjs";
 import { RUNNERS } from "../lib/runners.mjs";
 
@@ -681,4 +683,22 @@ test("downloaded attachments are privately staged for a turn then cleaned up", a
   assert.equal(fs.existsSync(stagedPath), false, "per-turn attachment copy must be removed");
   assert.equal(fs.existsSync(buildInput.attachmentDir), false, "the scoped attachment directory must be removed after the turn");
   assert.equal(msg.attachments[0].path, blob, "message metadata must retain the cache path after cleanup");
+});
+
+test("tool-call markup never reaches the peer; the peer learns tools are off", async () => {
+  const leaked = "I'll list the files.\n\n<function_calls>\n<invoke name=\"Bash\">\n<parameter name=\"command\">ls -A</parameter>\n</invoke>\n</function_calls>\n\nDone.";
+  assert.deepEqual(stripToolMarkup(leaked), { text: `I'll list the files.\n\nDone.\n\n${TOOL_MARKUP_NOTE}`, stripped: true });
+  assert.deepEqual(stripToolMarkup("<invoke name=\"Bash\"><parameter name=\"command\">ls</parameter></invoke>"), { text: TOOL_MARKUP_NOTE, stripped: true });
+  assert.deepEqual(stripToolMarkup("plain answer with <b>html</b>"), { text: "plain answer with <b>html</b>", stripped: false });
+  assert.match(TOOL_MARKUP_NOTE, /--allowed-tools/, "tells the peer how the operator enables tools");
+
+  const h = makeRuntime({
+    script: `printf '%s\\n' '{"type":"result","result":"Sure. <invoke name=\\"Bash\\"><parameter name=\\"command\\">ls</parameter></invoke> That is all."}'`,
+  });
+  await h.runtime.handleMessage("peer", { text: "list files", messageId: "M1", kind: "text" });
+  assert.equal(h.delivered.length, 1);
+  assert.doesNotMatch(h.delivered[0], /<invoke|<function_calls/);
+  assert.match(h.delivered[0], /Sure\.\s+That is all\./);
+  assert.match(h.delivered[0], /Tools are disabled for this bot/);
+  assert.ok(h.events.some((e) => e.event === "BOT_AI_TOOL_MARKUP_STRIPPED"));
 });
