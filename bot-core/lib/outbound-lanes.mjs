@@ -32,7 +32,7 @@
 
 export const createOutboundLanes = ({
   encodeBatch,   // (peerHex, requestId, opaques, { forceIdentity }) -> payload bytes (throws if peer unknown)
-  submitPayload, // (peerHex, payload) -> Promise<void>
+  submitPayload, // (peerHex, payload, { forceIdentity }) -> Promise<void>
   makeRequestId, // () -> string
   maxPayloadBytes = 480 * 1024, // statement cap (500 KiB allowance) minus envelope headroom
   maxExtensions = 8, // after this many in-slot replacements, wait for the ACK instead
@@ -160,7 +160,7 @@ export const createOutboundLanes = ({
         const newEntries = batch.entries.filter((e) => !extending || !lane.current.entries.includes(e));
         const droppedBySupersede = extending ? lane.current.entries.filter((e) => !batch.entries.includes(e)) : [];
         try {
-          await submitPayload(peerHex, batch.payload);
+          await submitPayload(peerHex, batch.payload, { forceIdentity: batch.flag });
         } catch (e) {
           // Submit failed (chain outage, rejection): fail the NEW entries —
           // an extension leaves the old statement untouched in the slot, so

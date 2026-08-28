@@ -543,10 +543,12 @@ export function makePeerSession({
   });
 
   const session = makeSessionParts(ownAccountId, peerAccountId, sharedSecret, ownPin, peerPin);
+  const identitySession = makeSessionParts(ownAccountId, peerAccountId, identitySharedSecret, ownPin, peerPin);
   return {
     ...session,
     sharedSecret,
     identitySharedSecret,
+    identitySession: { ...identitySession, sharedSecret: identitySharedSecret },
     multiDeviceKeySharedSecret: deviceInfos[0]?.sharedSecret ?? sharedSecret,
     ownDeviceX25519PrivateKey,
     ownAccountId,

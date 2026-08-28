@@ -5,7 +5,7 @@
 //
 // Usage:
 //   node test-client.mjs --seed-hex 0x<root-seed> \
-//     --bot-account 0x<bot-account-hex> --bot-identifier-key 0x<bot-p256-hex> \
+//     --bot-account 0x<bot-account-hex> --bot-identifier-key 0x<bot-identifier-container-hex> \
 //     [--endpoint wss://...] [--wait-secs 25] "message" ["follow up" ...]
 //
 // NOTE: follow-ups are sent on the identity session channel; the app itself
@@ -17,15 +17,16 @@ import {
   chatRequestAllPeerStatementsTopic,
   chatRequestDayFromUnixSeconds,
   chatRequestPaginationTopic,
+  decodeAccountEcdhKey,
   decodeSessionStatementPayload,
-  deriveP256PrivateKey,
+  deriveX25519PrivateKey,
   encodeNativeChatRequestV2,
   encodeOpaqueTextMessage,
   encodeSessionRequestPayload,
   makeAppUuid,
   makePeerSession,
-  p256PublicKeyFromPrivateKey,
   submitAppStatement,
+  x25519PublicKeyFromPrivateKey,
 } from "./vendor/app-chat-codec.mjs";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
 
@@ -73,36 +74,58 @@ async function main() {
   const waitSecs = Number(opts["wait-secs"] ?? 25);
   const seed = hexToBytes(opts["seed-hex"]);
   const botAccountId = hexToBytes(opts["bot-account"]);
-  const botIdentifierKey = hexToBytes(opts["bot-identifier-key"]);
+  const botIdentifier = decodeAccountEcdhKey(hexToBytes(opts["bot-identifier-key"]));
+  if (botIdentifier.kind !== "x25519") throw new Error("bot uses an unsupported chat encryption key type");
+  const botIdentifierKey = botIdentifier.publicKey;
 
   const wallet = deriveSr25519PairFromSeed(seed, "//wallet");
-  const p256PrivateKey = deriveP256PrivateKey(deriveSr25519PairFromSeed(seed, "//wallet//chat"));
-  const p256PublicKey = p256PublicKeyFromPrivateKey(p256PrivateKey);
+  const x25519PrivateKey = deriveX25519PrivateKey(seed);
+  const x25519PublicKey = x25519PublicKeyFromPrivateKey(x25519PrivateKey);
 
   const lazyClient = createLazyClient(getWsProvider(endpoint));
   const statementStore = createPapiStatementStoreAdapter(lazyClient);
   const requestRpc = lazyClient.getRequestFn();
   const session = makePeerSession({
     ownAccountId: wallet.publicKey, peerAccountId: botAccountId,
-    peerIdentifierKey: botIdentifierKey, ownP256PrivateKey: p256PrivateKey,
+    peerIdentifierKey: botIdentifierKey, ownX25519PrivateKey: x25519PrivateKey,
   });
   console.log(`sender=0x${bytesToHex(wallet.publicKey)}  bot=0x${bytesToHex(botAccountId)}\n`);
 
   const seen = new Set();
   let replyCount = 0;
+  let receiveSessions = [session];
+  let receiveTopics = [session.peerSessionId];
+  const configureBotDevice = (publicKey) => {
+    const deviceView = makePeerSession({
+      ownAccountId: wallet.publicKey,
+      peerAccountId: botAccountId,
+      peerIdentifierKey: botIdentifierKey,
+      ownX25519PrivateKey: x25519PrivateKey,
+      peerDevices: [{ statementAccountId: botAccountId, encryptionPublicKey: publicKey }],
+    }).incomingDeviceSessions[0];
+    receiveSessions = [deviceView, session];
+    receiveTopics = [deviceView.peerSessionId, session.peerSessionId];
+  };
   const drain = async () => {
-    let statements = [];
-    try {
-      statements = await Promise.resolve(statementStore.queryStatements({ matchAll: [session.peerSessionId] }).match((v) => v, (e) => { throw new Error(String(e?.message ?? e)); }));
-    } catch { statements = []; }
-    for (const st of statements) {
-      const data = typeof st.data === "string" ? hexToBytes(st.data) : st.data;
-      const fp = bytesToHex(data).slice(0, 48);
-      if (seen.has(fp)) continue;
-      seen.add(fp);
-      let decoded = null;
-      try { decoded = decodeSessionStatementPayload(data, session, botAccountId); } catch { continue; }
-      if (decoded?.kind === "request") for (const m of decoded.messages ?? []) if (m.text) { replyCount += 1; console.log(`  [BOT] ${m.text}`); }
+    for (const topic of receiveTopics) {
+      let statements = [];
+      try {
+        statements = await Promise.resolve(statementStore.queryStatements({ matchAll: [topic] }).match((v) => v, (e) => { throw new Error(String(e?.message ?? e)); }));
+      } catch { statements = []; }
+      for (const st of statements) {
+        const data = typeof st.data === "string" ? hexToBytes(st.data) : st.data;
+        const fp = bytesToHex(data).slice(0, 48);
+        if (seen.has(fp)) continue;
+        seen.add(fp);
+        let decoded = null;
+        for (const receiveSession of receiveSessions) {
+          try { decoded = decodeSessionStatementPayload(data, receiveSession, botAccountId); break; } catch { decoded = null; }
+        }
+        if (decoded?.kind === "request") for (const m of decoded.messages ?? []) {
+          if (m.kind === "deviceChatAccepted" && m.encryptionPublicKey) configureBotDevice(m.encryptionPublicKey);
+          if (m.text) { replyCount += 1; console.log(`  [BOT] ${m.text}`); }
+        }
+      }
     }
   };
   const pollFor = async (secs) => { const until = Date.now() + secs * 1000; while (Date.now() < until) { await drain(); await delay(2000); } await drain(); };
@@ -112,7 +135,7 @@ async function main() {
   if (day != null) topics.push(chatRequestPaginationTopic(botAccountId, day));
   const { payload: openerPayload } = encodeNativeChatRequestV2({
     walletPair: wallet, botAccountId, botIdentifierKey,
-    ownP256PrivateKey: p256PrivateKey, ownP256PublicKey: p256PublicKey, text: messages[0],
+    ownX25519PrivateKey: x25519PrivateKey, ownDeviceX25519PublicKey: x25519PublicKey, text: messages[0],
   });
   await submitAppStatement(requestRpc, { walletPair: wallet, channel: session.outgoingRequestChannel, topics, scaleEncodedPayload: openerPayload, expiryFactory });
   console.log(`[ME] ${messages[0]}`);
