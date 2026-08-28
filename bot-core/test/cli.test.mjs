@@ -356,6 +356,30 @@ test("create persists the selected transport and deployment passes it to the run
   }
 });
 
+test("create writes a per-bot direct-engine persona template once", () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-persona-"));
+  try {
+    const result = runCli(botsDir, ["create", "personabot", "--brain", "codex", "--public", "--no-register"]);
+    assert.equal(result.status, 0, result.stderr);
+    const persona = path.join(botsDir, "personabot", "workspace", "PERSONA.md");
+    const template = fs.readFileSync(persona, "utf8");
+    assert.match(template, /Name or role:/);
+    assert.match(template, /Who this bot is for:/);
+    assert.match(template, /Tone:/);
+
+    fs.writeFileSync(persona, "# Custom persona\nNever overwrite me.\n");
+    const deploy = runCli(botsDir, ["deploy", "personabot", "--host", "root@example.test", "--dry-run"]);
+    assert.equal(deploy.status, 0, deploy.stderr);
+    assert.equal(fs.readFileSync(persona, "utf8"), "# Custom persona\nNever overwrite me.\n");
+
+    const bridge = runCli(botsDir, ["create", "bridgepersona", "--brain", "bridge", "--public", "--no-register"]);
+    assert.equal(bridge.status, 0, bridge.stderr);
+    assert.equal(fs.existsSync(path.join(botsDir, "bridgepersona", "workspace", "PERSONA.md")), false);
+  } finally {
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
+});
+
 test("T3ams deploys use authenticated bridge health for readiness", () => {
   const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
   const bridgeToken = "a-long-enough-bridge-token-for-tests";

@@ -12,8 +12,9 @@ import {
 // headless coding-agent CLI and normalize its JSONL event stream to one
 // vocabulary; bot-core owns the generic spawn/stream/idle-backstop loop.
 //
-// The runners preserve verbatim prompts, native --resume session continuity,
-// and engine tools without injecting a persona.
+// The runners preserve native --resume session continuity and engine tools.
+// agent-runtime supplies PCA's deterministic facts/persona through each
+// engine's native instruction path.
 //
 // A normalized event is one of:
 //   { kind: "started", sessionId }  — capture for --resume next turn
@@ -260,14 +261,11 @@ const totalInputTokens = (usage) => {
 
 // ---- claude (Claude Code) --------------------------------------------------
 // Invocation & event schema verified live against the claude CLI.
-// See buildArgs: a no-tools turn must be told so, or the model emits tool-call
-// markup as prose. Kept engine-specific — codex/opencode/kimi do not do this.
-const CLAUDE_NO_TOOLS_PROMPT = "You have NO tools in this session: no Bash, no file access, no web. Never write tool-call markup such as <invoke> or <function_calls>. If a request needs a tool, say plainly that tools are disabled for this bot and that its operator can enable them with --allowed-tools (for example: pca run <bot> --allowed-tools read,write,bash), then answer from knowledge as far as you can.";
 
 const claude = {
   command: "claude",
   effortLevels: ["low", "medium", "high", "xhigh", "max"],
-  buildArgs({ prompt, model, resume, policy: policyInput = DEFAULT_TOOL_POLICY, effort, attachmentDir = null, outputDir = null, workingDirectory = "/workspace", protectedPaths: protectedList = [] }) {
+  buildArgs({ prompt, model, resume, operatorContext = "", policy: policyInput = DEFAULT_TOOL_POLICY, effort, attachmentDir = null, outputDir = null, workingDirectory = "/workspace", protectedPaths: protectedList = [] }) {
     const policy = assertEngineToolPolicy("claude", policyInput);
     const scope = scopedPaths({ policy, workingDirectory, attachmentDir, outputDir });
     const protectedDirectories = protectedPaths(protectedList);
@@ -297,12 +295,7 @@ const claude = {
     // chat turn on an invisible terminal prompt.
     const tools = claudeTools(policy);
     args.push("--permission-mode", "dontAsk", "--tools", tools.join(","));
-    if (!tools.length) {
-      // With `--tools ""` the CLI still primes the model for tool use, and a
-      // request that wants one comes back as literal <invoke> markup in the
-      // reply text (reproduced live 2026-08-28). Tell the model up front.
-      args.push("--append-system-prompt", CLAUDE_NO_TOOLS_PROMPT);
-    }
+    if (operatorContext) args.push("--append-system-prompt", operatorContext);
     if (tools.length) {
       const approvals = claudeApprovalRules(policy, scope);
       if (approvals.length) args.push("--allowedTools", approvals.join(","));
@@ -355,7 +348,7 @@ const codex = {
   buildArgs({ prompt, model, resume, policy: policyInput = DEFAULT_TOOL_POLICY, effort, attachmentDir = null, outputDir = null, workingDirectory = "/workspace" }) {
     const policy = assertEngineToolPolicy("codex", policyInput);
     const scope = scopedPaths({ policy, workingDirectory, attachmentDir, outputDir });
-    const args = ["--ask-for-approval", "never", "exec", "--json", "--skip-git-repo-check", "--color=never", "--ignore-user-config", "--ignore-rules", "-C", scope.workspace];
+    const args = ["--ask-for-approval", "never", "exec", "--json", "--skip-git-repo-check", "--color=never", "--ignore-user-config", "-C", scope.workspace];
     if (model) args.push("-m", model);
     if (effort) args.push("-c", `model_reasoning_effort=${effort}`);
     // Codex's built-in workspace-write profile grants read access to `:root`,
@@ -443,7 +436,6 @@ const opencode = {
       OPENCODE_PERMISSION: JSON.stringify(permission),
       OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
       OPENCODE_PURE: "1",
-      OPENCODE_DISABLE_PROJECT_CONFIG: "1",
       OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
       OPENCODE_DISABLE_CLAUDE_CODE: "1",
       OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",

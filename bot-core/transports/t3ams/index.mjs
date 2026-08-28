@@ -9,7 +9,8 @@ import path from "node:path";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createStateStore } from "../../lib/session-store.mjs";
 import { createAgentRuntime } from "../../lib/agent-runtime.mjs";
-import { resolveModelPolicy } from "../../lib/commands.mjs";
+import { buildOperatorContext } from "../../lib/agent-context.mjs";
+import { commandCatalog, resolveModelPolicy } from "../../lib/commands.mjs";
 import { splitMessageText } from "../../lib/chunk.mjs";
 import { createDeferredProgressTracker, createLiveReplies, renderTurnStats } from "../../lib/live-reply.mjs";
 import { createWorkspaces } from "../../lib/workspaces.mjs";
@@ -2835,6 +2836,7 @@ if (!autoAcceptWorkspaces) {
 // on the base conversation key and therefore still replies in the right UI
 // thread.
 const aiModel = (env.BOT_AI_MODEL ?? "").trim();
+const aiContextEnabled = env.BOT_AI_CONTEXT !== "0";
 const modelSwitching = (env.BOT_AI_MODEL_SWITCHING ?? "locked").trim().toLowerCase();
 const aiAllowedModels = resolveModelPolicy({
   configured: env.BOT_AI_ALLOWED_MODELS ?? null,
@@ -2879,7 +2881,7 @@ const optionalPosixId = (name) => {
 const aiAgentUid = optionalPosixId("BOT_AI_AGENT_UID");
 const aiAgentGid = optionalPosixId("BOT_AI_AGENT_GID");
 const defaultAiWorkspace = env.BOT_STATE_DIR
-  ? path.join(path.dirname(path.resolve(stateDir)), `${path.basename(path.resolve(stateDir))}-workspace`)
+  ? path.join(path.resolve(stateDir), "workspace")
   : fs.mkdtempSync(path.join(os.tmpdir(), "pca-t3ams-workspace-"));
 const aiWorkspace = env.BOT_AI_WORKSPACE ?? defaultAiWorkspace;
 let aiProjects = {};
@@ -2990,10 +2992,11 @@ if (engine != null) {
     engine,
     engineName: customCmd ? "custom" : brain,
     engineCommand: customCmd || engine.command,
-    buildArgs: ({ prompt, model, resume, effort, attachmentDir, outputDir, workingDirectory }) => customCmd
+    buildArgs: ({ prompt, operatorContext, model, resume, effort, attachmentDir, outputDir, workingDirectory }) => customCmd
       ? (customArgs ? customArgs.map((item) => item === "__PROMPT__" ? prompt : item) : [prompt])
       : engine.buildArgs({
         prompt,
+        operatorContext,
         model,
         resume,
         effort,
@@ -3028,6 +3031,13 @@ if (engine != null) {
     agentUid: aiAgentUid,
     agentGid: aiAgentGid,
     renderMessage: renderT3amsForBrain,
+    operatorContext: {
+      enabled: aiContextEnabled,
+      username,
+      transport: "t3ams",
+      policy: aiToolPolicy,
+      personaPath: path.join(aiWorkspace, "PERSONA.md"),
+    },
     chat: {
       sendText: sendAgentReply,
       deliver: deliverAgentReply,
@@ -3557,6 +3567,16 @@ pumpIngress = () => {
 // Bridge/Hermes/OpenClaw adapters receive the same durable entries as leased
 // array items. The HTTP shape remains unchanged, while ACK and renewal now
 // update the on-disk journal before reporting success.
+const bridgeOperatorContext = brain === "bridge" && aiContextEnabled
+  ? buildOperatorContext({
+    username,
+    transport: "t3ams",
+    policy: aiToolPolicy,
+    model: aiModel,
+    modelPolicy: aiAllowedModels,
+    commands: commandCatalog({ allowedModels: aiAllowedModels }),
+  })
+  : "";
 const bridgeQueued = () => ingress.filter((entry) => entry.kind === "bridge").length;
 const leaseBridgeIngress = async (limit) => mutateIngress(async () => {
   if (!ingressDurable) return [];
@@ -3605,6 +3625,7 @@ const leaseBridgeIngress = async (limit) => mutateIngress(async () => {
   }
   return leased.map((entry) => ({
     ...bridgeInboundWithMedia(entry.routed),
+    ...(bridgeOperatorContext ? { context: bridgeOperatorContext } : {}),
     delivery_id: entry.id,
     lease_id: entry.leaseId,
     lease_until: entry.leaseUntil,

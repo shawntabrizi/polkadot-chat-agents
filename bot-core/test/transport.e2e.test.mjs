@@ -512,6 +512,9 @@ describe("transport e2e", { concurrency: 8 }, () => {
       const opener = await pump((i) => i.text === "bridge opener", { label: "opener" });
       assert.match(opener.delivery_id, /^[0-9A-F-]{36}$/);
       assert.match(opener.lease_id, /^[0-9A-F-]{36}$/);
+      assert.match(opener.context, /You are `e2etest\.00`/);
+      assert.match(opener.context, /transport: polkadot-app/);
+      assert.match(opener.context, /Chat commands: \/help—list these commands/);
       const sent = await post("/send", { chat_id: opener.chat_id, text: "seen it", reply_to: opener.message_id });
       assert.equal(sent.success, true, JSON.stringify(sent));
       assert.match(sent.message_id, /^[0-9A-F-]{36}$/, "expected a real envelope UUID");

@@ -70,7 +70,8 @@ import { timingSafeEqual } from "node:crypto";
 import { blake2b } from "@noble/hashes/blake2.js";
 import { createStateStore } from "./lib/session-store.mjs";
 import { createAgentRuntime } from "./lib/agent-runtime.mjs";
-import { resolveModelPolicy } from "./lib/commands.mjs";
+import { buildOperatorContext } from "./lib/agent-context.mjs";
+import { commandCatalog, resolveModelPolicy } from "./lib/commands.mjs";
 import { splitMessageText } from "./lib/chunk.mjs";
 import { createOutboundLanes } from "./lib/outbound-lanes.mjs";
 import { createWorkspaces } from "./lib/workspaces.mjs";
@@ -204,6 +205,7 @@ const greetText = env.BOT_GREET_TEXT ?? `👋 ${env.BOT_USERNAME || "Your bot"} 
 // defined below. See docs/explanation/protocol.md. BOT_AI_MODEL pins a model (for opencode
 // this is a provider/model slug); per-peer /model overrides it.
 const aiModel = (env.BOT_AI_MODEL ?? "").trim();
+const aiContextEnabled = env.BOT_AI_CONTEXT !== "0";
 // aiAllowedModels (the /model switching policy) is derived below, once the
 // peer allowlist is known. It is locked by default; open switching requires an
 // explicit non-public operator opt-in. See resolveModelPolicy.
@@ -231,11 +233,12 @@ const optionalPosixId = (name) => {
 };
 const aiAgentUid = optionalPosixId("BOT_AI_AGENT_UID");
 const aiAgentGid = optionalPosixId("BOT_AI_AGENT_GID");
-// The agent workspace is intentionally outside state/secrets. A deployment can
-// grant its unprivileged agent user this directory without exposing the seed,
-// session keys, or the bridge token kept in BOT_STATE_DIR.
+// The workspace is a dedicated tool root, never BOT_STATE_DIR itself. Managed
+// deployments set it to the separately-mounted /workspace; local/manual runs
+// default to BOT_STATE_DIR/workspace and native file policies open only that
+// child, not the sibling signing/session files.
 const defaultWorkspace = env.BOT_STATE_DIR
-  ? path.join(path.dirname(path.resolve(env.BOT_STATE_DIR)), `${path.basename(path.resolve(env.BOT_STATE_DIR))}-workspace`)
+  ? path.join(path.resolve(env.BOT_STATE_DIR), "workspace")
   : fs.mkdtempSync(path.join(os.tmpdir(), "bot-ws-"));
 const aiWorkspace = env.BOT_AI_WORKSPACE ?? defaultWorkspace;
 // Multi-project workspaces: BOT_AI_PROJECTS maps aliases to project dirs; a
@@ -278,10 +281,11 @@ if (engine && aiReasoning && !engine.effortLevels?.includes(aiReasoning)) {
   console.error(`BOT_AI_REASONING=${aiReasoning} is not valid for this engine${engine.effortLevels ? ` (levels: ${engine.effortLevels.join(", ")})` : " (it has no reasoning control)"}`);
   process.exit(2);
 }
-const buildEngineArgs = ({ prompt, model, resume, effort, attachmentDir, outputDir, workingDirectory }) => {
+const buildEngineArgs = ({ prompt, operatorContext, model, resume, effort, attachmentDir, outputDir, workingDirectory }) => {
   if (customCmd) return customArgsTmpl ? customArgsTmpl.map((a) => (a === "__PROMPT__" ? prompt : a)) : [prompt];
   return engine.buildArgs({
     prompt,
+    operatorContext,
     model,
     resume,
     effort,
@@ -1205,12 +1209,29 @@ const agentRuntime = engine ? createAgentRuntime({
   agentUid: aiAgentUid,
   agentGid: aiAgentGid,
   renderMessage: (msg) => renderForBrain(msg),
+  operatorContext: {
+    enabled: aiContextEnabled,
+    username,
+    transport: "polkadot-app",
+    policy: aiToolPolicy,
+    personaPath: path.join(aiWorkspace, "PERSONA.md"),
+  },
   chat: { sendText, deliver: deliverToChat, beginTurn: beginTurnProgress },
   username,
   chainConnected,
   log,
   persist: () => persist(),
 }) : null;
+const bridgeOperatorContext = brain === "bridge" && aiContextEnabled
+  ? buildOperatorContext({
+    username,
+    transport: "polkadot-app",
+    policy: aiToolPolicy,
+    model: aiModel,
+    modelPolicy: aiAllowedModels,
+    commands: commandCatalog({ allowedModels: aiAllowedModels }),
+  })
+  : "";
 
 // File commands are transport commands, not model prompts. That makes the
 // same peer-scoped vault work for direct engines and bridge-backed bots.
@@ -1278,6 +1299,7 @@ const handleInbound = async (peerHex, msg, owedId = null, { reservedBridge = fal
       text: synthesizeText(msg.text, msg.attachments),
       message_id: msg.messageId,
       owedId,
+      ...(bridgeOperatorContext ? { context: bridgeOperatorContext } : {}),
       ...(msg.kind && msg.kind !== "text" ? { kind: msg.kind } : {}),
       ...(msg.replyTo ? { reply_to: msg.replyTo } : {}),
       ...(msg.editOf ? { edit_of: msg.editOf } : {}),
