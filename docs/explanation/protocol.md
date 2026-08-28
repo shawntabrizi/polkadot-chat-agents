@@ -281,11 +281,14 @@ openclaw-plugin/polkadot (TS)    OpenClaw channel plugin over the bridge
 ```
 
 One transport, many brains. A **direct engine** runs a headless coding-agent
-CLI (claude/codex/opencode/kimi) as an autonomous agent: the message is passed
-verbatim (no injected persona), continuity is the CLI's native session via
-`--resume` (a token captured from its event stream, persisted per peer,
-invalidated on an engine/workspace change), and tools run in a persistent
-workspace.
+CLI (claude/codex/opencode/kimi) as an autonomous agent. The user's message is
+kept as the user prompt while PCA separately supplies deterministic facts about
+the running bot and an optional operator-owned `PERSONA.md`. Continuity is the
+CLI's native session via `--resume` (a token captured from its event stream,
+persisted per peer, invalidated on an engine/workspace change), and tools run
+in a persistent workspace. Claude receives context through its system prompt;
+Codex, OpenCode, and Kimi use a PCA-marked `AGENTS.md`, with a first-prompt
+fallback when an operator owns that filename.
 
 `lib/runners.mjs` holds each engine's argv builder + JSONL-event normalizer
 (to one started/action/text/result vocabulary); `lib/agent-runtime.mjs` owns
@@ -320,7 +323,9 @@ under `BOT_AI_WORKSPACE/.worktrees` (or `BOT_AI_WORKTREES_DIR`)
 guards). The active project persists per peer in the session snapshot;
 switching clears the resume token, because a resumed engine session is only
 valid in the cwd it started in. Bridge mode instead hands messages to an
-external agent framework over one HTTP hop. Deployed engines run in a non-root
+external agent framework over one HTTP hop. Its inbound `context` field carries
+the same facts; adapters inject it once per framework session, while persona
+remains the framework's responsibility. Deployed engines run in a non-root
 container that is the sandbox for their tools (see
 [Agent frameworks](/guide/harnesses#safety-model-for-containerized-agents)).
 

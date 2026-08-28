@@ -162,7 +162,7 @@ test("codex compiles a custom workspace permission profile", () => {
   const fresh = RUNNERS.codex.buildArgs({ prompt: "hi", model: "gpt-5", policy: policy(["read", "write"]), workingDirectory: "/workspace/project", attachmentDir: "/tmp/pca-attachment", outputDir: "/tmp/pca-output" });
   assert.deepEqual(fresh.slice(0, 7), ["--ask-for-approval", "never", "exec", "--json", "--skip-git-repo-check", "--color=never", "--ignore-user-config"]);
   assert.ok(fresh.includes("-m") && fresh[fresh.indexOf("-m") + 1] === "gpt-5");
-  assert.ok(fresh.includes("--ignore-rules"));
+  assert.equal(fresh.includes("--ignore-rules"), false, "Codex must load PCA's generated AGENTS.md");
   assert.ok(fresh.includes("-C") && fresh[fresh.indexOf("-C") + 1] === "/workspace/project");
   assert.equal(fresh.includes("-s"), false, "the broad workspace-write profile reads :root");
   assert.ok(fresh.includes("default_permissions=\"pca\""));
@@ -241,7 +241,7 @@ test("opencode compiles deny-first permissions and isolates configuration", () =
   assert.deepEqual(permission.edit, { "*": "deny", "/workspace/project/**": "allow", "/tmp/pca-output/**": "allow" });
   assert.equal(permission.bash, undefined);
   assert.deepEqual(permission.external_directory, { "*": "deny", "/tmp/pca-stage/**": "allow", "/tmp/pca-output/**": "allow" });
-  assert.equal(env.OPENCODE_DISABLE_PROJECT_CONFIG, "1");
+  assert.equal(env.OPENCODE_DISABLE_PROJECT_CONFIG, undefined, "OpenCode must load PCA's generated AGENTS.md");
   assert.equal(env.OPENCODE_DISABLE_DEFAULT_PLUGINS, "1");
   assert.ok(RUNNERS.opencode.buildArgs({ prompt: "bash", policy: policy(["bash"]) }).includes("bash"));
   assert.throws(
@@ -590,15 +590,16 @@ test("codex delegation events become subagent progress lines", () => {
   assert.match(ev.title, /^subagent: review the auth module/);
 });
 
-test("claude is told when it has no tools, and only then", () => {
-  const none = RUNNERS.claude.buildArgs({ prompt: "hi", policy: policy() });
+test("claude carries the complete operator context as a system prompt on every turn", () => {
+  const context = "You are `atlas.42`. Tools: no tools. Never emit tool-call markup.";
+  const none = RUNNERS.claude.buildArgs({ prompt: "hi", policy: policy(), operatorContext: context });
   assert.equal(none[none.indexOf("--tools") + 1], "");
   const i = none.indexOf("--append-system-prompt");
-  assert.ok(i > 0, "a no-tools turn carries the system prompt");
-  assert.match(none[i + 1], /NO tools/);
-  assert.match(none[i + 1], /<invoke>/, "names the markup the model must not emit");
+  assert.ok(i > 0, "the turn carries PCA's system prompt");
+  assert.equal(none[i + 1], context);
   assert.ok(i < none.indexOf("--"), "flags precede the prompt separator");
 
-  const some = RUNNERS.claude.buildArgs({ prompt: "hi", policy: policy(["read"]) });
-  assert.equal(some.includes("--append-system-prompt"), false, "with tools the CLI's own prompt stands");
+  const some = RUNNERS.claude.buildArgs({ prompt: "hi", policy: policy(["read"]), operatorContext: context });
+  assert.equal(some[some.indexOf("--append-system-prompt") + 1], context, "tool access does not remove identity facts");
+  assert.equal(RUNNERS.claude.buildArgs({ prompt: "hi" }).includes("--append-system-prompt"), false, "the runner does not invent context");
 });

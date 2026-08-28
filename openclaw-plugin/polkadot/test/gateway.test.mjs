@@ -32,9 +32,9 @@ after(async () => {
 const account = { accountId: "default", outboundFileMaxBytes: 25 * 1024 * 1024 };
 const context = { cfg: { session: {} }, log: { warn: () => undefined } };
 
-const runtimeFor = (run, { buildContext = () => ({}) } = {}) => ({
+const runtimeFor = (run, { buildContext = () => ({}), routeSessionKey = "agent:polkadot:chat" } = {}) => ({
   routing: {
-    resolveAgentRoute: () => ({ agentId: "agent", sessionKey: "agent:polkadot:chat" }),
+    resolveAgentRoute: () => ({ agentId: "agent", sessionKey: routeSessionKey }),
   },
   session: {
     resolveStorePath: () => "/tmp/openclaw-session-store.json",
@@ -63,6 +63,37 @@ test("T3ams thread roots isolate OpenClaw session and dispatcher lanes", () => {
     gateway.t3amsDispatchKey("t3ams:channel:workspace:room", rootA),
     gateway.t3amsDispatchKey("t3ams:channel:workspace:room", rootB),
   );
+});
+
+test("gateway injects bridge operator context once per OpenClaw session", async () => {
+  const seen = [];
+  const bridge = {
+    typing: async () => undefined,
+    send: async () => ({ success: true, message_id: "outgoing" }),
+  };
+  const runtime = runtimeFor(async ({ adapter }) => {
+    const input = adapter.ingest();
+    seen.push(input);
+    await adapter.resolveTurn(input).delivery.deliver({ text: "answer" }, { kind: "final" });
+  }, { routeSessionKey: "agent:polkadot:operator-context-test" });
+  const base = {
+    chat_id: "peer-context-test",
+    text: "/help",
+    conversation_type: "dm",
+    sender_xid: "sender",
+    context: "You are `atlas.42`.\nTools: no tools.",
+  };
+
+  await gateway.dispatchInbound(context, runtime, account, bridge, {
+    ...base, message_id: "one", delivery_id: "delivery-one", lease_id: "lease-one",
+  }, new AbortController().signal);
+  await gateway.dispatchInbound(context, runtime, account, bridge, {
+    ...base, message_id: "two", delivery_id: "delivery-two", lease_id: "lease-two",
+  }, new AbortController().signal);
+
+  assert.match(seen[0].textForAgent, /^\[PCA operator context\][\s\S]*You are `atlas\.42`[\s\S]*\[End PCA operator context\]\n\n\/help$/);
+  assert.equal(seen[0].textForCommands, "/help", "framework commands receive the unprefixed message");
+  assert.equal(seen[1].textForAgent, "/help", "resume history already contains operator context");
 });
 
 test("bridge serializes live edits and binds activity to the active lease", { concurrency: false }, async (t) => {

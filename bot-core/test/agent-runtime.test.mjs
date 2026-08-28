@@ -11,6 +11,7 @@ import {
   stripToolMarkup,
   TOOL_MARKUP_NOTE,
 } from "../lib/agent-runtime.mjs";
+import { OPERATOR_CONTEXT_MARKER } from "../lib/agent-context.mjs";
 import { RUNNERS } from "../lib/runners.mjs";
 
 // A runtime wired to a mock "CLI": `sh -c <script>` emitting claude-shaped
@@ -71,6 +72,91 @@ test("a plain message runs a turn and delivers the answer with the one-time tip"
   // Second turn: no tip repeat.
   await h.runtime.handleMessage("PEER", { text: "again", messageId: "M2", kind: "text" });
   assert.equal(h.delivered[1], "the answer");
+});
+
+test("codex, opencode, and kimi receive generated native instructions without changing the user prompt", async () => {
+  for (const engineName of ["codex", "opencode", "kimi"]) {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), `pca-${engineName}-context-`));
+    const personaPath = path.join(workspace, "PERSONA.md");
+    fs.writeFileSync(personaPath, "# Persona\nCalm and direct.\n");
+    const turns = [];
+    const h = makeRuntime({
+      workspace,
+      engineName,
+      model: "model-a",
+      allowedModels: ["model-a", "model-b"],
+      buildArgs: (turn) => {
+        turns.push(turn);
+        return ["-c", `printf '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"S1\"}\\n{\"type\":\"result\",\"result\":\"ok\"}\\n'`];
+      },
+      operatorContext: {
+        username: "atlas.42",
+        transport: "polkadot-app",
+        policy: { capabilities: ["read"], scope: "workspace" },
+        personaPath,
+      },
+    });
+    const agents = fs.readFileSync(path.join(workspace, "AGENTS.md"), "utf8");
+    assert.ok(agents.startsWith(OPERATOR_CONTEXT_MARKER), `${engineName} marker`);
+    assert.match(agents, /You are `atlas\.42`/);
+    assert.match(agents, /Calm and direct/);
+    await h.runtime.handleMessage("peer", { text: "hello", messageId: "M1", kind: "text" });
+    assert.equal(turns[0].prompt, "hello", `${engineName} keeps a verbatim user prompt with native instructions`);
+    assert.equal(turns[0].operatorContext, "");
+  }
+});
+
+test("an operator AGENTS.md is preserved and fresh native sessions receive a prompt fallback", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "pca-operator-agents-"));
+  const operatorFile = path.join(workspace, "AGENTS.md");
+  fs.writeFileSync(operatorFile, "# Operator instructions\nKeep this file.\n");
+  const prompts = [];
+  const h = makeRuntime({
+    workspace,
+    engineName: "codex",
+    buildArgs: ({ prompt }) => {
+      prompts.push(prompt);
+      return ["-c", `printf '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"S1\"}\\n{\"type\":\"result\",\"result\":\"ok\"}\\n'`];
+    },
+    operatorContext: {
+      username: "atlas.42",
+      transport: "t3ams",
+      policy: { capabilities: [], scope: "workspace" },
+    },
+  });
+  assert.equal(fs.readFileSync(operatorFile, "utf8"), "# Operator instructions\nKeep this file.\n");
+  assert.ok(fs.readFileSync(path.join(workspace, ".pca", "OPERATOR-CONTEXT.md"), "utf8").startsWith(OPERATOR_CONTEXT_MARKER));
+  assert.equal(h.events.filter(({ event }) => event === "BOT_AI_CONTEXT_FILE_SKIPPED").length, 1);
+
+  await h.runtime.handleMessage("peer", { text: "first", messageId: "M1", kind: "text" });
+  assert.match(prompts[0], /You are `atlas\.42`[\s\S]*User message:\nfirst/);
+  await h.runtime.handleMessage("peer", { text: "second", messageId: "M2", kind: "text" });
+  assert.equal(prompts[1], "second", "resume history already contains the one-time fallback");
+  assert.equal(fs.readFileSync(operatorFile, "utf8"), "# Operator instructions\nKeep this file.\n");
+});
+
+test("BOT_AI_CONTEXT=0 semantics disable facts without disabling PERSONA.md", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "pca-context-disabled-"));
+  const personaPath = path.join(workspace, "PERSONA.md");
+  fs.writeFileSync(personaPath, "# Persona\nStill operator-owned.\n");
+  const turns = [];
+  const h = makeRuntime({
+    workspace,
+    buildArgs: (turn) => {
+      turns.push(turn);
+      return ["-c", `printf '{\"type\":\"result\",\"result\":\"ok\"}\\n'`];
+    },
+    operatorContext: {
+      enabled: false,
+      username: "hidden.42",
+      transport: "polkadot-app",
+      policy: { capabilities: [], scope: "workspace" },
+      personaPath,
+    },
+  });
+  await h.runtime.handleMessage("peer", { text: "hello", messageId: "M1", kind: "text" });
+  assert.doesNotMatch(turns[0].operatorContext, /hidden\.42|polkadot-chat-agents|Tools:/);
+  assert.match(turns[0].operatorContext, /Still operator-owned/);
 });
 
 test("final-text stream deltas reach the transport without changing the durable answer", async () => {

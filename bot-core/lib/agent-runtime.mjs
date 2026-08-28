@@ -34,7 +34,79 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { createCommandHandler } from "./commands.mjs";
+import { buildOperatorContext, OPERATOR_CONTEXT_MARKER } from "./agent-context.mjs";
+import { commandCatalog, createCommandHandler } from "./commands.mjs";
+
+const NATIVE_CONTEXT_FILE_ENGINES = new Set(["codex", "opencode", "kimi"]);
+const PERSONA_MAX_BYTES = 64 * 1024;
+
+const regularFileText = (file, maxBytes = PERSONA_MAX_BYTES) => {
+  let stat;
+  try { stat = fs.lstatSync(file); }
+  catch (error) { if (error?.code === "ENOENT") return null; throw error; }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maxBytes) return null;
+  return fs.readFileSync(file, "utf8");
+};
+
+const writeRegularFile = (file, content, { create = false } = {}) => {
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+  const flags = fs.constants.O_WRONLY | noFollow | (create
+    ? fs.constants.O_CREAT | fs.constants.O_EXCL
+    : fs.constants.O_TRUNC);
+  const fd = fs.openSync(file, flags, 0o644);
+  try {
+    if (!fs.fstatSync(fd).isFile()) throw new Error(`${file} is not a regular file`);
+    fs.writeFileSync(fd, content, "utf8");
+  } finally {
+    fs.closeSync(fd);
+  }
+};
+
+const writeFallbackContextFile = (workspace, content) => {
+  const directory = path.join(workspace, ".pca");
+  try {
+    const stat = fs.lstatSync(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+  } catch (error) {
+    if (error?.code !== "ENOENT") return false;
+    try { fs.mkdirSync(directory, { mode: 0o700 }); }
+    catch { return false; }
+  }
+  const file = path.join(directory, "OPERATOR-CONTEXT.md");
+  let existing = null;
+  try { existing = regularFileText(file); }
+  catch { return false; }
+  try {
+    if (existing == null) writeRegularFile(file, content, { create: true });
+    else if (existing.startsWith(OPERATOR_CONTEXT_MARKER)) writeRegularFile(file, content);
+    else return false;
+    return true;
+  } catch { return false; }
+};
+
+// Install PCA's derived instructions without ever replacing an operator-owned
+// AGENTS.md. The fallback file is intentionally not referenced from that file;
+// callers prefix the first fresh prompt when native discovery cannot own it.
+export const prepareOperatorContextFile = ({ workspace, content }) => {
+  const rendered = `${OPERATOR_CONTEXT_MARKER}\n\n${String(content ?? "").trim()}\n`;
+  const file = path.join(workspace, "AGENTS.md");
+  let existing = null;
+  try { existing = regularFileText(file); }
+  catch (error) { return { native: false, file, fallback: false, error }; }
+  try {
+    if (existing == null) {
+      writeRegularFile(file, rendered, { create: true });
+      return { native: true, file, fallback: false };
+    }
+    if (existing.startsWith(OPERATOR_CONTEXT_MARKER)) {
+      writeRegularFile(file, rendered);
+      return { native: true, file, fallback: false };
+    }
+  } catch (error) {
+    return { native: false, file, fallback: writeFallbackContextFile(workspace, rendered), error };
+  }
+  return { native: false, file, fallback: writeFallbackContextFile(workspace, rendered) };
+};
 
 const norm = (hex) => String(hex).trim().replace(/^0x/i, "").toLowerCase();
 
@@ -194,6 +266,9 @@ export const createAgentRuntime = ({
   agentEnv = {}, // explicit non-secret variables for a custom agent CLI
   parentEnv = process.env,
   renderMessage, // (msg) -> verbatim prompt text (transport owns message shape)
+  // Deterministic pca facts plus an optional operator-owned PERSONA.md. Direct
+  // transports pass this object; custom embedders may omit it.
+  operatorContext = null,
   chat,
   // Most transports acknowledge an inbound message before their outgoing
   // statement is durably submitted, so preserving historical best-effort
@@ -212,6 +287,7 @@ export const createAgentRuntime = ({
   const peerUsage = new Map();           // peerKey -> cumulative { turns, inputTokens, outputTokens, costUsd }
   const runningChildren = new Map();     // peerKey -> live child process (for /stop + idle kill)
   const introducedPeers = new Set();     // peers whose first reply carried the /help hint
+  const contextFileSkipLogs = new Set();
   const childEnv = buildAgentEnvironment({ parentEnv, agentEnv, log });
   const turnLimit = boundedInt(maxConcurrentTurns, 4, 1);
   const queuedTurnLimit = boundedInt(maxQueuedTurns, 100, 0);
@@ -533,6 +609,54 @@ export const createAgentRuntime = ({
     return proj ? workspaces.resolveCwd(proj) : workspace;
   };
 
+  const contextCommands = commandCatalog({
+    allowedModels,
+    effortLevels: engine?.effortLevels ?? null,
+    hasProjects: (workspaces?.size ?? 0) > 0,
+  });
+  const buildTurnOperatorContext = (turnModel) => {
+    if (operatorContext == null) return "";
+    let facts = "";
+    if (operatorContext.enabled !== false) {
+      facts = buildOperatorContext({
+        username: operatorContext.username ?? username,
+        transport: operatorContext.transport,
+        policy: operatorContext.policy,
+        model: turnModel,
+        modelPolicy: allowedModels,
+        commands: contextCommands,
+        docsUrl: operatorContext.docsUrl,
+      });
+    }
+    let persona = "";
+    if (operatorContext.personaPath) {
+      try { persona = regularFileText(operatorContext.personaPath) ?? ""; }
+      catch (error) {
+        log("BOT_AI_PERSONA_FILE_SKIPPED", { error: String(error?.message ?? error) });
+      }
+    }
+    return [facts, persona.trim() ? `Operator persona (from PERSONA.md):\n${persona.trim()}` : ""]
+      .filter(Boolean)
+      .join("\n\n");
+  };
+  const prepareNativeContext = (cwd, content) => {
+    const result = prepareOperatorContextFile({ workspace: cwd, content });
+    if (!result.native && !contextFileSkipLogs.has(result.file)) {
+      contextFileSkipLogs.add(result.file);
+      log("BOT_AI_CONTEXT_FILE_SKIPPED", {
+        file: result.file,
+        fallbackFile: result.fallback,
+        ...(result.error ? { error: String(result.error?.message ?? result.error) } : {}),
+      });
+    }
+    return result;
+  };
+  // Regenerate derived instructions at process start. Per-turn refreshes below
+  // keep /model overrides and live PERSONA.md edits accurate.
+  if (NATIVE_CONTEXT_FILE_ENGINES.has(engineName)) {
+    prepareNativeContext(workspace, buildTurnOperatorContext(model));
+  }
+
   // Kill a child's whole process group (SIGTERM, then SIGKILL after a grace
   // period) so agent-spawned subprocesses (bash, builds) are reaped too.
   const killProcessGroup = (child) => {
@@ -637,8 +761,22 @@ export const createAgentRuntime = ({
     try {
       resume = peerResume.get(k) ?? null;
       const effort = peerEffortOverrides.get(k) ?? reasoning ?? "";
+      const turnOperatorContext = buildTurnOperatorContext(turnModel);
+      let prompt = userText;
+      if (NATIVE_CONTEXT_FILE_ENGINES.has(engineName)) {
+        const prepared = prepareNativeContext(cwd, turnOperatorContext);
+        if (!prepared.native && !resume && turnOperatorContext) {
+          prompt = `${turnOperatorContext}\n\nUser message:\n${userText}`;
+        }
+      } else if (engineName === "custom" && !resume && turnOperatorContext) {
+        // A custom claude-shaped command has no declared native instruction
+        // convention. Give only a fresh session the facts so resume history
+        // does not accumulate a duplicate block every turn.
+        prompt = `${turnOperatorContext}\n\nUser message:\n${userText}`;
+      }
       const turn = {
-        prompt: userText,
+        prompt,
+        operatorContext: engineName === "claude" ? turnOperatorContext : "",
         model: turnModel,
         resume,
         effort: effort || null,

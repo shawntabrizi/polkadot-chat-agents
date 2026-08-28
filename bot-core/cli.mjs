@@ -40,6 +40,7 @@ import {
   x25519PublicKeyFromPrivateKey,
 } from "./vendor/app-chat-codec.mjs";
 import { entrypointForTransport } from "./lib/transport-entrypoint.mjs";
+import { PERSONA_TEMPLATE } from "./lib/agent-context.mjs";
 import { assertEngineToolPolicy, toolPolicyEnforcement } from "./lib/runners.mjs";
 import {
   DEFAULT_TOOL_POLICY,
@@ -153,6 +154,15 @@ const PAID_BRAINS = new Set(["claude", "codex", "opencode", "kimi", "bridge"]);
 // the bot may be destined for a server) when it isn't installed, or every message
 // dies with BOT_AI_SPAWN_FAILED and the user only sees the apology text.
 const DIRECT_BRAIN_CLIS = new Set(["claude", "codex", "opencode", "kimi"]);
+const ensurePersonaFile = (name, brain) => {
+  if (!DIRECT_BRAIN_CLIS.has(brain)) return null;
+  const workspace = botWorkspace(name);
+  fs.mkdirSync(workspace, { recursive: true, mode: 0o700 });
+  const file = path.join(workspace, "PERSONA.md");
+  try { fs.writeFileSync(file, PERSONA_TEMPLATE, { flag: "wx", mode: 0o600 }); }
+  catch (error) { if (error?.code !== "EEXIST") throw error; }
+  return file;
+};
 function warnMissingBrainCli(brain) {
   if (!DIRECT_BRAIN_CLIS.has(brain) || process.env.BOT_AI_CMD) return;
   const r = spawnSync("which", [brain], { stdio: "ignore" });
@@ -235,6 +245,7 @@ function parseFlags(argv) {
 
 const BOT_NAME_RE = /^[a-z][a-z0-9-]{1,30}(?:\.\d{2})?$/;
 const botDir = (name) => path.join(BOTS_DIR, name);
+const botWorkspace = (name) => path.join(botDir(name), "workspace");
 const configPath = (name) => path.join(botDir(name), "config.json");
 const secretPath = (name) => path.join(botDir(name), "secret.json");
 const allowanceProvisioningLockPath = (networkProfile, address) => path.join(
@@ -1049,6 +1060,7 @@ async function cmdCreate(name, flags) {
     username: null, registered: false, createdAt: new Date().toISOString(),
   };
   saveConfig(name, config);
+  ensurePersonaFile(name, brain);
 
   let reg = "skipped";
   if (register) {
@@ -1516,10 +1528,12 @@ function cmdRun(name, flags = {}) {
   const transport = configuredTransport(cfg);
   const runToolPolicy = requestedDirectToolPolicy(cfg.brain, flags, "run");
   const transportEnv = t3amsEnvironment(cfg, transport);
-  // Keep agent work away from the bot state directory. Local runs still share
-  // the invoking user's permissions, so run them only on trusted machines.
-  const workspace = path.join(BOTS_DIR, `${name}-workspace`);
+  // Keep agent work in its dedicated per-bot workspace rather than beside the
+  // state files. Local runs still share the invoking user's process boundary,
+  // so run them only on trusted machines.
+  const workspace = botWorkspace(name);
   fs.mkdirSync(workspace, { recursive: true, mode: 0o700 });
+  ensurePersonaFile(name, cfg.brain);
   if (!cfg.registered) note("Warning: this bot isn't registered on the network yet, so people can't message it.");
   warnMissingBrainCli(cfg.brain);
   if (cfg.deploy?.host) warn(`Heads up: "${name}" is also deployed on ${cfg.deploy.host}. Running it here too = two processes on one identity (they will double-reply). Stop one first.`);
@@ -1686,6 +1700,7 @@ async function cmdDeploy(name, flags) {
   }
   const spec = DEPLOY_ENGINES[cfg.brain];
   if (!spec) fail(`deploy supports echo/claude/codex/opencode/kimi and --harness openclaw|hermes for bridge bots.\nFor "${cfg.brain}", set it up manually — see docs/guide/harnesses.md.`);
+  const personaFile = ensurePersonaFile(name, cfg.brain);
   if (mediaAnalyzerEnabled && (transport !== "t3ams" || !spec.pkg)) {
     fail("--media-analyzer requires a T3ams direct-engine deployment (claude, codex, opencode, or kimi); it has no effect for echo or bridge bots.");
   }
@@ -1831,6 +1846,17 @@ async function cmdDeploy(name, flags) {
     : `mkdir -p ${remoteBase}/app ${remoteBase}/state ${remoteBase}/image && chown -R 1000:1000 ${remoteBase}/state && chmod 700 ${remoteBase}/state`;
   const prep = runLocal("ssh", [...sshOpts, host, prepareVolumes]);
   if (prep.status !== 0) fail("Could not prepare the remote bot directories.");
+  if (personaFile) {
+    // PERSONA.md is operator-owned. Seed a missing remote template, but never
+    // replace edits already made in the persistent deployment workspace.
+    const stagedPersona = `${base}/workspace/.PERSONA.md.pca-template`;
+    const remotePersona = `${base}/workspace/PERSONA.md`;
+    const copyPersona = runLocal("scp", [...sshOpts, personaFile, `${host}:${stagedPersona}`]);
+    if (copyPersona.status !== 0) fail("Could not copy the bot persona template.");
+    const installPersona = runLocal("ssh", [...sshOpts, host,
+      `if [ ! -e ${shellQuote(remotePersona)} ]; then mv ${shellQuote(stagedPersona)} ${shellQuote(remotePersona)}; else rm -f ${shellQuote(stagedPersona)}; fi; chown 1000:1000 ${shellQuote(remotePersona)}; chmod 600 ${shellQuote(remotePersona)}`]);
+    if (installPersona.status !== 0) fail("Could not install the bot persona template.");
+  }
   step("Uploading bot-core (code + dependencies)…");
   const rs = runLocal("rsync", ["-az", "--delete",
     "--exclude", "bots/", "--exclude", "*.log", "--exclude", "*.bak*", "--exclude", ".git",

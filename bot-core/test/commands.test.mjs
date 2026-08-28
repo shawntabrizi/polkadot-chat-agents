@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createCommandHandler, resolveModelPolicy } from "../lib/commands.mjs";
+import { commandCatalog, createCommandHandler, resolveModelPolicy } from "../lib/commands.mjs";
 
 const make = (over = {}) => {
   const resumeTokens = new Map();
@@ -48,7 +48,10 @@ test("unknown but command-shaped input redirects to /help, never the model", () 
 test("/help lists every command", () => {
   const { handler } = make();
   const help = handler("peer", "/help");
-  for (const cmd of ["/reset", "/stop", "/model", "/file", "/ping"]) assert.ok(help.includes(cmd), `missing ${cmd}`);
+  for (const { command, meaning } of commandCatalog()) {
+    if (command === "/help") continue;
+    assert.ok(help.includes(`${command} — ${meaning}`), `missing shared command ${command}`);
+  }
 });
 
 test("/reset clears only that peer's session token", () => {

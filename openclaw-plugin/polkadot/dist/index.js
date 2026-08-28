@@ -218,6 +218,7 @@ var MAX_TOTAL_ATTACHMENT_BYTES = 32 * 1024 * 1024;
 var MAX_OUTBOUND_MEDIA_PER_REPLY = 4;
 var DISPATCH_SHUTDOWN_WAIT_MS = 3e4;
 var T3AMS_THREAD_ROOT_RE = /^[0-9a-f]{64}$/i;
+var operatorContextSessions = /* @__PURE__ */ new Set();
 var delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 var normalizeT3amsThreadRootId = (value) => {
   if (typeof value !== "string") return null;
@@ -858,6 +859,13 @@ async function dispatchInbound(ctx, channelRuntime, account, bridge, msg, signal
       peer: { kind: "direct", id: chatId }
     });
     const routeSessionKey = t3amsThreadSessionKey(route.sessionKey, threadRootId);
+    const operatorContext = typeof msg.context === "string" ? msg.context.trim() : "";
+    const includeOperatorContext = Boolean(operatorContext) && !operatorContextSessions.has(routeSessionKey);
+    const operatorContextNote = includeOperatorContext ? `[PCA operator context]
+${operatorContext}
+[End PCA operator context]
+
+` : "";
     const storePath = channelRuntime.session.resolveStorePath(ctx.cfg.session?.store, { agentId: route.agentId });
     const liveReply = createT3amsLiveReply({
       bridge,
@@ -879,7 +887,7 @@ async function dispatchInbound(ctx, channelRuntime, account, bridge, msg, signal
           id: msg.message_id || randomUUID(),
           timestamp: Date.now(),
           rawText: msg.text,
-          textForAgent: msg.text + channelContextNotes(msg.channel_context) + materialized.notes,
+          textForAgent: operatorContextNote + msg.text + channelContextNotes(msg.channel_context) + materialized.notes,
           textForCommands: msg.text,
           raw: msg
         }),
@@ -931,6 +939,12 @@ async function dispatchInbound(ctx, channelRuntime, account, bridge, msg, signal
       }
     });
     liveReply.assertTerminalDelivery();
+    if (includeOperatorContext) {
+      operatorContextSessions.add(routeSessionKey);
+      while (operatorContextSessions.size > 5e3) {
+        operatorContextSessions.delete(operatorContextSessions.values().next().value);
+      }
+    }
   } finally {
     await cleanupAttachments(materialized);
   }

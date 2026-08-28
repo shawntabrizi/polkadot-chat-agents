@@ -41,7 +41,7 @@ never turns a supplied stale lease into a valid one.
 | Method & path | Purpose |
 |---|---|
 | `GET /health` | `{ ok, account, identifierKey, username, … }` — reachability plus transport, media/file, and live-operation capability flags. |
-| `GET /inbound?wait=<secs>&limit=<n>` | Long-poll. Returns leased deliveries: `[{ delivery_id, lease_id, lease_ms, chat_id, text, message_id, … }]`. Rows can include thread, reply/edit, attachment, and transport-specific fields. Add `&events=1` to also receive non-message signals. |
+| `GET /inbound?wait=<secs>&limit=<n>` | Long-poll. Returns leased deliveries: `[{ delivery_id, lease_id, lease_ms, chat_id, text, message_id, context?, … }]`. `context`, when present, is PCA's generated runtime facts and should be injected once at the start of the framework session for that chat. Rows can include thread, reply/edit, attachment, and transport-specific fields. Add `&events=1` to also receive non-message signals. |
 | `POST /inbound/ack` `{ delivery_id, lease_id }` | Acknowledge a completed delivery so it isn't redelivered. |
 | `POST /inbound/renew` `{ delivery_id, lease_id }` | Extend an active lease while still working. |
 | `GET /media/<id>` | Authenticated attachment bytes. For T3ams, `<id>` is an opaque, short-lived bridge handle and a fetch can materialize the encrypted media on demand. |
@@ -60,6 +60,13 @@ drain. A harness renews the lease while it works and calls `/inbound/ack` only
 once the message is fully handled. If the harness crashes mid-turn, the lease
 expires and `bot-core` redelivers — so a failed handoff is retried rather than
 lost. A harness must therefore **not** acknowledge a delivery it didn't finish.
+
+bot-core repeats a non-empty `context` on deliveries so a restarted adapter
+can recover the facts. Session-aware adapters must show it to the model only
+once per framework session. The bundled Hermes and OpenClaw adapters do this
+after the first successful handoff. Bridge personas remain owned by the
+framework; `context` is factual configuration only. `BOT_AI_CONTEXT=0` omits
+the field.
 
 ## Inbound fields on the default transport
 

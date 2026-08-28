@@ -512,6 +512,9 @@ describe("transport e2e", { concurrency: 8 }, () => {
       const opener = await pump((i) => i.text === "bridge opener", { label: "opener" });
       assert.match(opener.delivery_id, /^[0-9A-F-]{36}$/);
       assert.match(opener.lease_id, /^[0-9A-F-]{36}$/);
+      assert.match(opener.context, /You are `e2etest\.00`/);
+      assert.match(opener.context, /transport: polkadot-app/);
+      assert.match(opener.context, /Chat commands: \/help—list these commands/);
       const sent = await post("/send", { chat_id: opener.chat_id, text: "seen it", reply_to: opener.message_id });
       assert.equal(sent.success, true, JSON.stringify(sent));
       assert.match(sent.message_id, /^[0-9A-F-]{36}$/, "expected a real envelope UUID");
@@ -1029,14 +1032,19 @@ describe("transport e2e", { concurrency: 8 }, () => {
     const stateDir = tmpState();
     const bytes = new Uint8Array(Buffer.from("spec-content-123"));
     const file = hop.putFile(bytes);
-    // The mock CLI answers with the prompt it was given ($1 = the verbatim
-    // prompt), which carries the attachment's staged path.
+    // The mock CLI answers with the prompt it was given, which carries the
+    // attachment's staged path. JSON.stringify keeps generated context
+    // newlines valid in the mock result event.
     const bot = await startBot({
       endpoint: node.url,
       stateDir,
       extraEnv: {
-        BOT_SUBSCRIBE: "0", BOT_BRAIN: "claude", BOT_AI_CMD: "sh",
-        BOT_AI_ARGS: JSON.stringify(["-c", "printf '{\"type\":\"result\",\"result\":\"PROMPT %s\"}\\n' \"$1\"", "sh", "__PROMPT__"]),
+        BOT_SUBSCRIBE: "0", BOT_BRAIN: "claude", BOT_AI_CMD: process.execPath,
+        BOT_AI_ARGS: JSON.stringify([
+          "-e",
+          "process.stdout.write(JSON.stringify({ type: 'result', result: `PROMPT ${process.argv[1]}` }) + '\\n')",
+          "__PROMPT__",
+        ]),
         BOT_THINKING_TEXT: "", BOT_HOP_ALLOW_INSECURE: "1",
       },
     });
@@ -1048,7 +1056,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
       assert.equal(r.code, 0, `client failed:\n${r.out}`);
       // The prompt references a private per-turn copy, not the media store;
       // that copy is removed once the engine has completed.
-      const m = /PROMPT .*saved at (\S+)/.exec(r.out);
+      const m = /PROMPT [\s\S]*?saved at (\S+)/.exec(r.out);
       assert.ok(m, `no staged path in the engine prompt:\n${r.out}`);
       assert.ok(m[1].includes(`${path.sep}.pca-attachment-`), `not staged into a private turn directory: ${m[1]}`);
       assert.equal(fs.existsSync(m[1]), false, "staged attachment must be cleaned up after the turn");
