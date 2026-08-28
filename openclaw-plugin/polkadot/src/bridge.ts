@@ -35,6 +35,9 @@ export type InboundMsg = {
   chat_id: string;
   text: string;
   message_id: string;
+  // Deterministic pca runtime facts. Adapters inject this once per native
+  // framework session; bot-core repeats it so a restarted adapter recovers.
+  context?: string;
   // A leased delivery remains in bot-core until this id is acknowledged after
   // OpenClaw has accepted the turn. It is deliberately separate from the app
   // message id, which is used for conversation/session identity.

@@ -20,6 +20,7 @@ const MAX_TOTAL_ATTACHMENT_BYTES = 32 * 1024 * 1024;
 const MAX_OUTBOUND_MEDIA_PER_REPLY = 4;
 const DISPATCH_SHUTDOWN_WAIT_MS = 30_000;
 const T3AMS_THREAD_ROOT_RE = /^[0-9a-f]{64}$/i;
+const operatorContextSessions = new Set<string>();
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -859,6 +860,11 @@ export async function dispatchInbound(
       peer: { kind: "direct", id: chatId },
     });
     const routeSessionKey = t3amsThreadSessionKey(route.sessionKey, threadRootId);
+    const operatorContext = typeof msg.context === "string" ? msg.context.trim() : "";
+    const includeOperatorContext = Boolean(operatorContext) && !operatorContextSessions.has(routeSessionKey);
+    const operatorContextNote = includeOperatorContext
+      ? `[PCA operator context]\n${operatorContext}\n[End PCA operator context]\n\n`
+      : "";
     const storePath = channelRuntime.session.resolveStorePath(ctx.cfg.session?.store, { agentId: route.agentId });
     const liveReply = createT3amsLiveReply({
       bridge,
@@ -883,7 +889,7 @@ export async function dispatchInbound(
           id: msg.message_id || randomUUID(),
           timestamp: Date.now(),
           rawText: msg.text,
-          textForAgent: msg.text + channelContextNotes(msg.channel_context) + materialized.notes,
+          textForAgent: operatorContextNote + msg.text + channelContextNotes(msg.channel_context) + materialized.notes,
           textForCommands: msg.text,
           raw: msg,
         }),
@@ -940,6 +946,12 @@ export async function dispatchInbound(
     // progress frame does not abort its stream. A failed final is different:
     // leave the lease unacknowledged for a safe redelivery.
     liveReply.assertTerminalDelivery();
+    if (includeOperatorContext) {
+      operatorContextSessions.add(routeSessionKey);
+      while (operatorContextSessions.size > 5000) {
+        operatorContextSessions.delete(operatorContextSessions.values().next().value!);
+      }
+    }
   } finally {
     await cleanupAttachments(materialized);
   }

@@ -90,6 +90,13 @@ def _channel_context_note(value: Any) -> str:
     return "\n\n" + "\n".join(lines) if lines else ""
 
 
+def _operator_context_note(value: Any) -> str:
+    """Delimit pca's deterministic facts from the user's actual message."""
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    return f"\n\n[PCA operator context]\n{value.strip()}\n[End PCA operator context]"
+
+
 class _BoundedKeyedDispatcher:
     """Bounded, ordered-per-chat worker pool for inbound bridge leases."""
 
@@ -188,6 +195,10 @@ class PolkadotAdapter(BasePlatformAdapter):
         # Hermes turn, so every bridge /send can prove it still owns the
         # inbound delivery that prompted the response.
         self._active_delivery_claims: Dict[str, Tuple[str, str]] = {}
+        # bot-core repeats the derived field so a restarted harness can recover
+        # it. Hermes needs it only on the first turn of this process's chat
+        # session; later turns already carry it in native conversation memory.
+        self._operator_context_sessions: Set[str] = set()
         self._running = False
         self._bot_account: Optional[str] = None
         self._bridge_file_max_bytes = _MAX_OUTBOUND_ATTACHMENT_BYTES
@@ -557,8 +568,19 @@ class PolkadotAdapter(BasePlatformAdapter):
                 message_id=msg.get("message_id"),
             )
             is_photo = any(t.startswith("image/") for t in media_types)
+            include_operator_context = (
+                isinstance(msg.get("context"), str)
+                and bool(msg["context"].strip())
+                and chat_id not in self._operator_context_sessions
+            )
             event = MessageEvent(
-                text=text + _channel_context_note(msg.get("channel_context")),
+                # Keep the triggering text first so Hermes slash-command
+                # detection still sees a leading command.
+                text=(
+                    text
+                    + _channel_context_note(msg.get("channel_context"))
+                    + (_operator_context_note(msg.get("context")) if include_operator_context else "")
+                ),
                 message_type=MessageType.PHOTO if is_photo else MessageType.TEXT,
                 source=source,
                 message_id=msg.get("message_id"),
@@ -567,6 +589,10 @@ class PolkadotAdapter(BasePlatformAdapter):
                 reply_to_message_id=thread_root or msg.get("reply_to"),
             )
             await self.handle_message(event)
+            if include_operator_context:
+                self._operator_context_sessions.add(chat_id)
+                if len(self._operator_context_sessions) > 5000:
+                    self._operator_context_sessions.pop()
             return True
         finally:
             if had_previous_root:
