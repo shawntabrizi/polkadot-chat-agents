@@ -34,7 +34,11 @@ import {
   peopleEndpointsFor,
 } from "./lib/network-config.mjs";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
-import { deriveP256PrivateKey, p256PublicKeyFromPrivateKey } from "./vendor/app-chat-codec.mjs";
+import {
+  deriveX25519PrivateKey,
+  encodeAccountEcdhKey,
+  x25519PublicKeyFromPrivateKey,
+} from "./vendor/app-chat-codec.mjs";
 import { entrypointForTransport } from "./lib/transport-entrypoint.mjs";
 import { assertEngineToolPolicy, toolPolicyEnforcement } from "./lib/runners.mjs";
 import {
@@ -980,7 +984,7 @@ async function cmdCreate(name, flags) {
   const mnemonic = generateMnemonic(128);
   const seed = mnemonicToMiniSecret(mnemonic);
   const wallet = deriveSr25519PairFromSeed(seed, "//wallet");
-  const p256 = p256PublicKeyFromPrivateKey(deriveP256PrivateKey(deriveSr25519PairFromSeed(seed, "//wallet//chat")));
+  const identifierKey = encodeAccountEcdhKey(x25519PublicKeyFromPrivateKey(deriveX25519PrivateKey(seed)));
   const accountIdHex = bytesToHex(wallet.publicKey);
   const address = ss58Address(wallet.publicKey, 42);
   ok("Generated your bot's identity");
@@ -1003,7 +1007,7 @@ async function cmdCreate(name, flags) {
     ...(flags.model != null ? { model: flagValue(flags.model, "model") } : {}), // pin per-brain model
     bridgePort: portFlag(flags.port ?? 8799),
     bridgeToken: newBridgeToken(),
-    account: accountIdHex, address, identifierKey: bytesToHex(p256),
+    account: accountIdHex, address, identifierKey: bytesToHex(identifierKey),
     username: null, registered: false, createdAt: new Date().toISOString(),
   };
   saveConfig(name, config);
