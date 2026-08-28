@@ -1,8 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  chacha20Poly1305DecryptRawKey,
+  chacha20Poly1305EncryptRawKey,
+  decodeAccountEcdhKey,
   decodeStatementData,
   decodeOpaqueMessageAt,
+  encodeAccountEcdhKey,
+  encodeOpaqueDeviceAddedMessage,
+  encodeOpaqueDeviceChatAcceptedMessage,
   encodeOpaqueTextMessage,
   encodeOpaqueRichTextMessage,
   encodeOpaqueReactionMessage,
@@ -10,6 +16,8 @@ import {
   encodeOpaqueEditedMessage,
   encodeOpaqueDataChannelClosedMessage,
   scaleEncodeBytes,
+  x25519PublicKeyFromPrivateKey,
+  x25519SharedSecret,
 } from "../vendor/app-chat-codec.mjs";
 
 const enc = new TextEncoder();
@@ -37,6 +45,8 @@ const u64 = (n) => {
   return out;
 };
 const decodeOne = (opaque) => decodeOpaqueMessageAt(opaque, 0).value;
+const hex = (value) => new Uint8Array(Buffer.from(value, "hex"));
+const hexOf = (value) => Buffer.from(value).toString("hex");
 
 // Hand-build a remote message envelope the way the app does: SCALE(messageId,
 // timestamp u64, version 0, contentKind, content), length-prefixed as opaque.
@@ -53,6 +63,99 @@ const fileVariant = ({ metaTag = 1, thumbnail = null } = {}) => concat(
   ...(metaTag === 0 ? [] : [u32(1920), u32(1080)]), // width/height (image) or duration+pad (video handled below)
   ...(metaTag === 0 ? [] : [thumbnail ? concat(Uint8Array.of(1), scaleEncodeBytes(thumbnail)) : Uint8Array.of(0)]),
 );
+
+test("X25519 public key matches RFC 7748 section 6.1", () => {
+  const privateKey = hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
+  assert.equal(
+    hexOf(x25519PublicKeyFromPrivateKey(privateKey)),
+    "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+  );
+});
+
+test("X25519 agreement matches RFC 7748 section 6.1", () => {
+  const alicePrivate = hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
+  const bobPublic = hex("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f");
+  assert.equal(
+    hexOf(x25519SharedSecret(alicePrivate, bobPublic)),
+    "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
+  );
+});
+
+test("X25519 rejects every RFC004 small-order public key", () => {
+  const privateKey = hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
+  for (const publicKey of [
+    "00".repeat(32),
+    `01${"00".repeat(31)}`,
+    "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+    "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+  ]) {
+    assert.throws(() => x25519SharedSecret(privateKey, hex(publicKey)), /X25519 agreement rejected/);
+  }
+});
+
+test("ChaCha20-Poly1305 matches the RFC 8439 no-AAD vector", () => {
+  const key = hex("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f");
+  const nonce = hex("070000004041424344454647");
+  const plaintext = hex(
+    "4c616469657320616e642047656e746c656d656e206f662074686520636c6173" +
+    "73206f66202739393a204966204920636f756c64206f6666657220796f75206f" +
+    "6e6c79206f6e652074697020666f7220746865206675747572652c2073756e73" +
+    "637265656e20776f756c642062652069742e",
+  );
+  const ciphertext =
+    "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d6" +
+    "3dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b36" +
+    "92ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc" +
+    "3ff4def08e4b7a9de576d26586cec64b6116";
+  const expected = `${hexOf(nonce)}${ciphertext}6a23a4681fd59456aea1d29f82477216`;
+  const encrypted = chacha20Poly1305EncryptRawKey(key, plaintext, nonce);
+  assert.equal(hexOf(encrypted), expected);
+  assert.deepEqual(chacha20Poly1305DecryptRawKey(key, encrypted), plaintext);
+  assert.equal(chacha20Poly1305EncryptRawKey(key, new Uint8Array(41)).length, 69);
+
+  const tampered = encrypted.slice();
+  tampered[12] ^= 1;
+  assert.throws(() => chacha20Poly1305DecryptRawKey(key, tampered), /authenticate|state/i);
+  assert.throws(() => chacha20Poly1305DecryptRawKey(key, encrypted.slice(0, -1)), /authenticate|state/i);
+});
+
+test("AccountEcdhKey X25519 container is 65 bytes and ignores padding", () => {
+  const publicKey = new Uint8Array(32).fill(0xab);
+  const encoded = encodeAccountEcdhKey(publicKey);
+  assert.equal(hexOf(encoded), `00${"ab".repeat(32)}${"00".repeat(32)}`);
+  encoded.fill(0x7f, 33);
+  const decoded = decodeAccountEcdhKey(encoded);
+  assert.equal(decoded.kind, "x25519");
+  assert.deepEqual(decoded.publicKey, publicKey);
+});
+
+test("AccountEcdhKey rejects malformed widths and preserves unsupported containers", () => {
+  const legacy = new Uint8Array(65).fill(0x11);
+  legacy[0] = 0x04;
+  const decoded = decodeAccountEcdhKey(legacy);
+  assert.equal(decoded.kind, "unsupported");
+  assert.deepEqual(decoded.raw, legacy);
+  assert.deepEqual(encodeAccountEcdhKey(decoded), legacy);
+  assert.throws(() => decodeAccountEcdhKey(new Uint8Array(33)), /must be 65 bytes/);
+});
+
+test("device lifecycle messages carry 32-byte X25519 public keys", () => {
+  const statementAccountId = new Uint8Array(32).fill(0x22);
+  const encryptionPublicKey = new Uint8Array(32).fill(0x33);
+  const added = decodeOne(encodeOpaqueDeviceAddedMessage({ statementAccountId, encryptionPublicKey }));
+  assert.equal(added.kind, "deviceAdded");
+  assert.deepEqual(added.statementAccountId, statementAccountId);
+  assert.deepEqual(added.encryptionPublicKey, encryptionPublicKey);
+
+  const accepted = decodeOne(encodeOpaqueDeviceChatAcceptedMessage({
+    acceptedRequestId: "REQ-1",
+    statementAccountId,
+    encryptionPublicKey,
+  }));
+  assert.equal(accepted.kind, "deviceChatAccepted");
+  assert.deepEqual(accepted.statementAccountId, statementAccountId);
+  assert.deepEqual(accepted.encryptionPublicKey, encryptionPublicKey);
+});
 
 test("round-trip: reaction add and remove", () => {
   for (const removed of [false, true]) {

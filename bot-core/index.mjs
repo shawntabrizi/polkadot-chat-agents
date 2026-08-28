@@ -27,7 +27,8 @@
 //   BOT_GREET (0; 1 = message allowlisted owners on first start) + BOT_GREET_TEXT,
 //   BOT_SUBSCRIBE (1; 0 = poll-only), BOT_SWEEP_MS (30000, sweep cadence while the
 //   subscription is healthy), BOT_HEARTBEAT_MS (30000), BOT_PEER_IDENTIFIER_KEYS
-//   ("peerhex=keyhex,..." — pin identifier keys, skipping the on-chain lookup).
+//   ("peerhex=containerhex,..." — pin 65-byte on-chain identifier-key
+//   containers, skipping the on-chain lookup).
 //   Attachments: BOT_MEDIA_MAX_BYTES (32MB), BOT_MEDIA_TTL_HOURS (48),
 //   BOT_MEDIA_MAX_TOTAL_MB (512), BOT_HOP_TIMEOUT_MS (120000),
 //   BOT_HOP_ALLOWED_NODES (comma-sep trusted host suffixes; required for
@@ -97,8 +98,11 @@ import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
 import { withTimeout, runWithConcurrency } from "./vendor/lib/async-utils.mjs";
 import {
   makePeerSession,
-  deriveP256PrivateKey,
-  p256PublicKeyFromPrivateKey,
+  decodeAccountEcdhKey,
+  deriveX25519PrivateKey,
+  encodeAccountEcdhKey,
+  generateX25519Keypair,
+  x25519PublicKeyFromPrivateKey,
   chatRequestAllPeerStatementsTopic,
   chatRequestPaginationTopic,
   chatRequestDayFromUnixSeconds,
@@ -113,7 +117,7 @@ import {
   encodeOpaqueEditedMessage,
   encodeOpaqueDataChannelClosedMessage,
   encodeOpaqueChatAcceptedMessage,
-  encodeOpaqueMultiChatAcceptedMessage,
+  encodeOpaqueDeviceChatAcceptedMessage,
   encodeSessionRequestPayload,
   encodeSessionResponsePayload,
   submitAppStatement,
@@ -322,6 +326,7 @@ try {
   process.exit(2);
 }
 const stateStore = createStateStore(path.join(env.BOT_STATE_DIR, "session-state.json"));
+const rawStoredState = stateStore.load();
 const SEEN_CAP = 5000; // bound the persisted dedup set
 const allowedPeers = new Set(
   String(env.BOT_ALLOWED_PEERS ?? "").split(",").map((s) => s.trim().replace(/^0x/i, "").toLowerCase()).filter(Boolean),
@@ -568,10 +573,30 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 // ---------- identity ----------
 const seed = hexToBytes(seedHex);
 const wallet = deriveSr25519PairFromSeed(seed, "//wallet");
-const chatPair = deriveSr25519PairFromSeed(seed, "//wallet//chat");
 const hopUploadPair = deriveSr25519PairFromSeed(seed, "//allowance//bulletin//chat");
-const p256PrivateKey = deriveP256PrivateKey(chatPair);
-const identifierKey = p256PublicKeyFromPrivateKey(p256PrivateKey);
+const identityPrivateKey = deriveX25519PrivateKey(seed);
+const identityPublicKey = x25519PublicKeyFromPrivateKey(identityPrivateKey);
+const identifierKey = encodeAccountEcdhKey(identityPublicKey);
+const storedDevicePrivateKey = (() => {
+  try {
+    if (rawStoredState?.v !== 3 || typeof rawStoredState.devicePrivateKeyHex !== "string") return null;
+    const value = hexToBytes(rawStoredState.devicePrivateKeyHex);
+    return value.length === 32 ? value : null;
+  } catch {
+    return null;
+  }
+})();
+const deviceKeypair = storedDevicePrivateKey == null
+  ? generateX25519Keypair()
+  : {
+      privateKey: storedDevicePrivateKey,
+      publicKey: x25519PublicKeyFromPrivateKey(storedDevicePrivateKey),
+    };
+const stateProtocolKeysReset = rawStoredState?.v === 2
+  || (rawStoredState?.v === 3 && storedDevicePrivateKey == null);
+if (stateProtocolKeysReset) {
+  log("BOT_STATE_KEYS_RESET", { version: rawStoredState?.v ?? null, peers: rawStoredState?.peers?.length ?? 0 });
+}
 const accountId = wallet.publicKey;
 const accountIdHex = norm(bytesToHex(accountId));
 const hopUploadAccountIdHex = norm(bytesToHex(hopUploadPair.publicKey));
@@ -609,13 +634,34 @@ const submitBounded = (args) => withTimeout(submitAppStatement(requestRpc, args)
 const trimMap = (map, cap) => { while (map.size > cap) map.delete(map.keys().next().value); };
 
 const IDENTIFIER_CACHE_CAP = 5000;
-const identifierKeyCache = new Map(); // peerHex -> identifierKeyHex
+const identifierKeyCache = new Map(); // peerHex -> raw X25519 public key hex
+const decodePeerIdentifierKey = (peerHex, encoded) => {
+  try {
+    const container = hexToBytes(encoded);
+    const decoded = decodeAccountEcdhKey(container);
+    if (decoded.kind !== "x25519") {
+      log("BOT_PEER_KEY_UNSUPPORTED", { peer: norm(peerHex), reason: "unsupported_type", type: container[0] });
+      return null;
+    }
+    return norm(bytesToHex(decoded.publicKey));
+  } catch (error) {
+    log("BOT_PEER_KEY_UNSUPPORTED", {
+      peer: norm(peerHex),
+      reason: "invalid_container",
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+};
 // Static peer->identifier-key pins: "peerhex=keyhex,..." — skips the on-chain
 // lookup for those peers. Used by the offline transport tests (no people chain)
 // and usable for fixed-fleet setups.
 for (const pair of String(env.BOT_PEER_IDENTIFIER_KEYS ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
   const [peer, key] = pair.split("=");
-  if (peer && key) identifierKeyCache.set(norm(peer), norm(key));
+  if (peer && key) {
+    const decoded = decodePeerIdentifierKey(peer, key);
+    if (decoded) identifierKeyCache.set(norm(peer), decoded);
+  }
 }
 const resolveIdentifierKey = async (peerHex) => {
   const key = norm(peerHex);
@@ -625,7 +671,7 @@ const resolveIdentifierKey = async (peerHex) => {
     const consumer = await withTimeout(
       peopleApi.query.Resources.Consumers.getValue(ss58Address(hexToBytes(key), 2)),
       queryTimeoutMs, "identifier lookup");
-    value = consumer?.identifier_key == null ? null : norm(String(consumer.identifier_key));
+    value = consumer?.identifier_key == null ? null : decodePeerIdentifierKey(key, String(consumer.identifier_key));
   } catch (error) {
     log("BOT_IDENTIFIER_LOOKUP_FAILED", { peer: key, error: error instanceof Error ? error.message : String(error) });
   }
@@ -671,8 +717,8 @@ const buildSession = (peerHex, identifierKeyHex, extraDevices = []) => {
     ownAccountId: accountId,
     peerAccountId: hexToBytes(peerHex),
     peerIdentifierKey: hexToBytes(identifierKeyHex),
-    ownP256PrivateKey: p256PrivateKey,
-    ownDeviceP256PrivateKey: p256PrivateKey,
+    ownX25519PrivateKey: identityPrivateKey,
+    ownDeviceX25519PrivateKey: deviceKeypair.privateKey,
     peerDevices,
   });
   sessions.set(norm(peerHex), { session, identifierKeyHex: norm(identifierKeyHex), lastActiveAt: Date.now() });
@@ -917,13 +963,16 @@ const outbound = createOutboundLanes({
     if (entry == null) throw new Error("no active session for peer");
     return encodeSessionRequestPayload(entry.session, requestId, opaques, forceIdentity ? { forceIdentity: true } : {});
   },
-  submitPayload: async (peerHex, payload) => {
+  submitPayload: async (peerHex, payload, { forceIdentity }) => {
     const entry = sessions.get(norm(peerHex));
     if (entry == null) throw new Error("no active session for peer");
+    const transport = forceIdentity || (entry.session.peerDevices?.length ?? 0) === 0
+      ? entry.session.identitySession
+      : entry.session;
     await submitBounded({
       walletPair: wallet,
-      channel: entry.session.requestChannel,
-      topics: [entry.session.ownSessionId],
+      channel: transport.requestChannel,
+      topics: [transport.ownSessionId],
       scaleEncodedPayload: payload,
       expiryFactory,
     });
@@ -1318,13 +1367,15 @@ const settleOwed = (owedId) => {
   }
 };
 
-// Persist only what can't be re-derived: per-peer identifierKey + peerDevices.
-// makePeerSession is deterministic, so the channels/keys rebuild exactly from
-// these + the seed. Also persist the dedup set so a restart doesn't re-answer
-// old messages. (seenStatements stays in-memory — it only avoids redundant
-// decode work; seenRequests is the semantic "already replied" guard.)
+// Persist only what can't be re-derived: our random device private key plus
+// each peer's identity/device public keys. makePeerSession is deterministic,
+// so channels rebuild exactly from those + the seed. Also persist the dedup
+// set so a restart doesn't re-answer old messages. (seenStatements stays
+// in-memory — it only avoids redundant decode work; seenRequests is the
+// semantic "already replied" guard.)
 const snapshotState = () => ({
-  v: 2,
+  v: 3,
+  devicePrivateKeyHex: norm(bytesToHex(deviceKeypair.privateKey)),
   // Which engine, base model, and workspace these resume tokens belong to. A
   // token resumes a session tied to those settings, so a change invalidates it
   // on restart (resuming against the wrong tree or model corrupts context).
@@ -1391,13 +1442,13 @@ const handleOpener = async (data) => {
   // Unlike session batches, an opener has no per-message isolation: a welcome
   // message we can't decode drops the whole request (and the app resends it
   // forever, since no session ever ACKs) — make that visible.
-  try { decoded = decodeEncryptedChatRequestPayload(data, p256PrivateKey, accountId); }
+  try { decoded = decodeEncryptedChatRequestPayload(data, identityPrivateKey, accountId); }
   catch (e) { log("BOT_OPENER_DECODE_FAILED", { error: String(e?.message ?? e) }); return; }
   const senderHex = norm(decoded.peerAccountIdHex);
   if (!isAllowed(senderHex)) { log("BOT_REJECTED_UNLISTED", { from: senderHex }); return; }
   const identifierKeyHex = await resolveIdentifierKey(senderHex);
   if (!identifierKeyHex) { log("BOT_OPENER_NO_IDENTIFIER", { from: senderHex }); return; }
-  if (!verifyChatRequestIdentityProof(decoded, p256PrivateKey, hexToBytes(identifierKeyHex))) {
+  if (!verifyChatRequestIdentityProof(decoded, identityPrivateKey, hexToBytes(identifierKeyHex))) {
     log("BOT_OPENER_BAD_PROOF", { from: senderHex }); return;
   }
   // App UUIDs are normally globally unique, but they are peer-controlled
@@ -1459,7 +1510,11 @@ const handleOpener = async (data) => {
   }
   // ACK / accept so the peer establishes the session (advertise our device).
   const accept = decoded.deviceEncPubKeyHex
-    ? encodeOpaqueMultiChatAcceptedMessage({ acceptedRequestId: decoded.messageId, statementAccountId: accountId, encryptionPublicKey: identifierKey })
+    ? encodeOpaqueDeviceChatAcceptedMessage({
+        acceptedRequestId: decoded.messageId,
+        statementAccountId: accountId,
+        encryptionPublicKey: deviceKeypair.publicKey,
+      })
     : encodeOpaqueChatAcceptedMessage({ acceptedRequestId: decoded.messageId });
   try {
     // Same-tick enqueues ride one statement, preserving the single
@@ -1503,10 +1558,13 @@ const sendSessionAck = async (peerHex, requestId) => {
   const entry = sessions.get(norm(peerHex));
   if (entry == null) return;
   const payload = encodeSessionResponsePayload(entry.session, requestId);
+  const transport = (entry.session.peerDevices?.length ?? 0) === 0
+    ? entry.session.identitySession
+    : entry.session;
   await submitBounded({
     walletPair: wallet,
-    channel: entry.session.responseChannel,
-    topics: [entry.session.ownSessionId],
+    channel: transport.responseChannel,
+    topics: [transport.ownSessionId],
     scaleEncodedPayload: payload,
     expiryFactory,
   });
@@ -1593,7 +1651,7 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
     // Initiator side of an outgoing greeting: the peer's accept can advertise
     // their device encryption key — fold it into the session (and subscribe to
     // its topics) or the peer's device-channel replies would go unseen.
-    if (m.kind === "multiChatAccepted" && m.encryptionPublicKey) {
+    if ((m.kind === "deviceChatAccepted" || m.kind === "deviceAdded") && m.encryptionPublicKey) {
       const entry = sessions.get(norm(peerHex));
       if (entry) {
         buildSession(peerHex, entry.identifierKeyHex, [{ statementAccountId: m.statementAccountId, encryptionPublicKey: m.encryptionPublicKey }]);
@@ -2324,22 +2382,28 @@ log("BOT_LISTENING", { account: `0x${accountIdHex}`, identifierKey: `0x${norm(by
 // file crash startup or allocate unbounded collections.
 const normalizeRestoredState = (raw) => {
   if (raw == null) return null;
-  if (typeof raw !== "object" || Array.isArray(raw) || raw.v !== 2) {
+  if (typeof raw !== "object" || Array.isArray(raw) || (raw.v !== 2 && raw.v !== 3)) {
     log("BOT_STATE_INCOMPATIBLE", { version: raw?.v ?? null });
     return null;
   }
   const array = (value, cap) => Array.isArray(value) ? value.slice(-cap) : [];
+  // v2 contains only P-256 identity/device keys. Keep key-independent dedup
+  // and agent state, but discard every session-bearing record and let peers
+  // establish fresh RFC004 sessions against the newly persisted device key.
+  const keysValid = raw.v === 3 && storedDevicePrivateKey != null;
   return {
     ...raw,
-    peers: array(raw.peers, MAX_SESSIONS),
+    v: 3,
+    devicePrivateKeyHex: norm(bytesToHex(deviceKeypair.privateKey)),
+    peers: keysValid ? array(raw.peers, MAX_SESSIONS) : [],
     seen: array(raw.seen, SEEN_CAP),
-    pendingOpenerAcks: array(raw.pendingOpenerAcks, MAX_OWED),
-    owed: array(raw.owed, MAX_OWED),
-    greeted: array(raw.greeted, MAX_SESSIONS),
+    pendingOpenerAcks: keysValid ? array(raw.pendingOpenerAcks, MAX_OWED) : [],
+    owed: keysValid ? array(raw.owed, MAX_OWED) : [],
+    greeted: keysValid ? array(raw.greeted, MAX_SESSIONS) : [],
     intro: array(raw.intro, MAX_SESSIONS),
   };
 };
-const restored = normalizeRestoredState(stateStore.load());
+const restored = normalizeRestoredState(rawStoredState);
 // The runtime decides which persisted resume tokens are still valid (they're
 // scoped to the engine + the cwd they were captured in; see agent-runtime).
 agentRuntime?.noteRestoredAgent(restored?.agent ?? null);
@@ -2355,7 +2419,16 @@ for (const p of restored?.peers ?? []) {
       log("BOT_STATE_PEER_UNAUTHORIZED", { peer: norm(p.peerHex) });
       continue;
     }
-    const devices = (p.devices ?? []).map((d) => ({ statementAccountId: hexToBytes(d.s), encryptionPublicKey: hexToBytes(d.e) }));
+    const peerIdentifierKey = hexToBytes(p.identifierKeyHex);
+    if (peerIdentifierKey.length !== 32) throw new Error("stored peer identifier key must be 32 bytes");
+    const devices = (p.devices ?? []).map((d) => {
+      const statementAccountId = hexToBytes(d.s);
+      const encryptionPublicKey = hexToBytes(d.e);
+      if (statementAccountId.length !== 32 || encryptionPublicKey.length !== 32) {
+        throw new Error("stored peer device keys must be 32 bytes");
+      }
+      return { statementAccountId, encryptionPublicKey };
+    });
     buildSession(p.peerHex, p.identifierKeyHex, devices);
     const entry = touchSession(p.peerHex);
     if (entry && Number.isSafeInteger(p.la) && p.la > 0) entry.lastActiveAt = p.la;
@@ -2397,7 +2470,13 @@ for (const o of restored?.owed ?? []) {
   } catch (e) { log("BOT_STATE_OWED_SKIPPED", { error: String(e?.message ?? e) }); }
 }
 pumpOwed();
-if (restoredUnauthorized > 0) persist();
+// The device private key is random rather than seed-derived. Make its first
+// snapshot durable before polling; losing it would orphan every device session
+// learned during this process on the next restart.
+if (!(await persistCritical())) {
+  log("BOT_DEVICE_KEY_PERSIST_FAILED");
+  await gracefulShutdown(1);
+}
 if (restored) log("BOT_STATE_RESTORED", {
   peers: restoredPeers,
   seen: restored.seen?.length ?? 0,
@@ -2490,14 +2569,20 @@ if (greet) {
           walletPair: wallet,
           botAccountId: peerAccount,           // the codec's "bot" is simply the recipient
           botIdentifierKey: hexToBytes(identifierKeyHex),
-          ownP256PrivateKey: p256PrivateKey,
-          ownP256PublicKey: identifierKey,
+          ownX25519PrivateKey: identityPrivateKey,
+          ownDeviceX25519PublicKey: deviceKeypair.publicKey,
           text: greetText,
         });
         const today = chatRequestDayFromUnixSeconds(Math.floor(Date.now() / 1000));
         const topics = [chatRequestAllPeerStatementsTopic(peerAccount)];
         if (today != null) topics.push(chatRequestPaginationTopic(peerAccount, today));
-        await submitBounded({ walletPair: wallet, channel: session.outgoingRequestChannel, topics, scaleEncodedPayload: payload, expiryFactory });
+        await submitBounded({
+          walletPair: wallet,
+          channel: session.identitySession.outgoingRequestChannel,
+          topics,
+          scaleEncodedPayload: payload,
+          expiryFactory,
+        });
         greetedPeers.add(peerHex);
         persist();
         log("BOT_GREETED", { to: peerHex });

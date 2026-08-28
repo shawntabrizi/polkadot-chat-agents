@@ -15,9 +15,9 @@ const toHex = (bytes) => `0x${Buffer.from(bytes).toString("hex")}`;
 const fromHex = (hex) => new Uint8Array(Buffer.from(String(hex).replace(/^0x/i, ""), "hex"));
 const SUBMIT_CONTEXT = textEncoder.encode("hop-submit-v1:");
 
-const aesGcmEncrypt = (rawKey, plain) => {
+const chacha20Poly1305Encrypt = (rawKey, plain) => {
   const nonce = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", rawKey, nonce);
+  const cipher = crypto.createCipheriv("chacha20-poly1305", rawKey, nonce, { authTagLength: 16 });
   const ct = Buffer.concat([cipher.update(plain), cipher.final()]);
   return new Uint8Array(Buffer.concat([nonce, ct, cipher.getAuthTag()]));
 };
@@ -159,7 +159,7 @@ export const startMockHopNode = async () => {
   });
 
   // Upload a file the way the app does: encrypt 2MB chunks with the ticket's
-  // AES key, store each under blake2b(encrypted), then encrypt+store the
+  // ChaCha20-Poly1305 key, store each under blake2b(encrypted), then encrypt+store the
   // UploadedFile metadata whose hash becomes the message identifier.
   const putFile = (bytes, {
     chunkSize = 2_000_000,
@@ -169,22 +169,22 @@ export const startMockHopNode = async () => {
     metadataOverride = null,
   } = {}) => {
     const claimTicket = new Uint8Array(crypto.randomBytes(32));
-    const aesKey = blake2b32(textEncoder.encode("encryption"), claimTicket);
+    const encryptionKey = blake2b32(textEncoder.encode("encryption"), claimTicket);
     const recipientPub = getPublicKey(secretFromSeed(blake2b32(textEncoder.encode("signer"), claimTicket)));
     const chunkHashes = [];
     for (let at = 0; at < bytes.length; at += chunkSize) {
-      let blob = aesGcmEncrypt(aesKey, bytes.subarray(at, at + chunkSize));
+      let blob = chacha20Poly1305Encrypt(encryptionKey, bytes.subarray(at, at + chunkSize));
       let hash = blake2b32(blob);
       if (tamperChunk && at === 0) {
         blob = Uint8Array.from(blob);
         blob[20] ^= 0xff; // corrupt ciphertext; hash now mismatches
-        if (rehashTamper) hash = blake2b32(blob); // hash matches, GCM auth fails
+        if (rehashTamper) hash = blake2b32(blob); // hash matches, AEAD auth fails
       }
       store.set(toHex(hash), { blob, recipientPub });
       chunkHashes.push(hash);
     }
     const metadata = metadataOverride ?? encodeUploadedFile(totalSizeOverride ?? bytes.length, chunkHashes);
-    const metaBlob = aesGcmEncrypt(aesKey, metadata);
+    const metaBlob = chacha20Poly1305Encrypt(encryptionKey, metadata);
     const identifier = blake2b32(metaBlob);
     store.set(toHex(identifier), { blob: metaBlob, recipientPub });
     return { identifier, claimTicket, wssUrl: url };

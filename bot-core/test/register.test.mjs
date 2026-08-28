@@ -8,6 +8,11 @@ import { generateMnemonic, mnemonicToMiniSecret } from "@polkadot-labs/hdkd-help
 import { verify as verifySr25519 } from "@scure/sr25519";
 import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
 import {
+  deriveX25519PrivateKey,
+  encodeAccountEcdhKey,
+  x25519PublicKeyFromPrivateKey,
+} from "../vendor/app-chat-codec.mjs";
+import {
   acquireIdentitySession,
   obtainIdentitySession,
   redeemIdentityVoucher,
@@ -240,6 +245,7 @@ test("username registration sends the acquired bearer token on the protected wri
     { mode: 0o700 },
   );
   const requests = [];
+  const mnemonic = generateMnemonic(128);
   const fetchImpl = async (url, options) => {
     requests.push({ url: String(url), options });
     if (String(url).endsWith("/attester")) {
@@ -250,7 +256,7 @@ test("username registration sends the acquired bearer token on the protected wri
 
   try {
     await registerIdentity({
-      mnemonic: generateMnemonic(128),
+      mnemonic,
       username: "testbot.01",
       backendUrl: "https://identity.example.test",
       bandersnatchBin: proofHelper,
@@ -266,4 +272,27 @@ test("username registration sends the acquired bearer token on the protected wri
   assert.equal(new Headers(requests[0].options.headers).has("authorization"), false);
   assert.equal(requests[1].url, "https://identity.example.test/api/v1/usernames");
   assert.equal(new Headers(requests[1].options.headers).get("authorization"), "Bearer issued-bearer-token");
+
+  const body = JSON.parse(requests[1].options.body);
+  const rootSeed = mnemonicToMiniSecret(mnemonic);
+  const wallet = deriveSr25519PairFromSeed(rootSeed, "//wallet");
+  const expectedIdentifierKey = encodeAccountEcdhKey(
+    x25519PublicKeyFromPrivateKey(deriveX25519PrivateKey(rootSeed)),
+  );
+  assert.equal(body.identifierKey, `0x${Buffer.from(expectedIdentifierKey).toString("hex")}`);
+  assert.equal(expectedIdentifierKey.length, 65);
+  assert.equal(expectedIdentifierKey[0], 0);
+  assert.deepEqual(expectedIdentifierKey.slice(33), new Uint8Array(32));
+
+  const username = new TextEncoder().encode("testbot");
+  const resourcesPayload = concatBytes(
+    wallet.publicKey,
+    new Uint8Array(32).fill(0x33),
+    expectedIdentifierKey,
+    Uint8Array.of(username.length << 2),
+    username,
+    Uint8Array.of(0),
+  );
+  const consumerSignature = new Uint8Array(Buffer.from(body.consumerRegistrationSignature.slice(2), "hex"));
+  assert.equal(verifySr25519(resourcesPayload, consumerSignature, wallet.publicKey), true);
 });

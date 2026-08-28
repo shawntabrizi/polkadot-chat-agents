@@ -240,7 +240,7 @@ variables `pca deploy` writes into `bot.env` automatically.
 | `BOT_NETWORK_PROFILE` | `devnet` when no custom endpoint is supplied | `devnet` or `paseo`; selects the matching People descriptor, fallback RPCs, identity service, and Bulletin service. Empty means a compatible custom endpoint. **gen** |
 | `BOT_ENDPOINT` | Products Devnet People wss | Statement-store RPC node to poll and publish to. **gen** |
 | `BOT_USERNAME` | `""` | Registered network username (display/search only). **gen** |
-| `BOT_PEER_IDENTIFIER_KEYS` | `""` | `peerhex=keyhex,…` — pin identifier keys, skipping the on-chain lookup (tests / fixed fleets). |
+| `BOT_PEER_IDENTIFIER_KEYS` | `""` | `peerhex=containerhex,…` — pin 65-byte RFC004 identifier-key containers, skipping the on-chain lookup (tests / fixed fleets). |
 
 Named profiles are deliberately complete rather than aliases for one RPC:
 

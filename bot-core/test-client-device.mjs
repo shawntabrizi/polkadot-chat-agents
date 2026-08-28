@@ -2,13 +2,13 @@
 // Headless test client that reproduces the mobile app's DEVICE-channel
 // behaviour, which test-client.mjs cannot (it follows up on the identity
 // channel). Mirrors what a phone does:
-//  - opener v2 advertising a SEPARATE device P256 key (statement acct = identity acct)
+//  - opener v2 advertising a SEPARATE device X25519 key (statement acct = identity acct)
 //  - follow-ups sent on the DEVICE session topic as a multi-device envelope,
 //    preceded by an undecodable richText+attachment message (like a photo) to
 //    exercise batch resilience
 // Usage:
 //   node test-client-device.mjs --seed-hex 0x.. --bot-account 0x.. \
-//     --bot-identifier-key 0x.. [--no-opener 1] [--wait-secs 30] \
+//     --bot-identifier-key 0x.. [--bot-device-key 0x..] [--no-opener 1] [--wait-secs 30] \
 //     [--settle-ms N] [--poll-ms 2000] "opener" ["follow-up" ...]
 // --settle-ms N ends a wait window early once at least one statement arrived
 // in it AND nothing new has arrived for N ms (0 = always sit out the full
@@ -20,15 +20,16 @@
 //   --reply 1        send follow-ups as kind-7 replies quoting the bot's last message
 //   --react "🔥"     react to the bot's last message (expect ACK, no reply)
 //   --offer-call 1   send a WebRTC offer and require a dataChannelClosed decline
-import crypto from "node:crypto";
+import { blake2b } from "@noble/hashes/blake2.js";
 import { createLazyClient, createPapiStatementStoreAdapter } from "@novasamatech/statement-store";
 import { getWsProvider } from "polkadot-api/ws";
 import {
   chatRequestAllPeerStatementsTopic,
   chatRequestDayFromUnixSeconds,
   chatRequestPaginationTopic,
+  decodeAccountEcdhKey,
   decodeSessionStatementPayload,
-  deriveP256PrivateKey,
+  deriveX25519PrivateKey,
   encodeNativeChatRequestV2,
   encodeOpaqueTextMessage,
   encodeOpaqueReactionMessage,
@@ -37,9 +38,9 @@ import {
   encodeSessionResponsePayload,
   makeAppUuid,
   makePeerSession,
-  p256PublicKeyFromPrivateKey,
   scaleEncodeBytes,
   submitAppStatement,
+  x25519PublicKeyFromPrivateKey,
 } from "./vendor/app-chat-codec.mjs";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
 import { withTimeout } from "./vendor/lib/async-utils.mjs";
@@ -54,15 +55,20 @@ const opt = (k) => { const i = args.indexOf(`--${k}`); return i >= 0 ? args[i + 
 const texts = args.filter((a, i) => !a.startsWith("--") && (i === 0 || !args[i - 1].startsWith("--")));
 const seed = hexToBytes(opt("seed-hex"));
 const botAccountId = hexToBytes(opt("bot-account"));
-const botIdentifierKey = hexToBytes(opt("bot-identifier-key"));
+const botIdentifier = decodeAccountEcdhKey(hexToBytes(opt("bot-identifier-key")));
+if (botIdentifier.kind !== "x25519") throw new Error("bot uses an unsupported chat encryption key type");
+const botIdentifierKey = botIdentifier.publicKey;
 const waitSecs = Number(opt("wait-secs") ?? 30);
 const settleMs = Number(opt("settle-ms") ?? 0);
 const pollMs = Number(opt("poll-ms") ?? 2000);
 
 const wallet = deriveSr25519PairFromSeed(seed, "//wallet");
-const identityPriv = deriveP256PrivateKey(deriveSr25519PairFromSeed(seed, "//wallet//chat"));
-const devicePriv = deriveP256PrivateKey(deriveSr25519PairFromSeed(seed, "//wallet//chat//dev1"));
-const devicePub = p256PublicKeyFromPrivateKey(devicePriv);
+const identityPriv = deriveX25519PrivateKey(seed);
+// A real app persists a random device key. This headless test client derives a
+// stable, separate fixture key so independent --no-opener invocations still
+// represent the same device without writing another state file.
+const devicePriv = blake2b(seed, { key: new TextEncoder().encode("pca-test-device"), dkLen: 32 });
+const devicePub = x25519PublicKeyFromPrivateKey(devicePriv);
 
 let lastPriority = 0n;
 const expiryFactory = (attempt = 0) => {
@@ -76,26 +82,35 @@ const lazy = createLazyClient(getWsProvider(opt("endpoint") ?? "wss://people-pas
 const store = createPapiStatementStoreAdapter(lazy);
 const requestRpc = lazy.getRequestFn();
 
-// Device-perspective session: this is what the phone publishes follow-ups with.
-const deviceSession = makePeerSession({
-  ownAccountId: wallet.publicKey, peerAccountId: botAccountId,
-  peerIdentifierKey: botIdentifierKey, ownP256PrivateKey: devicePriv,
-  peerDevices: [{ statementAccountId: botAccountId, encryptionPublicKey: botIdentifierKey }],
-});
-// Receiver view for bot replies (bot encrypts outer with identity secret, inner per-device).
+// Identity view decrypts the force-identity acceptance. Once that acceptance
+// advertises the bot's device key, deviceSession becomes the phone's normal
+// multi-device sender and receiver view.
 const identitySession = makePeerSession({
   ownAccountId: wallet.publicKey, peerAccountId: botAccountId,
-  peerIdentifierKey: botIdentifierKey, ownP256PrivateKey: identityPriv,
+  peerIdentifierKey: botIdentifierKey, ownX25519PrivateKey: identityPriv,
+  ownDeviceX25519PrivateKey: devicePriv,
 });
-const deviceEcdh = crypto.createECDH("prime256v1");
-deviceEcdh.setPrivateKey(Buffer.from(devicePriv));
-const recvSession = {
-  ...identitySession,
-  multiDeviceKeySharedSecret: new Uint8Array(deviceEcdh.computeSecret(Buffer.from(botIdentifierKey))),
+let deviceSession = null;
+let receiveSessions = [identitySession.identitySession];
+let receiveTopics = [identitySession.identitySession.peerSessionId];
+const configureBotDevice = (publicKey) => {
+  deviceSession = makePeerSession({
+    ownAccountId: wallet.publicKey,
+    peerAccountId: botAccountId,
+    peerIdentifierKey: botIdentifierKey,
+    ownX25519PrivateKey: identityPriv,
+    ownDeviceX25519PrivateKey: devicePriv,
+    peerDevices: [{ statementAccountId: botAccountId, encryptionPublicKey: publicKey }],
+  });
+  const incoming = deviceSession.incomingDeviceSessions[0];
+  receiveSessions = [incoming, identitySession.identitySession];
+  receiveTopics = [incoming.peerSessionId, identitySession.identitySession.peerSessionId];
 };
+const pinnedBotDevice = opt("bot-device-key");
+if (pinnedBotDevice) configureBotDevice(hexToBytes(pinnedBotDevice));
 
 console.log(`sender=0x${bytesToHex(wallet.publicKey)} deviceKey=0x${bytesToHex(devicePub).slice(0, 16)}…`);
-console.log(`device ownSessionId (bot must poll this): 0x${bytesToHex(deviceSession.ownSessionId)}`);
+console.log(`device ownSessionId (bot must poll this): 0x${bytesToHex((deviceSession ?? identitySession).ownSessionId)}`);
 
 const seen = new Set();
 let statementsSeen = 0;
@@ -105,7 +120,7 @@ let acked = [];
 let lastBotMessageId = null;
 const declinedOffers = [];
 const drain = async () => {
-  for (const topic of [identitySession.peerSessionId]) {
+  for (const topic of receiveTopics) {
     let stmts = [];
     // Bound every RPC: papi buffers requests forever on a stalled socket
     // instead of rejecting, which would freeze the poll loop (same reason
@@ -119,12 +134,17 @@ const drain = async () => {
       statementsSeen += 1;
       lastStatementAt = Date.now();
       let d = null;
-      for (const sess of [recvSession, identitySession]) {
+      for (const sess of receiveSessions) {
         try { d = decodeSessionStatementPayload(data, sess, botAccountId); break; } catch (e) { d = { err: e.message }; }
       }
       if (d?.err) { console.log(`  [recv-decode-fail] ${d.err}`); continue; }
       if (d?.kind === "request") {
         for (const m of d.messages ?? []) {
+          if (m.kind === "deviceChatAccepted" && m.encryptionPublicKey) {
+            configureBotDevice(m.encryptionPublicKey);
+            console.log(`  [BOT DEVICE] 0x${bytesToHex(m.encryptionPublicKey).slice(0, 16)}…`);
+            continue;
+          }
           if (m.kind === "edited") { console.log(`  [BOT EDIT ${m.targetMessageId}] ${m.text}`); continue; }
           if (m.text) { replies += 1; lastBotMessageId = m.messageId ?? lastBotMessageId; console.log(`  [BOT ${m.messageId}] ${m.text}`); }
           if (m.kind === "dataChannelClosed") { declinedOffers.push(m.offerId); console.log(`  [CALL CLOSED] offerId=${m.offerId}`); }
@@ -134,11 +154,12 @@ const drain = async () => {
         // exercise the never-fetched-placeholder fallback.
         if (!opt("no-ack")) {
           try {
+            const ackSession = deviceSession ?? identitySession.identitySession;
             await withTimeout(submitAppStatement(requestRpc, {
               walletPair: wallet,
-              channel: identitySession.responseChannel,
-              topics: [identitySession.ownSessionId],
-              scaleEncodedPayload: encodeSessionResponsePayload(identitySession, d.requestId),
+              channel: ackSession.responseChannel,
+              topics: [ackSession.ownSessionId],
+              scaleEncodedPayload: encodeSessionResponsePayload(ackSession, d.requestId),
               expiryFactory,
             }), 8000, "ack submit");
           } catch (e) { console.log(`  [ack-send-fail] ${e?.message ?? e}`); }
@@ -168,9 +189,15 @@ if (!opt("no-opener")) {
   if (day != null) topics.push(chatRequestPaginationTopic(botAccountId, day));
   const { payload } = encodeNativeChatRequestV2({
     walletPair: wallet, botAccountId, botIdentifierKey,
-    ownP256PrivateKey: identityPriv, ownP256PublicKey: devicePub, text: texts[0],
+    ownX25519PrivateKey: identityPriv, ownDeviceX25519PublicKey: devicePub, text: texts[0],
   });
-  await submitAppStatement(requestRpc, { walletPair: wallet, channel: identitySession.outgoingRequestChannel, topics, scaleEncodedPayload: payload, expiryFactory });
+  await submitAppStatement(requestRpc, {
+    walletPair: wallet,
+    channel: identitySession.identitySession.outgoingRequestChannel,
+    topics,
+    scaleEncodedPayload: payload,
+    expiryFactory,
+  });
   console.log(`[ME opener] ${texts[0]}`);
   await pollFor(waitSecs);
   followUps = texts.slice(1);
@@ -189,6 +216,7 @@ const poison = scaleEncodeBytes(concat(
   Uint8Array.of(0, 0, 0, 0),                    // junk attachment body
 ));
 const submitDeviceBatch = async (opaqueMessages, label) => {
+  if (deviceSession == null) throw new Error("bot device key is unknown; send an opener or pass --bot-device-key");
   const payload = encodeSessionRequestPayload(deviceSession, makeAppUuid(), opaqueMessages);
   await submitAppStatement(requestRpc, {
     walletPair: wallet,

@@ -3,7 +3,7 @@
 // Generates a lite-person proof (via the vendored bandersnatch CLI) and submits
 // a username/consumer claim to the identity backend, which attests it on-chain
 // so the bot becomes messageable. Ported from the faucet's registration flow,
-// using the same P256 chat-key derivation the transport uses (keeps the
+// using the same X25519 chat-key derivation the transport uses (keeps the
 // registered identifier_key consistent with what bot-core runs).
 
 import { spawnSync } from "node:child_process";
@@ -12,7 +12,11 @@ import { blake2b } from "@noble/hashes/blake2.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { mnemonicToEntropy, mnemonicToMiniSecret, ss58Address } from "@polkadot-labs/hdkd-helpers";
 import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
-import { deriveP256PrivateKey, p256PublicKeyFromPrivateKey } from "../vendor/app-chat-codec.mjs";
+import {
+  deriveX25519PrivateKey,
+  encodeAccountEcdhKey,
+  x25519PublicKeyFromPrivateKey,
+} from "../vendor/app-chat-codec.mjs";
 import { withTimeout } from "../vendor/lib/async-utils.mjs";
 
 // Re-export the shared timeout helper (cli.mjs uses it for chain queries): papi
@@ -324,7 +328,8 @@ export async function registerIdentity({
   const rootSeed = mnemonicToMiniSecret(mnemonic);
   const wallet = deriveSr25519PairFromSeed(rootSeed, "//wallet");
   const accountId = wallet.publicKey;
-  const p256Pub = p256PublicKeyFromPrivateKey(deriveP256PrivateKey(deriveSr25519PairFromSeed(rootSeed, "//wallet//chat")));
+  const x25519Pub = x25519PublicKeyFromPrivateKey(deriveX25519PrivateKey(rootSeed));
+  const identifierKey = encodeAccountEcdhKey(x25519Pub);
   const liteEntropy = blake2b(mnemonicToEntropy(mnemonic), { dkLen: 32 });
 
   const attesterData = await jsonFetch(new URL("/api/v1/attester", backendUrl), { method: "GET" }, fetchImpl);
@@ -337,7 +342,7 @@ export async function registerIdentity({
   const liteMessage = concatBytes(enc.encode(MSG_PREFIX), accountId, hexToBytes(ringVrfKey));
   const litePerson = await runLitePerson(bandersnatchBin, bytesToHex(liteEntropy), bytesToHex(liteMessage));
 
-  const resourcesSig = concatBytes(accountId, hexToBytes(attester), p256Pub, scaleString(base), Uint8Array.of(0));
+  const resourcesSig = concatBytes(accountId, hexToBytes(attester), identifierKey, scaleString(base), Uint8Array.of(0));
   const payload = {
     candidateAccountId: ss58Address(accountId, ss58Prefix),
     username: base,
@@ -345,7 +350,7 @@ export async function registerIdentity({
     ringVrfKey,
     proofOfOwnership: litePerson.proofOfOwnership,
     consumerRegistrationSignature: bytesToHex(wallet.sign(resourcesSig)),
-    identifierKey: bytesToHex(p256Pub),
+    identifierKey: bytesToHex(identifierKey),
   };
   // The backend rejects a null preferredDigits; only send it when chosen,
   // otherwise let the backend auto-assign an available number.
@@ -363,7 +368,7 @@ export async function registerIdentity({
   return {
     account: bytesToHex(accountId),
     address: ss58Address(accountId, ss58Prefix),
-    identifierKey: bytesToHex(p256Pub),
+    identifierKey: bytesToHex(identifierKey),
     username: submitted?.username ?? (preferredDigits ? `${base}.${preferredDigits}` : base),
     submitted,
   };

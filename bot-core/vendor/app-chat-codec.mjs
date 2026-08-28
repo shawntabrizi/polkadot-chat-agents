@@ -363,95 +363,158 @@ export function isDesktopLikeChatRequest(decodedRequest) {
   return isDesktopNanoidMessageId(decodedRequest?.messageId);
 }
 
-export function deriveP256PrivateKey(chatSr25519Pair) {
-  const privateKey = chatSr25519Pair.privateKey;
-  if (privateKey == null) {
-    throw new Error("Cannot derive chat P-256 key without sr25519 private key material");
+const X25519_PRIVATE_KEY_DER_PREFIX = Buffer.from("302e020100300506032b656e04220420", "hex");
+const X25519_PUBLIC_KEY_DER_PREFIX = Buffer.from("302a300506032b656e032100", "hex");
+
+function requireX25519Key(key, label) {
+  if (!(key instanceof Uint8Array) || key.length !== 32) {
+    throw new Error(`${label} must be 32 bytes`);
   }
-  return blake2b32(privateKey.slice(0, 32));
+  return key;
 }
 
-export function p256PublicKeyFromPrivateKey(privateKey) {
-  const ecdh = crypto.createECDH("prime256v1");
-  ecdh.setPrivateKey(Buffer.from(privateKey));
-  return new Uint8Array(ecdh.getPublicKey(null, "uncompressed"));
+function x25519PrivateKeyObject(privateKey) {
+  requireX25519Key(privateKey, "X25519 private key");
+  return crypto.createPrivateKey({
+    key: Buffer.concat([X25519_PRIVATE_KEY_DER_PREFIX, Buffer.from(privateKey)]),
+    format: "der",
+    type: "pkcs8",
+  });
 }
 
-function p256EphemeralKeypair() {
-  const ecdh = crypto.createECDH("prime256v1");
-  ecdh.generateKeys();
+function x25519PublicKeyObject(publicKey) {
+  requireX25519Key(publicKey, "X25519 public key");
+  return crypto.createPublicKey({
+    key: Buffer.concat([X25519_PUBLIC_KEY_DER_PREFIX, Buffer.from(publicKey)]),
+    format: "der",
+    type: "spki",
+  });
+}
+
+export function deriveX25519PrivateKey(rootSeed) {
+  requireX25519Key(rootSeed, "bot root seed");
+  const ecdhRoot = blake2b32(rootSeed, textEncoder.encode("ecdh"));
+  const chatChainCode = new Uint8Array(32);
+  chatChainCode.set(scaleEncodeBytes(textEncoder.encode("chat")));
+  // The app roots this tree in BIP39 entropy. Bots retain only BOT_SEED_HEX at
+  // runtime, so registration and transport deliberately root it in that
+  // 32-byte mini-secret instead. Interop requires their published key to match
+  // each other; it does not require matching a mobile wallet's mnemonic tree.
+  return blake2b32(ecdhRoot, chatChainCode);
+}
+
+export function x25519PublicKeyFromPrivateKey(privateKey) {
+  const der = crypto.createPublicKey(x25519PrivateKeyObject(privateKey)).export({ format: "der", type: "spki" });
+  return new Uint8Array(der.subarray(der.length - 32));
+}
+
+export function generateX25519Keypair() {
+  const { privateKey, publicKey } = crypto.generateKeyPairSync("x25519");
+  const privateDer = privateKey.export({ format: "der", type: "pkcs8" });
+  const publicDer = publicKey.export({ format: "der", type: "spki" });
   return {
-    privateKey: new Uint8Array(ecdh.getPrivateKey()),
-    publicKey: new Uint8Array(ecdh.getPublicKey(null, "uncompressed")),
+    privateKey: new Uint8Array(privateDer.subarray(privateDer.length - 32)),
+    publicKey: new Uint8Array(publicDer.subarray(publicDer.length - 32)),
   };
 }
 
-function p256SharedSecret(privateKey, peerPublicKey) {
-  const ecdh = crypto.createECDH("prime256v1");
-  ecdh.setPrivateKey(Buffer.from(privateKey));
-  return new Uint8Array(ecdh.computeSecret(Buffer.from(peerPublicKey)));
+export function x25519SharedSecret(privateKey, peerPublicKey) {
+  let sharedSecret;
+  try {
+    sharedSecret = new Uint8Array(crypto.diffieHellman({
+      privateKey: x25519PrivateKeyObject(privateKey),
+      publicKey: x25519PublicKeyObject(peerPublicKey),
+    }));
+  } catch (error) {
+    throw new Error("X25519 agreement rejected the peer public key", { cause: error });
+  }
+  if (sharedSecret.every((byte) => byte === 0)) {
+    throw new Error("X25519 agreement rejected an all-zero shared secret");
+  }
+  return sharedSecret;
 }
 
-function aesKeyFromSharedSecret(sharedSecret) {
-  return Buffer.from(crypto.hkdfSync("sha256", Buffer.from(sharedSecret), Buffer.alloc(0), Buffer.alloc(0), 32));
+export function encodeAccountEcdhKey(value) {
+  if (value?.kind === "unsupported") {
+    if (!(value.raw instanceof Uint8Array) || value.raw.length !== 65) {
+      throw new Error("Unsupported on-chain encryption key must retain 65 raw bytes");
+    }
+    return value.raw.slice();
+  }
+  const publicKey = value?.kind === "x25519" ? value.publicKey : value;
+  requireX25519Key(publicKey, "X25519 public key");
+  const container = new Uint8Array(65);
+  container.set(publicKey, 1);
+  return container;
 }
 
-function aesGcmEncrypt(sharedSecret, data) {
-  const nonce = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", aesKeyFromSharedSecret(sharedSecret), nonce);
+export function decodeAccountEcdhKey(container) {
+  if (!(container instanceof Uint8Array) || container.length !== 65) {
+    throw new Error("On-chain encryption key must be 65 bytes");
+  }
+  if (container[0] !== 0) {
+    return { kind: "unsupported", raw: container.slice() };
+  }
+  // RFC004 reserves the trailing 32 bytes for future use; readers ignore it.
+  return { kind: "x25519", publicKey: container.slice(1, 33) };
+}
+
+export function aeadKeyFromSharedSecret(sharedSecret) {
+  requireX25519Key(sharedSecret, "X25519 shared secret");
+  return new Uint8Array(crypto.hkdfSync(
+    "sha256",
+    Buffer.from(sharedSecret),
+    Buffer.alloc(0),
+    Buffer.alloc(0),
+    32,
+  ));
+}
+
+export function chacha20Poly1305EncryptRawKey(rawKey, data, nonce = crypto.randomBytes(12)) {
+  requireX25519Key(rawKey, "ChaCha20-Poly1305 key");
+  if (!(nonce instanceof Uint8Array) || nonce.length !== 12) {
+    throw new Error("ChaCha20-Poly1305 nonce must be 12 bytes");
+  }
+  const cipher = crypto.createCipheriv("chacha20-poly1305", Buffer.from(rawKey), Buffer.from(nonce), { authTagLength: 16 });
   const ciphertext = Buffer.concat([cipher.update(Buffer.from(data)), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return new Uint8Array(Buffer.concat([nonce, ciphertext, tag]));
+  return new Uint8Array(Buffer.concat([Buffer.from(nonce), ciphertext, cipher.getAuthTag()]));
 }
 
-function aesGcmEncryptRawKey(rawKey, data) {
-  const nonce = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", Buffer.from(rawKey), nonce);
-  const ciphertext = Buffer.concat([cipher.update(Buffer.from(data)), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return new Uint8Array(Buffer.concat([nonce, ciphertext, tag]));
+function chacha20Poly1305Encrypt(sharedSecret, data) {
+  return chacha20Poly1305EncryptRawKey(aeadKeyFromSharedSecret(sharedSecret), data);
 }
 
-export function aesGcmDecrypt(sharedSecret, encryptedData) {
+export function chacha20Poly1305DecryptRawKey(rawKey, encryptedData) {
+  requireX25519Key(rawKey, "ChaCha20-Poly1305 key");
   const encrypted = Buffer.from(encryptedData);
   if (encrypted.length < 28) {
-    throw new Error("AES-GCM payload is too short");
+    throw new Error("ChaCha20-Poly1305 payload is too short");
   }
 
   const nonce = encrypted.subarray(0, 12);
   const tag = encrypted.subarray(encrypted.length - 16);
   const ciphertext = encrypted.subarray(12, encrypted.length - 16);
-  const decipher = crypto.createDecipheriv("aes-256-gcm", aesKeyFromSharedSecret(sharedSecret), nonce);
+  const decipher = crypto.createDecipheriv("chacha20-poly1305", Buffer.from(rawKey), nonce, { authTagLength: 16 });
   decipher.setAuthTag(tag);
   return new Uint8Array(Buffer.concat([decipher.update(ciphertext), decipher.final()]));
 }
 
-function aesGcmDecryptRawKey(rawKey, encryptedData) {
-  const encrypted = Buffer.from(encryptedData);
-  if (encrypted.length < 28) {
-    throw new Error("AES-GCM payload is too short");
-  }
-
-  const nonce = encrypted.subarray(0, 12);
-  const tag = encrypted.subarray(encrypted.length - 16);
-  const ciphertext = encrypted.subarray(12, encrypted.length - 16);
-  const decipher = crypto.createDecipheriv("aes-256-gcm", Buffer.from(rawKey), nonce);
-  decipher.setAuthTag(tag);
-  return new Uint8Array(Buffer.concat([decipher.update(ciphertext), decipher.final()]));
+export function chacha20Poly1305Decrypt(sharedSecret, encryptedData) {
+  return chacha20Poly1305DecryptRawKey(aeadKeyFromSharedSecret(sharedSecret), encryptedData);
 }
 
 export function makePeerSession({
   ownAccountId,
   peerAccountId,
   peerIdentifierKey,
-  ownP256PrivateKey,
-  ownDeviceP256PrivateKey = ownP256PrivateKey,
+  ownX25519PrivateKey,
+  ownDeviceX25519PrivateKey = ownX25519PrivateKey,
   peerDevices = [],
   ownPin = null,
   peerPin = null,
 }) {
-  const sharedSecret = p256SharedSecret(ownDeviceP256PrivateKey, peerIdentifierKey);
-  const identitySharedSecret = p256SharedSecret(ownP256PrivateKey, peerIdentifierKey);
+  const sharedSecret = x25519SharedSecret(ownDeviceX25519PrivateKey, peerIdentifierKey);
+  const identitySharedSecret = x25519SharedSecret(ownX25519PrivateKey, peerIdentifierKey);
   const deviceInfos = peerDevices.map((device) => {
     const statementAccountId = typeof device.statementAccountId === "string"
       ? hexToBytes(device.statementAccountId)
@@ -459,8 +522,8 @@ export function makePeerSession({
     const encryptionPublicKey = typeof device.encryptionPublicKey === "string"
       ? hexToBytes(device.encryptionPublicKey)
       : device.encryptionPublicKey;
-    const deviceSharedSecret = p256SharedSecret(ownDeviceP256PrivateKey, encryptionPublicKey);
-    const incomingSharedSecret = p256SharedSecret(ownP256PrivateKey, encryptionPublicKey);
+    const deviceSharedSecret = x25519SharedSecret(ownDeviceX25519PrivateKey, encryptionPublicKey);
+    const incomingSharedSecret = x25519SharedSecret(ownX25519PrivateKey, encryptionPublicKey);
     const incoming = makeSessionParts(
       ownAccountId,
       statementAccountId,
@@ -487,12 +550,14 @@ export function makePeerSession({
   });
 
   const session = makeSessionParts(ownAccountId, peerAccountId, sharedSecret, ownPin, peerPin);
+  const identitySession = makeSessionParts(ownAccountId, peerAccountId, identitySharedSecret, ownPin, peerPin);
   return {
     ...session,
     sharedSecret,
     identitySharedSecret,
+    identitySession: { ...identitySession, sharedSecret: identitySharedSecret },
     multiDeviceKeySharedSecret: deviceInfos[0]?.sharedSecret ?? sharedSecret,
-    ownDeviceP256PrivateKey,
+    ownDeviceX25519PrivateKey,
     ownAccountId,
     peerAccountId,
     peerIdentifierKey,
@@ -571,13 +636,14 @@ export function encodeNativeChatRequestV2({
   walletPair,
   botAccountId,
   botIdentifierKey,
-  ownP256PrivateKey,
-  ownP256PublicKey = p256PublicKeyFromPrivateKey(ownP256PrivateKey),
+  ownX25519PrivateKey,
+  ownDeviceX25519PublicKey,
   text,
   messageId = makeAppUuid(),
   timestamp = chatTimestampNow(),
 }) {
-  const identitySharedSecret = p256SharedSecret(ownP256PrivateKey, botIdentifierKey);
+  requireX25519Key(ownDeviceX25519PublicKey, "device X25519 public key");
+  const identitySharedSecret = x25519SharedSecret(ownX25519PrivateKey, botIdentifierKey);
   const identityProof = blake2b32(
     concatBytes(
       walletPair.publicKey,
@@ -592,7 +658,7 @@ export function encodeNativeChatRequestV2({
     Uint8Array.of(1),
     walletPair.publicKey,
     identityProof,
-    ownP256PublicKey,
+    ownDeviceX25519PublicKey,
     Uint8Array.of(0),
     Uint8Array.of(1),
     Uint8Array.of(1),
@@ -607,8 +673,8 @@ export function encodeNativeChatRequestV2({
     signature,
     walletPair.publicKey,
   );
-  const envelopeKey = p256EphemeralKeypair();
-  const encrypted = aesGcmEncrypt(p256SharedSecret(envelopeKey.privateKey, botIdentifierKey), remoteModel);
+  const envelopeKey = generateX25519Keypair();
+  const encrypted = chacha20Poly1305Encrypt(x25519SharedSecret(envelopeKey.privateKey, botIdentifierKey), remoteModel);
   const statementData = concatBytes(scaleEncodeBytes(envelopeKey.publicKey), scaleEncodeBytes(encrypted));
   const payload = scaleEncodeBytes(statementData);
   return {
@@ -620,7 +686,7 @@ export function encodeNativeChatRequestV2({
   };
 }
 
-export function decodeEncryptedChatRequestPayload(payload, ownP256PrivateKey, ownAccountId) {
+export function decodeEncryptedChatRequestPayload(payload, ownX25519PrivateKey, ownAccountId) {
   let remotePayloadBytes = payload;
   try {
     const wrapped = scaleDecodeBytesAt(payload, 0, MAX_SCALE_BYTES, "encrypted chat request");
@@ -632,16 +698,16 @@ export function decodeEncryptedChatRequestPayload(payload, ownP256PrivateKey, ow
   }
 
   let offset = 0;
-  const encryptionPubKey = scaleDecodeBytesAt(remotePayloadBytes, offset, 65, "chat request encryption key");
-  if (encryptionPubKey.value.length !== 65) throw new Error("invalid chat request encryption key length");
+  const encryptionPubKey = scaleDecodeBytesAt(remotePayloadBytes, offset, 32, "chat request encryption key");
+  if (encryptionPubKey.value.length !== 32) throw new Error("invalid chat request encryption key length");
   offset = encryptionPubKey.offset;
   const encryptedData = scaleDecodeBytesAt(remotePayloadBytes, offset, MAX_SCALE_BYTES, "chat request ciphertext");
   if (encryptedData.offset !== remotePayloadBytes.length) {
     throw new Error("Encrypted chat request model has trailing bytes");
   }
 
-  const requestSharedSecret = p256SharedSecret(ownP256PrivateKey, encryptionPubKey.value);
-  const decrypted = aesGcmDecrypt(requestSharedSecret, encryptedData.value);
+  const requestSharedSecret = x25519SharedSecret(ownX25519PrivateKey, encryptionPubKey.value);
+  const decrypted = chacha20Poly1305Decrypt(requestSharedSecret, encryptedData.value);
   const remoteModel = decodeChatRequestRemoteModel(decrypted, newScaleVectorBudget());
   const proofPayload = encodeChatRequestProofPayload(remoteModel.messageBytes, ownAccountId);
   const isValid = sr25519Verify(proofPayload, remoteModel.proof.signature, remoteModel.proof.signer);
@@ -662,12 +728,12 @@ export function decodeEncryptedChatRequestPayload(payload, ownP256PrivateKey, ow
   };
 }
 
-export function verifyChatRequestIdentityProof(decodedRequest, ownP256PrivateKey, peerIdentityPublicKey) {
+export function verifyChatRequestIdentityProof(decodedRequest, ownX25519PrivateKey, peerIdentityPublicKey) {
   if (decodedRequest.identityProof == null) {
     return true;
   }
 
-  const sharedSecret = p256SharedSecret(ownP256PrivateKey, peerIdentityPublicKey);
+  const sharedSecret = x25519SharedSecret(ownX25519PrivateKey, peerIdentityPublicKey);
   const payload = concatBytes(
     decodedRequest.identityProof.identityAccountId,
     decodedRequest.peerStatementAccountId,
@@ -707,7 +773,7 @@ function decodeChatRequestMessageAt(bytes, offset = 0, budget = newScaleVectorBu
     offset = identityAccountId.offset;
     const proof = fixedBytesAt(bytes, offset, 32, "identity proof");
     offset = proof.offset;
-    const deviceKey = fixedBytesAt(bytes, offset, 65, "device encryption key");
+    const deviceKey = fixedBytesAt(bytes, offset, 32, "device encryption key");
     offset = deviceKey.offset;
     deviceEncPubKey = deviceKey.value;
     identityProof = { identityAccountId: identityAccountId.value, proof: proof.value };
@@ -1014,13 +1080,38 @@ export function encodeOpaqueChatAcceptedMessage({
   });
 }
 
-export function encodeOpaqueMultiChatAcceptedMessage({
+export function encodeOpaqueDeviceAddedMessage({
+  messageId = makeAppUuid(),
+  timestamp = chatTimestampNow(),
+  statementAccountId,
+  encryptionPublicKey,
+}) {
+  requireX25519Key(encryptionPublicKey, "device X25519 public key");
+  if (!(statementAccountId instanceof Uint8Array) || statementAccountId.length !== 32) {
+    throw new Error("device statement account must be 32 bytes");
+  }
+  return encodeOpaqueRemoteMessage({
+    messageId,
+    timestamp,
+    content: concatBytes(
+      Uint8Array.of(17),
+      scaleEncodeBytes(statementAccountId),
+      scaleEncodeBytes(encryptionPublicKey),
+    ),
+  });
+}
+
+export function encodeOpaqueDeviceChatAcceptedMessage({
   messageId = makeAppUuid(),
   timestamp = chatTimestampNow(),
   acceptedRequestId,
   statementAccountId,
   encryptionPublicKey,
 }) {
+  requireX25519Key(encryptionPublicKey, "device X25519 public key");
+  if (!(statementAccountId instanceof Uint8Array) || statementAccountId.length !== 32) {
+    throw new Error("device statement account must be 32 bytes");
+  }
   return encodeOpaqueRemoteMessage({
     messageId,
     timestamp,
@@ -1118,12 +1209,12 @@ function encodeMultiDeviceEnvelope(innerPayload, session) {
   }
 
   const oneshotKey = crypto.randomBytes(32);
-  const encryptedPayload = aesGcmEncryptRawKey(oneshotKey, innerPayload);
+  const encryptedPayload = chacha20Poly1305EncryptRawKey(oneshotKey, innerPayload);
   const devicesInfo = session.peerDevices.map((device) => {
-    const keySharedSecret = device.sharedSecret ?? p256SharedSecret(session.ownDeviceP256PrivateKey, device.encryptionPublicKey);
+    const keySharedSecret = device.sharedSecret ?? x25519SharedSecret(session.ownDeviceX25519PrivateKey, device.encryptionPublicKey);
     return concatBytes(
       device.statementAccountId,
-      scaleEncodeBytes(aesGcmEncrypt(keySharedSecret, oneshotKey)),
+      scaleEncodeBytes(chacha20Poly1305Encrypt(keySharedSecret, oneshotKey)),
     );
   });
 
@@ -1134,7 +1225,7 @@ function encodeMultiDeviceEnvelope(innerPayload, session) {
 }
 
 export function encodeEncryptedStatementPayload(statementDataBytes, sharedSecret) {
-  return scaleEncodeBytes(aesGcmEncrypt(sharedSecret, statementDataBytes));
+  return scaleEncodeBytes(chacha20Poly1305Encrypt(sharedSecret, statementDataBytes));
 }
 
 export function encodeSessionRequestPayload(session, requestId, opaqueMessages, options = {}) {
@@ -1163,13 +1254,13 @@ export function decodeSessionStatementPayload(data, session, senderAccountId = n
   try {
     return decodeEncryptedStatementPayload(data, session.sharedSecret, session, senderAccountId);
   } catch {
-    return decodeStatementData(aesGcmDecrypt(session.sharedSecret, data), session, senderAccountId);
+    return decodeStatementData(chacha20Poly1305Decrypt(session.sharedSecret, data), session, senderAccountId);
   }
 }
 
 export function decodeEncryptedStatementPayload(payload, sharedSecret, session = null, senderAccountId = null) {
   const encrypted = scaleDecodeBytesAt(payload, 0, MAX_SCALE_BYTES, "encrypted session statement");
-  const decrypted = aesGcmDecrypt(sharedSecret, encrypted.value);
+  const decrypted = chacha20Poly1305Decrypt(sharedSecret, encrypted.value);
   return decodeStatementData(decrypted, session, senderAccountId);
 }
 
@@ -1246,8 +1337,8 @@ function decodeMultiDeviceInnerPayload(envelope, session, senderAccountId = null
         entry.statementAccountIdHex === device.statementAccountIdHex
       ));
       if (peerEntry != null) {
-        const oneshotKey = aesGcmDecrypt(device.sharedSecret, peerEntry.encryptedKey);
-        return aesGcmDecryptRawKey(oneshotKey, envelope.encryptedPayload);
+        const oneshotKey = chacha20Poly1305Decrypt(device.sharedSecret, peerEntry.encryptedKey);
+        return chacha20Poly1305DecryptRawKey(oneshotKey, envelope.encryptedPayload);
       }
     }
     throw new Error("Own multi-device payload has no known peer device entry");
@@ -1259,8 +1350,8 @@ function decodeMultiDeviceInnerPayload(envelope, session, senderAccountId = null
   }
 
   const keySharedSecret = session.multiDeviceKeySharedSecret ?? session.sharedSecret;
-  const oneshotKey = aesGcmDecrypt(keySharedSecret, ownDeviceEntry.encryptedKey);
-  return aesGcmDecryptRawKey(oneshotKey, envelope.encryptedPayload);
+  const oneshotKey = chacha20Poly1305Decrypt(keySharedSecret, ownDeviceEntry.encryptedKey);
+  return chacha20Poly1305DecryptRawKey(oneshotKey, envelope.encryptedPayload);
 }
 
 function decodeMessageExchangeRequestAt(bytes, offset, budget) {
@@ -1350,17 +1441,33 @@ function decodeRemoteMessage(bytes, budget) {
       offset: accepted.offset,
     };
   }
+  if (contentKind === 17) {
+    const statementAccountId = scaleDecodeBytesAt(bytes, offset, 32, "device statement account");
+    if (statementAccountId.value.length !== 32) throw new Error("device statement account must be 32 bytes");
+    const encryptionPublicKey = scaleDecodeBytesAt(bytes, statementAccountId.offset, 32, "device encryption key");
+    if (encryptionPublicKey.value.length !== 32) throw new Error("device encryption key must be 32 bytes");
+    return {
+      messageId: messageId.value,
+      timestamp: Number(timestamp.value),
+      kind: "deviceAdded",
+      statementAccountId: statementAccountId.value,
+      statementAccountIdHex: normalizeHex(bytesToHex(statementAccountId.value)),
+      encryptionPublicKey: encryptionPublicKey.value,
+      encryptionPublicKeyHex: normalizeHex(bytesToHex(encryptionPublicKey.value)),
+      offset: encryptionPublicKey.offset,
+    };
+  }
   if (contentKind === 20) {
     const accepted = decodeIdAt(bytes, offset, "accepted request id");
     offset = accepted.offset;
     const statementAccountId = fixedBytesAt(bytes, offset, 32, "device statement account");
     offset = statementAccountId.offset;
-    const encryptionPublicKey = fixedBytesAt(bytes, offset, 65, "device encryption key");
+    const encryptionPublicKey = fixedBytesAt(bytes, offset, 32, "device encryption key");
     offset = encryptionPublicKey.offset;
     return {
       messageId: messageId.value,
       timestamp: Number(timestamp.value),
-      kind: "multiChatAccepted",
+      kind: "deviceChatAccepted",
       acceptedRequestId: accepted.value,
       statementAccountId: statementAccountId.value,
       statementAccountIdHex: normalizeHex(bytesToHex(statementAccountId.value)),

@@ -13,7 +13,11 @@ import { fileURLToPath } from "node:url";
 import { startMockStatementNode } from "./mock-statement-node.mjs";
 import { startMockHopNode } from "./mock-hop-node.mjs";
 import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
-import { deriveP256PrivateKey, p256PublicKeyFromPrivateKey } from "../vendor/app-chat-codec.mjs";
+import {
+  deriveX25519PrivateKey,
+  encodeAccountEcdhKey,
+  x25519PublicKeyFromPrivateKey,
+} from "../vendor/app-chat-codec.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BOT_CORE = path.join(HERE, "..");
@@ -24,16 +28,18 @@ const hexToBytes = (h) => Uint8Array.from(String(h).replace(/^0x/i, "").match(/.
 const BOT_SEED = `0x${"22".repeat(32)}`;
 const CLIENT_SEED = `0x${"11".repeat(32)}`;
 const idKeyOf = (seedHex) =>
-  bytesToHex(p256PublicKeyFromPrivateKey(deriveP256PrivateKey(deriveSr25519PairFromSeed(hexToBytes(seedHex), "//wallet//chat"))));
+  bytesToHex(encodeAccountEcdhKey(x25519PublicKeyFromPrivateKey(deriveX25519PrivateKey(hexToBytes(seedHex)))));
 const accountOf = (seedHex) => bytesToHex(deriveSr25519PairFromSeed(hexToBytes(seedHex), "//wallet").publicKey);
 const BOT_ACCOUNT = accountOf(BOT_SEED);
 const BOT_ID_KEY = idKeyOf(BOT_SEED);
 const CLIENT_ACCOUNT = accountOf(CLIENT_SEED);
 const CLIENT_ID_KEY = idKeyOf(CLIENT_SEED);
 const TEST_BRIDGE_TOKEN = "transport-e2e-bridge-token-0123456789";
+const botStateDirs = new Map();
 
 // Spawn the bot and expose its JSON-line events for assertions.
 async function startBot({ endpoint, stateDir, extraEnv = {} }) {
+  botStateDirs.set(endpoint, stateDir);
   const bridgeToken = extraEnv.BOT_BRIDGE_TOKEN ?? TEST_BRIDGE_TOKEN;
   const child = spawn(process.execPath, [path.join(BOT_CORE, "index.mjs")], {
     env: {
@@ -104,6 +110,14 @@ async function startBot({ endpoint, stateDir, extraEnv = {} }) {
 
 // Run the device-channel client; returns { code, out }.
 function runClient(endpoint, extraArgs, texts) {
+  let botDeviceArgs = [];
+  try {
+    const state = JSON.parse(fs.readFileSync(path.join(botStateDirs.get(endpoint), "session-state.json"), "utf8"));
+    const privateKey = hexToBytes(state.devicePrivateKeyHex);
+    if (state.v === 3 && privateKey.length === 32) {
+      botDeviceArgs = ["--bot-device-key", `0x${bytesToHex(x25519PublicKeyFromPrivateKey(privateKey))}`];
+    }
+  } catch { /* a fresh opener learns the device key from DeviceChatAccepted */ }
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [path.join(BOT_CORE, "test-client-device.mjs"),
       // extraArgs go FIRST: the client's flag parser takes the first
@@ -113,6 +127,7 @@ function runClient(endpoint, extraArgs, texts) {
       "--seed-hex", CLIENT_SEED,
       "--bot-account", `0x${BOT_ACCOUNT}`,
       "--bot-identifier-key", `0x${BOT_ID_KEY}`,
+      ...botDeviceArgs,
       "--endpoint", endpoint,
       "--wait-secs", "8",
       // End each wait window once the bot has answered and gone quiet for 4s
@@ -192,7 +207,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
         // the mode explicitly too.
         if (extraEnv.BOT_SUBSCRIBE === "1") await bot.waitFor((e) => e.event === "BOT_SUBSCRIBED", { label: "BOT_SUBSCRIBED" });
         const r = await runClient(node.url, [], ["hello opener", "follow-one", "follow-two"]);
-        assert.equal(r.code, 0, `client failed:\n${r.out}`);
+        assert.equal(r.code, 0, `client failed:\n${r.out}\nbot events:\n${JSON.stringify(bot.events.slice(-20), null, 2)}`);
         assert.match(r.out, /Echo: hello opener/);
         assert.match(r.out, /Echo: follow-one/);
         assert.match(r.out, /Echo: follow-two/);
@@ -220,9 +235,17 @@ describe("transport e2e", { concurrency: 8 }, () => {
         assert.equal(first.code, 0, `client failed:\n${first.out}`);
         await bot.stop(); // SIGTERM: flushes state, removes pidfile
 
+        const beforeRestart = JSON.parse(fs.readFileSync(path.join(stateDir, "session-state.json"), "utf8"));
+        assert.equal(beforeRestart.v, 3);
+        assert.match(beforeRestart.devicePrivateKeyHex, /^[0-9a-f]{64}$/);
+        assert.match(beforeRestart.peers[0].identifierKeyHex, /^[0-9a-f]{64}$/);
+        assert.ok(beforeRestart.peers[0].devices.every((device) => /^[0-9a-f]{64}$/.test(device.e)));
+
         bot = await startBot({ endpoint: node.url, stateDir, extraEnv });
         const restored = await bot.waitFor((e) => e.event === "BOT_STATE_RESTORED", { label: "BOT_STATE_RESTORED" });
         assert.equal(restored.peers, 1);
+        const afterRestart = JSON.parse(fs.readFileSync(path.join(stateDir, "session-state.json"), "utf8"));
+        assert.equal(afterRestart.devicePrivateKeyHex, beforeRestart.devicePrivateKeyHex);
         // Old statements are still in the store; none may be re-answered.
         const second = await runClient(node.url, ["--no-opener", "1"], ["after-restart"]);
         assert.equal(second.code, 0, `client failed:\n${second.out}`);
@@ -314,6 +337,69 @@ describe("transport e2e", { concurrency: 8 }, () => {
       }
     });
   }
+
+  test("v2 P-256 session keys are reset while key-independent state survives", async () => {
+    const node = await startMockStatementNode();
+    const stateDir = tmpState();
+    fs.writeFileSync(path.join(stateDir, "session-state.json"), JSON.stringify({
+      v: 2,
+      peers: [{
+        peerHex: CLIENT_ACCOUNT,
+        identifierKeyHex: `04${"11".repeat(64)}`,
+        devices: [{ s: CLIENT_ACCOUNT, e: `04${"22".repeat(64)}` }],
+      }],
+      seen: ["keep-this-dedup-marker"],
+      owed: [{ id: "old", p: CLIENT_ACCOUNT, t: "cannot decrypt", r: "old-request" }],
+      pendingOpenerAcks: ["old"],
+      greeted: [CLIENT_ACCOUNT],
+    }), { mode: 0o600 });
+    const bot = await startBot({ endpoint: node.url, stateDir, extraEnv: { BOT_SUBSCRIBE: "0" } });
+    try {
+      const reset = await bot.waitFor((event) => event.event === "BOT_STATE_KEYS_RESET", { label: "BOT_STATE_KEYS_RESET" });
+      assert.equal(reset.version, 2);
+      assert.equal(reset.peers, 1);
+      const restored = await bot.waitFor((event) => event.event === "BOT_STATE_RESTORED", { label: "BOT_STATE_RESTORED" });
+      assert.equal(restored.peers, 0);
+      assert.equal(restored.seen, 1);
+      assert.equal(restored.owed, 0);
+      const migrated = JSON.parse(fs.readFileSync(path.join(stateDir, "session-state.json"), "utf8"));
+      assert.equal(migrated.v, 3);
+      assert.match(migrated.devicePrivateKeyHex, /^[0-9a-f]{64}$/);
+      assert.deepEqual(migrated.peers, []);
+      assert.deepEqual(migrated.seen, ["keep-this-dedup-marker"]);
+      assert.deepEqual(migrated.owed, []);
+    } finally {
+      await bot.stop();
+      await node.close();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  test("legacy on-chain P-256 containers are rejected with a clear event", async () => {
+    const node = await startMockStatementNode();
+    const stateDir = tmpState();
+    const bot = await startBot({
+      endpoint: node.url,
+      stateDir,
+      extraEnv: {
+        BOT_SUBSCRIBE: "0",
+        BOT_PEER_IDENTIFIER_KEYS: `${CLIENT_ACCOUNT}=04${"11".repeat(64)}`,
+      },
+    });
+    try {
+      const rejected = await bot.waitFor(
+        (event) => event.event === "BOT_PEER_KEY_UNSUPPORTED",
+        { label: "BOT_PEER_KEY_UNSUPPORTED" },
+      );
+      assert.equal(rejected.peer, CLIENT_ACCOUNT);
+      assert.equal(rejected.reason, "unsupported_type");
+      assert.equal(rejected.type, 4);
+    } finally {
+      await bot.stop();
+      await node.close();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
 
   test("removing an allowlisted peer drops its restored session", async () => {
     const node = await startMockStatementNode();
