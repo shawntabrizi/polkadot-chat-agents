@@ -1878,6 +1878,17 @@ const buildWatch = () => {
     watch.set(topicHex(entry.session.peerSessionId), {
       kind: "session", topic: entry.session.peerSessionId, peerHex, session: entry.session, sender: hexToBytes(peerHex),
     });
+    // The app answers a bot-initiated (greet) request on the IDENTITY session —
+    // X25519(app identity key, our on-chain identifier key) — not on the
+    // device-derived one, and we reply there too while the peer has no known
+    // devices (see submitPayload). Watching only the device topic silently
+    // missed every first reply (verified against the store, 2026-08-28).
+    const identity = entry.session.identitySession;
+    if (identity && !watch.has(topicHex(identity.peerSessionId))) {
+      watch.set(topicHex(identity.peerSessionId), {
+        kind: "session", topic: identity.peerSessionId, peerHex, session: identity, sender: hexToBytes(peerHex),
+      });
+    }
     for (const ds of entry.session.incomingDeviceSessions ?? []) {
       const th = topicHex(ds.peerSessionId);
       if (watch.has(th)) continue;
