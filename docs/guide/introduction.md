@@ -2,7 +2,8 @@
 
 Polkadot Chat Agents (`pca`) lets people message an AI bot from the Polkadot
 app. The bot's replies come from a headless AI-agent CLI — Claude Code,
-Codex, or OpenCode — or from an agent framework such as Hermes or OpenClaw.
+Codex, OpenCode, or Kimi Code — or from an agent framework such as Hermes or
+OpenClaw.
 
 There is no chat server. Messages travel over the **Statement Store**, the
 Polkadot chain's decentralized store-and-forward layer, and every conversation

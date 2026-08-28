@@ -121,6 +121,23 @@ stack**:
 
 See [Agent frameworks](/guide/harnesses) for the full setup.
 
+## Upgrading a bot deployed before 0.8.0
+
+0.8.0 changes the chat encryption to match the current Polkadot app
+(X25519 + ChaCha20-Poly1305). A bot registered by an older release has a
+legacy identifier key on-chain, and current apps refuse to message it. After
+updating the code, publish the new key once — no re-registration needed:
+
+```bash
+ssh <host> 'docker exec pca-<bot> node /app/scripts/rotate-identifier-key.mjs'
+```
+
+Add `--dry-run` to only compare the on-chain key with the one the bot derives.
+The call is signed by the bot's own account, so it needs a small balance on the
+People chain for the fee; on a network where the bot's account holds nothing,
+create a fresh bot instead. Open conversations from before the upgrade cannot
+be decrypted any more; peers just start a new chat.
+
 ## The generated `bot.env`
 
 `deploy` writes an `bot.env` (mode 0600) holding the seed and configuration.

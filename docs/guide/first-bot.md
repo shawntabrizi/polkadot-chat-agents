@@ -2,7 +2,8 @@
 
 Your first bot runs right on your own computer, in the foreground. It uses
 whichever AI-agent CLI you already have installed and logged in — Claude
-Code, Codex, or OpenCode — so there's nothing new to authenticate: the bot just
+Code, Codex, OpenCode, or Kimi Code — so there's nothing new to authenticate:
+the bot just
 drives the tool you're already using. It's the fastest way to see the whole
 thing work end to end, and you get live logs and Ctrl-C to stop.
 
