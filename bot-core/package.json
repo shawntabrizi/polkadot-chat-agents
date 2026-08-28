@@ -60,5 +60,9 @@
     "README.md",
     "LICENSE",
     "scripts/"
-  ]
+  ],
+  "overrides": {
+    "nanoid": "^5.1.16",
+    "deepmerge-ts": "^8.0.0"
+  }
 }
