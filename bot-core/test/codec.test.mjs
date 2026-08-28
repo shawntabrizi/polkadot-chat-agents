@@ -111,6 +111,7 @@ test("ChaCha20-Poly1305 matches the RFC 8439 no-AAD vector", () => {
   const encrypted = chacha20Poly1305EncryptRawKey(key, plaintext, nonce);
   assert.equal(hexOf(encrypted), expected);
   assert.deepEqual(chacha20Poly1305DecryptRawKey(key, encrypted), plaintext);
+  assert.equal(chacha20Poly1305EncryptRawKey(key, new Uint8Array(41)).length, 69);
 
   const tampered = encrypted.slice();
   tampered[12] ^= 1;
@@ -134,6 +135,7 @@ test("AccountEcdhKey rejects malformed widths and preserves unsupported containe
   const decoded = decodeAccountEcdhKey(legacy);
   assert.equal(decoded.kind, "unsupported");
   assert.deepEqual(decoded.raw, legacy);
+  assert.deepEqual(encodeAccountEcdhKey(decoded), legacy);
   assert.throws(() => decodeAccountEcdhKey(new Uint8Array(33)), /must be 65 bytes/);
 });
 

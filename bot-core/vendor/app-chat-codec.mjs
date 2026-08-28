@@ -434,7 +434,14 @@ export function x25519SharedSecret(privateKey, peerPublicKey) {
   return sharedSecret;
 }
 
-export function encodeAccountEcdhKey(publicKey) {
+export function encodeAccountEcdhKey(value) {
+  if (value?.kind === "unsupported") {
+    if (!(value.raw instanceof Uint8Array) || value.raw.length !== 65) {
+      throw new Error("Unsupported on-chain encryption key must retain 65 raw bytes");
+    }
+    return value.raw.slice();
+  }
+  const publicKey = value?.kind === "x25519" ? value.publicKey : value;
   requireX25519Key(publicKey, "X25519 public key");
   const container = new Uint8Array(65);
   container.set(publicKey, 1);
