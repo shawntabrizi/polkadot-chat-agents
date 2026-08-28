@@ -37,7 +37,7 @@ A framework plugin needs this small authenticated API:
 | Route | Purpose |
 |---|---|
 | `GET /health` | returns `{ ok, transport, account, identifierKey, username, … }`, including live/media/file capability flags. |
-| `GET /inbound?wait=<secs>&limit=<n>` | long-poll; returns at most the requested bounded batch of leased `[{ delivery_id, lease_id, lease_ms, chat_id, text, message_id }, ...]`, or an empty array on timeout. `chat_id` is transport-specific. `text` is always non-empty (a safe placeholder is synthesized for a caption-less attachment). Items may carry `kind` (`richText`/`reply`/`edited`), `reply_to`, `edit_of`, and safe attachment metadata. Add `&events=1` to also receive non-message signals — opt-in, so a harness that ignores them never chat-replies to a reaction. |
+| `GET /inbound?wait=<secs>&limit=<n>` | long-poll; returns at most the requested bounded batch of leased `[{ delivery_id, lease_id, lease_ms, chat_id, text, message_id, context? }, ...]`, or an empty array on timeout. `chat_id` is transport-specific. `text` is always non-empty (a safe placeholder is synthesized for a caption-less attachment). `context`, when present, is PCA's deterministic operator facts; inject it once when starting that chat session. Items may carry `kind` (`richText`/`reply`/`edited`), `reply_to`, `edit_of`, and safe attachment metadata. Add `&events=1` to also receive non-message signals — opt-in, so a harness that ignores them never chat-replies to a reaction. |
 | `POST /inbound/ack { delivery_id, lease_id }` | permanently acknowledges a leased inbound row after the framework has successfully handed it to its own runtime. Accepts `deliveries: [{ delivery_id, lease_id }, ...]` for a batch. Unacknowledged rows are retried after their lease expires; a stale claim acknowledges zero rows. |
 | `POST /inbound/renew { delivery_id, lease_id }` | extends an active lease for a long-running turn. Renew before `lease_ms` elapses, then ACK only the current lease. |
 | `GET /media/<id>` | authenticated attachment bytes (`url` from the inbound item), served with its content type. A T3ams URL can materialize validated encrypted media on demand. |
@@ -53,6 +53,13 @@ while its agent turn runs, ACK only after that handoff succeeds, then use
 it at the bridge with `POLKADOT_BRIDGE_URL` and `POLKADOT_BRIDGE_TOKEN`.
 bot-core enforces the allowlist before a message reaches the bridge, so unlisted
 senders never reach the agent or spend model quota.
+
+bot-core repeats `context` on deliveries so an adapter that restarts can
+recover it. The bundled Hermes and OpenClaw adapters track framework sessions
+and expose the block to the model only on the first successfully handed-off
+message in each session. The block contains runtime facts, not a persona;
+configure personality in the framework itself (`SOUL.md` or its equivalent).
+`BOT_AI_CONTEXT=0` omits the field for debugging.
 
 To return a framework-generated artifact, store it with
 `PUT /files/<chat_id>/<path>` and then call `POST /send` with that `file_path`.
@@ -200,11 +207,12 @@ Hermes adapter (~150 lines of Python) is a practical template.
 ## Direct engines
 
 Without a framework, bot-core runs a headless AI-agent CLI itself — as an
-autonomous agent, not a chat wrapper: the user's message is passed verbatim (no
-injected persona), conversation continuity is the CLI's own native session
-(`--resume`), and bot-core presents its progress and answer in the chat. Direct
-Claude, Codex, OpenCode, and Kimi engines start with no tools; the deployer
-chooses a portable capability and scope policy explicitly.
+autonomous agent, not a chat wrapper. The user's message stays the user prompt;
+PCA supplies separate generated facts and an optional operator-owned
+`PERSONA.md`, conversation continuity is the CLI's own native session
+(`--resume`), and bot-core presents its progress and answer in the chat.
+Direct Claude, Codex, OpenCode, and Kimi engines start with no tools; the
+deployer chooses a portable capability and scope policy explicitly.
 
 | Engine | Invokes | Reaches | Authentication |
 |---|---|---|---|
@@ -244,7 +252,9 @@ Related settings:
 - Workspace scopes native file tools to the selected project and staged
   attachments. Bash uses the agent process boundary in either scope.
 - The agent works in a persistent non-secret workspace (`BOT_AI_WORKSPACE`,
-  defaulting to a sibling of `BOT_STATE_DIR`) that survives restarts.
+  defaulting to `BOT_STATE_DIR/workspace`) that survives restarts. Its
+  operator-owned `PERSONA.md` is created from a commented template once and is
+  never overwritten by PCA.
 - `BOT_AI_CMD`/`BOT_AI_ARGS` wire in a custom CLI that speaks claude-shaped
   stream-json (`__PROMPT__` is replaced with the prompt).
 - Transport file commands (`/file put|ls|info|rm|get`) work for every brain,
