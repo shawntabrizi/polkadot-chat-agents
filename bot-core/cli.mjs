@@ -1563,8 +1563,55 @@ function cmdRun(name, flags = {}) {
     env.BOT_GREET = "1";
     note("Greet mode: the bot will message its owner(s) first — watch your phone.");
   }
-  const child = spawn(process.execPath, [path.join(HERE, entrypointForTransport(transport))], { env, stdio: "inherit" });
-  child.on("exit", (code) => process.exit(code ?? 0));
+  // Everything the bot prints also lands in <botdir>/bot.log, so a problem
+  // seen on the phone can be traced after the terminal scrolled away or
+  // closed. Terminal output is unchanged; `pca logs <name>` reads the file.
+  const botLog = openBotLog(name);
+  note(`Log file: ${botLog.file}   (pca logs ${name} [-f] reads it)`);
+  const child = spawn(process.execPath, [path.join(HERE, entrypointForTransport(transport))], { env, stdio: ["inherit", "pipe", "pipe"] });
+  child.stdout.on("data", (chunk) => { process.stdout.write(chunk); botLog.stream.write(chunk); });
+  child.stderr.on("data", (chunk) => { process.stderr.write(chunk); botLog.stream.write(chunk); });
+  child.on("exit", (code) => botLog.stream.end(() => process.exit(code ?? 0)));
+}
+
+// Local bot log: append-only, private, rotated once so it can't grow without
+// bound (the previous generation is kept as bot.log.1).
+const BOT_LOG_ROTATE_BYTES = 20 * 1024 * 1024;
+const botLogPath = (name) => path.join(botDir(name), "bot.log");
+function openBotLog(name) {
+  const file = botLogPath(name);
+  try { if (fs.statSync(file).size > BOT_LOG_ROTATE_BYTES) fs.renameSync(file, `${file}.1`); }
+  catch (error) { if (error?.code !== "ENOENT") throw error; }
+  const stream = fs.createWriteStream(file, { flags: "a", mode: 0o600 });
+  stream.on("error", (error) => warn(`Could not write ${file}: ${error?.message ?? error}`));
+  return { file, stream };
+}
+
+// `pca logs` for a bot that runs (or ran) locally: tail the file pca run keeps.
+function localLogs(name, { follow, tail }) {
+  const file = botLogPath(name);
+  if (!fs.existsSync(file)) fail(`No local log for "${name}" yet — it appears after the first  pca run ${name}.\nFor a deployed bot, pass --host <ssh>.`);
+  const lines = fs.readFileSync(file, "utf8").split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  process.stdout.write(lines.slice(-tail).map((l) => `${l}\n`).join(""));
+  if (!follow) return;
+  step("Following (Ctrl-C to stop)…");
+  let offset = fs.statSync(file).size;
+  const poll = () => {
+    let size;
+    try { size = fs.statSync(file).size; } catch { return; }
+    if (size < offset) offset = 0; // rotated: start over on the new file
+    if (size > offset) {
+      const fd = fs.openSync(file, "r");
+      try {
+        const buf = Buffer.alloc(size - offset);
+        fs.readSync(fd, buf, 0, buf.length, offset);
+        process.stdout.write(buf);
+      } finally { fs.closeSync(fd); }
+      offset = size;
+    }
+  };
+  setInterval(poll, 500);
 }
 
 // Run a local command (ssh/rsync/scp), streaming progress; optionally capture stdout.
@@ -2085,12 +2132,14 @@ function deployTarget(name, flags) {
 const SSH_OPTS = ["-o", "ConnectTimeout=10", "-o", "BatchMode=yes"];
 
 function cmdLogs(name, flags) {
-  const { host, cn } = deployTarget(name, flags);
   const follow = flags.follow === true || flags.f === true;
   const rawTail = flags.tail ?? 100;
   if (typeof rawTail === "boolean" || String(rawTail).trim() === "") fail("--tail requires an integer from 1 to 10000.");
   const tail = Number(rawTail);
   if (!Number.isInteger(tail) || tail < 1 || tail > 10_000) fail("--tail must be an integer from 1 to 10000.");
+  const cfg = readConfig(name);
+  if (!flags.host && !cfg.deploy?.host) return localLogs(name, { follow, tail });
+  const { host, cn } = deployTarget(name, flags);
   step(`Logs for "${name}" on ${host}${follow ? " (following — Ctrl-C to stop)" : ""}…`);
   // stdio inherit so -f streams live and Ctrl-C ends it.
   spawnSync("ssh", [...SSH_OPTS, ...(follow ? ["-t"] : []), host,
@@ -2527,7 +2576,7 @@ function usage() {
   pca run <name> [--model <m>] [--allowed-tools <read,write,bash,web,subagents>] [--tool-scope workspace|container] [--greet]
                                        start the bot locally (foreground)
   pca deploy <name> --host <ssh>       ship it to a server and run it in Docker
-  pca logs <name> [-f] [--tail N]      tail a deployed bot's logs
+  pca logs <name> [-f] [--tail N]      tail a bot's logs (local bot.log, or the deployed container)
   pca status <name>                    is the bot running + healthy? (local or deployed)
   pca stop <name>                      stop a deployed bot
   pca delete <name> --yes              delete a local bot (destroys its key — irreversible)
@@ -2609,7 +2658,7 @@ const COMMAND_FLAGS = {
   register: ["username", "digits", "wait"],
   run: ["model", "allowed-tools", "tool-scope", "greet"],
   deploy: ["host", "harness", "anthropic-key", "openai-key", "openrouter-key", "gemini-key", "groq-key", "kimi-key", "allowed-tools", "tool-scope", "media-analyzer", "model", "dry-run", "remote-dir", "greet"],
-  logs: ["host", "follow", "tail"],
+  logs: ["host", "follow", "f", "tail"],
   status: ["host"],
   stop: ["host"],
   delete: ["yes"],

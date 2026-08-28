@@ -11,7 +11,7 @@ every command, including `project`, `model`, and `storage`.
 | `pca register <name>` | Finish or retry registration for an existing bot. |
 | `pca run <name>` | Start the bot locally in the foreground. |
 | `pca deploy <name> --host <ssh>` | Ship it to a Docker + SSH server and run it. |
-| `pca logs <name> [-f]` | Tail a deployed bot's logs. |
+| `pca logs <name> [-f] [--tail N]` | Tail a bot's logs: the local `~/.pca/bots/<name>/bot.log` that `pca run` keeps (rotated at 20 MB), or the deployed container's when the bot has a saved host. |
 | `pca status <name>` | Is the bot running and healthy? (local or deployed) |
 | `pca stop <name>` | Stop a deployed bot. |
 | `pca delete <name> --yes` | Delete a local bot (destroys its key — irreversible). |

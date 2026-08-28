@@ -32,6 +32,10 @@ pca create mycoolbot --brain claude --owner <your-app-username-or-SS58-address>
 pca run mycoolbot --greet
 ```
 
+Everything the bot prints is also written to `~/.pca/bots/mycoolbot/bot.log`, so
+`pca logs mycoolbot` (or `-f` to follow) shows what happened even after the
+terminal is gone.
+
 The default network is Polkadot Products Devnet. Its identity backend requires
 a bearer token for username writes, but `pca` obtains one automatically by
 proving possession of the bot's own SR25519 wallet key. No phone, locally

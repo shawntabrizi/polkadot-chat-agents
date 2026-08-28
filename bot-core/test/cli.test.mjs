@@ -898,3 +898,23 @@ test("pca --version notes a newer registry release, and stays quiet otherwise", 
     fs.rmSync(botsDir, { recursive: true, force: true });
   }
 });
+
+test("pca logs reads the local bot.log that pca run keeps", () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
+  try {
+    let result = runCli(botsDir, ["create", "loggy", "--brain", "echo", "--no-register"]);
+    assert.equal(result.status, 0, result.stderr);
+    result = runCli(botsDir, ["logs", "loggy"]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /No local log for "loggy" yet/);
+    assert.match(result.stderr, /pca run loggy/);
+
+    const file = path.join(botsDir, "loggy", "bot.log");
+    fs.writeFileSync(file, ["one", "two", "three"].map((l) => JSON.stringify({ event: l })).join("\n") + "\n");
+    result = runCli(botsDir, ["logs", "loggy", "--tail", "2"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(result.stdout.trim().split("\n").map((l) => JSON.parse(l).event), ["two", "three"]);
+  } finally {
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
+});
