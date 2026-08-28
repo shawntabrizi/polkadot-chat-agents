@@ -589,3 +589,16 @@ test("codex delegation events become subagent progress lines", () => {
   assert.equal(ev.kind, "action");
   assert.match(ev.title, /^subagent: review the auth module/);
 });
+
+test("claude is told when it has no tools, and only then", () => {
+  const none = RUNNERS.claude.buildArgs({ prompt: "hi", policy: policy() });
+  assert.equal(none[none.indexOf("--tools") + 1], "");
+  const i = none.indexOf("--append-system-prompt");
+  assert.ok(i > 0, "a no-tools turn carries the system prompt");
+  assert.match(none[i + 1], /NO tools/);
+  assert.match(none[i + 1], /<invoke>/, "names the markup the model must not emit");
+  assert.ok(i < none.indexOf("--"), "flags precede the prompt separator");
+
+  const some = RUNNERS.claude.buildArgs({ prompt: "hi", policy: policy(["read"]) });
+  assert.equal(some.includes("--append-system-prompt"), false, "with tools the CLI's own prompt stands");
+});

@@ -260,6 +260,10 @@ const totalInputTokens = (usage) => {
 
 // ---- claude (Claude Code) --------------------------------------------------
 // Invocation & event schema verified live against the claude CLI.
+// See buildArgs: a no-tools turn must be told so, or the model emits tool-call
+// markup as prose. Kept engine-specific — codex/opencode/kimi do not do this.
+const CLAUDE_NO_TOOLS_PROMPT = "You have NO tools in this session: no Bash, no file access, no web. Never write tool-call markup such as <invoke> or <function_calls>; if a request needs a tool, say plainly that you cannot run commands here and answer from knowledge instead.";
+
 const claude = {
   command: "claude",
   effortLevels: ["low", "medium", "high", "xhigh", "max"],
@@ -293,6 +297,12 @@ const claude = {
     // chat turn on an invisible terminal prompt.
     const tools = claudeTools(policy);
     args.push("--permission-mode", "dontAsk", "--tools", tools.join(","));
+    if (!tools.length) {
+      // With `--tools ""` the CLI still primes the model for tool use, and a
+      // request that wants one comes back as literal <invoke> markup in the
+      // reply text (reproduced live 2026-08-28). Tell the model up front.
+      args.push("--append-system-prompt", CLAUDE_NO_TOOLS_PROMPT);
+    }
     if (tools.length) {
       const approvals = claudeApprovalRules(policy, scope);
       if (approvals.length) args.push("--allowedTools", approvals.join(","));
