@@ -71,6 +71,7 @@ import { blake2b } from "@noble/hashes/blake2.js";
 import { createStateStore } from "./lib/session-store.mjs";
 import { createAgentRuntime } from "./lib/agent-runtime.mjs";
 import { buildOperatorContext } from "./lib/agent-context.mjs";
+import { createPeerClock } from "./lib/peer-clock.mjs";
 import { commandCatalog, resolveModelPolicy } from "./lib/commands.mjs";
 import { splitMessageText } from "./lib/chunk.mjs";
 import { createOutboundLanes } from "./lib/outbound-lanes.mjs";
@@ -707,6 +708,11 @@ const touchSession = (peerHex) => {
   if (entry) entry.lastActiveAt = Date.now();
   return entry;
 };
+// Outbound timestamps never sort before the peer's newest message (see
+// lib/peer-clock.mjs); every encoder below takes its timestamp from here.
+const peerClock = createPeerClock();
+const stamp = (peerHex) => peerClock.next(norm(peerHex));
+
 const buildSession = (peerHex, identifierKeyHex, extraDevices = []) => {
   const existing = sessions.get(norm(peerHex))?.session?.peerDevices ?? [];
   // Device session topics are part of every sweep/subscription watch. Keep a
@@ -1003,11 +1009,12 @@ const submitMessage = async (peerHex, { text, replyTo = null, editOf = null, sup
   const k = norm(peerHex);
   if (sessions.get(k) == null) throw new Error("no active session for peer");
   const messageId = makeAppUuid();
+  const timestamp = stamp(k);
   const opaque = replyTo
-    ? encodeOpaqueReplyMessage({ messageId, replyToMessageId: replyTo, text })
+    ? encodeOpaqueReplyMessage({ messageId, timestamp, replyToMessageId: replyTo, text })
     : editOf
-      ? encodeOpaqueEditedMessage({ messageId, targetMessageId: editOf, text })
-      : encodeOpaqueTextMessage({ messageId, text });
+      ? encodeOpaqueEditedMessage({ messageId, timestamp, targetMessageId: editOf, text })
+      : encodeOpaqueTextMessage({ messageId, timestamp, text });
   const { submitted, delivered } = outbound.enqueue(k, opaque, { messageId, supersedes });
   await submitted;
   log("BOT_SENT_TEXT", { to: peerHex, chars: text.length, ...(replyTo ? { replyTo } : {}), ...(editOf ? { editOf } : {}) });
@@ -1044,6 +1051,7 @@ const sendAttachment = async (peerHex, { filePath, mime, size, text = null }) =>
   const messageId = makeAppUuid();
   const opaque = encodeOpaqueRichTextMessage({
     messageId,
+    timestamp: stamp(k),
     text,
     attachments: [{
       identifier: uploaded.identifier,
@@ -1125,7 +1133,7 @@ const takeLivePlaceholder = async (peerHex) => {
 const sendReaction = async (peerHex, targetMessageId, emoji, removed = false) => {
   const k = norm(peerHex);
   if (sessions.get(k) == null) throw new Error("no active session for peer");
-  const { submitted } = outbound.enqueue(k, encodeOpaqueReactionMessage({ targetMessageId, emoji, removed }));
+  const { submitted } = outbound.enqueue(k, encodeOpaqueReactionMessage({ timestamp: stamp(k), targetMessageId, emoji, removed }));
   await submitted;
   log("BOT_SENT_REACTION", { to: peerHex, removed, target: targetMessageId });
 };
@@ -1535,18 +1543,20 @@ const handleOpener = async (data) => {
     }
   }
   // ACK / accept so the peer establishes the session (advertise our device).
+  peerClock.observe(norm(senderHex), decoded.timestamp); // accept+welcome sort after the request
   const accept = decoded.deviceEncPubKeyHex
     ? encodeOpaqueDeviceChatAcceptedMessage({
+        timestamp: stamp(senderHex),
         acceptedRequestId: decoded.messageId,
         statementAccountId: accountId,
         encryptionPublicKey: deviceKeypair.publicKey,
       })
-    : encodeOpaqueChatAcceptedMessage({ acceptedRequestId: decoded.messageId });
+    : encodeOpaqueChatAcceptedMessage({ timestamp: stamp(senderHex), acceptedRequestId: decoded.messageId });
   try {
     // Same-tick enqueues ride one statement, preserving the single
     // [accept, welcome] payload the app expects on first contact.
     const a = outbound.enqueue(senderHex, accept, { forceIdentity: true });
-    const w = outbound.enqueue(senderHex, encodeOpaqueTextMessage({ text: ackText }), { forceIdentity: true });
+    const w = outbound.enqueue(senderHex, encodeOpaqueTextMessage({ timestamp: stamp(senderHex), text: ackText }), { forceIdentity: true });
     await Promise.all([a.submitted, w.submitted]);
   } catch (error) {
     pendingOpenerAcks.add(openerId);
@@ -1674,6 +1684,7 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
   let stateChanged = false;
   let undecodable = 0;
   for (const m of decoded.messages ?? []) {
+    peerClock.observe(norm(peerHex), m.timestamp);
     // Initiator side of an outgoing greeting: the peer's accept can advertise
     // their device encryption key — fold it into the session (and subscribe to
     // its topics) or the peer's device-channel replies would go unseen.
@@ -1808,7 +1819,7 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
     enqueueWork(peerHex, async () => {
       try {
         if (sessions.get(norm(peerHex)) == null) return;
-        await outbound.enqueue(norm(peerHex), encodeOpaqueDataChannelClosedMessage({ offerId })).submitted;
+        await outbound.enqueue(norm(peerHex), encodeOpaqueDataChannelClosedMessage({ timestamp: stamp(peerHex), offerId })).submitted;
         log("BOT_CALL_DECLINED", { to: peerHex, offerId });
       } catch (e) { log("BOT_CALL_DECLINE_FAILED", { to: peerHex, error: String(e?.message ?? e) }); }
     });
