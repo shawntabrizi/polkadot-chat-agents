@@ -323,6 +323,7 @@ the directory is sensitive even if no model session has been created.
 | `BOT_AI_MODEL_SWITCHING` | `locked` | `locked` \| `open`. `open` allows free `/model` switching but **requires a peer allowlist** (public bots must use an approved set instead; the process refuses `open` + public). **gen (direct)** |
 | `BOT_AI_REASONING` | `""` | Default reasoning effort; `/reasoning` overrides per peer and is validated against the engine's levels — claude `--effort low\|medium\|high\|xhigh\|max`, codex `-c model_reasoning_effort=…`, opencode and kimi none. |
 | `BOT_AI_CONTEXT` | `1` | `0` disables PCA's generated runtime-facts block for debugging. An operator-owned direct-engine `PERSONA.md` remains active. |
+| `PCA_NO_UPDATE_CHECK` | unset | `1` stops `pca --version` and `pca status` from asking the npm registry whether a newer release exists (also skipped when `CI` is set). The note exists because npm's `min-release-age` cool-down silently installs an older version than `latest`. |
 
 ### Direct engine — tools, sandboxing & limits
 
