@@ -103,7 +103,7 @@ not a pin list). It covers, in both ingress modes (poll-only and subscription):
 - round trips with poison batches, restart survival with dedup, and owed-reply
   crash recovery;
 - the rich features — attachment download (against an in-memory HOP node,
-  `test/mock-hop-node.mjs`), reply quotes, reactions, and call auto-decline.
+  `sandbox/lib/hop-node.mjs`), reply quotes, reactions, and call auto-decline.
 
 Single-mode tests cover the bridge surface (`/inbound` shape, `/media`,
 `reply_to`/`edit_of`/`/react`, `events=1`), an owed *attachment* surviving

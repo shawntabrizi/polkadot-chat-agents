@@ -6,11 +6,11 @@ import os from "node:os";
 import path from "node:path";
 import { downloadP2PFile, uploadP2PFile, validateHopUrl } from "../lib/hop-client.mjs";
 import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
-import { startMockHopNode } from "./mock-hop-node.mjs";
+import { startHopNode } from "../../sandbox/lib/hop-node.mjs";
 
 const nodes = [];
 const startNode = async () => {
-  const node = await startMockHopNode();
+  const node = await startHopNode();
   nodes.push(node);
   return node;
 };

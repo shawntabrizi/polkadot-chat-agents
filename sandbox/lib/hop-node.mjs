@@ -70,7 +70,7 @@ const claimRequest = (params) => {
   return params;
 };
 
-export const startMockHopNode = async () => {
+export const startHopNode = async () => {
   const store = new Map(); // hashHex -> { blob, recipientPub }
   const acked = new Set(); // hashHex
   const submissions = [];

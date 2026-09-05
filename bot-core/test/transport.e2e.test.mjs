@@ -13,7 +13,7 @@ import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { startDaemon } from "../../sandbox/daemon.mjs";
-import { startMockHopNode } from "./mock-hop-node.mjs";
+import { startHopNode } from "../../sandbox/lib/hop-node.mjs";
 import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
 import {
   deriveX25519PrivateKey,
@@ -289,7 +289,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
 
     test(`attachment download, reply quotes, reaction, call decline (${mode})`, async () => {
       const node = await startSandbox();
-      const hop = await startMockHopNode();
+      const hop = await startHopNode();
       const stateDir = tmpState();
       const photo = new Uint8Array(crypto.randomBytes(300_000));
       const file = hop.putFile(photo);
@@ -497,7 +497,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
 
   test("bridge surface: /inbound shape, /media, reply/edit/react, events", async () => {
     const node = await startSandbox();
-    const hop = await startMockHopNode();
+    const hop = await startHopNode();
     const stateDir = tmpState();
     const photo = new Uint8Array(crypto.randomBytes(200_000));
     const file = hop.putFile(photo);
@@ -594,7 +594,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
 
   test("/file put saves a same-message attachment in the durable peer vault", async () => {
     const node = await startSandbox();
-    const hop = await startMockHopNode();
+    const hop = await startHopNode();
     const stateDir = tmpState();
     const bytes = new Uint8Array(Buffer.from("durable client attachment\n"));
     const attachment = hop.putFile(bytes);
@@ -631,7 +631,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
 
   test("bridge /files uploads, lists, retrieves, and sends a vault file", async () => {
     const node = await startSandbox();
-    const hop = await startMockHopNode();
+    const hop = await startHopNode();
     const stateDir = tmpState();
     const bot = await startBot({
       endpoint: node.url, apiUrl: node.apiUrl,
@@ -1056,7 +1056,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
 
   test("engine: a sent file is privately staged for the turn then cleaned up", async () => {
     const node = await startSandbox();
-    const hop = await startMockHopNode();
+    const hop = await startHopNode();
     const stateDir = tmpState();
     const bytes = new Uint8Array(Buffer.from("spec-content-123"));
     const file = hop.putFile(bytes);
@@ -1128,7 +1128,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
 
   test("owed attachment survives kill -9 and re-processes after restart", async () => {
     const node = await startSandbox();
-    const hop = await startMockHopNode();
+    const hop = await startHopNode();
     const stateDir = tmpState();
     const photo = new Uint8Array(crypto.randomBytes(100_000));
     const file = hop.putFile(photo);
