@@ -73,7 +73,10 @@ const usage = `pcs — Polkadot chat sandbox
   pcs fault list | pcs fault clear [<id>]
   pcs clock +2h|-30m|+10s|reset            # move the store node's clock
   pcs node restart|reset                   # drop every socket (keep / wipe the store)
-  pcs bot attach <pca-bot-name>            # register a pca bot's account in the directory
+  pcs hop                                  # the HOP pool: every entry, who signed and claimed it
+  pcs hop fault refuse|cut|delay|drop|corrupt [--hash <entry>] [--method claim|ack|submit] [--count N|forever] [--ms N]
+  pcs hop clear [<id>]
+  pcs bot attach <pca-bot-name>            # register a pca bot's account (and its Bulletin signer) in the directory
   pcs scenario run <file>                  # run a scripted scenario on a fresh daemon
   pcs events
 
@@ -141,10 +144,11 @@ switch (cmd) {
   case "up": {
     const dir = flags.dir ?? defaultDir();
     const daemon = await startDaemon({ dir, port: Number(flags.port ?? DEFAULT_PORT) });
-    if (json) out({ url: daemon.url, storeUrl: daemon.storeUrl, dir });
+    if (json) out({ url: daemon.url, storeUrl: daemon.storeUrl, hopUrl: daemon.hopUrl, dir });
     else {
       ok(`sandbox up at ${daemon.url}`);
       note(`statement store node ${daemon.storeUrl}`);
+      note(`HOP node (attachments) ${daemon.hopUrl}`);
       note(`state dir ${dir}`);
       note("ctrl-c to stop");
     }
@@ -321,6 +325,38 @@ switch (cmd) {
     else ok(`node ${sub === "restart" ? "restarted" : "reset"}: every socket dropped, ${result.statements} statement(s) in the store`);
     break;
   }
+  case "hop": {
+    const [sub, kind] = rest;
+    if (sub === "fault") {
+      if (!["refuse", "cut", "delay", "drop", "corrupt"].includes(kind)) fail("usage: pcs hop fault refuse|cut|delay|drop|corrupt [--hash <entry>] [--method claim|ack|submit] [--count N|forever] [--ms N]");
+      const body = { kind, hash: flags.hash ?? null, method: flags.method ?? null };
+      if (flags.count != null) body.count = flags.count === "forever" ? null : Number(flags.count);
+      if (kind === "delay") { if (flags.ms == null) fail("usage: pcs hop fault delay --ms N [...]"); body.ms = Number(flags.ms); }
+      const fault = await api("POST", "/hop/faults", body);
+      if (json) out(fault);
+      else ok(`HOP fault #${fault.id} ${fault.kind} on ${fault.method}${fault.hash ? ` of ${short(fault.hash)}` : ""} set${fault.count != null ? ` for ${fault.count} hit(s)` : " until cleared"}`);
+      break;
+    }
+    if (sub === "clear") {
+      const result = await api("DELETE", `/hop/faults/${kind ?? "all"}`);
+      if (json) out(result);
+      else ok(`cleared ${result.cleared} HOP fault(s)`);
+      break;
+    }
+    if (sub != null) fail("usage: pcs hop | pcs hop fault … | pcs hop clear [id]");
+    const pool = await api("GET", "/hop");
+    if (json) out(pool);
+    else {
+      step(`HOP node ${pool.url}: ${pool.status.entryCount} entr${pool.status.entryCount === 1 ? "y" : "ies"} holding ${pool.status.totalBytes}B of ${pool.status.maxBytes}B`);
+      if (pool.entries.length === 0) note("no entries");
+      for (const e of pool.entries) {
+        const role = e.role ? `${e.role}${e.owner ? ` of ${e.owner}` : ""}` : "entry";
+        note(`${short(e.hash)}  ${role}  ${e.bytes}B  by ${e.signerLabel ?? (e.signer ? short(e.signer) : "fixture")}  claimed ×${e.claims}${e.acked ? "  acked" : ""}${e.available ? "" : `  gone (${e.reason ?? "removed"})`}`);
+      }
+      for (const f of pool.faults) note(`fault #${f.id} ${f.kind} on ${f.method}${f.hash ? ` of ${short(f.hash)}` : ""}  hits ${f.hits}${f.count != null ? `/${f.count}` : ""}`);
+    }
+    break;
+  }
   case "bot": {
     const [sub, name] = rest;
     if (sub !== "attach" || !name) fail("usage: pcs bot attach <pca-bot-name>");
@@ -331,10 +367,12 @@ switch (cmd) {
     let cfg;
     try { cfg = JSON.parse(fs.readFileSync(file, "utf8")); } catch { fail(`no pca bot "${name}" (${file})`); }
     if (!cfg.account || !cfg.identifierKey) fail(`${file} has no account/identifierKey`);
-    const entry = await api("POST", "/accounts/register", { account: cfg.account, username: cfg.username ?? name, identifierKey: cfg.identifierKey });
+    // bulletinAccount is the public half of the bot's upload signer; without
+    // it the bot can receive attachments but not return files.
+    const entry = await api("POST", "/accounts/register", { account: cfg.account, username: cfg.username ?? name, identifierKey: cfg.identifierKey, bulletinAccount: cfg.bulletinAccount ?? null });
     if (json) out(entry);
     else {
-      ok(`${name} attached as ${entry.username} (${short(entry.account)})`);
+      ok(`${name} attached as ${entry.username} (${short(entry.account)})${entry.bulletinAccount ? ", file delivery allowed" : ""}`);
       if (cfg.networkProfile !== "sandbox") warn(`${name} targets ${cfg.endpoint}, not this sandbox. To run it here:  pca create ${name} --network sandbox`);
       else note(`run it:  pca run ${name}`);
     }

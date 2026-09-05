@@ -53,7 +53,7 @@ const intParam = (value, fallback) => {
   return n;
 };
 
-export function createApi({ node, directory, personas, events, addPersona, resolvePeer, storeUrl, setClock, restartNode, resetNode, staticDir = null }) {
+export function createApi({ node, hop, directory, personas, events, addPersona, resolvePeer, storeUrl, setClock, restartNode, resetNode, staticDir = null }) {
   // The room page shares the UI's markdown pipeline (lib/markdown.mjs); one
   // jsdom window for DOMPurify. Loaded on first use: jsdom is heavy, and the
   // CLI imports this module on every `pcs` call.
@@ -96,6 +96,25 @@ export function createApi({ node, directory, personas, events, addPersona, resol
     if (!found) throw notFound(`no fault ${id}`);
     return found;
   };
+  const hopFaultOf = (id) => {
+    const found = hop.faults.list().find((f) => f.id === Number(id));
+    if (!found) throw notFound(`no HOP fault ${id}`);
+    return found;
+  };
+  // Who signed a pool entry: a registered identity's Bulletin account, or a persona's.
+  const hopSignerLabel = (signer) => {
+    if (!signer) return null;
+    const p = [...personas.values()].find((x) => x.bulletinAccount === signer);
+    if (p) return p.name;
+    return directory.list().find((e) => e.bulletinAccount === signer)?.username ?? null;
+  };
+  const hopView = () => ({
+    url: hop.url,
+    limits: hop.limits,
+    status: hop.status(),
+    entries: hop.list().map((e) => ({ ...e, signerLabel: hopSignerLabel(e.signer) })),
+    faults: hop.faults.list(),
+  });
   const roomView = (p, peer, { device = null, unread = false } = {}) => ({
     persona: p.name,
     peer,
@@ -108,8 +127,32 @@ export function createApi({ node, directory, personas, events, addPersona, resol
   // [method, pattern, handler(params, query, body)] — patterns use :name segments.
   const routes = [
     ["GET", "/node", () => ({
-      url: storeUrl, statements: node.statements.length, allowances: node.allowances.size, limits: node.limits, clock: node.clock, faults: node.faults.list(),
+      url: storeUrl, hopUrl: hop.url, statements: node.statements.length, allowances: node.allowances.size, limits: node.limits, clock: node.clock, faults: node.faults.list(),
     })],
+    // The HOP pool: every entry it held (bytes never leave the node), who
+    // signed it, whether it was claimed and acked, and the faults set on it.
+    ["GET", "/hop", () => hopView()],
+    ["POST", "/hop/faults", (_p, _q, body) => {
+      const kinds = { refuse: "refuse", cut: "cut", delay: "delay", drop: "drop", corrupt: "corrupt", bloat: "bloat" };
+      const kind = kinds[body.kind];
+      if (!kind) throw badRequest(`kind must be one of ${Object.keys(kinds).join(", ")}`);
+      const opts = {
+        ...(body.hash ? { hash: normHex(body.hash) } : {}),
+        ...(body.method ? { method: body.method } : {}),
+        ...(body.count === undefined ? {} : { count: body.count === null ? null : intParam(body.count, null) }),
+        ...(body.ms != null ? { ms: Number(body.ms) } : {}),
+        ...(body.bytes != null ? { bytes: Number(body.bytes) } : {}),
+      };
+      let created;
+      try { created = hop.faults[kind](opts); }
+      catch (e) { throw badRequest(e.message); }
+      return hopFaultOf(created.id);
+    }],
+    ["DELETE", "/hop/faults/:id", (p) => {
+      if (p.id === "all") return { cleared: hop.faults.clear() };
+      hopFaultOf(p.id);
+      return { cleared: hop.faults.clear(Number(p.id)) };
+    }],
     ["GET", "/wire", (_p, q) => ({
       statements: inspectWire(wireDeps(), {
         topic: hexOf(q.get("topic"), "topic"), signer: q.get("signer") ? signersOf(q.get("signer"))[0] : null,
@@ -158,11 +201,17 @@ export function createApi({ node, directory, personas, events, addPersona, resol
       return directory.allow(body.account);
     }],
     // `register_lite_person` for an account the sandbox holds no keys for (a
-    // bot-core bot): username, identifier-key container, statement allowance.
+    // bot-core bot): username, identifier-key container, statement allowance,
+    // and the Bulletin authorization for its upload signer when named.
     ["POST", "/accounts/register", (_p, _q, body) => {
       if (!body.account || !body.username || !body.identifierKey) throw badRequest("account, username and identifierKey required");
-      try { return directory.register(body.account, { username: body.username, identifierKey: body.identifierKey }); }
+      try { return directory.register(body.account, { username: body.username, identifierKey: body.identifierKey, bulletinAccount: body.bulletinAccount ?? null }); }
       catch (e) { throw new ApiError(409, e.message); }
+    }],
+    // `pca storage grant`'s stand-in: a Bulletin authorization for one account.
+    ["POST", "/accounts/:account/bulletin", (p) => {
+      try { return directory.grantBulletin(p.account); }
+      catch (e) { throw badRequest(e.message); }
     }],
     ["GET", "/consumers/:account", (p) => directory.consumer(p.account) ?? (() => { throw notFound(`no consumer ${p.account}`); })()],
     ["GET", "/usernames/:name", (p) => {
