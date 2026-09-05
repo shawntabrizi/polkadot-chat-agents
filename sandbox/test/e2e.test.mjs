@@ -158,3 +158,108 @@ test("alice (1 device) and bob (2 devices): request, accept, text, reply from de
   assert.equal((await get("/personas/carol/requests"))[0].status, "pending", "the wire has no decline; carol's request stays pending");
   assert.equal((await get("/personas/bob")).contacts.length, 1);
 });
+
+test("faults, clock and node restart; the wire decodes both directions and matches ACKs per device", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pcs-e2e-"));
+  const daemon = await startDaemon({ dir, port: 0 });
+  t.after(async () => { await daemon.stop(); fs.rmSync(dir, { recursive: true, force: true }); });
+  const api = daemon.url;
+  const get = (route) => call(api, "GET", route);
+  const post = (route, body) => call(api, "POST", route, body);
+  const del = (route) => call(api, "DELETE", route);
+  const label = (name) => encodeURIComponent(name);
+  const delivered = (from, to, messageId) => waitFor(async () => (await get(`/personas/${from}/rooms/${to}`)).messages.find((m) => m.messageId === messageId)?.status === "delivered");
+
+  await post("/personas", { name: "alice", devices: 1 });
+  const bob = await post("/personas", { name: "bob", devices: 2 });
+  const { requestId } = await post("/personas/alice/requests", { to: "bob", welcome: "hi bob" });
+  await waitFor(async () => (await get("/personas/bob/requests")).length === 1);
+  await post(`/personas/bob/requests/${requestId}/accept`, {});
+  await waitFor(async () => (await get("/personas/alice")).contacts[0]?.devices.length === 2);
+  const sent = await post("/personas/alice/rooms/bob/messages", { text: "hello bob" });
+  await delivered("alice", "bob", sent.messageId);
+  await waitFor(async () => (await get("/personas/bob/rooms/alice")).messages.find((m) => m.messageId === sent.messageId)?.ackedBy.length === 2);
+
+  // The decoded wire: the request (bob holds the key), the accept on the
+  // identity session, alice's text as a multi-device envelope for both bob
+  // devices, and each device's ACK matched to it.
+  const wire = (await get("/wire")).statements;
+  const opener = wire.find((s) => s.channelLabel === "chat request");
+  assert.deepEqual([opener.decoded.kind, opener.decoded.requestId, opener.decoded.welcome, opener.decoded.sender.label], ["chatRequest", requestId, "hi bob", "alice"]);
+  assert.equal(opener.decoded.sender.device, daemon.personas.get("alice").devices[0].account, "the request names the sending device");
+  const accept = wire.find((s) => s.channelLabel === "identity bob→alice /request");
+  assert.equal(accept.decoded.messages[0].content.type, "deviceChatAccepted");
+  assert.equal(accept.decoded.messages[0].content.requestId, requestId);
+  assert.deepEqual(accept.acks.map((a) => [a.by, a.code]), [["alice#1", "success"]], "alice ACKed the accept on the identity session");
+  const text = wire.find((s) => s.channelLabel === "session alice#1→bob /request");
+  assert.equal(text.decoded.multiDevice, true);
+  assert.deepEqual(text.decoded.recipients.map((r) => r.label).sort(), ["bob#1", "bob#2"], "wrapped for both bob devices");
+  const row = text.decoded.messages.find((m) => m.messageId === sent.messageId);
+  assert.deepEqual(row.content, { type: "text", text: "hello bob" }, "the inbox's content shape");
+  assert.deepEqual(text.acks.map((a) => [a.by, a.code, a.live]).sort(), [["bob#1", "success", true], ["bob#2", "success", true]]);
+  assert.ok(wire.every((s) => !("hex" in s)), "no raw bytes unless asked");
+  assert.ok(!JSON.stringify(wire).includes(Buffer.from(daemon.personas.get("bob").devices[0].keys.statementSeed).toString("hex").slice(0, 32)), "no key material in the wire view");
+  // A slot's history: the fan-out (deviceAdded) sat in alice's request slot before the text replaced it.
+  const history = (await get(`/wire/history?channel=${label("session alice#1→bob /request")}`)).history;
+  // (whether the text extended the un-ACKed fan-out batch or started a fresh one depends on timing)
+  const kinds = (h) => h.decoded.messages.map((m) => m.content.type);
+  assert.deepEqual(history.map((h) => h.reason), ["replaced", null]);
+  assert.deepEqual([kinds(history[0])[0], kinds(history[1]).at(-1)], ["deviceAdded", "text"]);
+  assert.ok(history[0].replacedAt && !history[1].replacedAt);
+  assert.equal((await get(`/wire?channel=${label("session alice#1→bob /request")}`)).statements.length, 1);
+  await assert.rejects(get("/wire?channel=nope"), /unknown channel/);
+
+  // A fault by persona name and channel label: bob#1's next ACK is swallowed
+  // by the node; alice's row is delivered by bob#2's ACK alone.
+  const fault = await post("/faults", { kind: "drop", from: "bob", channel: "session bob#1→alice /response", count: 1 });
+  assert.deepEqual([fault.kind, fault.count, fault.hits, fault.signer.length], ["drop", 1, 0, 3]);
+  assert.deepEqual((await get("/faults")).map((f) => f.id), [fault.id]);
+  const second = await post("/personas/alice/rooms/bob/messages", { text: "second" });
+  await delivered("alice", "bob", second.messageId);
+  await waitFor(async () => (await get("/faults")).length === 0, { attempts: 200 });
+  const acked = (await get(`/wire?channel=${label("session alice#1→bob /request")}`)).statements[0];
+  assert.deepEqual(acked.acks.filter((a) => a.live).map((a) => a.by), ["bob#2"], "bob#1's ACK never reached the store");
+  assert.equal((await get("/node")).faults.length, 0, "a count-1 fault is spent");
+  await assert.rejects(post("/faults", { kind: "drop", from: "nobody" }), /unknown signer/);
+  await assert.rejects(post("/faults", { kind: "blip" }), /kind must be/);
+  const forever = await post("/faults", { kind: "delay", from: "alice", ms: 10, count: null });
+  assert.equal(forever.count, null);
+  assert.deepEqual(await del(`/faults/${forever.id}`), { cleared: 1 });
+  await assert.rejects(del(`/faults/${forever.id}`), /404/);
+
+  // The clock moves the node's expiry checks; chat statements never expire.
+  const beforeClock = (await get("/wire")).statements;
+  assert.ok(beforeClock.every((s) => s.expiresAt === null), "chat statements carry 0xffffffff");
+  assert.deepEqual(await post("/clock", { offsetMs: 2 * 3600 * 1000 }), { offsetMs: 7_200_000 });
+  assert.equal((await get("/node")).clock.offsetMs, 7_200_000);
+  assert.equal((await get("/wire")).statements.length, beforeClock.length, "nothing expired");
+  assert.deepEqual(await post("/clock", { reset: true }), { offsetMs: 0 });
+
+  // A node restart drops every socket and keeps the store; personas rebuild
+  // their sessions and traffic continues without a new request.
+  const before = (await get("/node")).statements;
+  assert.deepEqual(await post("/node/restart"), { ok: true, statements: before });
+  const after = await post("/personas/alice/rooms/bob/messages", { text: "after restart" });
+  await delivered("alice", "bob", after.messageId);
+  const onBoth = await waitFor(async () => {
+    const m = (await get("/personas/bob/rooms/alice")).messages.find((x) => x.messageId === after.messageId);
+    return m?.receivedBy.length === 2 ? m : null;
+  });
+  assert.deepEqual(onBoth.receivedBy.sort(), [1, 2]);
+  assert.equal((await get("/personas/bob/rooms/alice")).messages.filter((m) => m.direction === "incoming" && m.content.type === "text").length, 4, "the old statements were not received again");
+  // A reset wipes the store; the sessions still work.
+  assert.deepEqual(await post("/node/reset"), { ok: true, statements: 0 });
+  const fresh = await post("/personas/bob/rooms/alice/messages", { text: "fresh store", device: 2 });
+  await delivered("bob", "alice", fresh.messageId);
+  assert.equal((await get("/wire")).statements.every((s) => s.signerLabel), true);
+
+  // Faults, clock and node events are in the stream, typed apart from wire events.
+  const res = await fetch(`${api}/events?since=0`);
+  const reader = res.body.getReader();
+  const { value } = await reader.read();
+  await reader.cancel();
+  const stream = new TextDecoder().decode(value);
+  for (const type of ["fault", "clock", "node"]) assert.ok(stream.includes(`event: ${type}\n`), `no ${type} event`);
+  assert.ok(/"action":"hit"/.test(stream) && /"action":"cleared"/.test(stream) && /"action":"restart"/.test(stream));
+  assert.equal(bob.devices.length, 2);
+});

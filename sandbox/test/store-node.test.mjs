@@ -199,8 +199,10 @@ test("list() filters by topic, signer and channel and never needs a key", () =>
     assert.equal(node.list({ channel: hex32("02") })[0].signer, bob.account);
 
     const [entry] = node.list({ signer: alice.account });
-    assert.deepEqual(Object.keys(entry).sort(), ["channel", "expiry", "hex", "receivedAt", "replacedCount", "signer", "topics"]);
+    assert.deepEqual(Object.keys(entry).sort(), ["channel", "data", "expiry", "hex", "reason", "receivedAt", "replacedAt", "replacedCount", "signer", "topics"]);
     assert.equal(entry.channel, "01".repeat(32));
+    assert.equal(entry.data, toHex(new TextEncoder().encode("hi")), "the data field, still encrypted, for the inspector");
+    assert.deepEqual([entry.replacedAt, entry.reason], [null, null], "a live statement has no replacement stamp");
     assert.deepEqual(entry.topics, ["0a".repeat(32), "0b".repeat(32)]);
     assert.equal(typeof entry.expiry, "bigint");
     assert.ok(entry.receivedAt >= before && entry.receivedAt <= Date.now());
@@ -252,7 +254,7 @@ test("fault drop: matching submits are answered new but never stored, for count 
   withNode({}, async (node, open) => {
     const c = await open();
     const fault = node.faults.drop({ signer: alice.account, count: 1 });
-    assert.deepEqual(node.faults.list(), [{ id: fault.id, kind: "drop", signer: alice.account, channel: null, count: 1, hits: 0, held: 0 }]);
+    assert.deepEqual(node.faults.list(), [{ id: fault.id, kind: "drop", signer: [alice.account], channel: null, topic: null, count: 1, hits: 0, held: 0 }]);
 
     assert.deepEqual(await c.submit(await signed(alice, { channel: hex32("01"), topics: [TOPIC], expiry: expiryIn(60) })), { status: "new" });
     assert.equal(node.statements.length, 0, "dropped");
@@ -266,8 +268,63 @@ test("fault drop: matching submits are answered new but never stored, for count 
     const rejected = await c.submit(await signed(alice, { channel: hex32("01"), topics: [TOPIC], expiry: expiryIn(30) }));
     assert.equal(rejected.reason, "channelPriorityTooLow");
     assert.equal(node.faults.list()[0].hits, 0);
-    node.faults.clear();
+    assert.equal(node.faults.clear(), 1);
     assert.deepEqual(node.faults.list(), []);
+  }));
+
+test("fault matching: by topic, by a set of signers, forever with count null; every set/hit/clear is an event", () =>
+  withNode({}, async (node, open) => {
+    const c = await open();
+    const events = [];
+    const stop = node.watch((e) => { if (e.event === "fault") events.push(e); });
+    // A topic match drops any signer's statement carrying the topic.
+    const byTopic = node.faults.drop({ topic: hex32("0b"), count: null });
+    await c.submit(await signed(alice, { channel: hex32("01"), topics: [TOPIC, hex32("0b")], expiry: expiryIn(60) }));
+    await c.submit(await signed(bob, { channel: hex32("02"), topics: [hex32("0b")], expiry: expiryIn(60) }));
+    await c.submit(await signed(bob, { channel: hex32("03"), topics: [TOPIC], expiry: expiryIn(60) }));
+    assert.deepEqual(node.list().map((s) => s.channel), ["03".repeat(32)], "only the statement without the topic landed");
+    assert.equal(node.faults.list()[0].hits, 2, "count null never spends the fault");
+    byTopic.clear();
+    // A signer list: a persona's accounts at once.
+    node.faults.drop({ signer: [alice.account, `0x${bob.account}`], count: 2 });
+    await c.submit(await signed(alice, { channel: hex32("04"), topics: [TOPIC], expiry: expiryIn(60) }));
+    await c.submit(await signed(bob, { channel: hex32("05"), topics: [TOPIC], expiry: expiryIn(60) }));
+    assert.equal(node.list().length, 1);
+    assert.deepEqual(node.faults.list(), [], "spent after two hits");
+    assert.deepEqual(events.map((e) => [e.action, e.kind, e.spent ?? null]), [
+      ["set", "drop", null], ["hit", "drop", false], ["hit", "drop", false], ["cleared", "drop", null],
+      ["set", "drop", null], ["hit", "drop", false], ["hit", "drop", true],
+    ]);
+    assert.equal(events[1].signer, alice.account, "a hit names the statement it swallowed");
+    stop();
+  }));
+
+test("history(): a slot remembers what a replacement, an eviction or the clock pushed out, with the reason", () =>
+  withNode({ maxCountPerAccount: 2 }, async (node, open) => {
+    const c = await open();
+    const e = expiryIn(3600, 1);
+    await c.submit(await signed(alice, { channel: hex32("01"), topics: [TOPIC], expiry: e, data: new Uint8Array([1]) }));
+    await c.submit(await signed(alice, { channel: hex32("01"), topics: [TOPIC], expiry: e + 1n, data: new Uint8Array([2]) }));
+    await c.submit(await signed(alice, { channel: hex32("01"), topics: [TOPIC], expiry: e + 2n, data: new Uint8Array([3]) }));
+    assert.equal(node.list({ channel: hex32("01") })[0].replacedCount, 2);
+    const replaced = node.history({ channel: hex32("01") });
+    assert.deepEqual(replaced.map((h) => [h.data, h.reason]), [["01", "replaced"], ["02", "replaced"]], "oldest first, the live one excluded");
+    assert.ok(replaced.every((h) => typeof h.replacedAt === "number"));
+    assert.equal(node.history({ signer: bob.account }).length, 0);
+
+    // Eviction by the per-account count limit is history too.
+    await c.submit(await signed(alice, { channel: hex32("02"), topics: [TOPIC], expiry: expiryIn(3600, 5) }));
+    await c.submit(await signed(alice, { channel: hex32("03"), topics: [TOPIC], expiry: expiryIn(3600, 9) }));
+    assert.deepEqual(node.history({ channel: hex32("01") }).map((h) => h.reason), ["replaced", "replaced", "evicted"]);
+
+    // And so is expiry under the node clock.
+    await c.submit(await signed(bob, { channel: hex32("04"), topics: [TOPIC], expiry: expiryIn(60) }));
+    node.clock.offsetMs = 120_000;
+    assert.equal(node.list({ signer: bob.account }).length, 0);
+    assert.deepEqual(node.history({ signer: bob.account }).map((h) => h.reason), ["expired"]);
+    node.clock.offsetMs = 0;
+    node.reset();
+    assert.equal(node.history().length, 0, "a wipe forgets history too");
   }));
 
 test("fault delay: the submit is stored and answered only after ms", () =>

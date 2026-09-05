@@ -168,7 +168,7 @@ export const sendChatRequest = async (params) => {
 // bot-core wraps the envelope in one more `Bytes()`; the apps do not. A raw
 // envelope starts with compact(32) followed by the key, so reading a `Bytes()`
 // prefix that spans exactly the whole payload identifies the wrapped form.
-const unwrapOuterBytes = (data) => {
+export const unwrapOuterBytes = (data) => {
   try {
     const length = Number(compact.dec(data));
     const prefix = compact.enc(length).length;

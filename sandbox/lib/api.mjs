@@ -2,13 +2,12 @@
 // web UI are thin clients of it. JSON in, JSON out; bytes become 0x-hex and
 // bigints strings on the way out. Events stream as SSE on GET /events.
 //
-// Routes follow PLAN.md's table. Faults, clock and scenarios are S2/S3; the
-// router leaves room for them (one table, one handler per row).
+// Routes follow PLAN.md's table: one table, one handler per row.
 
 import http from "node:http";
 
 import { normHex } from "./bytes.mjs";
-import { inspectWire } from "./wire.mjs";
+import { inspectHistory, inspectWire, resolveHex } from "./wire.mjs";
 
 const replacer = (_k, v) => (v instanceof Uint8Array ? normHex(v) : typeof v === "bigint" ? v.toString() : v);
 export const toJson = (value) => JSON.stringify(value, replacer);
@@ -37,7 +36,7 @@ const intParam = (value, fallback) => {
   return n;
 };
 
-export function createApi({ node, directory, personas, events, addPersona, resolvePeer, storeUrl }) {
+export function createApi({ node, directory, personas, events, addPersona, resolvePeer, storeUrl, setClock, restartNode, resetNode }) {
   const persona = (name) => {
     const found = personas.get(name);
     if (!found) throw notFound(`no persona ${name}`);
@@ -49,6 +48,29 @@ export function createApi({ node, directory, personas, events, addPersona, resol
     return account;
   };
   const nameOf = (account) => directory.consumer(account)?.username ?? null;
+  const wireDeps = () => ({ node, personas: [...personas.values()], directory });
+  // A fault's `from`: a persona name (its identity and every device account),
+  // a directory username (a bot's account) or an account hex.
+  const signersOf = (value) => {
+    if (value == null) return null;
+    const p = personas.get(value);
+    if (p) return [p.account, ...p.devices.map((d) => d.account)];
+    const account = resolvePeer(value);
+    if (!account) throw notFound(`unknown signer ${value}`);
+    return [account];
+  };
+  // A channel or topic: hex, or a label as `pcs wire` prints it.
+  const hexOf = (value, what) => {
+    if (value == null) return null;
+    const hex = resolveHex(wireDeps(), value);
+    if (!hex) throw badRequest(`unknown ${what} ${value}`);
+    return hex;
+  };
+  const faultOf = (id) => {
+    const found = node.faults.list().find((f) => f.id === Number(id));
+    if (!found) throw notFound(`no fault ${id}`);
+    return found;
+  };
   const roomView = (p, peer, { device = null, unread = false } = {}) => ({
     persona: p.name,
     peer,
@@ -64,8 +86,46 @@ export function createApi({ node, directory, personas, events, addPersona, resol
       url: storeUrl, statements: node.statements.length, allowances: node.allowances.size, limits: node.limits, clock: node.clock, faults: node.faults.list(),
     })],
     ["GET", "/wire", (_p, q) => ({
-      statements: inspectWire({ node, personas: [...personas.values()], directory }, { topic: q.get("topic"), signer: q.get("signer"), peer: q.get("peer"), raw: q.get("raw") === "1" }),
+      statements: inspectWire(wireDeps(), {
+        topic: hexOf(q.get("topic"), "topic"), signer: q.get("signer") ? signersOf(q.get("signer"))[0] : null,
+        channel: hexOf(q.get("channel"), "channel"), peer: q.get("peer"), raw: q.get("raw") === "1",
+      }),
     })],
+    ["GET", "/wire/history", (_p, q) => {
+      if (!q.get("channel")) throw badRequest("channel required");
+      return { history: inspectHistory(wireDeps(), { channel: hexOf(q.get("channel"), "channel"), signer: q.get("signer") ? signersOf(q.get("signer"))[0] : null, raw: q.get("raw") === "1" }) };
+    }],
+
+    // Faults live in the store node; names are resolved here so a scenario
+    // can say "drop echobot's next statement on this channel".
+    ["GET", "/faults", () => node.faults.list()],
+    ["POST", "/faults", (_p, _q, body) => {
+      const match = { signer: signersOf(body.from ?? body.signer), channel: hexOf(body.channel, "channel"), topic: hexOf(body.topic, "topic") };
+      const count = body.count === undefined ? undefined : body.count === null ? null : intParam(body.count, null);
+      let created;
+      try {
+        if (body.kind === "drop") created = node.faults.drop({ ...match, ...(count !== undefined ? { count } : {}) });
+        else if (body.kind === "delay") created = node.faults.delay({ ...match, ms: Number(body.ms), ...(count !== undefined ? { count } : {}) });
+        else if (body.kind === "holdDump") created = node.faults.holdDump({ topic: match.topic });
+        else throw badRequest("kind must be drop, delay or holdDump");
+      } catch (e) {
+        if (e instanceof ApiError) throw e;
+        throw badRequest(e.message);
+      }
+      return faultOf(created.id);
+    }],
+    ["DELETE", "/faults/:id", (p) => {
+      if (p.id === "all") return { cleared: node.faults.clear() };
+      faultOf(p.id);
+      return { cleared: node.faults.clear(Number(p.id)) };
+    }],
+    ["POST", "/clock", (_p, _q, body) => {
+      const offset = body.reset ? 0 : Number(body.offsetMs);
+      if (!Number.isFinite(offset)) throw badRequest("offsetMs (milliseconds) or reset required");
+      return setClock(offset);
+    }],
+    ["POST", "/node/restart", async () => { await restartNode(); return { ok: true, statements: node.statements.length }; }],
+    ["POST", "/node/reset", async () => { await resetNode(); return { ok: true, statements: node.statements.length }; }],
 
     ["GET", "/accounts", () => directory.list()],
     ["POST", "/accounts", (_p, _q, body) => {
@@ -194,7 +254,7 @@ export function createApi({ node, directory, personas, events, addPersona, resol
         const match = url.pathname.match(route.regex);
         if (!match) continue;
         const params = Object.fromEntries(route.keys.map((k, i) => [k, decodeURIComponent(match[i + 1])]));
-        const body = req.method === "POST" ? await readBody(req) : {};
+        const body = req.method === "POST" || req.method === "DELETE" ? await readBody(req) : {};
         return send(200, await route.handler(params, url.searchParams, body));
       }
       return send(404, { error: `no route ${req.method} ${url.pathname}` });

@@ -19,7 +19,7 @@ for (let i = 0; i < args.length; i++) {
   if (!a.startsWith("--")) { positional.push(a); continue; }
   const key = a.slice(2);
   const next = args[i + 1];
-  if (["json", "unread", "raw", "remove"].includes(key) || next == null || next.startsWith("--")) flags[key] = true;
+  if (["json", "unread", "raw", "remove", "decode"].includes(key) || next == null || next.startsWith("--")) flags[key] = true;
   else { flags[key] = next; i += 1; }
 }
 const json = Boolean(flags.json) || !process.stdout.isTTY;
@@ -61,7 +61,13 @@ const usage = `pcs — Polkadot chat sandbox
   pcs react <from> <to> <messageId> <emoji> [--remove] [--device N]
   pcs edit <from> <to> <messageId> "text" [--device N]
   pcs inbox <name> [--peer <name>] [--unread] [--device N]
-  pcs wire [--peer <name>] [--signer <account>] [--raw]
+  pcs wire [--peer <name>] [--signer <account>] [--channel <hex|label>] [--decode] [--raw]
+  pcs wire --history <channel hex|label>   # what the slot held before, oldest first
+  pcs fault drop|delay [--from <name|account>] [--channel <hex|label>] [--topic <hex|label>] [--count N|forever] [--ms N]
+  pcs fault hold-dump [--topic <hex|label>] [--for <name>]
+  pcs fault list | pcs fault clear [<id>]
+  pcs clock +2h|-30m|+10s|reset            # move the store node's clock
+  pcs node restart|reset                   # drop every socket (keep / wipe the store)
   pcs bot attach <pca-bot-name>            # register a pca bot's account in the directory
   pcs scenario run <file>                  # run a scripted scenario on a fresh daemon
   pcs events
@@ -74,6 +80,43 @@ const pendingFor = async (name, requestId) => {
   if (pending.length === 0) fail(`${name} has no pending request`);
   if (pending.length > 1) fail(`${name} has ${pending.length} pending requests, name one: ${pending.map((r) => r.requestId).join(", ")}`);
   return pending[0].requestId;
+};
+
+const printDecoded = (s) => {
+  const d = s.decoded;
+  if (!d) return;
+  const acks = s.acks?.length ? `  acked by ${s.acks.map((a) => `${a.by} (${a.code})`).join(", ")}` : s.acks ? "  no ack" : "";
+  if (d.kind === "chatRequest") {
+    note(d.sealed ? "chat request (addressed to a bot: no key here)" : d.undecodable ? "chat request (undecodable)" : `chat request ${short(d.requestId)} from ${d.sender.label ?? short(d.sender.account)}${d.welcome != null ? `  "${d.welcome}"` : ""}`);
+    return;
+  }
+  if (d.kind === "response") {
+    note(d.sealed ? "response (sealed envelope)" : `response to ${short(d.requestId)}  ${d.responseCode}${d.recipients ? `  for ${d.recipients.map((r) => r.label ?? short(r.statementAccountId)).join(",")}` : ""}`);
+    return;
+  }
+  if (d.kind === "request") {
+    note(d.sealed ? "request (sealed envelope)" : `request ${short(d.requestId)}  ${d.messages.length} message(s)${d.recipients ? `  for ${d.recipients.map((r) => r.label ?? short(r.statementAccountId)).join(",")}` : ""}${acks}`);
+    for (const m of d.messages ?? []) {
+      if (m.undecodable) { note(`  undecodable (${m.bytes} bytes)`); continue; }
+      const c = m.content;
+      const body = c.type === "text" || c.type === "reply" || c.type === "edit" ? `"${c.text}"` : c.type === "reaction" ? `${c.emoji} on ${short(c.messageId)}` : c.type === "richText" ? `"${c.text ?? ""}" +${c.attachments.length} attachment(s)` : "";
+      note(`  ${c.type} ${body}  id ${short(m.messageId)}`);
+    }
+    return;
+  }
+  note(d.kind);
+};
+const printStatement = (s) => {
+  step(`${s.signerLabel ?? short(s.signer ?? "?")}  ${s.channelLabel ?? (s.channel ? short(s.channel) : "no channel")}  seq ${s.sequence}  ${s.bytes}B${s.replacedCount ? `  replaced ×${s.replacedCount}` : ""}${s.replacedAt ? `  ${s.reason} at ${when(Date.parse(s.replacedAt))}` : ""}`);
+  for (const t of s.topics) note(`topic ${t.label ?? t.hex}`);
+  if (flags.decode || flags.history) printDecoded(s);
+  if (flags.raw) note(s.hex);
+};
+// +2h, -30m, +10s, 500ms → milliseconds.
+const parseOffset = (value) => {
+  const m = /^([+-]?\d+)(ms|s|m|h|d)$/.exec(String(value));
+  if (!m) fail(`not a duration: ${value} (use +2h, -30m, +10s, 500ms)`);
+  return Number(m[1]) * { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2]];
 };
 
 const printMessages = (view) => {
@@ -192,16 +235,58 @@ switch (cmd) {
   }
   case "wire": {
     const query = new URLSearchParams();
-    for (const k of ["peer", "signer", "topic"]) if (flags[k]) query.set(k, flags[k]);
     if (flags.raw) query.set("raw", "1");
+    if (flags.history) {
+      query.set("channel", flags.history);
+      if (flags.signer) query.set("signer", flags.signer);
+      const { history } = await api("GET", `/wire/history?${query}`);
+      if (json) out(history);
+      else if (history.length === 0) note("nothing on that channel");
+      else for (const s of history) printStatement(s);
+      break;
+    }
+    for (const k of ["peer", "signer", "topic", "channel"]) if (flags[k]) query.set(k, flags[k]);
     const { statements } = await api("GET", `/wire?${query}`);
     if (json) out(statements);
     else if (statements.length === 0) note("no statements");
-    else for (const s of statements) {
-      step(`${s.signerLabel ?? short(s.signer ?? "?")}  ${s.channelLabel ?? (s.channel ? short(s.channel) : "no channel")}  seq ${s.sequence}  ${s.bytes}B${s.replacedCount ? `  replaced ×${s.replacedCount}` : ""}`);
-      for (const t of s.topics) note(`topic ${t.label ?? t.hex}`);
-      if (flags.raw) note(s.hex);
-    }
+    else for (const s of statements) printStatement(s);
+    break;
+  }
+  case "fault": {
+    const [sub, id] = rest;
+    if (sub === "list") {
+      const faults = await api("GET", "/faults");
+      if (json) out(faults);
+      else if (faults.length === 0) note("no faults");
+      else for (const f of faults) step(`#${f.id} ${f.kind}${f.signer ? ` from ${f.signer.map(short).join(",")}` : ""}${f.channel ? ` channel ${short(f.channel)}` : ""}${f.topic ? ` topic ${short(f.topic)}` : ""}${f.ms != null ? ` ${f.ms}ms` : ""}  hits ${f.hits}${f.count != null ? `/${f.count}` : ""}${f.held ? `  holding ${f.held}` : ""}`);
+    } else if (sub === "clear") {
+      const result = await api("DELETE", `/faults/${id ?? "all"}`);
+      if (json) out(result);
+      else ok(`cleared ${result.cleared} fault(s)`);
+    } else if (sub === "drop" || sub === "delay" || sub === "hold-dump") {
+      const body = { kind: sub === "hold-dump" ? "holdDump" : sub, from: flags.from ?? null, channel: flags.channel ?? null, topic: flags.topic ?? (flags.for ? `request→${flags.for}` : null) };
+      if (flags.count != null) body.count = flags.count === "forever" ? null : Number(flags.count);
+      if (sub === "delay") { if (flags.ms == null) fail("usage: pcs fault delay --ms N [...]"); body.ms = Number(flags.ms); }
+      const fault = await api("POST", "/faults", body);
+      if (json) out(fault);
+      else ok(`fault #${fault.id} ${fault.kind} set${fault.count != null ? ` for ${fault.count} hit(s)` : " until cleared"}`);
+    } else fail("usage: pcs fault drop|delay|hold-dump [...] | pcs fault list | pcs fault clear [id]");
+    break;
+  }
+  case "clock": {
+    const [value] = rest;
+    if (!value) fail("usage: pcs clock +2h|-30m|reset");
+    const clock = await api("POST", "/clock", value === "reset" ? { reset: true } : { offsetMs: parseOffset(value) });
+    if (json) out(clock);
+    else ok(`store node clock offset is now ${clock.offsetMs}ms`);
+    break;
+  }
+  case "node": {
+    const [sub] = rest;
+    if (sub !== "restart" && sub !== "reset") fail("usage: pcs node restart|reset");
+    const result = await api("POST", `/node/${sub}`);
+    if (json) out(result);
+    else ok(`node ${sub === "restart" ? "restarted" : "reset"}: every socket dropped, ${result.statements} statement(s) in the store`);
     break;
   }
   case "bot": {

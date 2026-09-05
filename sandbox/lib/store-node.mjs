@@ -55,6 +55,7 @@ import { compact } from "scale-ts";
 
 const DEFAULT_MAX_COUNT_PER_ACCOUNT = 1000;
 const DEFAULT_PAGE_SIZE = 100;
+const HISTORY_PER_SLOT = 100;
 // jsonrpsee: base STATEMENT (7000) + 1, "Statement store error: ...".
 const RPC_STATEMENT_STORE_ERROR = 7001;
 
@@ -100,6 +101,7 @@ function decodeStored(hexWithPrefix) {
   const signer = proof == null ? null : bareHex(proof.value?.signer ?? proof.value?.who ?? null);
   return {
     hex: hexWithPrefix,
+    data: bareHex(decoded.data ?? new Uint8Array()),
     topics: (decoded.topics ?? []).map(bareHex),
     signer,
     channel: bareHex(decoded.channel),
@@ -139,8 +141,12 @@ export function startStoreNode({
   const subs = new Map(); // subId -> { ws, filter }
   let nextSub = 1;
   let nextFault = 1;
-  const faultList = []; // { id, kind, signer, channel, count, ms, topic, hits, held: [] }
+  const faultList = []; // { id, kind, signers: Set|null, channel, topic, count, ms, hits, held: [] }
   const watchers = new Set(); // listeners for wire events (the daemon's event stream)
+  // What a (signer, channel) slot held before: replaced, evicted or expired
+  // statements, newest last, so the inspector can show a slot's history and
+  // find ACKs that a later ACK on the same response channel pushed out.
+  const history = new Map(); // `${signer}:${channel}` -> [{ ...stored, replacedAt, reason }]
 
   const node = {
     port: 0,
@@ -154,22 +160,35 @@ export function startStoreNode({
 
   const now = () => Date.now() + node.clock.offsetMs;
   const isExpired = (stored) => Math.floor(now() / 1000) >= expirationSecs(stored.expiry);
+  const emit = (event) => { for (const fn of watchers) fn(event); };
+
+  const slotKey = (s) => `${s.signer}:${s.channel}`;
+  const retire = (stored, reason) => {
+    statements.splice(statements.indexOf(stored), 1);
+    if (!stored.channel) return;
+    const list = history.get(slotKey(stored)) ?? [];
+    list.push({ ...stored, replacedAt: now(), reason });
+    if (list.length > HISTORY_PER_SLOT) list.splice(0, list.length - HISTORY_PER_SLOT);
+    history.set(slotKey(stored), list);
+  };
   const pruneExpired = () => {
-    for (let i = statements.length - 1; i >= 0; i -= 1) {
-      if (isExpired(statements[i])) statements.splice(i, 1);
+    for (const s of [...statements]) {
+      if (isExpired(s)) { retire(s, "expired"); emit({ event: "expired", signer: s.signer, channel: s.channel, topics: [...s.topics], expiry: s.expiry }); }
     }
   };
 
+  const faultView = ({ held, signers, ...f }) => ({ ...f, signer: signers ? [...signers] : null, held: held.length });
   const matchingFault = (kind, stored) => faultList.find((f) => f.kind === kind
-    && (f.signer == null || f.signer === stored.signer)
-    && (f.channel == null || f.channel === stored.channel));
-  const hitFault = (fault) => {
+    && (f.signers == null || f.signers.has(stored.signer))
+    && (f.channel == null || f.channel === stored.channel)
+    && (f.topic == null || stored.topics.includes(f.topic)));
+  const hitFault = (fault, stored = null) => {
     fault.hits += 1;
-    if (fault.count != null && fault.hits >= fault.count) faultList.splice(faultList.indexOf(fault), 1);
+    const spent = fault.count != null && fault.hits >= fault.count;
+    if (spent) faultList.splice(faultList.indexOf(fault), 1);
     log("STORE_NODE_FAULT_HIT", { id: fault.id, kind: fault.kind, hits: fault.hits });
+    emit({ event: "fault", action: "hit", ...faultView(fault), spent, signer: stored?.signer ?? null, channel: stored?.channel ?? null });
   };
-
-  const emit = (event) => { for (const fn of watchers) fn(event); };
 
   const send = (ws, payload) => { if (ws.readyState === ws.OPEN) ws.send(toJson(payload)); };
   const notify = (ws, subId, page) => send(ws, {
@@ -239,9 +258,9 @@ export function startStoreNode({
     }
 
     const drop = matchingFault("drop", stored);
-    if (drop) { hitFault(drop); return { result: { status: "new" } }; }
+    if (drop) { hitFault(drop, stored); return { result: { status: "new" } }; }
 
-    for (const s of evicted) statements.splice(statements.indexOf(s), 1);
+    for (const s of evicted) retire(s, s === previous ? "replaced" : "evicted");
     statements.push({
       ...stored,
       receivedAt: now(),
@@ -307,7 +326,7 @@ export function startStoreNode({
         let stored = null;
         try { stored = decodeStored(msg.params[0]); } catch { /* run() reports the decode error */ }
         const delay = stored && matchingFault("delay", stored);
-        if (delay) { hitFault(delay); setTimeout(run, delay.ms); return; }
+        if (delay) { hitFault(delay, stored); setTimeout(run, delay.ms); return; }
         return run();
       }
 
@@ -318,7 +337,7 @@ export function startStoreNode({
         // A held subscription is not live until released: no dump, no pushes,
         // as if the node had not got round to it yet.
         const hold = faultList.find((f) => f.kind === "holdDump" && filterMentions(filter, f.topic));
-        if (hold) { hold.hits += 1; hold.held.push({ ws, subId, filter }); return; }
+        if (hold) { hold.hits += 1; hold.held.push({ ws, subId, filter }); emit({ event: "fault", action: "hit", ...faultView(hold), spent: false }); return; }
         return activateSubscription({ ws, subId, filter });
       }
 
@@ -332,27 +351,37 @@ export function startStoreNode({
     });
   });
 
+  // `signer` is one account or a list (a persona's identity and device
+  // accounts); null matches every signer. `channel` and `topic` narrow further.
+  const signerSet = (signer) => {
+    if (signer == null) return null;
+    const list = (Array.isArray(signer) ? signer : [signer]).map(bareHex);
+    return list.length ? new Set(list) : null;
+  };
   const addFault = (fault) => {
     const entry = { id: nextFault++, hits: 0, held: [], ...fault };
     faultList.push(entry);
     log("STORE_NODE_FAULT_SET", { id: entry.id, kind: entry.kind });
+    emit({ event: "fault", action: "set", ...faultView(entry) });
     return entry;
   };
   const clearFault = (entry) => {
     const i = faultList.indexOf(entry);
     if (i >= 0) faultList.splice(i, 1);
     for (const held of entry.held.splice(0)) activateSubscription(held);
+    emit({ event: "fault", action: "cleared", ...faultView(entry) });
   };
   const faults = {
     // Matching submits answer "new" but are never stored (a lossy node).
-    drop: ({ signer = null, channel = null, count = 1 } = {}) => {
-      const entry = addFault({ kind: "drop", signer: bareHex(signer), channel: bareHex(channel), count });
+    // count: hits before the fault disappears; null = forever.
+    drop: ({ signer = null, channel = null, topic = null, count = 1 } = {}) => {
+      const entry = addFault({ kind: "drop", signers: signerSet(signer), channel: bareHex(channel), topic: bareHex(topic), count });
       return { id: entry.id, clear: () => clearFault(entry) };
     },
     // Matching submits are processed and answered `ms` later.
-    delay: ({ signer = null, channel = null, ms, count = null } = {}) => {
+    delay: ({ signer = null, channel = null, topic = null, ms, count = null } = {}) => {
       if (!(ms >= 0)) throw new Error("delay fault needs ms >= 0");
-      const entry = addFault({ kind: "delay", signer: bareHex(signer), channel: bareHex(channel), ms, count });
+      const entry = addFault({ kind: "delay", signers: signerSet(signer), channel: bareHex(channel), topic: bareHex(topic), ms, count });
       return { id: entry.id, clear: () => clearFault(entry) };
     },
     // New subscriptions whose filter mentions `topic` (all of them when topic
@@ -361,9 +390,11 @@ export function startStoreNode({
       const entry = addFault({ kind: "holdDump", topic: bareHex(topic) });
       return { id: entry.id, release: () => clearFault(entry), clear: () => clearFault(entry) };
     },
-    list: () => faultList.map(({ held, ...f }) => ({ ...f, held: held.length })),
+    list: () => faultList.map(faultView),
     clear: (id = null) => {
-      for (const entry of [...faultList]) if (id == null || entry.id === id) clearFault(entry);
+      let cleared = 0;
+      for (const entry of [...faultList]) if (id == null || entry.id === id) { clearFault(entry); cleared += 1; }
+      return cleared;
     },
   };
 
@@ -373,24 +404,33 @@ export function startStoreNode({
     for (const f of faultList) f.held.length = 0;
   };
 
+  const view = ({ hex, data, topics, signer: sg, channel: ch, expiry, receivedAt, replacedCount, replacedAt = null, reason = null }) =>
+    ({ hex, data, topics: [...topics], signer: sg, channel: ch, expiry, receivedAt, replacedCount, replacedAt, reason });
+  const selects = (t, s, c) => (e) => (t == null || e.topics.includes(t)) && (s == null || e.signer === s) && (c == null || e.channel === c);
+
   Object.assign(node, {
     faults,
-    // Decoded read side for the inspector; nothing here needs a key.
+    // Decoded read side for the inspector; nothing here needs a key. `data`
+    // is the statement's data field (bare hex), still encrypted.
     list: ({ topic = null, signer = null, channel = null } = {}) => {
       pruneExpired();
-      const [t, s, c] = [bareHex(topic), bareHex(signer), bareHex(channel)];
-      return statements
-        .filter((e) => (t == null || e.topics.includes(t)) && (s == null || e.signer === s) && (c == null || e.channel === c))
-        .map(({ hex, topics, signer: sg, channel: ch, expiry, receivedAt, replacedCount }) =>
-          ({ hex, topics: [...topics], signer: sg, channel: ch, expiry, receivedAt, replacedCount }));
+      return statements.filter(selects(bareHex(topic), bareHex(signer), bareHex(channel))).map(view);
+    },
+    // What slots held before, oldest first: every entry a later statement
+    // replaced or evicted, or the clock expired (`reason`, `replacedAt`).
+    history: ({ topic = null, signer = null, channel = null } = {}) => {
+      pruneExpired();
+      return [...history.values()].flat().filter(selects(bareHex(topic), bareHex(signer), bareHex(channel)))
+        .sort((a, b) => a.replacedAt - b.replacedAt).map(view);
     },
     // Wire events for the inspector: `stored` (with `replaced` when the
-    // statement took over a channel slot) and `refused` (rule rejections).
+    // statement took over a channel slot), `refused` (rule rejections),
+    // `expired`, and `fault` (set / hit / cleared).
     watch: (fn) => { watchers.add(fn); return () => watchers.delete(fn); },
     // A node restart: every connection drops, the store survives.
-    restart: () => { dropClients(); log("STORE_NODE_RESTART", { statements: statements.length }); },
+    restart: () => { dropClients(); log("STORE_NODE_RESTART", { statements: statements.length }); emit({ event: "node", action: "restart", statements: statements.length }); },
     // A wipe: connections drop and the store is emptied. Faults stay set.
-    reset: () => { dropClients(); statements.length = 0; log("STORE_NODE_RESET"); },
+    reset: () => { dropClients(); statements.length = 0; history.clear(); log("STORE_NODE_RESET"); emit({ event: "node", action: "reset" }); },
     close: () => new Promise((r) => { dropClients(); wss.close(() => r()); }),
   });
 

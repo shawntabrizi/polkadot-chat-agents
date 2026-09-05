@@ -69,6 +69,24 @@ test("pcs: user add/list, request, requests, accept, send, inbox --device, react
   assert.ok(wire.some((s) => s.signerLabel === "alice#1" && s.channelLabel === "session alice#1→bob /request"), "alice's text on bob's per-device channel");
   assert.ok(wire.every((s) => !("hex" in s)));
   assert.ok((await pcs("wire", "--raw")).every((s) => s.hex.startsWith("0x")));
+  const decoded = await pcs("wire", "--decode", "--channel", "session alice#1→bob /request");
+  assert.equal(decoded.length, 1, "one live statement per slot");
+  assert.ok(decoded[0].decoded.messages.every((m) => m.content.type === "reaction"), "the slot now holds the reaction (the text batch was ACKed)");
+  const history = await pcs("wire", "--history", "session alice#1→bob /request");
+  assert.ok(history.length >= 2 && history.at(-1).replacedAt === null && history[0].reason === "replaced");
+  const textRow = history.flatMap((h) => h.decoded.messages).find((m) => m.messageId === sent.messageId);
+  assert.equal(textRow.content.text, "hello bob", "the ACKed text is still in the slot's history");
+
+  // Faults, clock, node.
+  const fault = await pcs("fault", "drop", "--from", "bob", "--channel", "session bob#1→alice /response", "--count", "forever");
+  assert.deepEqual([fault.kind, fault.count], ["drop", null]);
+  assert.equal((await pcs("fault", "list")).length, 1);
+  assert.deepEqual(await pcs("fault", "clear"), { cleared: 1 });
+  assert.equal((await pcsFails("fault", "delay", "--from", "bob")).code, 1, "delay needs --ms");
+  assert.deepEqual(await pcs("clock", "+2h"), { offsetMs: 7_200_000 });
+  assert.equal((await pcsFails("clock", "soon")).code, 1);
+  assert.deepEqual(await pcs("clock", "reset"), { offsetMs: 0 });
+  assert.equal((await pcs("node", "restart")).ok, true);
   assert.equal((await pcsFails("bogus")).code, 1);
   assert.match((await pcsFails("send", "alice", "nobody", "x")).stderr, /unknown peer/);
 

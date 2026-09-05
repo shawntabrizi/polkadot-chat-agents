@@ -52,7 +52,9 @@ export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, hos
   const events = createEvents();
   const clients = [];
 
-  node.watch((e) => events.emit("wire", e));
+  // Store events are "wire"; faults and node restarts get their own types so
+  // `pcs events` readers can tell a broken network from a chatty one.
+  node.watch((e) => events.emit(e.event === "fault" ? "fault" : e.event === "node" ? "node" : "wire", e));
 
   const lookup = {
     getPeerIdentity: async (accountId) => {
@@ -65,16 +67,36 @@ export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, hos
     clients.push(client);
     return createPapiStatementStoreAdapter(client);
   };
+  const transport = { makeStatementStore, lookup, onEvent: (e) => events.emit("engine", e) };
 
   const addPersona = async (name, devices) => {
     const persona = createPersona({ name, devices });
     persona.register(directory);
     personas.set(name, persona);
     persona.state.onChange((change) => events.emit(change.type, { persona: name, ...change }));
-    persona.start({ makeStatementStore, lookup, onEvent: (e) => events.emit("engine", e) });
+    persona.start(transport);
     events.emit("persona", { persona: name, devices });
     log("SANDBOX_PERSONA_UP", { name, account: persona.account, devices });
     return persona;
+  };
+
+  // Disposed sessions send their unsubscribes over the socket; destroying the
+  // papi client first rejects those in flight (DestroyedError) inside the SDK
+  // where nothing catches them. Let them round-trip.
+  const dropClients = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    for (const c of clients.splice(0)) c.disconnect();
+  };
+  // After the node drops its sockets a raw statement subscription is gone and
+  // papi's reconnect does not re-open it — the web client rebuilds its
+  // sessions after a drop, and so does every persona here: fresh clients,
+  // fresh engines, the same state (contacts, rooms, un-acked rows), the way
+  // an app restores after the network came back.
+  const rewire = async (restartNode) => {
+    for (const p of personas.values()) p.stop();
+    await dropClients();
+    restartNode();
+    for (const p of personas.values()) p.start(transport);
   };
 
   /** A persona name, a directory username or an account hex → account hex. */
@@ -84,7 +106,18 @@ export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, hos
     return personas.get(value)?.account ?? directory.usernameOwner(value) ?? null;
   };
 
-  const api = createApi({ node, directory, personas, events, addPersona, resolvePeer, storeUrl: node.url });
+  const setClock = (offsetMs) => {
+    node.clock.offsetMs = offsetMs;
+    events.emit("clock", { offsetMs });
+    log("SANDBOX_CLOCK", { offsetMs });
+    return { ...node.clock };
+  };
+
+  const api = createApi({
+    node, directory, personas, events, addPersona, resolvePeer, storeUrl: node.url, setClock,
+    restartNode: () => rewire(() => node.restart()),
+    resetNode: () => rewire(() => node.reset()),
+  });
   const apiPort = await api.listen(port, host);
   const url = `http://${host}:${apiPort}`;
   fs.writeFileSync(path.join(dir, "daemon.json"), JSON.stringify({ url, storeUrl: node.url, pid: process.pid, startedAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
@@ -102,11 +135,7 @@ export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, hos
     resolvePeer,
     async stop() {
       for (const p of personas.values()) p.stop();
-      // Disposed sessions send their unsubscribes over the socket; destroying
-      // the papi client first rejects those in flight (DestroyedError) inside
-      // the SDK where nothing catches them. Let them round-trip.
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      for (const c of clients) c.disconnect();
+      await dropClients();
       await api.close();
       await node.close();
       try { fs.rmSync(path.join(dir, "daemon.json")); } catch { /* already gone */ }
