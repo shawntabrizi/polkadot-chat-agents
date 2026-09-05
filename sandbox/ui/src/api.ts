@@ -5,7 +5,9 @@
 export type HexString = `0x${string}`;
 
 export type Device = { index: number; account: HexString; encryptionPublicKey: HexString; online: boolean; removed: boolean };
-export type Persona = { name: string; account: HexString; chatPublicKey: HexString; bulletinAccount: HexString; devices: Device[] };
+// Where a persona's registration stands on a real network (null on the mock, where the name is the username).
+export type Registration = { username: string | null; status: 'minted' | 'claimed' | 'attested' | 'needs-reregistration'; genesis: HexString | null; claimedAt: string | null; attestedAt: string | null; bulletin: string };
+export type Persona = { name: string; account: HexString; username: string; chatPublicKey: HexString; bulletinAccount: HexString; registration: Registration | null; devices: Device[] };
 export type ContactDevice = { statementAccountId: HexString; encryptionPublicKey: HexString };
 export type Contact = { account: HexString; username: string; devices: ContactDevice[]; createdAt: number; updatedAt: number };
 export type Room = { peer: HexString; unreadCount: number; lastMessageAt: number; lastPreview: string; createdAt: number; updatedAt: number; peerName?: string | null };
@@ -67,7 +69,23 @@ export type Message = {
 export type RoomView = { persona: string; device: number | null; peer: HexString; peerName: string | null; room: Room | null; contact: Contact | null; messages: Message[] };
 
 export type Fault = { id: number; kind: 'drop' | 'delay' | 'holdDump'; signer: HexString[] | null; channel: HexString | null; topic: HexString | null; ms?: number; count: number | null; hits: number; held: number };
-export type NodeInfo = { url: string; hopUrl: string; statements: number; allowances: number; limits: Record<string, number>; clock: { offsetMs: number }; faults: Fault[] };
+// The network the daemon runs on: the mock (every control available) or a real chain (its genesis; faults, clock and node controls refused).
+export type ChainReset = { previous: HexString; current: HexString; since: string | null; personas: string[]; bots: string[] };
+export type NodeInfo = {
+  network: string;
+  name: string;
+  mock: boolean;
+  genesis: HexString | null;
+  identityBackendUrl: string | null;
+  chainReset: ChainReset | null;
+  url: string;
+  hopUrl: string;
+  statements: number;
+  allowances: number | null;
+  limits: Record<string, number>;
+  clock: { offsetMs: number } | null;
+  faults: Fault[];
+};
 
 // The HOP pool: entries never carry bytes; a persona that uploaded or claimed one names its role and conversation.
 export type HopEntry = {

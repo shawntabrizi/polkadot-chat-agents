@@ -6,7 +6,7 @@ import { useEvents } from './events';
 import { formatIso, shortHex } from './format';
 import { useLoader } from './hooks';
 
-type Props = { session: Session | null };
+type Props = { session: Session | null; mock: boolean };
 type FaultForm = { kind: 'drop' | 'delay' | 'holdDump'; from: string; channel: string; topic: string; count: string; ms: string };
 const EMPTY_FAULT: FaultForm = { kind: 'drop', from: '', channel: '', topic: '', count: '1', ms: '1000' };
 type HopFaultForm = { kind: HopFaultKind; hash: string; method: 'claim' | 'ack' | 'submit'; count: string; ms: string };
@@ -45,8 +45,8 @@ const eventLine = (e: SandboxEvent): string => {
   return flat.length > 220 ? `${flat.slice(0, 219)}…` : flat;
 };
 
-/** The decoded wire with filters, a statement's detail and slot history, fault and clock controls, and the live event log. */
-export const Wire = ({ session }: Props) => {
+/** The decoded wire with filters, a statement's detail and slot history, fault and clock controls (mock only), and the live event log. */
+export const Wire = ({ session, mock }: Props) => {
   const [peer, setPeer] = useState('');
   const [signer, setSigner] = useState('');
   const [channel, setChannel] = useState('');
@@ -59,7 +59,8 @@ export const Wire = ({ session }: Props) => {
 
   const wire = useLoader(() => api.wire({ peer, signer, channel }), [peer, signer, channel]);
   const node = useLoader(() => api.node(), []);
-  const hop = useLoader(() => api.hop(), []);
+  // The pool view is the mock node's; a real network has no pool to list.
+  const hop = useLoader(() => (mock ? api.hop() : Promise.resolve(null)), [mock]);
   const history = useLoader(() => (selected?.channel ? api.history(selected.channel, selected.signer ?? undefined) : Promise.resolve([])), [selected?.channel, selected?.signer]);
   useEvents(() => {
     wire.reload();
@@ -213,13 +214,20 @@ export const Wire = ({ session }: Props) => {
           <h2 className="label">Node</h2>
           {error ? <p className="error" role="alert">{error}</p> : null}
           <div className="caption">
-            {node.data ? `${node.data.statements} statement(s) · ${node.data.allowances} allowance(s) · clock ${node.data.clock.offsetMs >= 0 ? '+' : ''}${node.data.clock.offsetMs} ms` : '…'}
+            {node.data
+              ? mock
+                ? `${node.data.statements} statement(s) · ${node.data.allowances} allowance(s) · clock ${node.data.clock && node.data.clock.offsetMs >= 0 ? '+' : ''}${node.data.clock?.offsetMs ?? 0} ms`
+                : `${node.data.name} · ${node.data.statements} statement(s) seen by the personas · genesis ${shortHex(node.data.genesis)}`
+              : '…'}
           </div>
+          {!mock ? <p className="empty" data-testid="controls-unavailable">Faults, the clock and node restarts exist on the mock network only; the wire shows what the personas' subscriptions saw.</p> : null}
+          {mock ? (
+          <>
           <div className="row" style={{ flexWrap: 'wrap' }}>
-            <button type="button" className="btn small" onClick={() => void run('clock', () => api.clock(10_000 + (node.data?.clock.offsetMs ?? 0)))}>
+            <button type="button" className="btn small" onClick={() => void run('clock', () => api.clock(10_000 + (node.data?.clock?.offsetMs ?? 0)))}>
               +10 s
             </button>
-            <button type="button" className="btn small" onClick={() => void run('clock', () => api.clock(2 * 3_600_000 + (node.data?.clock.offsetMs ?? 0)))}>
+            <button type="button" className="btn small" onClick={() => void run('clock', () => api.clock(2 * 3_600_000 + (node.data?.clock?.offsetMs ?? 0)))}>
               +2 h
             </button>
             <input className="input" style={{ width: 96 }} value={clockMs} placeholder="ms" aria-label="Clock offset in ms" onChange={e => setClockMs(e.target.value)} />
@@ -238,7 +246,11 @@ export const Wire = ({ session }: Props) => {
               Reset store
             </button>
           </div>
+          </>
+          ) : null}
         </section>
+        {mock ? (
+        <>
         <section className="panel stack">
           <h2 className="label">Faults</h2>
           <form className="stack" style={{ gap: 6 }} onSubmit={addFault}>
@@ -365,6 +377,8 @@ export const Wire = ({ session }: Props) => {
             ))}
           </ul>
         </section>
+        </>
+        ) : null}
         <section className="panel stack" style={{ flex: 1, minHeight: 160 }}>
           <div className="row">
             <h2 className="label">Events</h2>

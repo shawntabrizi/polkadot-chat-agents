@@ -18,12 +18,14 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'wire', label: 'Wire' },
 ];
 
-/** What the screens share: the active persona, its device, and the directory. */
+/** What the screens share: the active persona, its device, the directory, and which network this is. */
 export type Session = {
   persona: PersonaDetail;
   device: number;
   personas: Persona[];
   accounts: Account[];
+  /** False on a real network: no faults, no clock, no second device. */
+  mock: boolean;
   isPersona: (account: string) => boolean;
   reload: () => void;
 };
@@ -37,6 +39,7 @@ export const App = () => {
 
   const personas = useLoader(() => api.personas(), []);
   const accounts = useLoader(() => api.accounts(), []);
+  const node = useLoader(() => api.node(), []);
   const detail = useLoader(() => (active ? api.persona(active) : Promise.resolve(null)), [active]);
 
   // The persona list changes on `persona`; the active persona's contacts,
@@ -72,6 +75,7 @@ export const App = () => {
         device,
         personas: personas.data ?? [],
         accounts: accounts.data ?? [],
+        mock: node.data?.mock ?? true,
         isPersona: account => personaAccounts.has(account as Persona['account']),
         reload: () => {
           detail.reload();
@@ -90,6 +94,11 @@ export const App = () => {
           <img className="light" src="./logo-symbol_light.svg" alt="" />
           Sandbox
         </div>
+        {node.data ? (
+          <span className={`pill network ${node.data.mock ? '' : 'live'}`} data-testid="network-badge" title={node.data.genesis ? `${node.data.name} · genesis ${node.data.genesis}` : node.data.name}>
+            {node.data.network}
+          </span>
+        ) : null}
         {TABS.map(entry => (
           <button key={entry.id} type="button" className="nav-item" aria-current={tab === entry.id ? 'page' : undefined} onClick={() => setTab(entry.id)}>
             {entry.label}
@@ -131,7 +140,7 @@ export const App = () => {
           {tab === 'requests' ? session ? <Requests session={session} /> : <p className="empty">Add a persona first.</p> : null}
           {tab === 'chats' ? session ? <Chats session={session} /> : <p className="empty">Add a persona first.</p> : null}
           {tab === 'conversation' ? session ? <Conversation session={session} /> : <p className="empty">Add a persona first.</p> : null}
-          {tab === 'wire' ? <Wire session={session} /> : null}
+          {tab === 'wire' ? <Wire session={session} mock={node.data?.mock ?? true} /> : null}
         </div>
       </main>
     </div>

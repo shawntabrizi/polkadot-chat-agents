@@ -20,7 +20,7 @@ export const Personas = ({ session, personas, onSelect, onAdded }: Props) => {
     setBusy(true);
     setError(null);
     try {
-      const created = await api.addPersona(trimmed, devices);
+      const created = await api.addPersona(trimmed, session?.mock === false ? 1 : devices);
       setName('');
       onAdded();
       onSelect(created.name);
@@ -48,7 +48,9 @@ export const Personas = ({ session, personas, onSelect, onAdded }: Props) => {
       <section className="panel stack">
         <form className="row" onSubmit={event => void add(event)}>
           <input className="input" style={{ flex: 1, minWidth: 0 }} value={name} placeholder="Name" aria-label="Persona name" onChange={e => setName(e.target.value)} />
-          <input className="input" style={{ width: 56 }} type="number" min={1} max={9} value={devices} aria-label="Devices" onChange={e => setDevices(Number(e.target.value))} />
+          {session?.mock !== false ? (
+            <input className="input" style={{ width: 56 }} type="number" min={1} max={9} value={devices} aria-label="Devices" onChange={e => setDevices(Number(e.target.value))} />
+          ) : null}
           <button className="btn primary" type="submit" disabled={busy || !name.trim()}>
             Add
           </button>
@@ -76,7 +78,17 @@ export const Personas = ({ session, personas, onSelect, onAdded }: Props) => {
           <h2 className="heading">{active.name}</h2>
           <dl className="kv">
             <dt>Username</dt>
-            <dd>{active.name}</dd>
+            <dd>
+              {active.registration ? (
+                <span data-testid="registration">
+                  {active.registration.username ?? '(no username yet)'} ·{' '}
+                  {active.registration.status === 'attested' ? 'attested' : active.registration.status === 'claimed' ? 'attestation pending' : active.registration.status === 'needs-reregistration' ? 'needs re-registration (the chain was reset)' : active.registration.status}
+                  {active.registration.bulletin !== 'none' ? ` · Bulletin allowance ${active.registration.bulletin}` : ''}
+                </span>
+              ) : (
+                active.username
+              )}
+            </dd>
             <dt>Account</dt>
             <dd className="mono">{active.account}</dd>
             <dt>Chat key</dt>
@@ -85,9 +97,13 @@ export const Personas = ({ session, personas, onSelect, onAdded }: Props) => {
           <div className="row">
             <h3 className="label">Devices</h3>
             <span className="spacer" style={{ flex: 1 }} />
-            <button type="button" className="btn small" onClick={() => void addDevice()}>
-              Add device
-            </button>
+            {session?.mock ? (
+              <button type="button" className="btn small" onClick={() => void addDevice()}>
+                Add device
+              </button>
+            ) : (
+              <span className="caption">single-device on {session ? 'this network' : ''}</span>
+            )}
           </div>
           <ul className="stack" style={{ gap: 4 }}>
             {active.devices.map(d => (
