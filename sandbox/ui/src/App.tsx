@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { type Account, type Persona, type PersonaDetail, api } from './api';
+import { Chats } from './Chats';
 import { useConnection, useEvents } from './events';
 import { useLoader, useStored } from './hooks';
 import { Personas } from './Personas';
+import { Requests } from './Requests';
 
 type Tab = 'personas' | 'requests' | 'chats' | 'wire';
 const TABS: { id: Tab; label: string }[] = [
@@ -123,7 +125,9 @@ export const App = () => {
         {personas.error ? <p className="error" role="alert">{personas.error}</p> : null}
         <div className="content">
           {tab === 'personas' ? <Personas session={session} personas={personas.data ?? []} onSelect={setActive} onAdded={personas.reload} /> : null}
-                                      </div>
+          {tab === 'requests' ? session ? <Requests session={session} /> : <p className="empty">Add a persona first.</p> : null}
+          {tab === 'chats' ? session ? <Chats session={session} /> : <p className="empty">Add a persona first.</p> : null}
+                  </div>
       </main>
     </div>
   );
