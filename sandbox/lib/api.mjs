@@ -9,7 +9,6 @@ import http from "node:http";
 import path from "node:path";
 
 import { normHex } from "./bytes.mjs";
-import { createRoomRenderer } from "./room-html.mjs";
 import { inspectHistory, inspectWire, resolveHex } from "./wire.mjs";
 
 const replacer = (_k, v) => (v instanceof Uint8Array ? normHex(v) : typeof v === "bigint" ? v.toString() : v);
@@ -56,9 +55,13 @@ const intParam = (value, fallback) => {
 
 export function createApi({ node, directory, personas, events, addPersona, resolvePeer, storeUrl, setClock, restartNode, resetNode, staticDir = null }) {
   // The room page shares the UI's markdown pipeline (lib/markdown.mjs); one
-  // jsdom window for DOMPurify, made on first use.
+  // jsdom window for DOMPurify. Loaded on first use: jsdom is heavy, and the
+  // CLI imports this module on every `pcs` call.
   let roomRenderer = null;
-  const renderRoom = (view) => (roomRenderer ??= createRoomRenderer()).renderRoom(view);
+  const renderRoom = async (view) => {
+    roomRenderer ??= (await import("./room-html.mjs")).createRoomRenderer();
+    return roomRenderer.renderRoom(view);
+  };
   const persona = (name) => {
     const found = personas.get(name);
     if (!found) throw notFound(`no persona ${name}`);
@@ -225,9 +228,9 @@ export function createApi({ node, directory, personas, events, addPersona, resol
     }],
     // `?format=html`: the room as a page rendered through the UI's markdown
     // pipeline, so an agent can assert on rendering without a browser.
-    ["GET", "/personas/:name/rooms/:peer", (p, q) => {
+    ["GET", "/personas/:name/rooms/:peer", async (p, q) => {
       const view = roomView(persona(p.name), peerOf(p.peer), { device: intParam(q.get("device"), null), unread: q.get("unread") === "1" });
-      return q.get("format") === "html" ? new Html(renderRoom(view)) : view;
+      return q.get("format") === "html" ? new Html(await renderRoom(view)) : view;
     }],
     ["POST", "/personas/:name/rooms/:peer/read", (p) => {
       const found = persona(p.name);
