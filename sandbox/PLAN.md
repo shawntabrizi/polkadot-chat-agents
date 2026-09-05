@@ -219,6 +219,10 @@ and the acceptance check recorded in `sandbox/docs/acceptance.md`.
 
 ### S6 — `paseo` profile: the sandbox on Paseo Next
 
+Done 2026-09-05 for both testnets: `--network paseo` and `--network devnet` (S6b),
+each one row of bot-core's network table; live messaging proven on devnet,
+Paseo Next waits for its backend to attest (questions.md S6.1).
+
 Decided 2026-09-05: no chopsticks `local` profile (its executor lacks the
 statement-store host functions and its pre-decoder rejects the v5 general
 extrinsics Coinage needs; see `docs/research-local-profile.md`). The next

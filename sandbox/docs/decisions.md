@@ -136,3 +136,27 @@ read-side shape so `pcs wire --decode` and the inspector are unchanged.
 
 **Refusals, not modes.** Faults, the clock, node restarts and the pool view
 answer `409` off-mock; nothing is emulated.
+
+## D6 — Every testnet is one row of bot-core's network table (S6b)
+
+**Context.** S6b adds Products Devnet beside Paseo Next. Devnet's identity
+backend admits a claim only with a bearer minted by proving the wallet key
+(`identityRegistrationAuth: "client-proof"`); everything else differs by
+endpoint only.
+
+**Decision.** `lib/network.mjs` builds each testnet profile by one rule
+from bot-core's `lib/network-config.mjs` entry — endpoints, HOP nodes,
+Bulletin RPC, the allowance helper's profile id, and the registration auth
+mode. The daemon has one testnet path; the only per-profile behaviour is
+the auth mode, read from the table, so a third testnet is a third row.
+Operator credentials for the backend (`PCA_IDENTITY_TOKEN`,
+`PCA_IDENTITY_VOUCHER`) come from the daemon's environment, as for `pca`,
+never from a flag or the API; the session lives in the persona's 0600
+record only until the claim is in.
+
+**The identity backend has one client.** bot-core's `lib/register.mjs`
+holds the claim, the session and now the username search (paging, the
+rate limit, the proof-of-compute puzzle, the chain's padded form of a
+name); the sandbox's chain directory calls it rather than keeping a second
+implementation of the same route — the backend is not the chat protocol
+under test, so the "two implementations" rule does not apply to it.

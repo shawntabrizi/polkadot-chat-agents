@@ -171,35 +171,35 @@ and `send` and between `send` and `inbox`, as when a person types.
 
 ```
 $ pcs user add alice
-✓ alice registered as 0xcaa8d88d… with 1 device(s)
+✓ alice registered as 0xcaa8d88d… with 1 device(s)
   device 1: 0x86cdfacc…
 
 $ pcs user add bob --devices 2
-✓ bob registered as 0x682e8d8c… with 2 device(s)
+✓ bob registered as 0x682e8d8c… with 2 device(s)
   device 1: 0x78a90152…
   device 2: 0x8cf63162…
 
 $ pcs request alice bob
-✓ alice → bob: request a0fa3836-115f-4c78-8cb2-0001d682678f
+✓ alice → bob: request a0fa3836-115f-4c78-8cb2-0001d682678f
 
 $ pcs requests bob
-→ from alice pending  a0fa3836-115f-4c78-8cb2-0001d682678f
+→ from alice pending  a0fa3836-115f-4c78-8cb2-0001d682678f
 
 $ pcs accept bob
-✓ bob accepted the request from alice on device 1
+✓ bob accepted the request from alice on device 1
 
 $ pcs send alice bob hi
-✓ alice → bob: sent  id 9451f431-d92a-4851-be0c-35a96c7af01e
+✓ alice → bob: sent  id 9451f431-d92a-4851-be0c-35a96c7af01e
 
 $ pcs inbox bob --device 2
-→ bob ⇄ alice (device 2)  1 unread
+→ bob ⇄ alice (device 2)  1 unread
 09:14:41 ·: chat accepted
   id accepted:a0fa3836-115f-4c78-8cb2-0001d682678f
 09:14:43 alice: hi [on #1,#2 acked #1,#2 unread]
   id 9451f431-d92a-4851-be0c-35a96c7af01e
 
 $ pcs wire --peer alice
-→ alice#1  chat request  seq 25434880  547B
+→ alice#1  chat request  seq 25434880  547B
   topic request→bob
   topic request→bob day 294
   topic 0x16f0a37f86ce53a35eabff90fed2a9298e137395bbc3e54eb886ad7badf294a8
@@ -348,12 +348,12 @@ third terminal after `create`). About three seconds passed between
 
 ```
 $ pcs user add alice --devices 2
-✓ alice registered as 0x445fb972… with 2 device(s)
+✓ alice registered as 0x445fb972… with 2 device(s)
   device 1: 0x648c1981…
   device 2: 0xacd3f487…
 
 $ pca create echobot --brain echo --public --network sandbox --port 18797
-→ Creating bot "echobot"…
+→ Creating bot "echobot"…
 ✓ Generated your bot's identity
 → Registering your bot in the sandbox…
 ✓ Registered as echobot
@@ -369,21 +369,21 @@ Message your bot in the Polkadot app:
   Start it:  pca run echobot
 
 $ pca status echobot
-→ Status of "echobot" (local)…
+→ Status of "echobot" (local)…
 ✓ "echobot" is running locally.
   echobot · reaching the network
 
 $ pcs request alice echobot --welcome hello bot
-✓ alice → echobot: request 96c8ed4a-ad20-4daa-a6ce-fe1de847390c
+✓ alice → echobot: request 96c8ed4a-ad20-4daa-a6ce-fe1de847390c
 
 $ pcs send alice echobot from my second device --device 2
-✓ alice → echobot: sent  id a5c04ada-2b37-4d6b-a54d-5f8c21a41b68
+✓ alice → echobot: sent  id a5c04ada-2b37-4d6b-a54d-5f8c21a41b68
 
 $ pcs react alice echobot 7AD5D9AC-1618-45B1-9EE3-9199AFF01E99 👍
-✓ alice reacted 👍 on 7AD5D9AC-1…
+✓ alice reacted 👍 on 7AD5D9AC-1…
 
 $ pcs inbox alice --device 2
-→ alice ⇄ echobot (device 2)  3 unread
+→ alice ⇄ echobot (device 2)  3 unread
 10:02:29 alice: hello bot [delivered from #1]
   id 96c8ed4a-ad20-4daa-a6ce-fe1de847390c
 10:02:29 ·: chat accepted
@@ -394,7 +394,7 @@ $ pcs inbox alice --device 2
   id 7AD5D9AC-1618-45B1-9EE3-9199AFF01E99
 
 $ pcs wire --peer alice
-→ alice#1  chat request  seq 25437749  559B
+→ alice#1  chat request  seq 25437749  559B
   topic request→echobot
   topic request→echobot day 294
   topic 0xbee29decf39dea15334d6675db482aca2281bb1736bbe945f0e93630f1e25893
@@ -460,7 +460,7 @@ does.
 
 ```
 $ pcs user add bob
-✓ bob registered as 0x52238aa0… with 1 device(s)
+✓ bob registered as 0x52238aa0… with 1 device(s)
   device 1: 0xc22a2715…
 $ curl -X POST /accounts/register (the device client's throwaway identity 0x33…)
 {"account":"0x865ac3ec86396d918f8e5ceb72711008a4542c10177856d522ea7250747d8b47","username":"devclient","identifierKey":"0x006a9e22c77d7d150d015469a4ac1138c76b8a004f64c8661357eddff9445d6e3c0000000000000000000000000000000000000000000000000000000000000000"}
@@ -493,14 +493,14 @@ device ownSessionId (bot must poll this): 0x58096fd86525807326fd0fefaea0028e3fe9
 client exit=0
 
 $ pcs inbox bob
-→ bob ⇄ devclient
+→ bob ⇄ devclient
 10:02:39 devclient: hello bob [on #1]
   id 17FD73AA-9563-4AD2-BB86-E388762859B9
 10:02:42 ·: chat accepted
   id accepted:17FD73AA-9563-4AD2-BB86-E388762859B9
 
 $ pcs wire --peer bob
-→ devclient  chat request  seq 25437759  526B
+→ devclient  chat request  seq 25437759  526B
   topic request→bob
   topic request→bob day 294
 → bob#1  identity bob→devclient /request  seq 25437762  379B
@@ -1574,3 +1574,317 @@ No bot, daemon or dev server was left behind: `sandboxecho` was created
 and attached but never run; the paseo daemon on port 7799 was stopped at
 the end (the owner's own `pcs up` on port 7788, pid 27053, started before
 this session, was left untouched).
+
+## S6b — `devnet` profile: the sandbox on Products Devnet (2026-09-05)
+
+The point of S6b: Paseo Next's identity backend does not attest (S6.1),
+Products Devnet's does, so the live acceptance S6 could not reach — a
+persona and a bot exchanging messages over a real testnet — ran here.
+The devnet profile is the paseo profile with a different row of
+bot-core's network table; the one thing devnet adds is the client-proof
+session its backend wants for a username claim.
+
+### What was verified (offline, CI)
+
+`cd sandbox && npm test` (Node v24.13.1) on the final tree: 107 tests, every
+scenario on the mock. New or changed since S6:
+
+```
+✔ mock is the default and holds no endpoint; a typo is refused
+✔ paseo mirrors bot-core's Paseo Next v2 profile; registration auth is none
+✔ devnet mirrors bot-core's Polkadot Products Devnet profile; registration auth is client-proof
+✔ client-proof: the claim carries a bearer minted with the persona's wallet key; the session is saved before the claim and gone after
+✔ client-proof: an issued PCA_IDENTITY_TOKEN skips the exchange; a refusal names the enrollment rules; the voucher is offered only after it
+✔ search asks the identity backend's search route, page by page, and checks every hit against the chain
+ℹ tests 107  ℹ pass 107  ℹ fail 0
+```
+
+`cd sandbox/ui && npm run check`: tsc, 31 vitest tests, vite build.
+`cd bot-core && npm test`: 425 tests, 420 pass, 5 skipped (the uid-gated
+`workspaces.test.mjs` cases); new: `canonicalUsername`, `searchUsernames`
+(paging, 402 proof of compute against the backend's own work vectors, 429
+retry) and the `create --digits` taken/free decision through the search.
+
+### (a) `pcs up --network devnet`, `pcs user add alice`
+
+Human output is JSON here because the commands ran without a TTY. The
+daemon ran on port 7799 with a scratch state dir (the owner's own mock
+daemon holds 7788).
+
+```
+$ pcs up --network devnet --dir <scratch>/devnet-state --port 7799
+{"event":"SANDBOX_UP","url":"http://127.0.0.1:7799","network":"devnet","genesis":"0xe6c30d6e148f250b887105237bcaa5cb9f16dd203bf7b5b9d4f1da7387cb86ec","storeUrl":"wss://people-paseo.rotko.net","hopUrl":"wss://bullet.sik.rocks",…,"personas":[]}
+
+$ pcs user add alice --wait 240                       # 52 s
+{ "name": "alice", "account": "0x0862f804…", "username": "sandboxalice.80",
+  "registration": { "username": "sandboxalice.80", "status": "attested", "genesis": "0xe6c30d6e…",
+                    "claimedAt": "2026-09-05T19:43:50.799Z", "attestedAt": "2026-09-05T19:44:28.461Z", "bulletin": "authorized" },
+  "devices": [ { "index": 1, "account": "0x0862f804…", … } ] }
+daemon log:
+  SANDBOX_PERSONA_UP       {"name":"alice","account":"0x0862f804…","devices":1,"username":"sandboxalice"}
+  SANDBOX_PERSONA_CLAIMED  {"name":"alice","username":"sandboxalice.80","again":false}
+  SANDBOX_PERSONA_ATTESTED {"name":"alice","username":"sandboxalice.80"}          # 38 s after the claim
+  SANDBOX_PERSONA_BULLETIN {"name":"alice","address":"5H6UtaUGgscy…","detail":null}
+
+$ curl http://127.0.0.1:7799/api/consumers/0x0862f804…        # Resources.Consumers on the devnet People chain
+{"account":"0x0862f804…","username":"sandboxalice.80","identifierKey":"0x00d0efc3e7…"}
+$ curl '{devnet backend}/api/v1/usernames?prefix=sandboxalice'
+[{"candidateAccountId":"5CFhe5c8f8S3…","username":"sandboxalice.80","status":"ASSIGNED","onchainData":{"blockNumber":6497684,…}}]
+```
+
+The claim went out with a bearer the daemon minted from alice's own
+`//wallet` key (challenge → client proof → token, no voucher, no operator
+token); the backend attested it at block 6497684 and the chain holds the
+RFC-0004 container (`0x00` + her X25519 key). Her statement allowance is
+proven by everything below: every statement she submitted was stored.
+The Bulletin faucet answered within the helper's deadline this time.
+
+### (b) `pca create sandboxecho-dev --network devnet`, `pca run`
+
+```
+$ pca create sandboxecho-dev --brain echo --network devnet --owner 0x0862f804… --username sandboxechodev --wait 240 --port 8834
+→ Creating bot "sandboxecho-dev"…
+✓ Generated your bot's identity
+→ Registering your bot on the network…
+✓ Registered as sandboxechodev.90
+→ Waiting for the network to confirm (up to 240s)…
+..................
+✓ Confirmed — your bot is live and people can message it!
+→ Provisioning Bulletin Products Devnet file allowance…
+⚠ The public Polkadot Products Devnet faucet may have accepted this allowance grant. Do not retry it yet.
+  …
+Locked to 1 allowlisted address — only they can message it.
+  or search: sandboxechodev.90
+                                                       # 2 min 10 s in total
+$ pca storage sandboxecho-dev status                   # a minute later
+  storage:   active through block 958796 (201567 blocks remaining); 1000 transactions and 95.3 MiB remain
+$ pca storage sandboxecho-dev recover
+✓ Verified allowance is sufficient; cleared the local recovery guard.
+
+$ pcs bot attach sandboxecho-dev
+{ "name": "sandboxecho-dev", "username": "sandboxechodev.90", "account": "0x9e60b889…", "onChain": true, "needsReregistration": false, "networkProfile": "devnet", … }
+$ pca run sandboxecho-dev
+{"event":"BOT_HOP_UPLOAD_CONFIGURED","host":"bullet.sik.rocks","maxBytes":52428800}
+{"event":"BOT_STARTING","endpoint":"wss://people-paseo.rotko.net","username":"sandboxechodev.90","brain":"echo","allowlist":1}
+{"event":"BOT_SUBSCRIBED","heartbeatMs":30000}
+```
+
+`--username sandboxechodev` because a bot name with a hyphen is not a
+username; the backend assigned `.90`.
+
+### (c) alice ↔ sandboxechodev.90: request, accept, text, reply, reaction, an attachment each way
+
+```
+$ pcs request alice sandboxecho-dev --welcome "hello from the sandbox on devnet"
+{ "requestId": "f7dcba52-…", "to": "0x9e60b889…", "toName": "sandboxechodev.90" }
+$ pcs requests alice                                   # 40 s later
+[ { "peerUsername": "sandboxechodev.90", "direction": "outgoing", "status": "accepted", "welcomeMessage": "hello from the sandbox on devnet", … } ]
+$ pcs send alice sandboxecho-dev "text round trip on devnet"
+$ pcs send alice sandboxecho-dev "a reply to your echo" --reply 753653FC-AB5A-4B4C-B526-178BE71C6458
+$ pcs react alice sandboxecho-dev 753653FC-AB5A-4B4C-B526-178BE71C6458 👍
+$ pcs send alice sandboxecho-dev --attach photo.png --caption "a photo for you"        # 240×120 PNG, 60789 B
+  "kind": "image", "mimeType": "image/png", "fileSize": 60789, "wssUrl": "wss://bullet.sik.rocks"
+$ pcs send alice sandboxecho-dev --attach notes.txt --caption "/file put notes.txt"
+$ pcs send alice sandboxecho-dev "/file get notes.txt"
+$ pcs inbox alice                                      # one line per row: direction, text, status, ACKs, attachment
+outgoing hello from the sandbox on devnet               delivered
+system   contactAdded                                   received
+incoming Echo: hello from the sandbox on devnet         received acked [1]  reactions ["👍:me"]
+outgoing text round trip on devnet                      delivered
+incoming Echo: text round trip on devnet                received acked [1]
+outgoing a reply to your echo                           delivered            ↩ 753653FC
+incoming Echo: a reply to your echo                     received acked [1]
+outgoing a photo for you                                delivered            image image/png 60789B sent media 3c9ee47c…
+incoming Echo: a photo for you                          received acked [1]
+outgoing /file put notes.txt                            delivered            general text/plain 68B sent media 37ed71c0…
+incoming Saved notes.txt (68 B).                        received acked [1]
+outgoing /file get notes.txt                            delivered
+incoming notes.txt                                      received acked [1]   general text/plain 68B claimed media 8bb1e4e6…
+$ cmp notes.txt devnet-state/personas/alice/media/8bb1e4e6….txt && echo byte-identical
+byte-identical
+bot log:
+  BOT_RECEIVED_OPENER {"from":"0862f804…","requestId":"f7dcba52-…","chars":32}   BOT_SENT_TEXT {"chars":38}
+  BOT_RECEIVED_TEXT {"chars":25}                                                  BOT_SENT_TEXT {"chars":31}
+  BOT_RECEIVED_TEXT {"chars":20,"kind":"reply"}                                   BOT_SENT_TEXT {"chars":26}
+  BOT_RECEIVED_REACTION {"emoji":"👍","target":"753653FC-…","removed":false}
+  BOT_RECEIVED_TEXT {"chars":15,"kind":"richText","attachments":1}  BOT_MEDIA_DOWNLOADED {"mime":"image/png","bytes":60789}
+  BOT_RECEIVED_TEXT {"chars":19,"kind":"richText","attachments":1}  BOT_MEDIA_DOWNLOADED {"mime":"text/plain","bytes":68}  BOT_FILE_SAVED {"path":"notes.txt"}
+  BOT_RECEIVED_TEXT {"chars":19}   BOT_SENT_FILE {"mime":"text/plain","bytes":68}   BOT_FILE_DELIVERED {"path":"notes.txt","bytes":68}
+```
+
+Every outgoing row is `delivered` (the bot's ACK on the real store), every
+incoming one was ACKed by alice's device; both attachments went through
+the real Bulletin HOP node under the faucet allowances, and the file the
+bot returned is byte-identical. The wire, as alice's subscriptions saw it
+(the slots are what the store holds now; `replaced ×N` is the sandbox's
+count of what each slot held before):
+
+```
+$ pcs wire --decode --peer alice
+→ alice#1  chat request  seq 25472886  582B
+  topic request→sandboxechodev.90
+  topic request→sandboxechodev.90 day 294
+  topic 0x78008d168cef19b4330b5e42c2e676d2c98f832e3b9312907285cd69123bf35a
+  chat request (addressed to a bot: no key here)
+→ sandboxechodev.90  identity sandboxechodev.90→alice /request  seq 25472887  394B
+  topic identity sandboxechodev.90→alice
+  request 5151E512-B…  1 message(s)  acked by alice#1 (success)
+    deviceChatAccepted   id F480A5A7-5…
+→ alice#1  identity alice→sandboxechodev.90 /response  seq 25472887  244B
+  topic identity alice→sandboxechodev.90
+  response to 5151E512-B…  success
+→ alice#1  session alice#1→sandboxechodev.90 /request  seq 25473138  422B  replaced ×6
+  topic session alice#1→sandboxechodev.90
+  request 5rWrRIAVfa…  1 message(s)  for sandboxechodev.90  acked by sandboxechodev.90 (success)
+    text "/file get notes.txt"  id 3b5256a7-c…
+→ sandboxechodev.90  session sandboxechodev.90#1→alice /response  seq 25473138  352B  replaced ×6
+  topic session sandboxechodev.90#1→alice
+  response to 5rWrRIAVfa…  success  for alice#1
+→ sandboxechodev.90  session sandboxechodev.90#1→alice /request  seq 25473140  538B  replaced ×5
+  topic session sandboxechodev.90#1→alice
+  request B8415331-0…  1 message(s)  for alice#1  acked by alice#1 (success)
+    richText "notes.txt" +1 attachment(s)  id DA62FB85-1…
+→ alice#1  session alice#1→sandboxechodev.90 /response  seq 25473140  368B  replaced ×5
+  topic session alice#1→sandboxechodev.90
+  response to B8415331-0…  success  for sandboxechodev.90
+```
+
+### (d) The Conversation screen
+
+`docs/images/s6b-devnet-conversation.png`: the UI served by the devnet
+daemon, rail badge `devnet`, alice on the left, `sandboxechodev.90` on the
+right (read-only, "as seen by alice"), the rows above including the photo
+inline and the returned `notes.txt`.
+
+### The daemon restart
+
+The daemon was stopped and started again on the same state dir (also to
+load the search-route change below):
+
+```
+$ pcs up --network devnet --dir <scratch>/devnet-state --port 7799
+$ pcs user list         → alice  sandboxalice.80  attested, Bulletin allowance authorized
+$ pcs bot list          → sandboxecho-dev  sandboxechodev.90  onChain true
+$ pcs send alice sandboxecho-dev "still here after the daemon restart"
+✗ no chat session with this contact
+$ pcs request alice sandboxecho-dev --welcome "hello again after the daemon restart"
+$ pcs requests alice    → accepted
+$ pcs send alice sandboxecho-dev "text after the restart"
+$ pcs inbox alice
+outgoing hello again after the daemon restart           delivered
+system   contactAdded                                   received
+incoming Echo: hello again after the daemon restart     received acked [1]
+outgoing text after the restart                         delivered
+incoming Echo: text after the restart                   received acked [1]
+```
+
+The identity, the registration and the attached bot came back; the chat
+state (contact, session, room) did not — a testnet persona persists its
+identity record only, as in S6 — so a new request was needed, which the
+bot (whose own session state survived) accepted again. Recorded as
+questions.md S6b.4.
+
+### The identity backend's search route
+
+Both live backends run `paritytech/device-uniqueness-backend`; the username
+read is `GET /api/v1/usernames/search?prefix=&limit=&cursor=`. After the
+change (`a80c59f`, `3248e57`), live on devnet:
+
+```
+$ pcs user find shawntabrizi
+[ { "username": "shawntabrizi.01", "account": "0xd09c501e…", "status": "ASSIGNED", "onChain": true } ]
+$ pcs user find sandbox
+[ { "username": "sandboxalice.80", "account": "0x0862f804…", "status": "ASSIGNED", "onChain": true },
+  { "username": "sandboxechodev.90", "account": "0x9e60b889…", "status": "ASSIGNED", "onChain": true } ]
+```
+
+The backend rendered `shawntabrizi.1`; the chain holds
+`shawntabrizi.01` (`Resources.UsernameOwnerOf("shawntabrizi.1")` is empty,
+`("shawntabrizi.01")` is `5GnEFZQ7PPpk…`; the consumer's `lite_username`
+bytes read `shawntabrizi.01`), so every hit is normalised to the padded
+form in `canonicalUsername` before the chain check. The proof-of-compute
+gate is not enforced on either backend today (a wrong, a reused and a
+malformed `Proof-Of-Compute` header all answered 200), so the solver is
+verified against the backend's own work vectors, not live. At the time of
+this run the retired routes still answered 200 on devnet.
+
+### (e) The phone check — the owner's
+
+`shawntabrizi.01` exists on devnet (`5GnEFZQ7PPpk5i9bQkNqLzmzKqnXPx31PyPx15BeB8EBgQhr`,
+`0xd09c501e…`), but its identifier key on chain is `0x04cd8f2f…`: a
+pre-RFC-0004 P-256 key. The sandbox (and the app) cannot message it:
+`pcs request alice shawntabrizi.01` answers "not messageable (no
+identifier key on this chain)". Precondition for the steps below: the
+phone re-registers on devnet with an X25519 key (a fresh install or a
+re-registration — `pcs user find shawntabrizi` then shows the new name
+with `onChain: true`, and `curl {daemon}/api/consumers/<account>` an
+`identifierKey` starting `0x00`).
+
+1. `pcs up --network devnet` (the default state dir), then
+   `pcs user add alice` — reports `attested` (a new persona) or resumes.
+2. `pcs request alice shawntabrizi.NN --welcome "hello from the sandbox"`
+   — the phone shows a request from `sandboxalice.NN`.
+3. Accept it on the phone; `pcs requests alice` shows `accepted`;
+   `pcs inbox alice` shows the "chat accepted" row.
+4. Phone → sandbox: send a text, react to the welcome message, send a
+   photo. `pcs inbox alice --peer shawntabrizi.NN` shows the text, the
+   reaction on the welcome row, and the photo `claimed on #1` with a
+   `media` id; `pcs wire --decode --peer alice` shows the phone's
+   statements on `session shawntabrizi.NN#1→alice /request` and alice's
+   ACKs.
+5. Sandbox → phone: `pcs send alice shawntabrizi.NN "hi phone"`,
+   `pcs react alice shawntabrizi.NN <phone message id> 👍`,
+   `pcs send alice shawntabrizi.NN --attach photo.png --caption "from alice"`
+   — the phone shows each; `pcs inbox alice` shows `delivered` after the
+   phone's ACK.
+6. Screenshots: the phone's chat, `pcs inbox alice`, the Conversation
+   screen in the UI (`http://127.0.0.1:7788`, alice | shawntabrizi.NN).
+
+Result: ______________________________________ (owner)
+
+### Deviations from the task, and why
+
+- **The bot is `sandboxechodev.90`, not `sandboxecho-dev`**: a hyphen is
+  not a username character, so `--username sandboxechodev` was passed;
+  the bot's local name is the one the task named.
+- **The phone step stops at its precondition**: the owner's devnet
+  identity carries a P-256 key, which nothing in this repo can message;
+  the steps are written for after a re-registration.
+- **Scope added by the owner mid-task**: the identity backend's search
+  route (bot-core and the sandbox), above.
+- **No devnet-specific code**: the profile is one rule over bot-core's
+  table; the only per-profile behaviour is `identityRegistrationAuth`,
+  read from that table.
+
+### What is verified
+
+- The devnet daemon against the real network: connect, genesis, persona
+  minting, the client-proof session and claim through the identity
+  backend, the attestation (38 s), the Bulletin faucet allowance, `bot
+  attach` reading the chain, persistence of the identity across a restart,
+  the backend search checked against the chain.
+- A real message path over a testnet between a persona and a bot-core
+  bot: request and accept, text, reply, reaction, a photo and a file to
+  the bot, a file back from the bot, every request ACKed, the wire as the
+  persona saw it.
+- The registration paths offline: client proof, issued token, voucher
+  fallback, refusal message, and no exchange on Paseo Next.
+
+### What is not verified
+
+- The voucher and issued-token paths live (the backend accepted the client
+  proof, so neither was needed), and the proof-of-compute gate live (not
+  enforced today).
+- The phone (P-256 key on devnet; steps written, result blank).
+- The two scenarios on `--network devnet` as scripts: the same steps ran
+  by hand above; the scenario helper's `pca create` would need the
+  `--username` the hyphen-less names avoid, so
+  `pcs scenario run scenarios/echo-roundtrip.mjs --network devnet` is a
+  live check for a later session.
+- A chain reset on devnet (the unit test marks records; the live daemon
+  saw one genesis).
+
+No bot, daemon or dev server was left behind: the echo bot (pid 90515) and
+the devnet daemon (port 7799) were stopped at the end; `sandboxecho-dev`
+remains in `~/.pca/bots` as a registered devnet bot (`sandboxechodev.90`),
+locked to alice; the owner's own mock daemon on 7788 was left untouched.
