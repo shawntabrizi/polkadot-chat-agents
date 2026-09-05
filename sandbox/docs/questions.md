@@ -213,3 +213,21 @@ untouched. No papi storage query remains outside `lib/people-directory.mjs`.
 
 S3 self-check: sandbox 61/61 (11 scenarios), bot-core 417/417 on the final
 tree; no bot or daemon process left behind.
+
+### Answers (owner review, 2026-09-05)
+
+1. Settled. Chat channels pin the expiry high word; a real expiration on a chat
+   channel is not expected. The scenario records the protocol limit.
+2. Only via extension or init, like the SDK, until a phone is observed doing
+   otherwise. No timer option.
+3. Not now. Note the limit in the acceptance record; revisit if a phone shows
+   concurrent sends from several devices.
+4. Done in this review: kind 18 is decoded in `vendor/app-chat-codec.mjs`
+   (minimal diff, protocol-level, as CLAUDE.md allows) and `index.mjs` reads
+   `m.kind === "deviceRemoved"`. The hand parser is gone.
+5. Retire at v1.5 with the HOP sandbox. Do not port the attachment tests early.
+
+S3 review: accepted. Re-run here: sandbox 61/61 with all eleven scenarios,
+bot-core 417/417 before and after the codec move; `ack-or-resend` and
+`device-removed` replayed through `pcs scenario run`. `bot-core/vendor`
+changed only for the kind-18 decoder.

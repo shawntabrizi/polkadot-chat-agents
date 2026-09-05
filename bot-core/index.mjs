@@ -1488,17 +1488,6 @@ const persistCritical = async () => {
 };
 const fp = (data) => bytesToHex(data.subarray(0, 32)); // dedup key: first 32 bytes, no full-payload encode
 
-// DeviceRemovedContent (host-chat codec): one compact-length-prefixed
-// statementAccountId. The vendored codec surfaces kind 18 as `unsupported`
-// with the raw content; a 32-byte account needs a one- or two-byte prefix.
-const decodeDeviceRemoved = (raw) => {
-  if (!(raw instanceof Uint8Array) || raw.length < 33) return null;
-  const mode = raw[0] & 3;
-  const [length, offset] = mode === 0 ? [raw[0] >> 2, 1] : mode === 1 ? [(raw[0] | (raw[1] << 8)) >> 2, 2] : [-1, 0];
-  if (length !== 32 || raw.length < offset + 32) return null;
-  return norm(bytesToHex(raw.subarray(offset, offset + 32)));
-};
-
 const handleOpener = async (data) => {
   let decoded;
   // Unlike session batches, an opener has no per-message isolation: a welcome
@@ -1730,8 +1719,8 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
     // deviceRemoved (18): the peer unpaired a device (Android's fan-out sends
     // it from a remaining one). Drop it from the roster so envelopes stop
     // being wrapped for it and its session topic leaves the watch set.
-    if (m.kind === "unsupported" && m.contentKind === 18) {
-      const removed = decodeDeviceRemoved(m.rawContent);
+    if (m.kind === "deviceRemoved") {
+      const removed = m.statementAccountIdHex;
       const entry = sessions.get(norm(peerHex));
       if (removed && entry) {
         const kept = (entry.session.peerDevices ?? []).filter((d) => norm(bytesToHex(d.statementAccountId)) !== removed);
