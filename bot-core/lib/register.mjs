@@ -312,6 +312,30 @@ export function normalizeUsername(raw) {
   return { base: m[1], digits: m[2] ?? null };
 }
 
+// The keys one registration binds together, from the mnemonic: the //wallet
+// sr25519 pair (the account the backend attests, and the account that signs
+// the bot's statements) and the X25519 chat key whose public half is the
+// identifier key the claim publishes. A client that must chat AS the
+// identity it registers here (the sandbox's paseo personas) derives its keys
+// through this one function, so what it publishes and what it uses agree.
+export function deriveIdentityKeys(mnemonic) {
+  const rootSeed = mnemonicToMiniSecret(mnemonic);
+  const wallet = deriveSr25519PairFromSeed(rootSeed, "//wallet");
+  const chatPrivateKey = deriveX25519PrivateKey(rootSeed);
+  const chatPublicKey = x25519PublicKeyFromPrivateKey(chatPrivateKey);
+  return {
+    accountId: wallet.publicKey,
+    account: bytesToHex(wallet.publicKey),
+    /** 64-byte sr25519 secret (scure/HDKD form); a statement-store prover accepts it as is. */
+    walletPrivateKey: wallet.privateKey,
+    sign: wallet.sign,
+    chatPrivateKey,
+    chatPublicKey,
+    identifierKey: encodeAccountEcdhKey(chatPublicKey),
+    liteEntropy: blake2b(mnemonicToEntropy(mnemonic), { dkLen: 32 }),
+  };
+}
+
 export async function registerIdentity({
   mnemonic,
   username,
@@ -325,12 +349,7 @@ export async function registerIdentity({
   const { base, digits: parsedDigits } = normalizeUsername(username);
   const preferredDigits = digits ?? parsedDigits;
 
-  const rootSeed = mnemonicToMiniSecret(mnemonic);
-  const wallet = deriveSr25519PairFromSeed(rootSeed, "//wallet");
-  const accountId = wallet.publicKey;
-  const x25519Pub = x25519PublicKeyFromPrivateKey(deriveX25519PrivateKey(rootSeed));
-  const identifierKey = encodeAccountEcdhKey(x25519Pub);
-  const liteEntropy = blake2b(mnemonicToEntropy(mnemonic), { dkLen: 32 });
+  const { accountId, sign, identifierKey, liteEntropy } = deriveIdentityKeys(mnemonic);
 
   const attesterData = await jsonFetch(new URL("/api/v1/attester", backendUrl), { method: "GET" }, fetchImpl);
   const attester = attesterData?.attester;
@@ -346,10 +365,10 @@ export async function registerIdentity({
   const payload = {
     candidateAccountId: ss58Address(accountId, ss58Prefix),
     username: base,
-    candidateSignature: bytesToHex(wallet.sign(liteMessage)),
+    candidateSignature: bytesToHex(sign(liteMessage)),
     ringVrfKey,
     proofOfOwnership: litePerson.proofOfOwnership,
-    consumerRegistrationSignature: bytesToHex(wallet.sign(resourcesSig)),
+    consumerRegistrationSignature: bytesToHex(sign(resourcesSig)),
     identifierKey: bytesToHex(identifierKey),
   };
   // The backend rejects a null preferredDigits; only send it when chosen,
@@ -372,6 +391,35 @@ export async function registerIdentity({
     username: submitted?.username ?? (preferredDigits ? `${base}.${preferredDigits}` : base),
     submitted,
   };
+}
+
+// Registration after a chain reset. The identity backend keeps its own
+// record of a username (ASSIGNED, with the block of the old chain), the reset
+// chain has none, so the bot is unreachable although every local record says
+// "registered". This claims the same username again and reports what the
+// backend did instead of guessing:
+//   { outcome: "on-chain" }                the chain still holds the account: nothing to do
+//   { outcome: "claimed", username, renamed } the backend accepted the claim (with the old
+//                                          digits, or new ones: `digits`, or its own pick
+//                                          with `newNumber`)
+//   { outcome: "refused", status, detail }  the backend answered the claim with an error
+// A transport failure (no answer at all) throws, like registerIdentity.
+// Observed on Paseo Next (2026-09-05): the backend refuses the old digits
+// ("Preferred digits NN already taken for username …", 409) even for the
+// account that owns them, so a bot comes back only under a new number.
+export async function reregisterIdentity({ mnemonic, username, digits = null, newNumber = false, backendUrl, directory, bandersnatchBin = null, identityToken = null, fetchImpl = fetch }) {
+  const { account } = deriveIdentityKeys(mnemonic);
+  const onChain = await directory.identifierKeyFor(account);
+  if (onChain != null) return { outcome: "on-chain", account, username };
+  const { base, digits: current } = normalizeUsername(username);
+  const wanted = newNumber ? null : digits ?? current;
+  try {
+    const result = await registerIdentity({ mnemonic, username: base, digits: wanted, backendUrl, bandersnatchBin, identityToken, fetchImpl });
+    return { outcome: "claimed", account, username: result.username, renamed: result.username !== username };
+  } catch (error) {
+    if (error?.status == null) throw error;
+    return { outcome: "refused", account, username, status: error.status, detail: error.message };
+  }
 }
 
 // Poll the directory (lib/people-directory.mjs) until the bot's identifier key

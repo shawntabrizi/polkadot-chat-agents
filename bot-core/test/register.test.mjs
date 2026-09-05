@@ -14,9 +14,11 @@ import {
 } from "../vendor/app-chat-codec.mjs";
 import {
   acquireIdentitySession,
+  deriveIdentityKeys,
   obtainIdentitySession,
   redeemIdentityVoucher,
   registerIdentity,
+  reregisterIdentity,
 } from "../lib/register.mjs";
 
 const concatBytes = (...parts) => {
@@ -295,4 +297,73 @@ test("username registration sends the acquired bearer token on the protected wri
   );
   const consumerSignature = new Uint8Array(Buffer.from(body.consumerRegistrationSignature.slice(2), "hex"));
   assert.equal(verifySr25519(resourcesPayload, consumerSignature, wallet.publicKey), true);
+});
+
+// A proof helper that answers like the wasm one, so the claim can be built
+// without the ring-VRF crypto.
+function fakeProofHelper(dir) {
+  const helper = path.join(dir, "proof-helper.mjs");
+  fs.writeFileSync(helper, `#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ memberKey: "0x${"22".repeat(32)}", proofOfOwnership: "0xproof" }));\n`, { mode: 0o700 });
+  return helper;
+}
+
+test("deriveIdentityKeys is the identity a claim publishes: same account, same identifier key, a signing key the wallet accepts", () => {
+  const mnemonic = generateMnemonic(128);
+  const keys = deriveIdentityKeys(mnemonic);
+  const rootSeed = mnemonicToMiniSecret(mnemonic);
+  const wallet = deriveSr25519PairFromSeed(rootSeed, "//wallet");
+  assert.deepEqual(keys.accountId, wallet.publicKey);
+  assert.equal(keys.account, `0x${Buffer.from(wallet.publicKey).toString("hex")}`);
+  assert.equal(keys.walletPrivateKey.length, 64);
+  assert.deepEqual(keys.identifierKey, encodeAccountEcdhKey(x25519PublicKeyFromPrivateKey(deriveX25519PrivateKey(rootSeed))));
+  assert.deepEqual(keys.chatPublicKey, x25519PublicKeyFromPrivateKey(keys.chatPrivateKey));
+  const message = new TextEncoder().encode("statement");
+  assert.equal(verifySr25519(message, keys.sign(message), keys.accountId), true);
+  assert.deepEqual(deriveIdentityKeys(mnemonic).identifierKey, keys.identifierKey, "deterministic");
+});
+
+// After a chain reset the backend still holds the username; the chain does
+// not. Each outcome of a second claim is reported as the backend gave it.
+test("reregisterIdentity: on-chain, claimed with the old digits, renamed by the backend, refused", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pca-reregister-test-"));
+  const helper = fakeProofHelper(temp);
+  const mnemonic = generateMnemonic(128);
+  const { account } = deriveIdentityKeys(mnemonic);
+  const backendUrl = "https://identity.example.test";
+  const claims = [];
+  const backend = (answer) => async (url, options) => {
+    if (String(url).endsWith("/attester")) return new Response(JSON.stringify({ attester: `0x${"33".repeat(32)}` }), { status: 200 });
+    claims.push(JSON.parse(options.body));
+    return answer();
+  };
+  const directoryHolding = (key) => ({ identifierKeyFor: async (hex) => (hex === account ? key : null) });
+  try {
+    // Still on the chain: no claim is made.
+    const kept = await reregisterIdentity({ mnemonic, username: "macbot.78", backendUrl, directory: directoryHolding(`0x00${"44".repeat(32)}${"00".repeat(32)}`), bandersnatchBin: helper, fetchImpl: backend(() => { throw new Error("must not claim"); }) });
+    assert.deepEqual(kept, { outcome: "on-chain", account, username: "macbot.78" });
+    assert.equal(claims.length, 0);
+
+    // The chain forgot it; the backend accepts the same number again.
+    const same = await reregisterIdentity({ mnemonic, username: "macbot.78", backendUrl, directory: directoryHolding(null), bandersnatchBin: helper, fetchImpl: backend(() => new Response(JSON.stringify({ username: "macbot.78" }), { status: 202 })) });
+    assert.deepEqual(same, { outcome: "claimed", account, username: "macbot.78", renamed: false });
+    assert.deepEqual([claims[0].username, claims[0].preferredDigits], ["macbot", "78"], "the old digits are asked for");
+
+    // The backend will not reuse the number and assigns another.
+    const renamed = await reregisterIdentity({ mnemonic, username: "macbot.78", backendUrl, directory: directoryHolding(null), bandersnatchBin: helper, fetchImpl: backend(() => new Response(JSON.stringify({ username: "macbot.91" }), { status: 202 })) });
+    assert.deepEqual(renamed, { outcome: "claimed", account, username: "macbot.91", renamed: true });
+    // A number chosen by the operator overrides the old one.
+    await reregisterIdentity({ mnemonic, username: "macbot.78", digits: "12", backendUrl, directory: directoryHolding(null), bandersnatchBin: helper, fetchImpl: backend(() => new Response(JSON.stringify({ username: "macbot.12" }), { status: 202 })) });
+    assert.equal(claims.at(-1).preferredDigits, "12");
+
+    // The backend refuses: the answer is reported, not retried.
+    const refused = await reregisterIdentity({ mnemonic, username: "macbot.78", backendUrl, directory: directoryHolding(null), bandersnatchBin: helper, fetchImpl: backend(() => new Response(JSON.stringify({ error: "Username already assigned" }), { status: 409, statusText: "Conflict" })) });
+    assert.deepEqual([refused.outcome, refused.status, refused.username], ["refused", 409, "macbot.78"]);
+    assert.match(refused.detail, /409 Conflict/);
+    assert.match(refused.detail, /Username already assigned/);
+
+    // No answer at all is not a backend decision.
+    await assert.rejects(reregisterIdentity({ mnemonic, username: "macbot.78", backendUrl, directory: directoryHolding(null), bandersnatchBin: helper, fetchImpl: backend(() => { throw new Error("ECONNRESET"); }) }), /ECONNRESET/);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
 });

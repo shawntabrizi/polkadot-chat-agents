@@ -56,6 +56,7 @@ import {
   DEFAULT_BACKENDS,
   acquireIdentitySession,
   registerIdentity,
+  reregisterIdentity,
   waitForAttestation,
   withTimeout,
 } from "./lib/register.mjs";
@@ -229,7 +230,7 @@ const fail = (s) => { console.error(`${c("✗", "31")} ${s}`); process.exit(1); 
 
 // Flags that are always boolean — they must never consume the following token,
 // or `pca create --public mybot` would swallow the bot name into --public.
-const BOOLEAN_FLAGS = new Set(["public", "dry-run", "no-register", "follow", "greet", "yes", "help", "version", "media-analyzer", "t3ams-auto-accept-workspaces", "t3ams-no-auto-accept-workspaces"]);
+const BOOLEAN_FLAGS = new Set(["public", "dry-run", "no-register", "again", "new-number", "follow", "greet", "yes", "help", "version", "media-analyzer", "t3ams-auto-accept-workspaces", "t3ams-no-auto-accept-workspaces"]);
 const SHORT_FLAGS = { "-f": "follow", "-h": "help", "-V": "version" };
 function parseFlags(argv) {
   const flags = {};
@@ -1242,6 +1243,12 @@ async function runRegistration(name, config, { secret, wantUsername, digits, wai
     }
     step(`Username ${config.username} already claimed; waiting for the network to confirm…`);
   }
+  return waitForConfirmation(name, config, wait);
+}
+
+// The tail of every registration: poll the directory until the identifier
+// key is on the chain (or in the sandbox), then mark the bot registered.
+async function waitForConfirmation(name, config, wait) {
   const waitMs = Number(wait ?? 180) * 1000;
   step(`Waiting for the network to confirm (up to ${Math.round(waitMs / 1000)}s)…`);
   let attested = false;
@@ -1250,14 +1257,89 @@ async function runRegistration(name, config, { secret, wantUsername, digits, wai
       waitForAttestation(directory, config.account, { timeoutMs: waitMs, onTick: () => process.stdout.write(".") }));
     process.stdout.write("\n");
   } catch (e) { process.stdout.write("\n"); warn(`Couldn't reach the network: ${e instanceof Error ? e.message : String(e)}`); }
-  if (attested) { config.registered = true; save(); ok("Confirmed — your bot is live and people can message it!"); return "registered"; }
+  if (attested) { config.registered = true; saveConfig(name, config); ok("Confirmed — your bot is live and people can message it!"); return "registered"; }
   warn(`Not confirmed yet — this can take a few minutes. Check or retry:  pca register ${name}`);
   return "pending";
 }
 
+// `pca register <bot> --again`: the bot's records say "registered", the chain
+// does not (a testnet reset). The sandbox forgets on restart and takes the
+// same registration again; on a real network the identity backend still
+// holds the username as ASSIGNED, so what a second claim does is the
+// backend's decision — reported as it happened, never assumed.
+async function runReregistration(name, config, { secret, digits, newNumber, wait }) {
+  if (!config.username) {
+    warn(`"${name}" was never registered, so there is nothing to register again. Register it:  pca register ${name}`);
+    return "failed";
+  }
+  if (config.networkProfile === SANDBOX.id) {
+    step("Registering your bot in the sandbox again…");
+    try {
+      const entry = await createSandboxDirectory(config.backendUrl).register({ account: config.account, username: config.username, identifierKey: config.identifierKey, bulletinAccount: config.bulletinAccount ?? null });
+      config.username = entry.username;
+      config.registered = false;
+      saveConfig(name, config);
+    } catch (e) {
+      warn(`Registration didn't complete: ${e instanceof Error ? e.message : String(e)}`);
+      note(`Is the sandbox up (pcs up)? Retry when ready:  pca register ${name} --again`);
+      return "failed";
+    }
+    ok(`Registered as ${config.username}`);
+    return waitForConfirmation(name, config, wait);
+  }
+  if (!secret?.mnemonic) { warn(`No mnemonic stored for "${name}" (imported bot?), so it can't be registered here.`); return "failed"; }
+  step(`Checking the chain for ${config.username}…`);
+  let result;
+  try {
+    result = await withDirectory(config, (directory) => reregisterIdentity({
+      mnemonic: secret.mnemonic,
+      username: config.username,
+      digits: digits ?? null,
+      newNumber,
+      backendUrl: config.backendUrl,
+      directory,
+      bandersnatchBin: BANDERSNATCH_BIN,
+      identityToken: process.env.PCA_IDENTITY_TOKEN?.trim() || null,
+    }));
+  } catch (e) {
+    warn(`Couldn't re-register: ${e instanceof Error ? e.message : String(e)}`);
+    note(`Retry when ready:  pca register ${name} --again`);
+    return "failed";
+  }
+  if (result.outcome === "on-chain") {
+    config.registered = true;
+    saveConfig(name, config);
+    ok(`${config.username} is on the chain — nothing to register again.`);
+    return "registered";
+  }
+  if (result.outcome === "refused") {
+    warn(`The identity backend refused a second claim of ${config.username}: ${result.detail}`);
+    note("The backend still lists the username as assigned on the old chain, and the chain has no record of this bot.");
+    note(`Let the backend assign a new number:  pca register ${name} --again --new-number   (or pick one: --digits <NN>)`);
+    note("The bot's account and keys stay the same; only the number after the dot changes. Tell its contacts.");
+    return "failed";
+  }
+  const previous = config.username;
+  config.username = result.username;
+  config.registered = false;
+  saveConfig(name, config);
+  if (result.renamed) warn(`The backend assigned ${result.username}; ${previous} is no longer this bot's name. Tell its contacts.`);
+  else ok(`Claimed ${result.username} again.`);
+  return waitForConfirmation(name, config, wait);
+}
+
 async function cmdRegister(name, flags) {
-  if (!name) fail("Usage: pca register <botname>");
+  if (!name) fail("Usage: pca register <botname> [--again]");
   const cfg = readConfig(name);
+  if (flags.again === true) {
+    if (flags.username != null) fail("--again keeps the bot's username; to claim a different number pass --digits <NN> or --new-number.");
+    if (flags.digits != null && flags["new-number"] === true) fail("Use either --digits <NN> or --new-number.");
+    const secret = fs.existsSync(secretPath(name)) ? JSON.parse(fs.readFileSync(secretPath(name), "utf8")) : null;
+    const reg = await runReregistration(name, cfg, { secret, digits: flags.digits ? String(flags.digits) : null, newNumber: flags["new-number"] === true, wait: flags.wait });
+    if (reg === "failed") process.exitCode = 1;
+    else await provisionTestnetFileAllowance(name, cfg);
+    return;
+  }
   if (cfg.registered) {
     ok(`"${name}" is already registered as ${cfg.username}.`);
     await provisionTestnetFileAllowance(name, cfg);
@@ -2670,7 +2752,8 @@ function usage() {
   console.log(`pca — Polkadot Chat Agents
 
   pca create <botname> [--brain echo|claude|codex|opencode|kimi|bridge] [--transport polkadot-app|t3ams] [--owner <your username or address>] [--public] [--network devnet] [--username name]
-  pca register <name>                  finish/retry registration for an existing bot
+  pca register <name> [--again]        finish/retry registration; --again re-registers after a chain reset
+                                       (--new-number when the backend refuses the old number)
   pca run <name> [--model <m>] [--allowed-tools <read,write,bash,web,subagents|all>] [--tool-scope workspace|container] [--greet]
                                        start the bot locally (foreground)
   pca deploy <name> --host <ssh>       ship it to a server and run it in Docker
@@ -2754,7 +2837,7 @@ Bots live in ${BOTS_DIR} (override with PCA_BOTS_DIR).`);
 // ignoring it means the user believes a setting took effect when it didn't.
 const COMMAND_FLAGS = {
   create: ["brain", "transport", "owner", "allow", "t3ams-peer-key", "t3ams-namespace", "t3ams-display-name", "t3ams-auto-accept-workspaces", "t3ams-no-auto-accept-workspaces", "public", "network", "sandbox-url", "endpoint", "backend", "username", "digits", "model", "port", "wait", "no-register"],
-  register: ["username", "digits", "wait"],
+  register: ["username", "digits", "wait", "again", "new-number"],
   run: ["model", "allowed-tools", "tool-scope", "greet"],
   deploy: ["host", "harness", "anthropic-key", "openai-key", "openrouter-key", "gemini-key", "groq-key", "kimi-key", "allowed-tools", "tool-scope", "media-analyzer", "model", "dry-run", "remote-dir", "greet"],
   logs: ["host", "follow", "f", "tail"],
