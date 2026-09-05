@@ -52,3 +52,45 @@ Questions only the owner can answer. Each one names what was done meanwhile.
 
 S0 review: accepted. Both suites re-run green here (sandbox 11/11, bot-core
 416/416). The rules were checked against the polkadot-sdk checkout.
+
+## S1
+
+1. **`deviceAdded` fan-out and bot-core.** Android's PApp announces every
+   one of its devices with `deviceAdded` on the multi-device session once a
+   contact has no pending request (`ContactDeviceFanOutService`, both the
+   accepting and the requesting side, including the device the peer already
+   knows). The personas do the same, and that is how alice learns bob's
+   device 2 in the acceptance. `docs/explanation/protocol.md` lists what
+   bot-core does with `DeviceChatAccepted` but not with `deviceAdded` /
+   `deviceRemoved` (17/18). When a two-device persona accepts a bot's
+   request in S2, a bot that ignores `deviceAdded` wraps its answers for
+   device 1 only. Should S2 make bot-core apply the roster variants (as the
+   web client and Android do), or is single-device addressing accepted for
+   bots for now? Meanwhile the personas fan out like the phone.
+
+2. **Sibling devices on the identity session.** Every device of a persona
+   opens the identity session with each contact (all must receive an accept
+   and the SDK opens the subscription only through a session). The SDK's
+   `init` restores "own" outgoing batches from the shared identity topic by
+   decrypting with K(A,B), which every sibling can — so device 2 adopts
+   device 1's un-acked identity batch as its own. Harmless while siblings
+   never post there (only the accepting device does), and the peer dedups by
+   messageId; it would duplicate messages under a second signer if a sibling
+   posted before the ACK. Accept as an SDK quirk of the sandbox, or should
+   sibling devices only listen (no `createSession`, a raw subscription)?
+   Meanwhile: every device runs the session, only the acting device posts.
+
+3. **ACK code for a mixed batch.** The web client's `respondToRequests`
+   answers per message, so with the SDK's sticky `responded` flag the first
+   message's status decides the batch's code. The personas answer per
+   request: `success` when anything decoded, `decodingFailed` only when
+   nothing did. bot-core ACKs the batch on delivery regardless. Is
+   "success if anything decoded" the semantics S3's poisoned-batch scenario
+   should assert against, or should a partially undecodable batch be
+   NACKed? Meanwhile the personas ACK success.
+
+4. **Persistence before S2.** Personas and node contents live in memory;
+   `pcs up` twice gives a fresh network. `scenarios/bot-restart.mjs` (S2)
+   restarts the bot, not the daemon, so this may wait — unless the owner
+   wants `pcs up` to reload personas from the state dir first. Meanwhile
+   nothing is persisted; the state dir only holds `daemon.json`.
