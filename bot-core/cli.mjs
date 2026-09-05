@@ -55,6 +55,7 @@ import {
 import {
   DEFAULT_BACKENDS,
   acquireIdentitySession,
+  searchUsernames,
   registerIdentity,
   reregisterIdentity,
   waitForAttestation,
@@ -1071,7 +1072,9 @@ async function cmdCreate(name, flags) {
     let taken = false;
     try {
       if (sandboxUrl) taken = (await createSandboxDirectory(sandboxUrl).usernameOwner(full)) != null;
-      else taken = (await fetch(new URL(`/api/v1/usernames/${full}`, backendUrl))).ok;
+      // The backend's search is the one read it keeps (the single lookup is
+      // retired); an exact match on the chain's form of the name.
+      else taken = (await searchUsernames({ backendUrl, prefix: full.replace(/\.\d{2}$/, "") })).some((hit) => hit.username === full);
     } catch { /* backend unreachable here — let registration surface it */ }
     if (taken) fail(`The username ${full} is already taken.\n  Pick another number:  --digits <NN>\n  Or drop --digits and the network assigns a free one automatically.`);
   }

@@ -10,7 +10,7 @@ import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { blake2b } from "@noble/hashes/blake2.js";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { mnemonicToEntropy, mnemonicToMiniSecret, ss58Address } from "@polkadot-labs/hdkd-helpers";
+import { mnemonicToEntropy, mnemonicToMiniSecret, ss58Address, ss58Decode } from "@polkadot-labs/hdkd-helpers";
 import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
 import {
   deriveX25519PrivateKey,
@@ -303,6 +303,124 @@ export async function acquireIdentitySession({
   const session = { backendUrl: currentBackend, ...enrolled };
   await persistSession?.(session);
   return session;
+}
+
+// ── The identity backend's username search ───────────────────────────────
+//
+// `GET /api/v1/usernames/search?prefix=&limit=&cursor=` is the one read the
+// backend (paritytech/device-uniqueness-backend) keeps: a paged projection
+// of assigned usernames. The old list (`/usernames?prefix=`) and single
+// lookup (`/usernames/{name}`) are retired. Two gates sit in front of it:
+// a per-IP rate limit (429 with Retry-After) and, when the operator enables
+// it, proof of compute (402): a puzzle from `POST /api/v1/poc/issue`, solved
+// by mining a counter and presented in a single-use `Proof-Of-Compute`
+// header. The puzzle is a bounded sha256 search (difficulty ≤ 32 leading
+// zero bits, counted over the first 32 bits of the digest), so it is
+// solved here in plain Node.
+
+// The chain pads a lite username's number to two digits (`alice.06`); it is
+// the only form `Resources.UsernameOwnerOf` answers to.
+export const MIN_LITE_USERNAME_DIGITS = 2;
+// Above this the search would take minutes; the backends issue 16–18.
+const MAX_PROOF_OF_COMPUTE_DIFFICULTY = 24;
+const DEFAULT_SEARCH_PAGES = 10;
+const RETRY_AFTER_CAP_MS = 30_000;
+
+/** The on-chain form of a username: the lite number padded (`alice.6` → `alice.06`); anything else as given. */
+export function canonicalUsername(raw) {
+  const text = String(raw ?? "").trim();
+  const m = /^([a-z0-9]+)\.(\d{1,2})$/i.exec(text);
+  return m ? `${m[1]}.${m[2].padStart(MIN_LITE_USERNAME_DIGITS, "0")}` : text;
+}
+
+const u64be = (value) => { const b = Buffer.alloc(8); b.writeBigUInt64BE(BigInt(value)); return new Uint8Array(b); };
+const uuidBytes = (id) => {
+  const clean = String(id).replace(/-/g, "");
+  if (!/^[0-9a-f]{32}$/i.test(clean)) throw new Error("proof of compute: the puzzle's sessionId is not a UUID");
+  return hexToBytes(clean);
+};
+
+/** Leading zero bits of sha256(uuid ‖ timestamp u64be ‖ counter u64be), the backend's work measure. */
+export function proofOfComputeWork({ sessionId, timestamp }, counter) {
+  const digest = sha256(concatBytes(uuidBytes(sessionId), u64be(timestamp), u64be(counter)));
+  return Math.clz32((digest[0] << 24 | digest[1] << 16 | digest[2] << 8 | digest[3]) >>> 0);
+}
+
+/** Mine the puzzle and return the `Proof-Of-Compute` header value. */
+export function solveProofOfCompute(puzzle) {
+  const difficulty = Number(puzzle?.difficulty);
+  if (!Number.isInteger(difficulty) || difficulty < 1 || difficulty > 32 || typeof puzzle?.checksum !== "string" || !Number.isInteger(Number(puzzle?.timestamp))) {
+    throw new Error("proof of compute: the identity backend issued a malformed puzzle");
+  }
+  if (difficulty > MAX_PROOF_OF_COMPUTE_DIFFICULTY) {
+    throw new Error(`proof of compute: the identity backend asks for ${difficulty} bits of work; this client solves up to ${MAX_PROOF_OF_COMPUTE_DIFFICULTY}`);
+  }
+  let counter = 0;
+  while (proofOfComputeWork(puzzle, counter) < difficulty) counter += 1;
+  return base64(enc.encode(`${puzzle.sessionId}:${puzzle.timestamp}:${difficulty}:${counter}:${puzzle.checksum}`));
+}
+
+async function issueProofOfCompute(backendUrl, fetchImpl) {
+  const puzzle = await jsonFetch(new URL("/api/v1/poc/issue", backendUrl), { method: "POST" }, fetchImpl);
+  return solveProofOfCompute(puzzle);
+}
+
+const retryAfterMs = (res) => {
+  const raw = res.headers?.get?.("retry-after");
+  const seconds = Number(raw);
+  const ms = Number.isFinite(seconds) ? seconds * 1000 : raw ? Date.parse(raw) - Date.now() : 1000;
+  return Math.min(Math.max(ms, 0), RETRY_AFTER_CAP_MS);
+};
+const errorText = async (res) => { const t = await res.text().catch(() => ""); try { return JSON.parse(t)?.error ?? t; } catch { return t; } };
+
+/**
+ * Every assigned username under a prefix, as the chain names it:
+ * `[{ username, account (0x hex), address (SS58), status, createdAt, updatedAt }]`.
+ * Pages follow `nextCursor` up to `maxPages`; a 429 is retried once after
+ * its Retry-After; a 402 is answered with a solved puzzle once per request.
+ * Any other failure throws with the backend's reason.
+ */
+export async function searchUsernames({ backendUrl, prefix, limit = 100, maxPages = DEFAULT_SEARCH_PAGES, fetchImpl = fetch, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+  const request = async (url) => {
+    let proof = null;
+    let retriedRateLimit = false;
+    for (;;) {
+      const res = await fetchImpl(url, { headers: proof ? { "Proof-Of-Compute": proof } : {} });
+      if (res.status === 402) {
+        if (proof) throw new Error(`identity backend search refused the proof of compute: ${await errorText(res)}`);
+        proof = await issueProofOfCompute(backendUrl, fetchImpl);
+        continue;
+      }
+      if (res.status === 429) {
+        if (retriedRateLimit) throw new Error(`identity backend search is rate limited: ${await errorText(res)}`);
+        retriedRateLimit = true;
+        proof = null; // single-use: a refused request spent it
+        await sleep(retryAfterMs(res));
+        continue;
+      }
+      if (!res.ok) throw new Error(`identity backend search failed (${res.status}): ${await errorText(res)}`);
+      return res.json();
+    }
+  };
+  const out = [];
+  let cursor = null;
+  for (let page = 0; page < maxPages; page++) {
+    const url = new URL("/api/v1/usernames/search", backendUrl);
+    url.searchParams.set("prefix", String(prefix));
+    url.searchParams.set("limit", String(limit));
+    if (cursor) url.searchParams.set("cursor", cursor);
+    const data = await request(url);
+    if (!Array.isArray(data?.usernames)) throw new Error("identity backend search returned no list");
+    for (const hit of data.usernames) {
+      if (typeof hit?.username !== "string" || typeof hit?.accountId !== "string") continue;
+      let account;
+      try { account = bytesToHex(ss58Decode(hit.accountId)[0]); } catch { continue; }
+      out.push({ username: canonicalUsername(hit.username), account, address: hit.accountId, status: hit.status ?? null, createdAt: hit.createdAt ?? null, updatedAt: hit.updatedAt ?? null });
+    }
+    cursor = typeof data.nextCursor === "string" && data.nextCursor ? data.nextCursor : null;
+    if (!cursor) break;
+  }
+  return out;
 }
 
 // Validate a username to the backend's rule: >=6 lowercase letters (+ optional .NN).

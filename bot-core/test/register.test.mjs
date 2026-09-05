@@ -14,11 +14,15 @@ import {
 } from "../vendor/app-chat-codec.mjs";
 import {
   acquireIdentitySession,
+  canonicalUsername,
   deriveIdentityKeys,
   obtainIdentitySession,
+  proofOfComputeWork,
   redeemIdentityVoucher,
   registerIdentity,
   reregisterIdentity,
+  searchUsernames,
+  solveProofOfCompute,
 } from "../lib/register.mjs";
 
 const concatBytes = (...parts) => {
@@ -366,4 +370,91 @@ test("reregisterIdentity: on-chain, claimed with the old digits, renamed by the 
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
+});
+
+// The backend's search route: the one username read it keeps. The chain
+// pads a lite number to two digits and answers UsernameOwnerOf only for that
+// form, so every hit is normalised to it here, once, for every caller.
+test("canonicalUsername pads a lite number to the chain's two digits and leaves everything else alone", () => {
+  assert.equal(canonicalUsername("shawntabrizi.1"), "shawntabrizi.01");
+  assert.equal(canonicalUsername("alice.06"), "alice.06");
+  assert.equal(canonicalUsername("sandboxalice.80"), "sandboxalice.80");
+  assert.equal(canonicalUsername(" alice "), "alice", "a full username has no number");
+  assert.equal(canonicalUsername("alice.123"), "alice.123", "not a lite number: untouched");
+});
+
+const SEARCH_ACCOUNT = "5GnEFZQ7PPpk5i9bQkNqLzmzKqnXPx31PyPx15BeB8EBgQhr"; // shawntabrizi.01 on devnet
+const SEARCH_ACCOUNT_HEX = "0xd09c501e147cd741bdfee3ed6b88ee4a5d6ab4a1c68d0c6d1b270193f7cac715";
+
+test("searchUsernames follows nextCursor, normalises each hit to the chain's form and drops what it cannot name", async () => {
+  const requests = [];
+  const fetchImpl = async (url, options) => {
+    requests.push({ url: String(url), headers: new Headers(options?.headers ?? {}) });
+    const cursor = new URL(String(url)).searchParams.get("cursor");
+    if (cursor === "p2") return new Response(JSON.stringify({ usernames: [{ accountId: SEARCH_ACCOUNT, username: "shawnbot.7", status: "ASSIGNED" }, { accountId: "not-an-address", username: "shawnx.01" }, { username: "no-account" }], nextCursor: null }), { status: 200 });
+    return new Response(JSON.stringify({ usernames: [{ accountId: SEARCH_ACCOUNT, username: "shawntabrizi.1", status: "ASSIGNED", createdAt: "2026-07-24T15:27:56.090Z", updatedAt: "2026-09-05T19:52:24.281Z" }], nextCursor: "p2" }), { status: 200 });
+  };
+  const hits = await searchUsernames({ backendUrl: "https://identity.example.test", prefix: "shawn", fetchImpl });
+  assert.deepEqual(requests.map((r) => r.url), [
+    "https://identity.example.test/api/v1/usernames/search?prefix=shawn&limit=100",
+    "https://identity.example.test/api/v1/usernames/search?prefix=shawn&limit=100&cursor=p2",
+  ]);
+  assert.equal(requests[0].headers.has("proof-of-compute"), false, "no puzzle unless the backend asks");
+  assert.deepEqual(hits, [
+    { username: "shawntabrizi.01", account: SEARCH_ACCOUNT_HEX, address: SEARCH_ACCOUNT, status: "ASSIGNED", createdAt: "2026-07-24T15:27:56.090Z", updatedAt: "2026-09-05T19:52:24.281Z" },
+    { username: "shawnbot.07", account: SEARCH_ACCOUNT_HEX, address: SEARCH_ACCOUNT, status: "ASSIGNED", createdAt: null, updatedAt: null },
+  ]);
+  // The page cap bounds a runaway cursor.
+  const looping = async (url) => new Response(JSON.stringify({ usernames: [{ accountId: SEARCH_ACCOUNT, username: "loop.01" }], nextCursor: "again" }), { status: 200 });
+  assert.equal((await searchUsernames({ backendUrl: "https://identity.example.test", prefix: "loop", fetchImpl: looping, maxPages: 3 })).length, 3);
+  await assert.rejects(searchUsernames({ backendUrl: "https://identity.example.test", prefix: "x", fetchImpl: async () => new Response(JSON.stringify({ error: "boom" }), { status: 500 }) }), /search failed \(500\): boom/);
+  await assert.rejects(searchUsernames({ backendUrl: "https://identity.example.test", prefix: "x", fetchImpl: async () => new Response("[]", { status: 200 }) }), /returned no list/);
+});
+
+test("proof of compute: the backend's work vectors, a mined header the verifier accepts, and a bound on the work", () => {
+  // From device-uniqueness-backend crates/username-indexer/src/poc/solution.rs `matches_the_legacy_work_vectors`.
+  const puzzle = { sessionId: "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed", timestamp: 1_700_000_000_000, difficulty: 4, checksum: "c8828951fd6c123fdbf6501f111d27dd3f260839344a7370e0dd8f20e2c40482" };
+  assert.equal(proofOfComputeWork(puzzle, 0), 3);
+  assert.equal(proofOfComputeWork(puzzle, 12_345), 0);
+  const header = solveProofOfCompute(puzzle);
+  const [sessionId, timestamp, difficulty, counter, checksum] = Buffer.from(header, "base64").toString("utf8").split(":");
+  assert.deepEqual([sessionId, timestamp, difficulty, checksum], [puzzle.sessionId, "1700000000000", "4", puzzle.checksum], "the header is sessionId:timestamp:difficulty:counter:checksum");
+  assert.ok(proofOfComputeWork(puzzle, Number(counter)) >= 4, "the counter reaches the difficulty");
+  assert.ok(Number(counter) > 0 && proofOfComputeWork(puzzle, Number(counter) - 1) < 4 || Number(counter) === 0, "the smallest such counter, as the reference miner finds it");
+  assert.throws(() => solveProofOfCompute({ ...puzzle, difficulty: 30 }), /asks for 30 bits of work; this client solves up to 24/);
+  assert.throws(() => solveProofOfCompute({ ...puzzle, sessionId: "nope" }), /not a UUID/);
+  assert.throws(() => solveProofOfCompute({ ...puzzle, checksum: 7 }), /malformed puzzle/);
+});
+
+test("searchUsernames answers a 402 with a solved single-use puzzle and a 429 with one retry after Retry-After", async () => {
+  const puzzle = { sessionId: "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed", timestamp: 1_700_000_000_000, difficulty: 8, checksum: "ab".repeat(32) };
+  const seen = [];
+  let issued = 0;
+  const gated = async (url, options) => {
+    const headers = new Headers(options?.headers ?? {});
+    if (String(url).endsWith("/api/v1/poc/issue")) { issued += 1; return new Response(JSON.stringify(puzzle), { status: 201 }); }
+    const proof = headers.get("proof-of-compute");
+    seen.push(proof);
+    if (!proof) return new Response(JSON.stringify({ error: "Proof of compute required." }), { status: 402 });
+    const [, , , counter] = Buffer.from(proof, "base64").toString("utf8").split(":");
+    if (proofOfComputeWork(puzzle, Number(counter)) < puzzle.difficulty) return new Response(JSON.stringify({ error: "insufficient difficulty" }), { status: 402 });
+    return new Response(JSON.stringify({ usernames: [{ accountId: SEARCH_ACCOUNT, username: "shawntabrizi.1" }], nextCursor: null }), { status: 200 });
+  };
+  const hits = await searchUsernames({ backendUrl: "https://identity.example.test", prefix: "shawn", fetchImpl: gated });
+  assert.deepEqual([hits.length, hits[0].username, issued, seen.length, seen[0]], [1, "shawntabrizi.01", 1, 2, null], "one puzzle, presented on the retry only");
+  // A proof the backend still refuses is not retried blindly.
+  const refusing = async (url) => (String(url).endsWith("/poc/issue") ? new Response(JSON.stringify(puzzle), { status: 201 }) : new Response(JSON.stringify({ error: "checksum mismatch" }), { status: 402 }));
+  await assert.rejects(searchUsernames({ backendUrl: "https://identity.example.test", prefix: "x", fetchImpl: refusing }), /refused the proof of compute: checksum mismatch/);
+
+  const waits = [];
+  let calls = 0;
+  const limited = async () => (++calls === 1
+    ? new Response(JSON.stringify({ error: "Rate limit exceeded." }), { status: 429, headers: { "retry-after": "2" } })
+    : new Response(JSON.stringify({ usernames: [], nextCursor: null }), { status: 200 }));
+  assert.deepEqual(await searchUsernames({ backendUrl: "https://identity.example.test", prefix: "x", fetchImpl: limited, sleep: async (ms) => waits.push(ms) }), []);
+  assert.deepEqual([calls, waits], [2, [2000]], "waited the Retry-After once");
+  const always = async () => new Response(JSON.stringify({ error: "Rate limit exceeded. Please retry after 60 seconds." }), { status: 429, headers: { "retry-after": "60" } });
+  const capped = [];
+  await assert.rejects(searchUsernames({ backendUrl: "https://identity.example.test", prefix: "x", fetchImpl: always, sleep: async (ms) => capped.push(ms) }), /rate limited: Rate limit exceeded/);
+  assert.deepEqual(capped, [30_000], "a long Retry-After is capped, and a second 429 is the caller's to handle");
 });
