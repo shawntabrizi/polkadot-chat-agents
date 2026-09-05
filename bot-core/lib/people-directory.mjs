@@ -80,9 +80,16 @@ export function createSandboxDirectory(url, { timeoutMs = DEFAULT_TIMEOUT_MS } =
       const entry = await call("GET", `/api/usernames/${encodeURIComponent(String(name))}`);
       return entry?.account == null ? null : normHex(entry.account);
     },
-    /** The sandbox's `register_lite_person`: username + identifier key + statement allowance, in one call. */
-    async register({ account, username, identifierKey }) {
-      return call("POST", "/api/accounts/register", { account: normHex(account), username, identifierKey: normHex(identifierKey) });
+    /**
+     * The sandbox's `register_lite_person`: username + identifier key +
+     * statement allowance in one call, plus the Bulletin authorization for
+     * the bot's upload signer (`bulletinAccount`, public key only).
+     */
+    async register({ account, username, identifierKey, bulletinAccount = null }) {
+      return call("POST", "/api/accounts/register", {
+        account: normHex(account), username, identifierKey: normHex(identifierKey),
+        ...(bulletinAccount ? { bulletinAccount: normHex(bulletinAccount) } : {}),
+      });
     },
   };
 }

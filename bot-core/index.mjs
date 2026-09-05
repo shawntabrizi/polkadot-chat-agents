@@ -400,7 +400,10 @@ const mediaMaxInflightBytes = numberEnv(
   { min: mediaMemoryReservation(mediaMaxBytes), max: 4 * 1024 * 1024 * 1024 },
 );
 const mediaDownloadQueueCap = numberEnv("BOT_MEDIA_DOWNLOAD_QUEUE_CAP", 100, { min: 1, max: 10_000 });
-const hopAllowInsecure = env.BOT_HOP_ALLOW_INSECURE === "1"; // tests only: mock node is plain ws
+// Plain ws:// and IP-literal HOP hosts are permitted on the network profile
+// that already permits them for the statement store (the local sandbox, whose
+// HOP node is on loopback) and for tests via BOT_HOP_ALLOW_INSECURE.
+const hopAllowInsecure = env.BOT_HOP_ALLOW_INSECURE === "1" || Boolean(networkProfile?.insecureEndpoints);
 const hopAllowedNodes = String(env.BOT_HOP_ALLOWED_NODES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 const mediaStore = createMediaStore({
   dir: env.BOT_STATE_DIR ? path.join(env.BOT_STATE_DIR, "media") : fs.mkdtempSync(path.join(os.tmpdir(), "bot-media-")),

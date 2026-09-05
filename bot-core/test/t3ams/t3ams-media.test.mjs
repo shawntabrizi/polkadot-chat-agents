@@ -89,9 +89,12 @@ test("T3ams media uploads through positional HOP RPC and fetches BLAKE2b-256-ver
     assert.equal(logs.filter(({ event }) => event === "T3AMS_MEDIA_PROGRESS_CALLBACK_FAILED").length, 2);
 
     // The content hash participates in the cache key. A wrong BLAKE2b-256 must
-    // trigger a fresh HOP claim and fail before the cache is populated.
+    // trigger a fresh HOP claim and fail before the cache is populated. The
+    // first upload's entries were acked and are gone (the pool is
+    // non-custodial), so the fresh claim needs a fresh upload.
+    const { attachment: again } = await media.upload({ filePath: source, mime: "application/pdf", filename: "evidence.pdf" });
     await assert.rejects(
-      () => media.download({ ...attachment, contentHashHex: "00".repeat(32) }),
+      () => media.download({ ...again, contentHashHex: "00".repeat(32) }),
       /content hash mismatch/,
     );
     assert.equal(media.stats().inflight, 0);

@@ -156,7 +156,7 @@ test("allowlist rejects hosts outside it", () => {
 test("hostile RPC frames are rejected before JSON parsing", async () => {
   const node = await startNode();
   const file = node.putFile(new Uint8Array(16));
-  node.failures.oversizedFrameBytes = 8 * 1024;
+  node.faults.bloat({ bytes: 8 * 1024 });
   await assert.rejects(() => download(node, file, { maxRpcFrameBytes: 1024 }), /frame exceeds 1024 bytes/);
 });
 
@@ -164,7 +164,7 @@ test("ack failures never fail the download", async () => {
   const node = await startNode();
   const original = new Uint8Array(crypto.randomBytes(50_000));
   const file = node.putFile(original);
-  node.failures.ack = true;
+  node.faults.refuse({ method: "ack", count: null });
   const got = await download(node, file);
   assert.equal(Buffer.compare(got, original), 0);
 });
@@ -173,7 +173,7 @@ test("a dropped connection resumes once and completes", async () => {
   const node = await startNode();
   const original = new Uint8Array(crypto.randomBytes(3_000_000)); // 2 chunks
   const file = node.putFile(original);
-  node.failures.dropConnections = 1;
+  node.faults.cut({ count: 1 });
   const got = await download(node, file);
   assert.equal(Buffer.compare(got, original), 0);
 });
