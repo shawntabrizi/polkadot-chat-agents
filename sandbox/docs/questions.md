@@ -384,3 +384,26 @@ sandbox 89/89 with all 15 scenarios, sandbox/ui 31/31 and build, bot-core
 installed in this checkout (not a regression). `attachment-to-bot` replayed
 through `pcs scenario run`. `bot-core/vendor` untouched.
 `test-client-device.mjs` is gone and CLAUDE.md no longer names it.
+
+### After the review: the CI failure on the restart tests
+
+8. **When should an answered entry leave the journal.** The fix settles
+   an owed entry once its answer is on the node (the submit returned), as
+   before; the answer is journaled so the crash window before that return
+   is a harmless re-send. Settling on the peer's ACK instead would also
+   cover a restart that replaces an un-fetched statement in the slot with
+   a later message (the lane's in-memory "current" does not survive a
+   restart, so the old reply is lost if the peer never fetched it). It was
+   not done: the journal is the bounded budget that admits every peer's
+   messages, and one peer offline for days would pin it. Is that restart
+   hazard worth a separate, per-peer "un-ACKed current statement" record?
+
+9. **A `/file` command in bridge mode never settles its owed entry.**
+   bot-core answers `/file …` itself, so the message never enters the
+   harness queue and no lease ACK ever removes it; `enqueueOwed` settles
+   only for direct runtimes. The entry stays journaled until a restart runs
+   the command again (`/file rm` then answers "No saved file exists"). With
+   the answer journal, the restart now re-sends the recorded answer instead
+   of re-running the command, so the visible effect is gone, but the entry
+   still never leaves the journal in a bridge bot's lifetime. Not reproduced
+   in a scenario; noted from reading `handleInbound`.

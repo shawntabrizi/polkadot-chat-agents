@@ -52,6 +52,7 @@ pcs wire --decode                        # every statement decrypted: kind, requ
 pcs wire --history "session alice#1→echobot /request"   # what the slot held before
 pcs fault drop --from echobot --channel "session echobot#1→alice /response" --count 1
 pcs fault delay --from alice --ms 2000 --count forever
+pcs fault delay-reply --from echobot --ms 30000 --count forever   # store and push at once, answer the submitter late
 pcs fault list | pcs fault clear
 pcs clock +2h | pcs clock reset          # the store node's clock (expiry checks)
 pcs node restart | pcs node reset        # drop every socket; keep / wipe the store

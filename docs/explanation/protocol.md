@@ -69,6 +69,23 @@ on restart instead of silently dropping the message. When a pipeline is full
 the statement is deferred un-ACKed — the app's resend is the retry
 (backpressure, never ACK-then-drop).
 
+The journal holds the answer too, once it exists. The store pushes a stored
+statement to subscribers before it answers the submitter, so a bot killed
+right after submitting its reply leaves the phone holding an answer the
+journal (question only) knows nothing about; a restart would run the brain
+again and send a second answer under a new id — with an LLM, a different
+one. Every message a direct turn sends is therefore recorded in its owed
+entry (message id, exact envelope bytes, superseded ids) and made durable
+before the outbound lane submits it. On restart an entry with a journaled
+answer is re-sent as-is under the same ids (peers dedup by id; usually the
+statement is still in the slot and the re-send changes nothing) and only an
+entry with no answer re-runs the brain. The placeholder and its progress
+frames are not the answer and are never journaled. The entry leaves the
+journal once the answer is on the node (the submit returned), not on the
+peer's ACK: a peer that is offline for days must not pin the bounded journal
+that admits every other peer's messages. Bridge deliveries keep their own
+contract (settled by the harness's lease ACK) and are not journaled here.
+
 ### One statement per channel (outbound lanes)
 
 The statement store keeps a single statement per (account, channel), and every

@@ -1148,6 +1148,7 @@ behind after the run.
 |---|---|
 | A follow-up that arrived while the previous turn settled was answered twice. The session receive path journals the message (`oweReply`), then awaits the critical persist; a turn settling on that peer meanwhile runs `pumpOwed()`, which enqueues the fresh entry and runs the brain; the receive path enqueues it again. Two answers with different ids — a phone shows the bot answering twice. The device client's 8 s windows never got there; the persona sends its follow-up as the opener's turn ends and hit it on every run. Ids journaled but not yet enqueued are now in `owedInAdmission`, which the pump skips; the ported restart test pins one answer per message. | `409b2fb` fix(transport) |
 | A claim the node answered `RateLimited` (1020) or `PoolFull` (1002) — "retry later" in the spec's error table — failed at once; only transport losses were retried. Those two codes now take the same single reconnect-and-resume retry; NotFound and the other refusals stay final, integrity failures never retry. Found by `scenarios/hop-faults.mjs`; pinned by a hop-client unit test. | `61eef61` fix(hop) |
+| A bot stopped after its answer reached the peer but before the store answered its submit answered the question again after the restart, under a new id. The store pushes to subscribers before it replies to the submitter; `settleOwed` runs after the submit returns; the journal held the question only, so the restart ran the brain again. CI hit it on the ported restart tests (`2 !== 1`: two "Echo: before-restart" rows); a real crash there does the same to a phone, and with an LLM the second answer differs. The owed entry now journals the answer (id, exact bytes, superseded ids), durably, before the lane submits it; a restart re-sends a journaled answer under the same ids and runs the brain only for entries without one. Reproduced deterministically by `scenarios/restart-with-sent-reply.mjs` with the new `delaySubmitReply` node fault (two rows before the fix, one after). | fix(transport): journal the answer |
 
 Also changed in bot-core, not defects: the sandbox profile's
 `insecureEndpoints` now covers the HOP node (`hopAllowInsecure`), `pca
@@ -1199,7 +1200,10 @@ real node) stays with `test-client.mjs`, the identity-channel client.
 
 - **Every inbound message is answered once** did not hold in bot-core
   when a follow-up landed as the previous turn settled (the first row of
-  the defect table). Fixed.
+  the defect table). Fixed. It also did not hold across a restart when the
+  process died between the store's push of its answer and the store's
+  reply to the submit (third row; found by CI after the S5 review, held
+  open by the `delaySubmitReply` fault in the new scenario). Fixed.
 - **A download failure is a note, never a dropped message** held for
   every fault; the retry policy was narrower than the spec's error table
   (second row). Fixed.
