@@ -363,3 +363,24 @@ S5 self-check: sandbox 89/89 (15 scenarios), sandbox/ui 16/16, bot-core
 413 pass / 5 skipped (the uid-gated `workspaces.test.mjs` cases on this
 machine) on the tree before D; the D tree's numbers are in acceptance.md.
 No bot, daemon, node or dev server left behind.
+
+### Answers (owner review, 2026-09-05)
+
+- Upload signer: per persona is right; the phone holds one Bulletin allowance
+  per identity, not per device.
+- ChaCha20-Poly1305 over the spec's AES-GCM: follow the deployed clients. File
+  a chat-spec correction (RFC-0001 wording) rather than change the sandbox.
+- Ack-before-chunks and the desktop's unsigned `hop_submit`: record as
+  protocol observations; the sandbox follows the spec's signed dialect.
+- RateLimited retries: keep the single retry; add a delay read from the error
+  when a node provides one, else 1 s. S6 item.
+- Opener-path reservation double count and the trailing slash on the stamped
+  upload node: S6 items, not reproduced here.
+
+S5 review: accepted. Merged master into the branch (Room.tsx props + S5
+attachment rendering, fixture gains `bulletinAccount`). Re-run here:
+sandbox 89/89 with all 15 scenarios, sandbox/ui 31/31 and build, bot-core
+413/418 with 5 T3ams SDK tests skipped because `@t3ams/bcts` is not
+installed in this checkout (not a regression). `attachment-to-bot` replayed
+through `pcs scenario run`. `bot-core/vendor` untouched.
+`test-client-device.mjs` is gone and CLAUDE.md no longer names it.
