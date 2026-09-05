@@ -288,9 +288,9 @@ export function createApi({ node, directory, personas, events, addPersona, resol
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
-    // The web UI calls every route under `/api` (its dev server proxies that
-    // prefix to the daemon); the CLI and the tests call the bare paths.
-    const pathname = url.pathname.startsWith("/api/") ? url.pathname.slice(4) : url.pathname;
+    // Every route lives under `/api` — the UI, the CLI, the tests and bot-core
+    // all use that one prefix (decisions.md D4). Anything else is the built UI.
+    const pathname = url.pathname.startsWith("/api/") ? url.pathname.slice(4) : null;
     const send = (status, body) => {
       if (body instanceof Html) {
         res.writeHead(status, { "content-type": "text/html; charset=utf-8" });
@@ -301,7 +301,7 @@ export function createApi({ node, directory, personas, events, addPersona, resol
     };
     try {
       if (req.method === "GET" && pathname === "/events") return serveEvents(req, res, url);
-      for (const route of routes) {
+      for (const route of pathname ? routes : []) {
         if (route.method !== req.method) continue;
         const match = pathname.match(route.regex);
         if (!match) continue;
@@ -309,7 +309,7 @@ export function createApi({ node, directory, personas, events, addPersona, resol
         const body = req.method === "POST" || req.method === "DELETE" ? await readBody(req) : {};
         return send(200, await route.handler(params, url.searchParams, body));
       }
-      const asset = req.method === "GET" && pathname === url.pathname ? staticFile(staticDir, pathname) : null;
+      const asset = req.method === "GET" && !pathname ? staticFile(staticDir, url.pathname) : null;
       if (asset) {
         res.writeHead(200, { "content-type": asset.type });
         return fs.createReadStream(asset.file).pipe(res);

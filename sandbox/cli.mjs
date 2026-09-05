@@ -38,7 +38,7 @@ const out = (value) => console.log(JSON.stringify(value, null, 2));
 const api = async (method, route, body) => {
   let res;
   try {
-    res = await fetch(baseUrl + route, { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+    res = await fetch(`${baseUrl}/api${route}`, { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
   } catch {
     fail(`no sandbox at ${baseUrl} — start one with: pcs up`);
   }
@@ -358,7 +358,7 @@ switch (cmd) {
   }
   case "events": {
     let res;
-    try { res = await fetch(`${baseUrl}/events`); } catch { fail(`no sandbox at ${baseUrl} — start one with: pcs up`); }
+    try { res = await fetch(`${baseUrl}/api/events`); } catch { fail(`no sandbox at ${baseUrl} — start one with: pcs up`); }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";

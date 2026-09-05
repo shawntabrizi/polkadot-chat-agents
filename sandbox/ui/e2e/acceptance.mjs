@@ -148,7 +148,7 @@ try {
   await dark.close();
 
   // The html route, as an agent would read it.
-  const res = await fetch(`${daemon.url}/personas/alice/rooms/echobot?format=html`);
+  const res = await fetch(`${daemon.url}/api/personas/alice/rooms/echobot?format=html`);
   const html = await res.text();
   if (!/<article[^>]*data-direction="incoming"[\s\S]*?<table>[\s\S]*?<td>rendered<\/td>[\s\S]*?<pre><code class="language-js">/.test(html)) throw new Error("html route: the echo did not render a table and a code block");
   fs.writeFileSync(path.join(work, "room.html"), html);

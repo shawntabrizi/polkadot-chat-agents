@@ -89,7 +89,7 @@ npm run acceptance                         # echo bot + headless Chromium, scree
 ```
 
 An agent checks rendering without a browser:
-`GET /personas/alice/rooms/echobot?format=html` returns the room as a page
+`GET /api/personas/alice/rooms/echobot?format=html` returns the room as a page
 through the same markdown pipeline the Room view uses (`sandbox/lib/markdown.mjs`),
 so a `<table>` or `<pre><code>` in that response is what a person sees.
 

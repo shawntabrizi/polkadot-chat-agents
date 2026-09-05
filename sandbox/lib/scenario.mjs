@@ -61,10 +61,10 @@ export const createPcs = (url) => async (...args) => {
   try { return JSON.parse(r.stdout); } catch { throw new Error(`pcs ${args.join(" ")} printed non-JSON: ${r.stdout}`); }
 };
 
-/** Thin HTTP client on the control API, for reads the CLI does not expose. */
+/** Thin HTTP client on the control API (routes relative to `/api`), for reads the CLI does not expose. */
 export function createSandboxClient(daemon) {
   const call = async (method, route, body) => {
-    const res = await fetch(daemon.url + route, { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+    const res = await fetch(`${daemon.url}/api${route}`, { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
     const data = await res.json();
     if (!res.ok) throw new Error(`${method} ${route} -> ${res.status} ${data.error}`);
     return data;

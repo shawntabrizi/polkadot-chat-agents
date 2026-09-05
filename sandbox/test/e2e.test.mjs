@@ -13,7 +13,7 @@ import { startDaemon } from "../daemon.mjs";
 import { waitFor } from "./helpers.mjs";
 
 const call = async (url, method, route, body) => {
-  const res = await fetch(url + route, { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+  const res = await fetch(`${url}/api${route}`, { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
   const json = await res.json();
   if (!res.ok) throw new Error(`${method} ${route} -> ${res.status} ${json.error}`);
   return json;
@@ -142,7 +142,7 @@ test("alice (1 device) and bob (2 devices): request, accept, text, reply from de
   assert.ok((await get("/wire?raw=1")).statements.every((s) => s.hex.startsWith("0x")));
 
   // Events: every state change was published, with a replayable sequence.
-  const res = await fetch(`${api}/events?since=0`);
+  const res = await fetch(`${api}/api/events?since=0`);
   const reader = res.body.getReader();
   const { value } = await reader.read();
   await reader.cancel();
@@ -275,7 +275,7 @@ test("faults, clock and node restart; the wire decodes both directions and match
   assert.equal((await get("/wire")).statements.every((s) => s.signerLabel), true);
 
   // Faults, clock and node events are in the stream, typed apart from wire events.
-  const res = await fetch(`${api}/events?since=0`);
+  const res = await fetch(`${api}/api/events?since=0`);
   const reader = res.body.getReader();
   const { value } = await reader.read();
   await reader.cancel();

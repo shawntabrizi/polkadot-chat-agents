@@ -18,7 +18,7 @@ import { waitFor } from "./helpers.mjs";
 const TEXT = "Here is a table:\n\n| name | ok |\n|---|---|\n| alice | yes |\n\n```js\nconst x = 1 < 2;\n```";
 
 const call = async (url, method, route, body) => {
-  const res = await fetch(url + route, { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+  const res = await fetch(`${url}/api${route}`, { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
   const json = await res.json();
   if (!res.ok) throw new Error(`${method} ${route} -> ${res.status} ${json.error}`);
   return json;
@@ -40,12 +40,12 @@ test("the html room route renders a table and a code block through the shared pi
   const sent = await post("/personas/alice/rooms/bob/messages", { text: TEXT });
   const row = await waitFor(async () => (await get("/personas/bob/rooms/alice")).messages.find((m) => m.messageId === sent.messageId));
 
-  // Both the bare path and the UI's /api prefix serve the page.
+  // One prefix: the page is under /api like every route; the bare path is not served.
   const res = await fetch(`${daemon.url}/api/personas/bob/rooms/alice?format=html`);
   assert.equal(res.status, 200);
   assert.match(res.headers.get("content-type"), /^text\/html/);
   const html = await res.text();
-  assert.equal(html, await (await fetch(`${daemon.url}/personas/bob/rooms/alice?format=html`)).text());
+  assert.equal((await fetch(`${daemon.url}/personas/bob/rooms/alice?format=html`)).status, 404, "bare paths were dropped in S5");
 
   // A parsed page: the table and the code block are real elements, with
   // the message's text in them, and the markup is exactly the pipeline's.
@@ -80,7 +80,7 @@ test("the html room route escapes what is not markdown: names, labels and a scri
   const sent = await post("/personas/alice/rooms/bob/messages", { text: "<script>alert(1)</script> [x](javascript:alert(1))" });
   await waitFor(async () => (await get("/personas/bob/rooms/alice")).messages.find((m) => m.messageId === sent.messageId));
 
-  const html = await (await fetch(`${daemon.url}/personas/bob/rooms/alice?format=html`)).text();
+  const html = await (await fetch(`${daemon.url}/api/personas/bob/rooms/alice?format=html`)).text();
   const { document } = new JSDOM(html).window;
   assert.equal(document.querySelector("script"), null, "no script element anywhere on the page");
   assert.equal(document.querySelector("a[href^='javascript']"), null);

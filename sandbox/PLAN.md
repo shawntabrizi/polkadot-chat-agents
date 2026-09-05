@@ -79,7 +79,8 @@ sandbox/
   fixtures/            golden vectors (iOS topic vectors, chat-v2 conformance)
 ```
 
-Control API, one process, default `http://127.0.0.1:7788`:
+Control API, one process, default `http://127.0.0.1:7788`, every route
+under `/api` (S4 answer 6; the bare paths were dropped in S5):
 
 | area | calls |
 |---|---|
