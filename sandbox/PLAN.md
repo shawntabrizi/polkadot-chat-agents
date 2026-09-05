@@ -45,8 +45,8 @@ under `sandbox/ui/` with its own build, like `docs/`.
   clients of its HTTP/WS API. The CLI prints JSON with `--json`, which is the
   default when stdout is not a TTY.
 - **The mock node must behave like the real one** on the rules the protocol
-  depends on: one statement per (signer, channel); replacement only by equal or
-  higher expiry; `noAllowance` for unregistered signers; per-account statement
+  depends on: one statement per (signer, channel); replacement only by a strictly
+  higher expiry (equal is rejected, `channelPriorityTooLow`); `noAllowance` for unregistered signers; per-account statement
   allowance; subscription initial dump then live pushes; `remaining` paging.
   Pin it with golden vectors (see References).
 - **Fault injection is a first-class API**, not test-only hacks, so the UI can
@@ -149,7 +149,7 @@ and the acceptance check recorded in `sandbox/docs/acceptance.md`.
 
 - `sandbox/package.json`, `node --test` wiring, `.gitignore` for state dirs.
 - Move the mock node to `sandbox/lib/store-node.mjs`; bot-core e2e imports it.
-- Extend it: expiry and priority replacement rules, `noAllowance` for signers
+- Extend it: expiry and priority replacement rules (strictly greater replaces), `noAllowance` for signers
   not in an allowance set, per-account statement count limit, `remaining`
   paging on initial dumps, a decoded read-side (`list({topic, signer,
   channel})`) for the inspector, and fault hooks (`drop`, `delay`, `holdDump`,

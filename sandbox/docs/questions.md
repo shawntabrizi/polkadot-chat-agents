@@ -34,3 +34,21 @@ Questions only the owner can answer. Each one names what was done meanwhile.
 
 4. **`startMockStatementNode` name.** Kept as instructed. Rename to
    `startStoreNode` when bot-core's tests are next touched?
+
+### Answers (owner review, 2026-09-05)
+
+1. Plan wording was wrong; fixed in PLAN.md. Strictly greater replaces, equal
+   is rejected. Node behaviour stays.
+2. Confirmed against `substrate/client/rpc/src/statement/mod.rs`
+   (`send_in_chunks` breaks on an empty chunk, sends nothing) and
+   `@novasamatech/sdk-statement` (`getStatements` resolves only on a page with
+   `remaining` 0 or absent). So bot-core's poll of an empty topic batch times
+   out at `BOT_QUERY_TIMEOUT_MS` against a real node. That is a bot-core
+   defect the mock hid. S1 makes the node faithful (no event on an empty dump)
+   and S2 fixes bot-core's sweep so it does not depend on a page arriving.
+   The existing e2e tests may go red in between; that is the point.
+3. Yes, add `badProof` in S1 together with the directory.
+4. Rename to `startStoreNode` in S1 and update bot-core's two imports then.
+
+S0 review: accepted. Both suites re-run green here (sandbox 11/11, bot-core
+416/416). The rules were checked against the polkadot-sdk checkout.
