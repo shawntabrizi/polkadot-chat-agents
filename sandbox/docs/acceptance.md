@@ -702,3 +702,251 @@ S2-answer items above and the test flake. No scenario is skipped.
   every version; against a real node her inbox could miss versions that a
   later takeover dropped. That is what the takeover means, and why it is a
   backstop.
+
+## S4 — Web UI (2026-09-05)
+
+### What was verified
+
+`cd sandbox && npm test` (Node v24.13.1), 76 tests in 10 files, on the
+final tree. New since S3: the markdown pipeline's known answers and the
+html room route:
+
+```
+✔ markdown: a table
+✔ markdown: fenced code keeps its language and escapes its content
+✔ markdown: a nested list
+✔ markdown: inline code with angle brackets is escaped, not markup
+✔ markdown: a script tag is text
+✔ markdown: a javascript: link is not a link
+✔ markdown: a raw URL is linkified, opens in a new tab with noopener
+✔ markdown: inline bold, italic and a markdown link
+✔ markdown: a heading, and a newline is a line break
+✔ markdown: an image is a link to its URL, never a fetch
+✔ markdown: raw HTML in the message is escaped
+✔ markdown: empty, whitespace-only and missing text render the placeholder
+✔ markdown: textOf and labelOf split content into text and a neutral label
+✔ the html room route renders a table and a code block through the shared pipeline
+✔ the html room route escapes what is not markdown: names, labels and a script in the text
+ℹ tests 76
+ℹ pass 76
+ℹ fail 0
+ℹ duration_ms 67009.139458
+```
+
+The run has 14 `STORE_NODE_SUBMIT_REFUSED` lines, the same 13 provoked
+by the store-node unit tests plus one benign `channelPriorityTooLow` as
+recorded for S3.
+
+`cd sandbox/ui && npm run check` (tsc --noEmit, vitest, vite build):
+
+```
+ Test Files  3 passed (3)
+      Tests  10 passed (10)
+dist/index.html                   0.67 kB
+dist/assets/index-*.css          48.96 kB
+dist/assets/index-*.js          364.27 kB
+```
+
+The three vitest files cover what transforms data: `message-status`
+(sending/sent/delivered/failed with the sending device; receivedBy and
+ackedBy per device), `quote` (a reply's one-line quote, truncation,
+textless targets, a missing target) and `MarkdownCell` (a table and a
+fenced block render, a script and a `javascript:` link do not, empty text
+shows the placeholder).
+
+`cd bot-core && npm test` on the final tree:
+
+```
+ℹ tests 417
+ℹ pass 417
+ℹ fail 0
+ℹ duration_ms 73654.81325
+```
+
+bot-core is untouched by S4; the run proves the daemon it starts for its
+transport e2e (now with the static and `/api` handling) still serves it.
+
+### The acceptance session
+
+`cd sandbox/ui && npm run build && npm run acceptance`
+(`sandbox/ui/e2e/acceptance.mjs`): a daemon on a random port serving
+`sandbox/ui/dist`, `pcs user add alice --devices 2`, `pca create echobot
+--brain echo --public --network sandbox` and `pca run echobot` through the
+scenario runner's bot helper, then headless Chromium (Playwright 1.62.1,
+the cached build 1234) driving the built app:
+
+1. Personas: alice with her two devices online (`docs/images/s4-personas.png`).
+2. Requests: the search box finds `echobot` in the directory with a `bot`
+   label; "Send request" with the welcome "hello bot"; the outgoing row
+   goes to `accepted`; the bot's persisted roster holds both devices
+   (`docs/images/s4-requests.png`).
+3. Chats: the Room view for echobot; the composer receives, with
+   Shift+Enter for the line breaks and Enter to send:
+
+   ```
+   Here is a table and some code:
+
+   | feature | status |
+   |---|---|
+   | tables | rendered |
+   | code | rendered |
+
+   ```js
+   const echo = (s) => `Echo: ${s}`;
+   ```
+   ```
+
+   The echo comes back and renders as a table (`.md table td` "rendered")
+   and a code block (`.md pre code.language-js`); its status line reads
+   `on #1,#2 · acked #1,#2`; alice's own row renders the same table and
+   reads `delivered from #1` (`docs/images/s4-room-markdown.png`).
+4. Still in the room: Reply on the echo, "thanks", Enter — the outgoing
+   row carries the one-line quote of the echo and goes to `delivered from
+   #1`; 👍 on the echo — the reaction pill shows on it
+   (`BOT_RECEIVED_REACTION` in the bot's log); Edit on alice's own message,
+   the text replaced by `Edited:` and a two-column table, Enter — the row
+   shows `edited` and the new table. The bot answered the reply and the
+   edit too (`Echo: thanks`, `Echo: Edited: …`, both `on #1,#2 · acked
+   #1,#2`).
+5. Wire: peer filter `alice`, the `session echobot#1→alice /request`
+   statement opened in the detail panel with its decoded message and the
+   ACKs from both devices (`docs/images/s4-wire.png`). Then the controls:
+   a `drop` fault from `echobot` with count 2 — the fault row shows `hits
+   0/2` and the event log shows the `fault` event; `+10 s` — the node line
+   reads `clock +10000 ms`; `Reset clock` — `clock +0 ms`; `Clear all` —
+   "No faults." and `GET /faults` is empty.
+6. The same room in a second browser page with `colorScheme: "dark"`
+   (Berlin Night through `prefers-color-scheme`; no switcher):
+   `docs/images/s4-room-dark.png`.
+7. `GET /personas/alice/rooms/echobot?format=html`, as an agent would
+   read it (styles and the earlier rows elided; the file is exactly what
+   `test/room-html.test.mjs` asserts the shape of). Alice's row is the
+   edited one; the echo carries her reaction:
+
+```html
+<article data-id="74f07553-6664-48ec-ade1-7b99117ebce7" data-direction="outgoing" data-status="delivered" data-type="text">
+<header><span class="who">alice</span><time datetime="2026-09-05T11:32:15.023Z">11:32:15</time><span>(edited)</span></header>
+<div class="md"><p>Edited:</p>
+<table>
+<thead>
+<tr>
+<th>a</th>
+<th>b</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>2</td>
+</tr>
+</tbody>
+</table>
+</div>
+<footer>delivered from #1</footer>
+</article>
+<article data-id="60DEC09C-90DA-4A0A-AE62-D551BBB56130" data-direction="incoming" data-status="received" data-type="text">
+<header><span class="who">echobot</span><time datetime="2026-09-05T11:32:15.039Z">11:32:15</time></header>
+<div class="md"><p>Echo: Here is a table and some code:</p>
+<table>
+<thead>
+<tr>
+<th>feature</th>
+<th>status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>tables</td>
+<td>rendered</td>
+</tr>
+<tr>
+<td>code</td>
+<td>rendered</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-js">const echo = (s) =&gt; `Echo: ${s}`;
+</code></pre>
+</div>
+<footer>on #1,#2 acked #1,#2 <span class="reactions">👍</span></footer>
+</article>
+```
+
+The script asserts on that response too (an incoming article with a
+`<table>` holding `rendered` and a `<pre><code class="language-js">`),
+then stops the bot, the daemon and the browser. `pgrep` is clean after
+the run. Separately, `npm run dev` was started against a daemon on
+another port and `curl` through it returned `/api/personas`, created a
+persona with `POST /api/personas`, and streamed the `persona` event from
+`/api/events`.
+
+### A regression the sandbox caught in its own tree
+
+The first version of the html route imported `room-html.mjs` (and so
+jsdom) at the top of `lib/api.mjs`. `cli.mjs` imports `daemon.mjs`, which
+imports the API module, so every `pcs` subprocess loaded jsdom: 442 ms per
+`pcs` start instead of 241 ms. With that in place
+`scenarios/device-removed.mjs` passed 1 of 5 runs (the base commit
+03f6b0d, same node_modules, 5/5; the whole suite showed it as the one
+failure). Its "and was ACKed" check reads the fan-out slot's ACKs right
+after `BOT_PEER_DEVICE_REMOVED`, and the bot ACKs after it logs that
+event. The lazy import (commit `81ca880`) restored 241 ms and 5/5, and the
+full suite went 76/76. Why *slower* `pcs` loses that race is not
+explained, only measured; questions.md S4.4 asks whether the scenario
+should wait for the ACK instead.
+
+### Deviations from PLAN.md and the task, and why
+
+- **No component library, no Tailwind.** The design skill's setup is
+  Tailwind v4 + shadcn; the task said no component library. The UI applies
+  the skill's rules in plain CSS over the copied token bundle
+  (questions.md S4.2). Theme: Berlin Day / Berlin Night by OS preference,
+  because nobody was there to choose (S4.1).
+- **The polkadot-chat-web screens were not copied.** Their structure
+  (Chats → Room, Requests, Search) and behaviours (Enter sends, quick
+  reactions, edit own text, mark read on view, reply quoting) were reused;
+  their code reads Dexie tables and a chat manager, which the sandbox UI
+  does not have — it reads the control API and an SSE stream. Search is a
+  box on the Requests screen, as the task describes; there is no Settings
+  or Pair screen (the Personas screen shows what Settings showed).
+- **Markdown images render as links**, never `<img>` (questions.md S4.3).
+- **The html route lives in `lib/room-html.mjs`**, with the page template
+  and jsdom; `lib/markdown.mjs` stays free of Node-only imports so Vite can
+  bundle it for the browser. The pipeline is shared as the task asked.
+- **`/api` is accepted in addition to the bare paths**, not instead
+  (questions.md S4.6).
+- **Playwright is a devDependency of `sandbox/ui` only** and runs from
+  `npm run acceptance`, not from CI: CI builds the UI and runs its vitest
+  and tsc; the browser run needs a `pca` bot and a browser binary and is
+  the documented acceptance, run by hand.
+
+### What is verified
+
+- Every construct the task named renders through one pipeline with the
+  exact HTML pinned; the route and the view share it; own messages render
+  the same way; empty and unknown content show a neutral placeholder or
+  label; a script tag, a `javascript:` link and raw HTML with a handler
+  never become markup; links open in a new tab with `noopener`.
+- The screens over the API with live updates from the SSE stream, driven
+  by the script above: a request opened from the directory search and
+  accepted by a bot; the room with per-device status lines, reply with its
+  quote, a reaction, an edit of an own message; the wire filtered by peer
+  with a statement's decoded detail and ACKs; a fault set and cleared, the
+  clock moved and reset, the event log filling; the dark theme.
+- No seed or private key is fetched or shown: the UI only calls routes
+  that already returned public halves (`persona.toJSON`,
+  `device.toJSON`); `GET /wire` is unchanged.
+
+### What is not verified
+
+- `Restart node` and `Reset store` were not clicked in the acceptance
+  run (they call `POST /node/restart` and `/node/reset`, which S3's tests
+  and `pcs node` cover); neither were `delay` and `hold-dump` faults from
+  the form, the signer and channel filters on the wire, the slot-history
+  panel's content, adding a device or a persona from the form, or
+  Decline. Those paths were only type-checked and built.
+- Removing a reaction (clicking the pill) and Escape to cancel a reply
+  were not exercised.
+- The UI was only run in Chromium (headless). No other browser.
+- No phone talked to the sandbox; the persona is still the SDK behind
+  Polkadot Desktop.

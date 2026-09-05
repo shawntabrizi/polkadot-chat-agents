@@ -231,3 +231,49 @@ S3 review: accepted. Re-run here: sandbox 61/61 with all eleven scenarios,
 bot-core 417/417 before and after the codec move; `ack-or-resend` and
 `device-removed` replayed through `pcs scenario run`. `bot-core/vendor`
 changed only for the kind-18 decoder.
+
+## S4
+
+1. **Theme.** The design skill asks which of its five themes a project
+   uses and says not to assume. Nobody was there to ask, so the UI ships the
+   default pair: Berlin Day, and Berlin Night when the OS prefers dark
+   (`prefers-color-scheme`, no switcher). The token bundle is copied as is
+   into `sandbox/ui/src/theme`, so a switch to Lisbon, Malta or Tokyo is one
+   `data-theme` attribute. Which theme?
+
+2. **No component library, plain CSS.** The skill's setup is Tailwind v4 plus
+   shadcn components; the task said "no component library". The UI follows
+   the skill's rules (surfaces over borders, the semantic tokens, one focus
+   rule, action tokens for buttons, a nav rail with pill selection, no
+   modals) in hand-written CSS (`src/styles.css`, ~200 lines) over the
+   bundle's `tokens.css`. Keep it that way, or adopt Tailwind + shadcn now
+   that there is a UI to carry them?
+
+3. **Markdown images.** `![alt](url)` renders as a link to the URL, never an
+   `<img>`, so a message can never make the viewer fetch an arbitrary URL.
+   The task listed only text constructs. Should the UI ever show remote
+   images (a bot answering with a chart), or is a link the right behaviour
+   for a protocol tool?
+
+4. **`scenarios/device-removed.mjs` is timing sensitive.** Its "and was
+   ACKed" check reads the fan-out slot's ACKs right after
+   `BOT_PEER_DEVICE_REMOVED`, and the bot ACKs after logging that event.
+   An extra 200 ms of `pcs` start-up (jsdom imported eagerly by the API
+   module, see the S4 acceptance record) flipped it from 5/5 to 1/5; the
+   lazy import restored 5/5 without touching the scenario. The mechanism of
+   *why slower `pcs` loses the race* is not explained, only measured. Should
+   the assertion become a `sandbox.waitFor` on the ACK (an S3 file, not
+   changed here), or is a sharp check wanted so that kind of slowdown shows?
+
+5. **Raw accounts on screen.** The design skill says never to surface raw
+   identifiers by default. The Personas screen shows the persona's account
+   and chat key in full (mono) and device and contact accounts shortened,
+   because this is the tool an agent and a person use to read the wire, and
+   the wire is made of accounts. Acceptable for the sandbox, or move them
+   behind a "details" toggle?
+
+6. **Two path prefixes.** The daemon answers every route bare (`/personas`,
+   used by `pcs` and the tests) and under `/api` (used by the UI, because
+   the Vite dev server proxies that prefix and the built app is served at
+   `/`). One prefix would be cleaner: move `pcs` and the tests to `/api`, or
+   keep both?

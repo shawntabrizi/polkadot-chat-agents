@@ -70,6 +70,9 @@ jobs:
         run: for f in daemon.mjs cli.mjs lib/*.mjs scenarios/*.mjs test/*.mjs; do node --check "$f"; done
       - name: Tests (unit, end-to-end, and the scenarios)
         run: npm test
+      - name: Web UI (types, component tests, build)
+        run: npm ci --no-audit --no-fund && npm run check
+        working-directory: sandbox/ui
 
   openclaw-plugin:
     runs-on: ubuntu-latest

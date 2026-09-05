@@ -61,7 +61,9 @@ export const Personas = ({ session, personas, onSelect, onAdded }: Props) => {
               <button type="button" className="list-item" aria-current={p.name === active?.name ? 'true' : undefined} onClick={() => onSelect(p.name)} data-testid="persona-row">
                 <span className="grow">
                   <span className="label">{p.name}</span>
-                  <span className="preview caption">{plural(p.devices.filter(d => !d.removed).length, 'device')}</span>
+                  <span className="preview caption" style={{ display: 'block' }}>
+                    {plural(p.devices.filter(d => !d.removed).length, 'device')}
+                  </span>
                 </span>
                 <span className={`dot ${p.devices.some(d => d.online) ? 'on' : ''}`} title={p.devices.some(d => d.online) ? 'online' : 'offline'} />
               </button>

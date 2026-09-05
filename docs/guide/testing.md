@@ -74,6 +74,25 @@ inboxes and the bot's log. `npm test` in `sandbox/` runs them with the rest
 of the suite (and CI does). Anything that touches sessions or inbound
 handling must keep both green.
 
+### The web UI
+
+The same control API has a browser front: personas, requests, chats with
+markdown rendering (tables, code blocks, lists, links — what a bot answers
+with), and the wire inspector with the fault controls.
+
+```bash
+cd sandbox/ui && npm ci && npm run build   # once; pcs up then serves it
+pcs up                                     # open http://127.0.0.1:7788
+npm run dev                                # live reload, proxies /api to the daemon
+npm run check                              # tsc, vitest, build (CI runs this)
+npm run acceptance                         # echo bot + headless Chromium, screenshots to sandbox/docs/images
+```
+
+An agent checks rendering without a browser:
+`GET /personas/alice/rooms/echobot?format=html` returns the room as a page
+through the same markdown pipeline the Room view uses (`sandbox/lib/markdown.mjs`),
+so a `<table>` or `<pre><code>` in that response is what a person sees.
+
 ## Offline, automated (no network at all)
 
 `npm test` in `bot-core/` runs the transport end-to-end against the sandbox

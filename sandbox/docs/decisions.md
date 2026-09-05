@@ -56,3 +56,35 @@ at least one statement, a page with nothing routable is the empty result,
 and a timeout means the node is down — a strictly better signal than today's
 "empty or down?" ambiguity. It stays unapplied because the premise is false
 for every node that speaks the event format.
+
+## D2 — One markdown pipeline, sanitized, images as links (S4)
+
+**Context.** The Room view and the daemon's `?format=html` route must show
+a message identically, and a message is data from a peer, never markup.
+
+**Decision.** `sandbox/lib/markdown.mjs`, plain ESM imported by both the
+Vite app and the daemon: markdown-it with `html: false` (raw HTML is
+escaped text), `linkify: true` (a bare URL is a link, as the phone shows
+it), `breaks: true` (a newline in a chat message is a line break); every
+link gets `target="_blank" rel="noopener noreferrer"`; an image token
+renders as a link to its URL (the viewer never fetches a URL a message
+names); the result goes through DOMPurify bound to the caller's window —
+the browser's in the app, a jsdom window on the daemon, made on first use
+because `pcs` imports the API module on every call. `test/markdown.test.mjs`
+pins the exact HTML of every construct the task named and of the three
+things that must not get through (a script tag, a `javascript:` link, raw
+HTML with a handler). `test/room-html.test.mjs` proves the route's body is
+byte-for-byte the pipeline's output.
+
+## D3 — The UI talks under `/api`; the daemon serves the built app (S4)
+
+**Context.** The UI needs live reload during work and a single origin when
+deployed, and it must never hold a second copy of the API's semantics.
+
+**Decision.** The daemon strips a leading `/api` before routing (so
+`pcs`, the tests and the UI hit one table), and serves `sandbox/ui/dist` at
+`/` when the build exists (files under the directory only; the API's paths
+win). `npm run dev` in `sandbox/ui` proxies `/api` to a daemon
+(`PCS_URL`, default `http://127.0.0.1:7788`), SSE included. The UI is one
+`EventSource` on `/api/events`; every screen refetches on the events that
+concern it and nothing polls.
