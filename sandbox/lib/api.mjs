@@ -278,6 +278,10 @@ export function createApi({ node, directory, personas, events, addPersona, resol
 
   const serveEvents = (req, res, url) => {
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+    // WebKit fires EventSource `open` only once body bytes arrive; Chromium
+    // fires it on the headers. Send a comment at once so both report "Live"
+    // instead of "Connecting…" until the first event or the 15 s ping.
+    res.write(": connected\n\n");
     const write = (e) => res.write(`id: ${e.seq}\nevent: ${e.type}\ndata: ${toJson(e)}\n\n`);
     const since = Number(url.searchParams.get("since") ?? req.headers["last-event-id"] ?? 0);
     for (const e of events.since(since)) write(e);
