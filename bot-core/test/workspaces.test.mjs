@@ -137,18 +137,18 @@ while :; do printf x; done
 
 test("worktree subprocess timeout reaps a stalled command", async () => {
   const repo = makeRepo();
-  const gitCommand = makeFakeGit(`
-if [ "$1" = "rev-parse" ]; then
-  printf '%s\\n' true
-  exit 0
-fi
-sleep 30
-`);
+  // Every git call stalls, the rev-parse probe included: the timeout is the
+  // only way out whatever the machine's load. (A fast-path probe racing the
+  // same 500 ms budget under a concurrent suite made this flaky, reporting
+  // "not a git repository" instead of the timeout.)
+  const gitCommand = makeFakeGit("sleep 30");
   const ws = createWorkspaces({
     projects: { p: repo },
     worktreesDir: tmp(),
     gitCommand,
     gitTimeoutMs: 500,
   });
+  const started = Date.now();
   await assert.rejects(ws.resolveCwd({ alias: "p", branch: "stalled" }), /timed out after 500ms/);
+  assert.ok(Date.now() - started < 10_000, "the stalled command was reaped, not waited out");
 });
