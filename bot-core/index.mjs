@@ -1383,6 +1383,13 @@ const messageDedupId = (peerHex, requestId, text, messageId) =>
 // protocol statement before its session ACK, allowing the peer to retry later.
 const owedReplies = new Map(); // owedId -> { peerHex, requestId, msg, byteSize }
 const queuedOwed = new Set();
+// Owed ids a receive path has journaled but not yet enqueued: it awaits the
+// critical persist in between, and a turn settling on that peer meanwhile
+// pumps every un-queued owed entry. Without this set the pump ran the brain
+// on the fresh message and the receive path ran it again (two answers with
+// different ids — a phone shows the bot answering twice). Found by the
+// sandbox's persona, which sends its follow-up as the previous turn ends.
+const owedInAdmission = new Set();
 let pumpOwed = () => {};
 let owedReplyBytes = 0;
 const owedByteSize = (owedId, peerHex, requestId, msg) =>
@@ -1666,7 +1673,7 @@ pumpOwed = () => {
   let pumped = 0;
   let deferred = 0;
   for (const [owedId, owed] of owedReplies) {
-    if (queuedOwed.has(owedId)) continue;
+    if (queuedOwed.has(owedId) || owedInAdmission.has(owedId)) continue;
     if (!reserveAdmission(owed.peerHex, 1, { alreadyOwed: true })) { deferred += 1; continue; }
     if (!enqueueOwed(owed.peerHex, owedId, owed.msg, owed.requestId, { reservedBridge: usesBridgeQueue })) {
       releaseBridgeReservation();
@@ -1806,13 +1813,15 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
   }
   if (fresh.length && !reserveAdmission(peerHex, fresh.length)) return "deferred";
   const addedOwed = [];
+  const dropAdded = () => { for (const id of addedOwed) { removeOwed(id); owedInAdmission.delete(id); } };
   for (const f of fresh) {
     if (!oweReply(f.id, peerHex, f.msg, decoded.requestId)) {
-      for (const id of addedOwed) removeOwed(id);
+      dropAdded();
       releaseBridgeReservation(fresh.length);
       return "deferred";
     }
     addedOwed.push(f.id);
+    owedInAdmission.add(f.id); // this path enqueues it below; the pump must not
   }
   for (const id of newlySeen) seenRequests.add(id);
   trimSet(seenRequests, SEEN_CAP);
@@ -1821,7 +1830,7 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
     // the app statement un-ACKed and let normal retransmission retry it.
     if (!(await persistCritical())) {
       for (const id of newlySeen) seenRequests.delete(id);
-      for (const id of addedOwed) removeOwed(id);
+      dropAdded();
       // See opener rollback above: retain only the post-rollback state for a
       // later retry if storage recovers.
       persist();
@@ -1833,6 +1842,7 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
   // retried when the peer resends; dedup suppresses a second model invocation.
   for (const f of fresh) {
     log("BOT_RECEIVED_TEXT", { from: peerHex, chars: f.msg.text.length, ...(f.msg.kind !== "text" ? { kind: f.msg.kind } : {}), ...(f.msg.attachments ? { attachments: f.msg.attachments.length } : {}) });
+    owedInAdmission.delete(f.id);
     enqueueOwed(peerHex, f.id, f.msg, decoded.requestId, { reservedBridge: usesBridgeQueue });
   }
   // ACK means "delivered", not "answered" — send it before any brain work so
