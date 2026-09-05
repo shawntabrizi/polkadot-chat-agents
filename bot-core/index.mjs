@@ -1568,11 +1568,12 @@ const handleOpener = async (data) => {
       })
     : encodeOpaqueChatAcceptedMessage({ timestamp: stamp(senderHex), acceptedRequestId: decoded.messageId });
   try {
-    // Same-tick enqueues ride one statement, preserving the single
-    // [accept, welcome] payload the app expects on first contact.
+    // Same-tick enqueues ride one statement: [accept, welcome] on first
+    // contact. An empty BOT_ACK_TEXT sends the accept alone — an empty text
+    // message is an empty bubble on the phone, not "no welcome".
     const a = outbound.enqueue(senderHex, accept, { forceIdentity: true });
-    const w = outbound.enqueue(senderHex, encodeOpaqueTextMessage({ timestamp: stamp(senderHex), text: ackText }), { forceIdentity: true });
-    await Promise.all([a.submitted, w.submitted]);
+    const w = ackText ? outbound.enqueue(senderHex, encodeOpaqueTextMessage({ timestamp: stamp(senderHex), text: ackText }), { forceIdentity: true }) : null;
+    await Promise.all([a.submitted, w?.submitted]);
   } catch (error) {
     pendingOpenerAcks.add(openerId);
     // Every pending acceptance still owns an owed entry, so MAX_OWED bounds

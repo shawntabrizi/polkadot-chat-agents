@@ -76,7 +76,7 @@ export async function run({ sandbox, pcs, bot, log }) {
   ]);
   assert.equal(echo.events.filter((e) => e.event === "BOT_SENT_TEXT").length, 4, "four answers, no reply to the reaction");
   for (const m of view.messages.filter((x) => x.direction === "outgoing")) assert.equal(m.status, "delivered", `alice's ${m.content.type} ${m.messageId} was not ACKed`);
-  assert.equal(view.messages.filter((m) => m.direction === "incoming" && m.content.type === "text" && !m.content.text.startsWith("Echo:")).length, 1, "the bot's (empty) welcome rode the identity session once");
+  assert.equal(view.messages.filter((m) => m.direction === "incoming" && m.content.type === "text" && !m.content.text.startsWith("Echo:")).length, 0, "BOT_ACK_TEXT is empty for the echo brain: the accept rode alone, no empty welcome bubble");
 
   // The wire: the bot's statements on the labelled per-device channels, every signer named.
   const wire = await pcs("wire", "--peer", "alice");

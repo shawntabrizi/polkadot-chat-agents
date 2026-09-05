@@ -277,7 +277,7 @@ session flow.
 | Variable | Default | Purpose |
 |---|---|---|
 | `BOT_BRAIN` | `bridge` | `claude`\|`codex`\|`opencode`\|`kimi` (direct CLI), `bridge` (external harness), `echo` (test). **gen** |
-| `BOT_ACK_TEXT` | "Connecting you to the agent…" (bridge) | First-contact acknowledgement text. |
+| `BOT_ACK_TEXT` | "Connecting you to the agent…" (bridge) | First-contact acknowledgement text, sent next to the accept. Empty (the default for every other brain) sends the accept alone. |
 | `BOT_GREET` | `0` | `1` = message allowlisted owners once on startup (proof of life). **gen when --greet** |
 | `BOT_GREET_TEXT` | auto | Custom greeting text. |
 
