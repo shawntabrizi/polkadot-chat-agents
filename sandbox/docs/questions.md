@@ -130,3 +130,18 @@ dir is 0700 with daemon.json 0600.
    ever differed are in `docs/decisions.md` (D1). Is any deployed node older
    than PR #11139? If so it also lacks the `newStatements` event shape the
    SDK and bot-core decode, so it could not serve either client anyway.
+
+2. **Empty welcome next to the accept.** With `BOT_ACK_TEXT` empty (the echo
+   brain's default) bot-core still enqueues a text message with empty text
+   beside its `deviceChatAccepted` on the identity session; the persona
+   shows an empty row (`inbox alice`: `echobot:` with no text) and a phone
+   presumably an empty bubble. Should an empty ack text mean "send no
+   welcome" rather than "send an empty one"? Meanwhile unchanged.
+
+3. **`deviceRemoved` (kind 18).** bot-core decodes `deviceAdded` (17) and
+   applies it; 18 is logged as `BOT_UNSUPPORTED_CONTENT`. No persona sends it
+   yet (there is no device-removal command). Add it when the personas can
+   remove a device (S3), or leave until a phone is seen sending it?
+
+S2 self-check: sandbox 48/48, bot-core 417/417 on the final tree; no bot
+or daemon process left behind (`pgrep` clean after every run).
