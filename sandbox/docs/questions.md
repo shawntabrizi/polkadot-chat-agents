@@ -460,3 +460,59 @@ through `pcs scenario run`. `bot-core/vendor` untouched.
    the real network, so the reset is only detected by `pca register <bot>
    --again` (which reads the chain first). Should `pca info` get a
    `--check` flag that reads the chain on request?
+
+### Answers (owner review, 2026-09-05)
+
+1. Raised with the owner; the attester `143a9g1d…` (`0x86aac84d…`) has
+   allowance 0 and balance 0 on the reset chain, verified here. Until the
+   backend is re-provisioned nothing on Paseo Next can be attested.
+2. Unknown; ask the backend owners together with 1.
+3. macbot was deleted by the owner on 2026-09-04 (`pca delete macbot --yes`
+   in shell history, followed by a `pca create` that left no directory).
+   Not an agent action. Re-create it once attestation works.
+4. Yes, as a later option: `register_with_fee` needs 75 PAS per identity and
+   a funded account; keep the backend path as default.
+5. Keep the `sandbox` prefix; it marks throwaway identities on a shared chain.
+6. Yes, `pca info --check`, small; S7 or later.
+
+S6 review: accepted. Re-run here: sandbox 103/103, sandbox/ui 31/31 and
+build, bot-core 415/420 with the 5 T3ams SDK skips. Live messaging on Paseo
+Next is blocked by the backend, not by the sandbox.
+
+## S6b
+
+1. **The devnet backend renders lite usernames unpadded and lists a
+   pre-RFC-0004 account.** `GET /api/v1/usernames/search?prefix=shawn` on
+   devnet answers `shawntabrizi.1` and `shawnbot.1`; the chain holds
+   `shawntabrizi.01` (`UsernameOwnerOf("shawntabrizi.1")` is empty) and
+   its identifier key is `0x04…` (P-256). The backend's own OpenAPI says
+   `alice.06`, never `alice.6`, and that pre-X25519 registrations are
+   omitted; the community `main` (`crates/username-indexer/src/search.rs`)
+   returns `display_username` and filters `get_byte(identifier_key, 0) = 0`.
+   So the deployed backend is behind `main`. bot-core normalises the
+   number (`canonicalUsername`) and the sandbox checks every hit against
+   the chain, so nothing here depends on the fix; who deploys it?
+2. **The retired routes still answer on devnet.** At 2026-09-05T19:53Z
+   `GET /api/v1/usernames?prefix=` and `GET /api/v1/usernames/{name}`
+   both answered 200 with the old shapes (padded digits, `onchainData`).
+   The switch to `search` is done regardless; is a removal date known?
+3. **Proof of compute is not enforced.** `POST /api/v1/poc/issue` mints a
+   puzzle (difficulty 18) on devnet, but the search answered 200 with a
+   wrong, a reused and a malformed `Proof-Of-Compute` header. The solver
+   here is checked against the backend's work vectors
+   (`poc/solution.rs`), not live. Will it be enabled, and at what
+   difficulty (this client solves up to 24 bits)?
+4. **A testnet persona's chat state does not survive a daemon restart.**
+   The identity record does (registration, username, Bulletin state), the
+   contact, session and room do not, so after `pcs up` alice needs a new
+   `pcs request` (the bot accepts it again; verified above). The mock
+   forgets everything by design; on a testnet this is a gap S6 had too.
+   Worth persisting the engine's state per persona (contacts, rooms,
+   pending ACKs) under the state dir, the way bot-core keeps
+   `session-state.json`? Not done here: out of S6b's "no other behaviour
+   change".
+5. **The owner's devnet identity is pre-RFC-0004.** `shawntabrizi.01` on
+   devnet carries a P-256 identifier key, so no X25519 client (the
+   sandbox, bot-core, the current app) can message it. The phone step (e)
+   needs a re-registration first; is that the plan for the owner's phone
+   on devnet?

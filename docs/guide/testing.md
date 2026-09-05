@@ -88,33 +88,44 @@ inboxes and the bot's log. `npm test` in `sandbox/` runs them with the rest
 of the suite (and CI does). Anything that touches sessions or inbound
 handling must keep both green.
 
-### The sandbox on Paseo Next
+### The sandbox on a testnet (Products Devnet, Paseo Next)
 
-`pcs up --network paseo` runs the same daemon against the real Paseo Next
-network: the People chain's statement store and `Resources` pallet are the
-store and the directory, Parity's identity backend registers the personas,
-and the Bulletin HOP nodes carry attachments — so a persona can chat with a
-deployed bot and with a phone. `mock` stays the default and is unchanged.
+`pcs up --network devnet` (or `paseo`) runs the same daemon against the real
+testnet: the People chain's statement store and `Resources` pallet are the
+store and the directory, the identity backend registers the personas, and
+the Bulletin HOP nodes carry attachments — so a persona can chat with a
+deployed bot and with a phone. Both profiles are rows of bot-core's network
+table (`lib/network-config.mjs`), so `pca create --network <id>` and
+`pcs up --network <id>` see one network. `mock` stays the default and is
+unchanged. Devnet is the one whose backend attests today (its
+client-proof session is minted from the persona's own wallet key, as
+`pca create` does; `PCA_IDENTITY_TOKEN` / `PCA_IDENTITY_VOUCHER` in the
+daemon's environment are the same overrides `pca` takes — see
+[Use Products Devnet](/guide/devnet)).
 
 ```bash
-pcs up --network paseo                   # prints the chain genesis; refuses to start if the RPC is unreachable
+pcs up --network devnet                  # prints the chain genesis; refuses to start if the RPC is unreachable
 pcs user add alice                       # mints a mnemonic, claims sandboxalice.NN through the backend
                                          # (alice is too short for a username), waits for the attestation;
                                          # "pending" if it does not land in time — run it again to keep waiting
 pcs user add alice --username alicetest --wait 300
 pcs user list                            # username, attested | pending attestation | needs re-registration
-pcs user find shawntabrizi               # the backend's records, each checked against the chain (onChain)
-pcs bot attach sandboxecho               # a bot from `pca create sandboxecho --network paseo`: verified on chain
+pcs user find shawntabrizi               # the backend's search, each hit checked against the chain (onChain)
+pca create sandboxecho --brain echo --network devnet --owner <alice's account>
+pcs bot attach sandboxecho               # verified on chain; then  pca run sandboxecho
 pcs request alice sandboxecho --welcome hi
 pcs send alice sandboxecho --attach photo.png
+pcs send alice sandboxecho --attach notes.txt --caption "/file put notes.txt"
+pcs send alice sandboxecho "/file get notes.txt"      # the bot returns the file through the real HOP node
+pcs inbox alice
 pcs wire --decode                        # what alice's subscriptions saw, and what she submitted
-pcs scenario run scenarios/echo-roundtrip.mjs --network paseo      # live checks, not CI
+pcs scenario run scenarios/echo-roundtrip.mjs --network devnet      # live checks, not CI
 pcs scenario run scenarios/attachment-to-bot.mjs --network paseo
 ```
 
 What differs from the mock, and why:
 
-- A paseo persona is **single-device**: its identity account is its
+- A testnet persona is **single-device**: its identity account is its
   statement account and its device key is a persisted random X25519 key —
   exactly what a bot is. A second device needs the `AsResources` ring-proof
   origin only the phone can mint. `--devices 2` is refused.

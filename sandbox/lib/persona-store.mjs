@@ -1,6 +1,6 @@
 // What the sandbox keeps on disk for a real network. On the mock network a
 // persona is minted per daemon run and the mock directory forgets with it;
-// on paseo a persona's identity is registered on a chain that outlives the
+// on a testnet a persona's identity is registered on a chain that outlives the
 // daemon, so its keys, its username and where its registration stands are
 // persisted under the state dir (0700), one 0600 file per persona holding
 // the mnemonic. Attached bots and the chain identity are recorded beside

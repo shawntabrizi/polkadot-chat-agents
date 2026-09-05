@@ -948,6 +948,44 @@ test("pca logs reads the local bot.log that pca run keeps", () => {
   }
 });
 
+// A requested number is checked through the backend's search route (the
+// single lookup is retired) and compared in the chain's padded form, so a
+// backend that renders `sandboxbot.7` still says `sandboxbot.07` is taken.
+test("create --digits asks the identity backend's search whether the number is taken", async () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
+  const searches = [];
+  const server = http.createServer((req, res) => {
+    const reply = (status, body) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
+    const url = new URL(req.url, "http://127.0.0.1");
+    if (req.method === "GET" && url.pathname === "/api/v1/usernames/search") {
+      searches.push(url.search);
+      return reply(200, { usernames: [{ accountId: "5GnEFZQ7PPpk5i9bQkNqLzmzKqnXPx31PyPx15BeB8EBgQhr", username: "sandboxbot.7", status: "ASSIGNED" }], nextCursor: null });
+    }
+    if (url.pathname === "/api/v1/usernames") return reply(404, { error: "Not found" }); // the retired routes
+    if (url.pathname === "/api/v1/attester") return reply(500, { error: "attester unavailable in this test" });
+    return reply(404, { error: `no route ${req.method} ${req.url}` });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const backend = `http://127.0.0.1:${server.address().port}`;
+  try {
+    let result = await runCliAsync(botsDir, ["create", "takenbot", "--brain", "echo", "--network", "paseo", "--backend", backend, "--username", "sandboxbot", "--digits", "07"]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /sandboxbot\.07 is already taken/);
+    assert.deepEqual(searches, ["?prefix=sandboxbot&limit=100"], "the stem is searched, the match is exact");
+    assert.equal(fs.existsSync(path.join(botsDir, "takenbot")), false, "nothing was created");
+
+    // A free number passes the check; the failure that follows is the attester's, after the check.
+    result = await runCliAsync(botsDir, ["create", "freebot", "--brain", "echo", "--network", "paseo", "--backend", backend, "--username", "sandboxbot", "--digits", "08"]);
+    assert.doesNotMatch(result.stderr, /already taken/);
+    assert.match(result.stdout, /Registering your bot on the network/);
+    assert.match(result.stdout, /Registration didn't complete: 500/);
+    assert.equal(searches.length, 2);
+  } finally {
+    server.close();
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
+});
+
 // A bot created for the local sandbox registers through its directory (no
 // proof, no identity backend) and runs against its store node over ws://.
 test("create --network sandbox registers through the sandbox directory and runs against its store node", async () => {

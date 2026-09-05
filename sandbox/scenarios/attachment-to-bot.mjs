@@ -5,7 +5,7 @@
 // exactly once (after the ACK, per-chunk integrity checked), serve them at
 // its bridge /media route without the ticket, and answer the caption.
 //
-// On paseo (`--network paseo`, a live check) the photo goes through the
+// On a testnet (`--network paseo|devnet`, a live check) the photo goes through the
 // real Bulletin HOP node under the persona's faucet-provisioned allowance;
 // the pool view is mock-only, the rest holds unchanged.
 import assert from "node:assert/strict";

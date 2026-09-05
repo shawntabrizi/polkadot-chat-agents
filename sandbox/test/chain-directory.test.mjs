@@ -59,28 +59,30 @@ test("consumer, identityOf and usernameOwner read Resources through papi and rem
   assert.equal(await withLegacy.identityOf(hex(legacy)), null, "no X25519 key: not messageable");
 });
 
-test("search asks the identity backend and checks every hit against the chain", async () => {
+test("search asks the identity backend's search route, page by page, and checks every hit against the chain", async () => {
   const live = acct(0xa1);
   const gone = acct(0xa2);
   const client = fakeClient({ owners: new Map([["macbot.19", address(live)]]) });
   const requests = [];
-  const fetchImpl = async (url) => {
+  // Two pages; the backend renders the number unpadded (`macbot.9`) where the chain holds `macbot.09`.
+  const fetchImpl = async (url, init) => {
     requests.push(String(url));
-    return new Response(JSON.stringify([
-      { candidateAccountId: address(live), username: "macbot.19", status: "ASSIGNED", onchainData: null },
-      { candidateAccountId: address(gone), username: "macbot.78", status: "ASSIGNED", onchainData: { blockNumber: 659047 } },
-      { candidateAccountId: address(acct(0xa3)), username: "macbot.91", status: "RESERVED", onchainData: null },
-      { bogus: true },
-    ]), { status: 200 });
+    if (init?.signal == null) throw new Error("no timeout on the request");
+    const cursor = new URL(String(url)).searchParams.get("cursor");
+    if (!cursor) return new Response(JSON.stringify({ usernames: [
+      { accountId: address(live), username: "macbot.19", status: "ASSIGNED" },
+      { accountId: address(gone), username: "macbot.78", status: "ASSIGNED" },
+    ], nextCursor: "page-2" }), { status: 200 });
+    return new Response(JSON.stringify({ usernames: [{ accountId: address(acct(0xa3)), username: "macbot.9", status: "ASSIGNED" }, { bogus: true }], nextCursor: null }), { status: 200 });
   };
   const directory = createChainDirectory({ client, backendUrl: "https://backend.example.test", fetchImpl });
   const hits = await directory.search("macbot");
-  assert.deepEqual(requests, ["https://backend.example.test/api/v1/usernames?prefix=macbot"]);
+  assert.deepEqual(requests, ["https://backend.example.test/api/v1/usernames/search?prefix=macbot&limit=100", "https://backend.example.test/api/v1/usernames/search?prefix=macbot&limit=100&cursor=page-2"]);
   assert.deepEqual(hits, [
     { username: "macbot.19", account: hex(live), status: "ASSIGNED", onChain: true },
     { username: "macbot.78", account: hex(gone), status: "ASSIGNED", onChain: false },
-    { username: "macbot.91", account: hex(acct(0xa3)), status: "RESERVED", onChain: false },
-  ], "a record the backend kept across a reset is not on chain; a reserved one is not yet");
+    { username: "macbot.09", account: hex(acct(0xa3)), status: "ASSIGNED", onChain: false },
+  ], "a record the backend kept across a reset is not on chain; the number is the chain's padded form");
   assert.deepEqual(directory.list().map((e) => e.username), ["macbot.19"], "only the live hit is remembered");
   const failing = createChainDirectory({ client, backendUrl: "https://backend.example.test", fetchImpl: async () => new Response("nope", { status: 503 }) });
   await assert.rejects(failing.search("x"), /search failed \(503\)/);

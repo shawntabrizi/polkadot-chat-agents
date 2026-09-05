@@ -247,9 +247,9 @@ export function createApi({ node, hop, directory, personas, bots = new Map(), ev
     // bot-core bot): username, identifier-key container, statement allowance,
     // and the Bulletin authorization for its upload signer when named. On a
     // real network registration goes through the identity backend
-    // (`pcs user add`, `pca create --network paseo`); see /bots/attach.
+    // (`pcs user add`, `pca create --network <id>`); see /bots/attach.
     ["POST", "/accounts/register", (_p, _q, body) => {
-      mockOnly("registering an account here (use pcs user add, or pca create --network paseo, then pcs bot attach)");
+      mockOnly(`registering an account here (use pcs user add, or pca create --network ${networkInfo().network}, then pcs bot attach)`);
       if (!body.account || !body.username || !body.identifierKey) throw badRequest("account, username and identifierKey required");
       try { return directory.register(body.account, { username: body.username, identifierKey: body.identifierKey, bulletinAccount: body.bulletinAccount ?? null }); }
       catch (e) { throw new ApiError(409, e.message); }
