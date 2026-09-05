@@ -54,8 +54,9 @@ The app sends follow-ups on a channel derived from a per-device encryption
 key, not the identity key. A bot must poll every device session
 (`incomingDeviceSessions` from `makePeerSession`), not just the identity
 session, or app follow-ups silently never arrive. Test clients whose device
-key equals their identity key cannot reproduce this; use
-`test-client-device.mjs` (see [Testing](/guide/testing)).
+key equals their identity key cannot reproduce this; the sandbox personas
+(a device is its own statement account and encryption key) and
+`test-client-device.mjs` both do (see [Testing](/guide/testing)).
 
 ### Acknowledgements
 

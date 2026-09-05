@@ -19,6 +19,9 @@ jobs:
         with: { node-version: 22.22.0, cache: npm, cache-dependency-path: bot-core/package-lock.json }
       - name: Install (runs papi generate from committed metadata)
         run: npm ci
+      - name: Install sandbox (the transport e2e imports its store node)
+        run: npm ci --no-audit --no-fund
+        working-directory: sandbox
       - name: Descriptors resolve
         run: node -e 'import("./lib/descriptors.mjs").then(()=>console.log("descriptors OK"))'
       - name: Syntax check
@@ -49,6 +52,27 @@ jobs:
               { console.error("wasm proof helper mismatch:", code, out); process.exit(1); }
             console.log("wasm proof OK");
           '
+
+  sandbox:
+    runs-on: ubuntu-latest
+    defaults:
+      run: { working-directory: sandbox }
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: { node-version: 22.22.0, cache: npm, cache-dependency-path: sandbox/package-lock.json }
+      - name: Install
+        run: npm ci --no-audit --no-fund
+      - name: Install bot-core (the scenarios create and run a pca bot)
+        run: npm ci --no-audit --no-fund
+        working-directory: bot-core
+      - name: Syntax check
+        run: for f in daemon.mjs cli.mjs lib/*.mjs scenarios/*.mjs test/*.mjs; do node --check "$f"; done
+      - name: Tests (unit, end-to-end, and the scenarios)
+        run: npm test
+      - name: Web UI (types, component tests, build)
+        run: npm ci --no-audit --no-fund && npm run check
+        working-directory: sandbox/ui
 
   openclaw-plugin:
     runs-on: ubuntu-latest

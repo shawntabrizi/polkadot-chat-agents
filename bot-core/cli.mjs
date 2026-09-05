@@ -23,16 +23,18 @@ import {
   ss58Address,
   ss58Decode,
 } from "@polkadot-labs/hdkd-helpers";
-import { createClient as createPapiClient, Binary } from "polkadot-api";
+import { createClient as createPapiClient } from "polkadot-api";
 import { getWsProvider } from "polkadot-api/ws";
 import { paseoPeopleNext, productsDevnetPeople } from "./lib/descriptors.mjs";
 import {
   DEFAULT_NETWORK_PROFILE,
   PASEO,
   PRODUCTS_DEVNET,
+  SANDBOX,
   configuredNetworkProfile,
   peopleEndpointsFor,
 } from "./lib/network-config.mjs";
+import { createChainDirectory, createSandboxDirectory } from "./lib/people-directory.mjs";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
 import {
   deriveX25519PrivateKey,
@@ -103,11 +105,15 @@ async function noteNewerRelease({ timeoutMs = 3000 } = {}) {
 // set PCA_BANDERSNATCH_CLI to a natively built binary to override.
 const BANDERSNATCH_BIN = process.env.PCA_BANDERSNATCH_CLI ?? null;
 
-async function withPeopleApi(config, fn) {
+// The People-chain reads pca makes (who owns a username, is an account
+// attested) go through lib/people-directory.mjs: the chain over a short-lived
+// papi client, or the sandbox directory for a bot that lives there.
+async function withDirectory(config, fn) {
+  if (config.networkProfile === SANDBOX.id) return fn(createSandboxDirectory(config.backendUrl));
   const endpoints = peopleEndpointsFor(config.endpoint, config.networkProfile);
   const client = createPapiClient(getWsProvider(endpoints));
   const descriptor = config.networkProfile === PASEO.id ? paseoPeopleNext : productsDevnetPeople;
-  try { return await fn(client.getTypedApi(descriptor)); }
+  try { return await fn(createChainDirectory(client.getTypedApi(descriptor))); }
   finally { client.destroy(); }
 }
 
@@ -138,7 +144,16 @@ const FILE_DELIVERY_PROFILES = Object.freeze({
     allowedNodes: Object.freeze(PASEO.bulletin.hopEndpoints.map((endpoint) => new URL(endpoint).hostname)),
   }),
 });
-const NAMED_NETWORK_IDS = Object.freeze(Object.keys(FILE_DELIVERY_PROFILES));
+const NAMED_NETWORK_IDS = Object.freeze([...Object.keys(FILE_DELIVERY_PROFILES), SANDBOX.id]);
+// Where a running local sandbox (`pcs up`) says it is: --sandbox-url, then
+// PCA_SANDBOX_URL, then the daemon.json `pcs up` writes, then its default port.
+const SANDBOX_DAEMON_FILE = path.join(os.homedir(), ".pca", "sandbox", "default", "daemon.json");
+function resolveSandboxUrl(flag) {
+  if (flag != null) return flagValue(flag, "sandbox-url");
+  if (process.env.PCA_SANDBOX_URL?.trim()) return process.env.PCA_SANDBOX_URL.trim();
+  try { return JSON.parse(fs.readFileSync(SANDBOX_DAEMON_FILE, "utf8")).url; } catch { /* no daemon file */ }
+  return "http://127.0.0.1:7788";
+}
 // Immutable multi-architecture manifests prevent a later deploy from silently
 // receiving a republished mutable image.
 const NODE_IMAGE = "node:22.22.0-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94";
@@ -195,8 +210,7 @@ async function resolvePeer(input, netCfg) {
   if (/^[a-z][a-z0-9-]{2,}(\.\d{2,})?$/.test(bare)) {
     let owner = null;
     try {
-      owner = await withPeopleApi(netCfg, (api) =>
-        withTimeout(api.query.Resources.UsernameOwnerOf.getValue(Binary.fromText(bare)), 15_000, "username lookup"));
+      owner = await withDirectory(netCfg, (directory) => directory.usernameOwner(bare));
     } catch { fail(`Couldn't reach the network to resolve "${bare}" — try again, or use the address (5…) or 0x… account id instead.`); }
     if (typeof owner !== "string" || owner === "") {
       fail(`Couldn't find the username "${bare}" on the network — check the spelling (it's shown in the app under your profile).`);
@@ -670,7 +684,11 @@ function fileDeliveryEnvironment(cfg) {
 }
 
 function networkEnvironment(cfg) {
-  return { BOT_NETWORK_PROFILE: cfg.networkProfile ?? "" };
+  return {
+    BOT_NETWORK_PROFILE: cfg.networkProfile ?? "",
+    // The sandbox directory is the bot's People chain; its URL is the backendUrl.
+    ...(cfg.networkProfile === SANDBOX.id ? { BOT_SANDBOX_URL: cfg.backendUrl } : {}),
+  };
 }
 
 function seedFromHex(seedHex) {
@@ -947,18 +965,34 @@ async function cmdCreate(name, flags) {
   if (!profile && !requestedNetwork.startsWith("wss://")) {
     fail(`--network must be one of ${NAMED_NETWORK_IDS.join(", ")} or a full wss:// People endpoint.`);
   }
-  const endpoint = String(flags.endpoint ?? profile?.peopleEndpoints[0] ?? requestedNetwork);
+  if (flags["sandbox-url"] != null && profile?.id !== SANDBOX.id) fail("--sandbox-url only applies with --network sandbox.");
+  // The sandbox's endpoints exist only while its daemon runs: ask it. The
+  // control API doubles as the bot's identity backend (it registers the bot)
+  // and as its People directory (BOT_SANDBOX_URL at run time).
+  let sandboxStoreUrl = null;
+  let sandboxUrl = null;
+  if (profile?.id === SANDBOX.id) {
+    sandboxUrl = resolveSandboxUrl(flags["sandbox-url"]);
+    try {
+      const res = await fetch(new URL("/node", sandboxUrl), { signal: AbortSignal.timeout(5000) });
+      sandboxStoreUrl = (await res.json()).url;
+      if (typeof sandboxStoreUrl !== "string") throw new Error("no store node url");
+    } catch { fail(`No sandbox at ${sandboxUrl} — start one with: pcs up   (or point at it with --sandbox-url / PCA_SANDBOX_URL)`); }
+  }
+  const endpoint = String(flags.endpoint ?? sandboxStoreUrl ?? profile?.peopleEndpoints[0] ?? requestedNetwork);
   let endpointUrl;
   try { endpointUrl = new URL(endpoint); }
   catch { fail("--network/--endpoint must be a valid wss:// People endpoint."); }
-  if (endpointUrl.protocol !== "wss:" || endpointUrl.username || endpointUrl.password) {
+  // Only the sandbox may speak plain ws://: its store node is on this machine.
+  const allowedProtocols = profile?.insecureEndpoints ? ["wss:", "ws:"] : ["wss:"];
+  if (!allowedProtocols.includes(endpointUrl.protocol) || endpointUrl.username || endpointUrl.password) {
     fail("--network/--endpoint must be a credential-free wss:// People endpoint.");
   }
   const networkProfile = profile?.id ?? null;
   const fileDeliveryProfile = FILE_DELIVERY_PROFILES[networkProfile] ?? null;
   const backendUrl = flags.backend
     ? String(flags.backend)
-    : profile?.identityBackendUrl ?? DEFAULT_BACKENDS.paseo;
+    : sandboxUrl ?? profile?.identityBackendUrl ?? DEFAULT_BACKENDS.paseo;
   const allowInputs = [
     ...String(flags.allow ?? "").split(",").map((s) => s.trim()).filter(Boolean),
     ...(flags.owner ? [String(flags.owner)] : []),
@@ -1023,8 +1057,8 @@ async function cmdCreate(name, flags) {
     const full = `${wantUsername.replace(/\.\d{2}$/, "")}.${wantDigits}`;
     let taken = false;
     try {
-      const res = await fetch(new URL(`/api/v1/usernames/${full}`, backendUrl));
-      taken = res.ok;
+      if (sandboxUrl) taken = (await createSandboxDirectory(sandboxUrl).usernameOwner(full)) != null;
+      else taken = (await fetch(new URL(`/api/v1/usernames/${full}`, backendUrl))).ok;
     } catch { /* backend unreachable here — let registration surface it */ }
     if (taken) fail(`The username ${full} is already taken.\n  Pick another number:  --digits <NN>\n  Or drop --digits and the network assigns a free one automatically.`);
   }
@@ -1124,7 +1158,21 @@ async function runRegistration(name, config, { secret, wantUsername, digits, wai
     fail(`PCA_BANDERSNATCH_CLI points at ${BANDERSNATCH_BIN}, which doesn't exist.`);
   }
   const save = () => saveConfig(name, config);
-  if (!config.username) {
+  if (!config.username && config.networkProfile === SANDBOX.id) {
+    // The sandbox directory registers directly: no proof, no backend session.
+    step("Registering your bot in the sandbox…");
+    const username = digits && !/\.\d{2}$/.test(wantUsername) ? `${wantUsername}.${digits}` : wantUsername;
+    try {
+      const entry = await createSandboxDirectory(config.backendUrl).register({ account: config.account, username, identifierKey: config.identifierKey });
+      config.username = entry.username;
+      save();
+    } catch (e) {
+      warn(`Registration didn't complete: ${e instanceof Error ? e.message : String(e)}`);
+      note(`Is the sandbox up (pcs up)? Retry when ready:  pca register ${name}`);
+      return "failed";
+    }
+    ok(`Registered as ${config.username}`);
+  } else if (!config.username) {
     if (!secret?.mnemonic) { warn(`No mnemonic stored for "${name}" (imported bot?), so it can't be registered here.`); return "failed"; }
     step("Registering your bot on the network…");
     let result;
@@ -1181,8 +1229,8 @@ async function runRegistration(name, config, { secret, wantUsername, digits, wai
   step(`Waiting for the network to confirm (up to ${Math.round(waitMs / 1000)}s)…`);
   let attested = false;
   try {
-    attested = await withPeopleApi(config, (api) =>
-      waitForAttestation(api, config.address, { timeoutMs: waitMs, onTick: () => process.stdout.write(".") }));
+    attested = await withDirectory(config, (directory) =>
+      waitForAttestation(directory, config.account, { timeoutMs: waitMs, onTick: () => process.stdout.write(".") }));
     process.stdout.write("\n");
   } catch (e) { process.stdout.write("\n"); warn(`Couldn't reach the network: ${e instanceof Error ? e.message : String(e)}`); }
   if (attested) { config.registered = true; save(); ok("Confirmed — your bot is live and people can message it!"); return "registered"; }
@@ -1383,9 +1431,8 @@ async function cmdInfo(name) {
   let reachedNetwork = true;
   if (cfg.username && !cfg.registered) {
     try {
-      messageable = await withPeopleApi(cfg, async (api) =>
-        withTimeout(api.query.Resources.Consumers.getValue(cfg.address), 12_000, "network check")
-          .then((consumer) => consumer?.identifier_key != null));
+      messageable = await withDirectory(cfg, async (directory) =>
+        withTimeout(directory.identifierKeyFor(cfg.account), 12_000, "network check").then((key) => key != null));
       if (messageable) { cfg.registered = true; saveConfig(name, cfg); }
     } catch { reachedNetwork = false; }
   }
@@ -2645,7 +2692,8 @@ create flags:
   --greet          (run/deploy) the bot opens the chat with its owner on first start — proof of life
   --no-register    create the identity locally without registering (finish later with pca register)
   --wait <secs>    how long to wait for on-chain confirmation (default 180)
-  --network <ep>   target People network: devnet (default), paseo, or a compatible full wss:// endpoint. Private named-testnet bots get automatic file-delivery setup and local allowance provisioning.
+  --network <ep>   target People network: devnet (default), paseo, sandbox (the local sandbox from pcs up), or a compatible full wss:// endpoint. Private named-testnet bots get automatic file-delivery setup and local allowance provisioning.
+  --sandbox-url <u> with --network sandbox: the sandbox control API (default: the daemon pcs up started, or PCA_SANDBOX_URL)
 
 Products Devnet registration is automatic: pca obtains a backend bearer session
 by proving possession of the bot's own wallet key. No phone or credential is
@@ -2688,7 +2736,7 @@ Bots live in ${BOTS_DIR} (override with PCA_BOTS_DIR).`);
 // typo (--modle) or a misplaced flag (--greet on create) — and silently
 // ignoring it means the user believes a setting took effect when it didn't.
 const COMMAND_FLAGS = {
-  create: ["brain", "transport", "owner", "allow", "t3ams-peer-key", "t3ams-namespace", "t3ams-display-name", "t3ams-auto-accept-workspaces", "t3ams-no-auto-accept-workspaces", "public", "network", "endpoint", "backend", "username", "digits", "model", "port", "wait", "no-register"],
+  create: ["brain", "transport", "owner", "allow", "t3ams-peer-key", "t3ams-namespace", "t3ams-display-name", "t3ams-auto-accept-workspaces", "t3ams-no-auto-accept-workspaces", "public", "network", "sandbox-url", "endpoint", "backend", "username", "digits", "model", "port", "wait", "no-register"],
   register: ["username", "digits", "wait"],
   run: ["model", "allowed-tools", "tool-scope", "greet"],
   deploy: ["host", "harness", "anthropic-key", "openai-key", "openrouter-key", "gemini-key", "groq-key", "kimi-key", "allowed-tools", "tool-scope", "media-analyzer", "model", "dry-run", "remote-dir", "greet"],

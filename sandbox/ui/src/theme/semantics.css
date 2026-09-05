@@ -1,0 +1,110 @@
+/* GENERATED from the design source by polkadot-design-tokens.
+   Do not edit by hand — the next palette re-cut overwrites this file. */
+
+/* Derived semantics for projects not using Tailwind. The Tailwind v4
+   entry point (index.css) declares these inside @theme instead. */
+
+:root {
+  --radius-container: var(--scale-radius-medium-increased);  /* 16px — containers, cards, modals, panels */
+  --radius-nested: var(--scale-radius-extra-medium);  /* 12px — nested elements, inputs */
+  --radius-medium: var(--scale-radius-small-increased);  /* 10px — the default button shape */
+  --radius-small: var(--scale-radius-small);  /* 8px — deeply nested elements, small cards, tab tops */
+  --radius-full: var(--scale-radius-full);  /* pills, badges, avatars */
+
+  --shadow-1: 0 4px 24px -4px var(--shadow-soft);  /* cards, panels, sidebars */
+  --shadow-2: 0 8px 32px -4px var(--shadow-medium);  /* dropdowns, popovers */
+  --shadow-3: 0 12px 48px -8px var(--shadow-medium);  /* hover / focus lift */
+
+  --font-sans: var(--scale-font-family-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-accent: var(--scale-font-family-accent), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--scale-font-family-mono), ui-monospace, SFMono-Regular, monospace;
+}
+
+/* The same named styles, as plain classes. @utility is a Tailwind directive,
+   so this path spells them out; nothing sets --tw-font-weight here, so it
+   falls back to the style's own weight. */
+
+.text-display-xl {
+  font-family: var(--font-accent);
+  font-size: var(--scale-font-size-56);
+  line-height: 1;
+  font-weight: var(--tw-font-weight, var(--scale-font-weight-semibold));
+}
+
+.text-display-l {
+  font-family: var(--font-accent);
+  font-size: var(--scale-font-size-32);
+  line-height: var(--scale-line-height-40);
+  font-weight: var(--tw-font-weight, var(--scale-font-weight-semibold));
+}
+
+.text-heading-l {
+  font-size: var(--scale-font-size-20);
+  line-height: var(--scale-line-height-24);
+  font-weight: var(--tw-font-weight, var(--scale-font-weight-semibold));
+}
+
+.text-heading-m {
+  font-size: var(--scale-font-size-16);
+  line-height: var(--scale-line-height-20);
+  font-weight: var(--tw-font-weight, var(--scale-font-weight-semibold));
+}
+
+.text-heading-s {
+  font-size: var(--scale-font-size-14);
+  line-height: var(--scale-line-height-20);
+  font-weight: var(--tw-font-weight, var(--scale-font-weight-semibold));
+}
+
+.text-label-l {
+  font-size: var(--scale-font-size-16);
+  line-height: var(--scale-line-height-20);
+  font-weight: var(--tw-font-weight, var(--scale-font-weight-medium));
+}
+
+.text-label-m {
+  font-size: var(--scale-font-size-14);
+  line-height: var(--scale-line-height-20);
+  font-weight: var(--tw-font-weight, var(--scale-font-weight-medium));
+}
+
+.text-label-s {
+  font-size: var(--scale-font-size-12);
+  line-height: var(--scale-line-height-18);
+  font-weight: var(--tw-font-weight, var(--scale-font-weight-medium));
+}
+
+.text-body-l {
+  font-size: var(--scale-font-size-16);
+  line-height: var(--scale-line-height-24);
+  font-weight: var(--tw-font-weight, var(--scale-font-weight-regular));
+}
+
+.text-body-m {
+  font-size: var(--scale-font-size-14);
+  line-height: var(--scale-line-height-24);
+  font-weight: var(--tw-font-weight, var(--scale-font-weight-regular));
+}
+
+.text-body-s {
+  font-size: var(--scale-font-size-12);
+  line-height: var(--scale-line-height-20);
+  font-weight: var(--tw-font-weight, var(--scale-font-weight-regular));
+}
+
+.text-caption {
+  font-size: var(--scale-font-size-12);
+  line-height: var(--scale-line-height-18);
+  font-weight: var(--tw-font-weight, var(--scale-font-weight-regular));
+}
+
+.text-code {
+  font-size: var(--scale-font-size-12);
+  font-weight: var(--tw-font-weight, var(--scale-font-weight-regular));
+}
+
+.text-overline {
+  font-size: var(--scale-font-size-10);
+  line-height: var(--scale-line-height-14);
+  font-weight: var(--tw-font-weight, var(--scale-font-weight-regular));
+}

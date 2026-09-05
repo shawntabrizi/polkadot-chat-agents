@@ -947,3 +947,96 @@ test("pca logs reads the local bot.log that pca run keeps", () => {
     fs.rmSync(botsDir, { recursive: true, force: true });
   }
 });
+
+// A bot created for the local sandbox registers through its directory (no
+// proof, no identity backend) and runs against its store node over ws://.
+test("create --network sandbox registers through the sandbox directory and runs against its store node", async () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
+  const registered = new Map(); // account -> entry, what the sandbox directory would hold
+  const server = http.createServer((req, res) => {
+    const reply = (status, body) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
+    if (req.method === "GET" && req.url === "/node") return reply(200, { url: "ws://127.0.0.1:1" });
+    if (req.method === "POST" && req.url === "/accounts/register") {
+      let raw = "";
+      req.on("data", (d) => { raw += d; });
+      req.on("end", () => {
+        const body = JSON.parse(raw);
+        if ([...registered.values()].some((e) => e.username === body.username)) return reply(409, { error: `username taken: ${body.username}` });
+        registered.set(body.account, body);
+        reply(200, body);
+      });
+      return undefined;
+    }
+    const consumer = /^\/consumers\/(0x[0-9a-f]{64})$/.exec(req.url ?? "");
+    if (req.method === "GET" && consumer) return registered.has(consumer[1]) ? reply(200, registered.get(consumer[1])) : reply(404, { error: "no consumer" });
+    const username = /^\/usernames\/(.+)$/.exec(req.url ?? "");
+    if (req.method === "GET" && username) {
+      const entry = [...registered.values()].find((e) => e.username === decodeURIComponent(username[1]));
+      return entry ? reply(200, entry) : reply(404, { error: "no username" });
+    }
+    return reply(404, { error: `no route ${req.method} ${req.url}` });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const sandboxUrl = `http://127.0.0.1:${server.address().port}`;
+  try {
+    let result = await runCliAsync(botsDir, ["create", "sandboxbot", "--brain", "echo", "--network", "sandbox", "--sandbox-url", sandboxUrl]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Registering your bot in the sandbox/);
+    assert.match(result.stdout, /Registered as sandboxbot/);
+    assert.match(result.stdout, /Confirmed — your bot is live/);
+    const bot = readBot(botsDir, "sandboxbot");
+    assert.equal(bot.networkProfile, "sandbox");
+    assert.equal(bot.endpoint, "ws://127.0.0.1:1", "the store node the daemon reported");
+    assert.equal(bot.backendUrl, sandboxUrl, "the control API doubles as identity backend and directory");
+    assert.deepEqual([bot.username, bot.registered], ["sandboxbot", true]);
+    assert.equal("fileDelivery" in bot, false, "no Bulletin/HOP network in the sandbox yet");
+    const entry = registered.get(bot.account);
+    assert.ok(entry, "the bot's account was registered");
+    assert.equal(entry.identifierKey, bot.identifierKey);
+    assert.equal(entry.identifierKey.length, 2 + 65 * 2, "the 65-byte RFC-0004 container");
+    const secret = JSON.parse(fs.readFileSync(path.join(botsDir, "sandboxbot", "secret.json"), "utf8"));
+    assert.ok(!result.stdout.includes(secret.seedHex) && !result.stdout.includes(secret.mnemonic));
+
+    // A second bot cannot take the username; the failure is friendly and resumable.
+    result = await runCliAsync(botsDir, ["create", "secondbot", "--brain", "echo", "--network", "sandbox", "--sandbox-url", sandboxUrl, "--username", "sandboxbot"]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /username taken: sandboxbot/);
+    assert.match(result.stdout, /pca register secondbot/);
+    assert.doesNotMatch(result.stdout + result.stderr, /at .*\.mjs:\d+/, "no stack trace");
+    // A requested number is checked against the directory before any key is made.
+    result = await runCliAsync(botsDir, ["create", "sandboxbot.42", "--brain", "echo", "--network", "sandbox", "--sandbox-url", sandboxUrl]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readBot(botsDir, "sandboxbot.42").username, "sandboxbot.42");
+    result = await runCliAsync(botsDir, ["create", "thirdbot", "--brain", "echo", "--network", "sandbox", "--sandbox-url", sandboxUrl, "--username", "sandboxbot", "--digits", "42"]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /sandboxbot\.42 is already taken/);
+    assert.equal(fs.existsSync(path.join(botsDir, "thirdbot")), false);
+
+    // info needs no network for a confirmed bot; run/deploy hand the runtime the directory URL.
+    result = await runCliAsync(botsDir, ["info", "sandboxbot"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /live — people can message it/);
+    assert.match(result.stdout, /network:\s+ws:\/\/127\.0\.0\.1:1/);
+    result = await runCliAsync(botsDir, ["deploy", "sandboxbot", "--host", "root@example.test", "--dry-run"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^BOT_NETWORK_PROFILE=sandbox$/m);
+    assert.match(result.stdout, new RegExp(`^BOT_SANDBOX_URL=${sandboxUrl.replace(/[.]/g, "\\.")}$`, "m"));
+    assert.match(result.stdout, /^BOT_ENDPOINT=ws:\/\/127\.0\.0\.1:1$/m);
+
+    // No daemon: a clear failure before any key is generated; ws:// stays sandbox-only.
+    result = await runCliAsync(botsDir, ["create", "nodaemon", "--brain", "echo", "--network", "sandbox", "--sandbox-url", "http://127.0.0.1:9"]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /No sandbox at http:\/\/127\.0\.0\.1:9/);
+    assert.match(result.stderr, /pcs up/);
+    assert.equal(fs.existsSync(path.join(botsDir, "nodaemon")), false);
+    result = await runCliAsync(botsDir, ["create", "insecure", "--brain", "echo", "--endpoint", "ws://127.0.0.1:1", "--no-register"]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /credential-free wss:\/\//);
+    result = await runCliAsync(botsDir, ["create", "misflag", "--brain", "echo", "--sandbox-url", sandboxUrl, "--no-register"]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /--sandbox-url only applies with --network sandbox/);
+  } finally {
+    server.close();
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
+});

@@ -1,0 +1,4 @@
+node_modules/
+# Daemon state: persona seeds, node contents, session keys (mode 0600, never committed).
+state/
+*.local.md

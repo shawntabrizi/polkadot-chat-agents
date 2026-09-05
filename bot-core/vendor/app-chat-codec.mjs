@@ -1457,6 +1457,19 @@ function decodeRemoteMessage(bytes, budget) {
       offset: encryptionPublicKey.offset,
     };
   }
+  if (contentKind === 18) {
+    // DeviceRemovedContent (mds.md "Removing old device"): one statementAccountId.
+    const statementAccountId = scaleDecodeBytesAt(bytes, offset, 32, "removed device statement account");
+    if (statementAccountId.value.length !== 32) throw new Error("removed device statement account must be 32 bytes");
+    return {
+      messageId: messageId.value,
+      timestamp: Number(timestamp.value),
+      kind: "deviceRemoved",
+      statementAccountId: statementAccountId.value,
+      statementAccountIdHex: normalizeHex(bytesToHex(statementAccountId.value)),
+      offset: statementAccountId.offset,
+    };
+  }
   if (contentKind === 20) {
     const accepted = decodeIdAt(bytes, offset, "accepted request id");
     offset = accepted.offset;

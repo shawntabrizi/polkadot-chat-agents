@@ -9,11 +9,96 @@ next:
 
 # Testing a bot without a phone
 
+## The local sandbox: a whole network on your machine
+
+`sandbox/` is a local replica of the chat network: a statement-store node,
+a directory that plays the People chain and the identity backend, and
+"personas" — users with one or more devices, driven from the terminal with
+`pcs`. Personas run the SDK behind Polkadot Desktop, not bot-core's
+transport, so a bot is tested against an independent implementation of the
+protocol. No phone, no testnet, no proof.
+
+```bash
+cd sandbox && npm ci
+pcs up                                   # store node + directory + control API
+pca create mybot --brain echo --network sandbox   # registers through the sandbox, no proof
+pca run mybot                            # in another terminal
+pcs user add alice --devices 2
+pcs request alice mybot --welcome "hello"   # alice opens the chat; the bot accepts
+pcs send alice mybot "from my laptop" --device 2
+pcs inbox alice --device 2               # the bot's answers, with per-device ACK state
+pcs wire --peer alice                    # every statement, labelled by session and channel
+```
+
+`pca create --network sandbox` finds the daemon through `--sandbox-url`,
+`PCA_SANDBOX_URL`, or the `daemon.json` that `pcs up` writes. `pcs bot attach
+<name>` registers a bot's account by hand (it reads only `config.json`).
+
+The wire is readable wherever the sandbox holds a key, and breakable on
+purpose:
+
+```bash
+pcs wire --decode                        # every statement decrypted: kind, requestId,
+                                         # messages in the inbox's shape, who ACKed it
+pcs wire --history "session alice#1→echobot /request"   # what the slot held before
+pcs fault drop --from echobot --channel "session echobot#1→alice /response" --count 1
+pcs fault delay --from alice --ms 2000 --count forever
+pcs fault list | pcs fault clear
+pcs clock +2h | pcs clock reset          # the store node's clock (expiry checks)
+pcs node restart | pcs node reset        # drop every socket; keep / wipe the store
+pcs call alice echobot                   # a WebRTC offer; the bot's decline shows in the inbox
+pcs send alice echobot --raw 0x…         # raw message bytes into the batch (an undecodable one)
+pcs device add alice | pcs device remove alice 2   # the persona fans out deviceRemoved
+```
+
+Scenarios are scripted conversations with assertions, run as tests, one per
+invariant in `CLAUDE.md` plus the S2 answers:
+
+```bash
+pcs scenario run scenarios/echo-roundtrip.mjs   # alice (2 devices) ↔ echo bot: opener,
+                                                # device-2 follow-up, reaction, reply, edit
+pcs scenario run scenarios/bot-restart.mjs      # kill -9 with a reply owed, restart: one answer
+pcs scenario run scenarios/ack-or-resend.mjs    # the node drops the bot's ACK: resend answered once
+pcs scenario run scenarios/poison-batch.mjs     # an undecodable message next to a good one
+pcs scenario run scenarios/channel-clobber.mjs  # direct submits clobber (node); lanes never (bot)
+pcs scenario run scenarios/every-device-session.mjs   # 3 devices, 3 channels, all polled
+pcs scenario run scenarios/expiry-while-queued.mjs    # clock +2h with a message waiting
+pcs scenario run scenarios/no-ack-peer.mjs      # one un-ACKed statement, queue, the backstop
+pcs scenario run scenarios/call-offer.mjs       # ACK, then dataChannelClosed
+pcs scenario run scenarios/accept-without-welcome.mjs # empty BOT_ACK_TEXT: the accept alone
+pcs scenario run scenarios/device-removed.mjs   # the bot stops addressing an unpaired device
+```
+
+Every scenario asserts on the wire (`GET /wire`, decoded) as well as on the
+inboxes and the bot's log. `npm test` in `sandbox/` runs them with the rest
+of the suite (and CI does). Anything that touches sessions or inbound
+handling must keep both green.
+
+### The web UI
+
+The same control API has a browser front: personas, requests, chats with
+markdown rendering (tables, code blocks, lists, links — what a bot answers
+with), and the wire inspector with the fault controls.
+
+```bash
+cd sandbox/ui && npm ci && npm run build   # once; pcs up then serves it
+pcs up                                     # open http://127.0.0.1:7788
+npm run dev                                # live reload, proxies /api to the daemon
+npm run check                              # tsc, vitest, build (CI runs this)
+npm run acceptance                         # echo bot + headless Chromium, screenshots to sandbox/docs/images
+```
+
+An agent checks rendering without a browser:
+`GET /personas/alice/rooms/echobot?format=html` returns the room as a page
+through the same markdown pipeline the Room view uses (`sandbox/lib/markdown.mjs`),
+so a `<table>` or `<pre><code>` in that response is what a person sees.
+
 ## Offline, automated (no network at all)
 
-`npm test` in `bot-core/` runs the transport end-to-end against an in-memory
-statement node (`test/mock-statement-node.mjs`). It covers, in both ingress
-modes (poll-only and subscription):
+`npm test` in `bot-core/` runs the transport end-to-end against the sandbox
+daemon (`sandbox/daemon.mjs`: its store node and its directory, so the
+identifier-key lookup is the deployed path through `lib/people-directory.mjs`,
+not a pin list). It covers, in both ingress modes (poll-only and subscription):
 
 - round trips with poison batches, restart survival with dedup, and owed-reply
   crash recovery;
@@ -26,9 +111,8 @@ kill -9, and the live-reply lifecycle: placeholder → ACK-gated progress edits
 with stream-json tool actions → final-as-edit, the no-ACK plain-message
 fallback, and bridge auto-upgrade with throttled harness edits.
 
-CI runs this on every push. `BOT_PEER_IDENTIFIER_KEYS` pins peer identifier
-keys so no people chain is needed. The device client ACKs bot requests like
-the app does; `--no-ack` simulates a peer that never fetches.
+CI runs this on every push. The device client ACKs bot requests like the
+app does; `--no-ack` simulates a peer that never fetches.
 
 ## Live network
 
@@ -73,6 +157,22 @@ node bot-core/test-client-device.mjs \
 
 If a bot answers `test-client.mjs` but not the app, this client is the repro
 tool: the bug is almost certainly in device-session polling or ACKs.
+
+The sandbox scenarios cover the same ground with the real SDK (opener,
+per-device follow-ups, reaction, reply, edit, restart survival, the poison
+message, a peer that never ACKs, a call offer, device removal) and are the
+preferred check. `test-client-device.mjs` stays for exactly two things the
+sandbox cannot do yet: a real HOP attachment (`--attach`, which bot-core's
+offline suite uses in its attachment, `/file put`, bridge `/files`, engine
+staging and owed-attachment tests — the sandbox has no HOP node until
+v1.5) and sending over a live network from a real seed. Known limit: it
+keys the multi-device envelope by the peer's identity account, ignoring
+the `statementAccountId` in `deviceChatAccepted`, so a peer whose device
+account differs from its identity account (a persona, a phone) cannot
+decrypt its follow-ups; bot-core's own device account equals its identity
+account, so the offline suite is unaffected. It will be retired with the
+HOP sandbox (v1.5), when the remaining bot-core tests move to the persona
+API.
 
 ## Named-testnet outbound file delivery
 
@@ -168,6 +268,8 @@ bot-core logs one JSON line per event. The ones worth grepping:
 | `BOT_RECEIVED_OPENER` / `BOT_RECEIVED_TEXT` | inbound message accepted |
 | `BOT_REJECTED_UNLISTED` | sender not on the allowlist |
 | `BOT_SESSION_DECODE_FAILED` | follow-up arrived but could not be decrypted |
+| `BOT_PEER_DEVICE_ADDED` / `BOT_PEER_DEVICE_REMOVED` | the peer's device roster changed (`deviceChatAccepted`, `deviceAdded`, `deviceRemoved`) |
+| `BOT_OUTBOUND_EXTENDED` / `BOT_OUTBOUND_TAKEOVER` | the un-ACKed statement grew losslessly / the liveness backstop replaced it (a peer that never ACKs) |
 | `BOT_SENT_TEXT` | reply published (carries `replyTo`/`editOf` when quoting/editing) |
 | `BOT_MEDIA_DOWNLOADED` / `BOT_MEDIA_DOWNLOAD_FAILED` | attachment fetched from the HOP node (or not — the brain gets a failure note) |
 | `BOT_RECEIVED_REACTION` / `BOT_SENT_REACTION` | emoji reaction in / out |
@@ -183,5 +285,6 @@ bot-core logs one JSON line per event. The ones worth grepping:
 
 `.github/workflows/ci.yml` runs on every push: bot-core installs from scratch and
 its CLI creates a bot offline, the vendored wasm proof helper is run against a
-known answer, the OpenClaw plugin bundle is rebuilt and compared to the committed
+known answer, the sandbox suite runs with its scenarios (a pca bot against
+personas), the OpenClaw plugin bundle is rebuilt and compared to the committed
 `dist/`, and the Rust proof helper builds for native and wasm targets.

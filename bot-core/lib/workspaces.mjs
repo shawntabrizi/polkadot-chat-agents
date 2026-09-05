@@ -190,7 +190,8 @@ export const createWorkspaces = ({
     if (!dir.startsWith(resolvedWorktreesDir + path.sep)) throw new Error("worktree path escapes the worktrees dir");
     if (await existingWorktree(dir, branch)) return dir;
     const probe = await runGit(["rev-parse", "--is-inside-work-tree"], repo);
-    if (probe.code !== 0) throw new Error(`${alias} is not a git repository`);
+    // A probe that timed out or overflowed says nothing about the repo.
+    if (probe.code !== 0) throw new Error(resourceLimited(probe) ? `git probe failed: ${probe.err.trim().slice(0, 200)}` : `${alias} is not a git repository`);
     const parent = await runMkdir(path.dirname(dir), repo);
     if (parent.code !== 0) throw new Error(`could not create worktree directory: ${(parent.err || parent.out).trim().slice(0, 200)}`);
     // Existing branch first; fall back to creating it from the repo's HEAD.

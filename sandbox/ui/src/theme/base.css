@@ -1,0 +1,74 @@
+/* Base layer. Hand-authored — the only file here the sync script does not own. */
+
+/* Tailwind's preflight defaults border-color to currentColor. Point it at the
+   default stroke instead, so a bare `border` is already the right colour.
+   MUST sit in @layer base: an unlayered rule outranks every Tailwind utility,
+   so `border-transparent` and `border-stroke-*` would render as --stroke-primary. */
+@layer base {
+  *,
+  ::before,
+  ::after {
+    border-color: var(--stroke-primary);
+  }
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+/* Tailwind v4 dropped v3's `button { cursor: pointer }` from preflight, so every
+   button falls back to the browser's `cursor: default` and reads as inert. Put
+   it back here, in the theme, so no consumer has to know. Disabled controls
+   keep the default arrow: a hand on something that will not respond is a lie.
+   Layered so that `cursor-*` utilities (emitted in @layer utilities) still win:
+   an unlayered rule outranks every layered one regardless of specificity. */
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  input:where([type="button"], [type="submit"], [type="reset"]):not(:disabled),
+  summary {
+    cursor: pointer;
+  }
+}
+
+body {
+  background-color: var(--bg-surface-main);
+  color: var(--fg-primary);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* One global rule, no per-element focus classes. The ring is translucent, so
+   it reads against every theme without needing a per-theme override. */
+*:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+
+[data-invalid] *:focus-visible,
+[aria-invalid="true"]:focus-visible {
+  outline-color: var(--focus-error);
+}
+
+/* shadcn components draw their own focus ring (`focus-visible:ring-[3px]`), and
+   they all carry a data-slot attribute. Without this the outline above and that
+   ring both fire and you get two concentric indicators. Stand down here and let
+   the component's ring do the work; --color-ring points it at --focus-ring, so
+   it is still the theme's colour.
+
+   Note this makes the known focus-ring-contrast gap worse, not better: shadcn
+   applies the ring at `ring-ring/50`, halving a token already measured at
+   1.55-1.78:1 against the page. The fix is a stronger --focus-ring in Figma,
+   not a local override here. */
+[data-slot]:focus-visible {
+  outline: none;
+}
+
+/* Tabular figures keep balances and addresses from shifting as they update. */
+.font-mono,
+[data-numeric] {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}

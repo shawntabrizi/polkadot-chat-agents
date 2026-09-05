@@ -19,7 +19,8 @@
 // on-chain identifier-key lookup. No faucet-specific code (coinage/stripe/etc.).
 //
 // Env: BOT_SEED_HEX (root mini-secret),
-//   BOT_ENDPOINT (default Products Devnet), BOT_NETWORK_PROFILE (devnet|paseo),
+//   BOT_ENDPOINT (default Products Devnet), BOT_NETWORK_PROFILE (devnet|paseo|sandbox;
+//   sandbox also needs BOT_SANDBOX_URL, the local sandbox's control API),
 //   BOT_BRIDGE_PORT (8799), BOT_BRIDGE_HOST (127.0.0.1),
 //   BOT_ACK_TEXT, BOT_ALLOWED_PEERS (comma-sep peer account hexes; empty = allow all),
 //   BOT_REQUEST_LOOKBACK_DAYS (7), BOT_REQUEST_FUTURE_DAYS (2), BOT_POLL_MS (2000),
@@ -28,7 +29,7 @@
 //   BOT_SUBSCRIBE (1; 0 = poll-only), BOT_SWEEP_MS (30000, sweep cadence while the
 //   subscription is healthy), BOT_HEARTBEAT_MS (30000), BOT_PEER_IDENTIFIER_KEYS
 //   ("peerhex=containerhex,..." — pin 65-byte on-chain identifier-key
-//   containers, skipping the on-chain lookup).
+//   containers in front of the directory lookup).
 //   Attachments: BOT_MEDIA_MAX_BYTES (32MB), BOT_MEDIA_TTL_HOURS (48),
 //   BOT_MEDIA_MAX_TOTAL_MB (512), BOT_HOP_TIMEOUT_MS (120000),
 //   BOT_HOP_ALLOWED_NODES (comma-sep trusted host suffixes; required for
@@ -89,13 +90,15 @@ import { getWsProvider, WsEvent } from "polkadot-api/ws";
 import { paseoPeopleNext, productsDevnetPeople } from "./lib/descriptors.mjs";
 import {
   DEFAULT_NETWORK_PROFILE,
+  NETWORK_PROFILE_IDS,
   PASEO,
   PRODUCTS_DEVNET,
+  SANDBOX,
   configuredNetworkProfile,
   peopleEndpointsFor,
 } from "./lib/network-config.mjs";
+import { createChainDirectory, createSandboxDirectory } from "./lib/people-directory.mjs";
 import { createLazyClient, createPapiStatementStoreAdapter } from "@novasamatech/statement-store";
-import { ss58Address } from "@polkadot-labs/hdkd-helpers";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
 import { withTimeout, runWithConcurrency } from "./vendor/lib/async-utils.mjs";
 import {
@@ -143,7 +146,15 @@ const networkProfile = explicitNetworkProfile
   ? configuredNetworkProfile(explicitNetworkProfile)
   : env.BOT_ENDPOINT?.trim() ? null : configuredNetworkProfile(DEFAULT_NETWORK_PROFILE);
 if (explicitNetworkProfile && !networkProfile) {
-  console.error("BOT_NETWORK_PROFILE must be devnet, paseo, or empty for a compatible custom endpoint");
+  console.error(`BOT_NETWORK_PROFILE must be ${NETWORK_PROFILE_IDS.join(", ")}, or empty for a compatible custom endpoint`);
+  process.exit(2);
+}
+// The sandbox has no fixed endpoints: its store node and directory live only
+// in the running daemon, so both must be handed in explicitly.
+const sandbox = networkProfile?.id === SANDBOX.id;
+const sandboxUrl = (env.BOT_SANDBOX_URL ?? "").trim();
+if (sandbox && (!env.BOT_ENDPOINT?.trim() || !sandboxUrl)) {
+  console.error("BOT_NETWORK_PROFILE=sandbox requires BOT_ENDPOINT (the sandbox store node) and BOT_SANDBOX_URL (its control API)");
   process.exit(2);
 }
 const endpoint = env.BOT_ENDPOINT?.trim() || networkProfile?.peopleEndpoints[0] || PRODUCTS_DEVNET.peopleEndpoints[0];
@@ -633,7 +644,13 @@ const socketConnected = (p) => p.getStatus?.().type === WsEvent.CONNECTED;
 const chainConnected = () => socketConnected(wsProvider) && socketConnected(papiProvider);
 const requestRpc = lazyClient.getRequestFn();
 const papiClient = createPapiClient(papiProvider);
-const peopleApi = papiClient.getTypedApi(peopleDescriptor);
+// The People-chain state the bot reads (identifier keys) comes through one
+// seam, lib/people-directory.mjs: the chain via papi, or the sandbox's
+// control API when the bot runs against the local sandbox. Nothing below
+// issues a storage query directly.
+const directory = sandbox
+  ? createSandboxDirectory(sandboxUrl, { timeoutMs: queryTimeoutMs })
+  : createChainDirectory(papiClient.getTypedApi(peopleDescriptor), { timeoutMs: queryTimeoutMs });
 // Every chain submit shares the query deadline: submitAppStatement retries
 // rejections, but a hung socket never rejects — it would await forever.
 const submitBounded = (args) => withTimeout(submitAppStatement(requestRpc, args), queryTimeoutMs, "statement submit");
@@ -662,9 +679,9 @@ const decodePeerIdentifierKey = (peerHex, encoded) => {
     return null;
   }
 };
-// Static peer->identifier-key pins: "peerhex=keyhex,..." — skips the on-chain
-// lookup for those peers. Used by the offline transport tests (no people chain)
-// and usable for fixed-fleet setups.
+// Static peer->identifier-key pins: "peerhex=keyhex,..." — a pin cache in
+// front of the directory for those peers (fixed-fleet setups, and the test
+// that checks how an unsupported container is rejected).
 for (const pair of String(env.BOT_PEER_IDENTIFIER_KEYS ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
   const [peer, key] = pair.split("=");
   if (peer && key) {
@@ -677,10 +694,8 @@ const resolveIdentifierKey = async (peerHex) => {
   if (identifierKeyCache.has(key)) return identifierKeyCache.get(key);
   let value = null;
   try {
-    const consumer = await withTimeout(
-      peopleApi.query.Resources.Consumers.getValue(ss58Address(hexToBytes(key), 2)),
-      queryTimeoutMs, "identifier lookup");
-    value = consumer?.identifier_key == null ? null : decodePeerIdentifierKey(key, String(consumer.identifier_key));
+    const container = await directory.identifierKeyFor(key);
+    value = container == null ? null : decodePeerIdentifierKey(key, container);
   } catch (error) {
     log("BOT_IDENTIFIER_LOOKUP_FAILED", { peer: key, error: error instanceof Error ? error.message : String(error) });
   }
@@ -713,8 +728,10 @@ const touchSession = (peerHex) => {
 const peerClock = createPeerClock();
 const stamp = (peerHex) => peerClock.next(norm(peerHex));
 
-const buildSession = (peerHex, identifierKeyHex, extraDevices = []) => {
-  const existing = sessions.get(norm(peerHex))?.session?.peerDevices ?? [];
+const buildSession = (peerHex, identifierKeyHex, extraDevices = [], { replace = false } = {}) => {
+  // `replace`: extraDevices IS the roster (a device was removed); otherwise
+  // they are folded into the established one.
+  const existing = replace ? [] : sessions.get(norm(peerHex))?.session?.peerDevices ?? [];
   // Device session topics are part of every sweep/subscription watch. Keep a
   // per-peer ceiling so one chat cannot turn device rotation into unbounded
   // memory and RPC fan-out. Preserve the established devices when full; the
@@ -1553,11 +1570,12 @@ const handleOpener = async (data) => {
       })
     : encodeOpaqueChatAcceptedMessage({ timestamp: stamp(senderHex), acceptedRequestId: decoded.messageId });
   try {
-    // Same-tick enqueues ride one statement, preserving the single
-    // [accept, welcome] payload the app expects on first contact.
+    // Same-tick enqueues ride one statement: [accept, welcome] on first
+    // contact. An empty BOT_ACK_TEXT sends the accept alone — an empty text
+    // message is an empty bubble on the phone, not "no welcome".
     const a = outbound.enqueue(senderHex, accept, { forceIdentity: true });
-    const w = outbound.enqueue(senderHex, encodeOpaqueTextMessage({ timestamp: stamp(senderHex), text: ackText }), { forceIdentity: true });
-    await Promise.all([a.submitted, w.submitted]);
+    const w = ackText ? outbound.enqueue(senderHex, encodeOpaqueTextMessage({ timestamp: stamp(senderHex), text: ackText }), { forceIdentity: true }) : null;
+    await Promise.all([a.submitted, w?.submitted]);
   } catch (error) {
     pendingOpenerAcks.add(openerId);
     // Every pending acceptance still owns an owed entry, so MAX_OWED bounds
@@ -1695,6 +1713,23 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
         ingress?.resubscribe();
         stateChanged = true;
         log("BOT_PEER_DEVICE_ADDED", { from: peerHex, device: norm(bytesToHex(m.encryptionPublicKey)).slice(0, 16) });
+      }
+      continue;
+    }
+    // deviceRemoved (18): the peer unpaired a device (Android's fan-out sends
+    // it from a remaining one). Drop it from the roster so envelopes stop
+    // being wrapped for it and its session topic leaves the watch set.
+    if (m.kind === "deviceRemoved") {
+      const removed = m.statementAccountIdHex;
+      const entry = sessions.get(norm(peerHex));
+      if (removed && entry) {
+        const kept = (entry.session.peerDevices ?? []).filter((d) => norm(bytesToHex(d.statementAccountId)) !== removed);
+        if (kept.length !== (entry.session.peerDevices ?? []).length) {
+          buildSession(peerHex, entry.identifierKeyHex, kept, { replace: true });
+          ingress?.resubscribe();
+          stateChanged = true;
+          log("BOT_PEER_DEVICE_REMOVED", { from: peerHex, device: removed.slice(0, 16), remaining: kept.length });
+        }
       }
       continue;
     }

@@ -237,10 +237,11 @@ variables `pca deploy` writes into `bot.env` automatically.
 |---|---|---|
 | `BOT_TRANSPORT` | `polkadot-app` | `polkadot-app` or `t3ams`. Set by `pca create --transport …`; selects the matching runner. **gen** |
 | `BOT_SEED_HEX` | — (required) | Root mini-secret; all keys derive from it. **gen** |
-| `BOT_NETWORK_PROFILE` | `devnet` when no custom endpoint is supplied | `devnet` or `paseo`; selects the matching People descriptor, fallback RPCs, identity service, and Bulletin service. Empty means a compatible custom endpoint. **gen** |
+| `BOT_NETWORK_PROFILE` | `devnet` when no custom endpoint is supplied | `devnet`, `paseo`, or `sandbox`; selects the matching People descriptor, fallback RPCs, identity service, and Bulletin service. Empty means a compatible custom endpoint. `sandbox` is the local sandbox (`pcs up`): no fixed endpoints, `ws://` on loopback, and People-chain reads go to its control API. **gen** |
 | `BOT_ENDPOINT` | Products Devnet People wss | Statement-store RPC node to poll and publish to. **gen** |
+| `BOT_SANDBOX_URL` | — | With `BOT_NETWORK_PROFILE=sandbox` (required then): the sandbox control API that plays the People chain (identifier keys, username owners). **gen** |
 | `BOT_USERNAME` | `""` | Registered network username (display/search only). **gen** |
-| `BOT_PEER_IDENTIFIER_KEYS` | `""` | `peerhex=containerhex,…` — pin 65-byte RFC004 identifier-key containers, skipping the on-chain lookup (tests / fixed fleets). |
+| `BOT_PEER_IDENTIFIER_KEYS` | `""` | `peerhex=containerhex,…` — pin 65-byte RFC004 identifier-key containers; a cache in front of the People-chain (or sandbox) lookup for fixed fleets. |
 
 Named profiles are deliberately complete rather than aliases for one RPC:
 
@@ -276,7 +277,7 @@ session flow.
 | Variable | Default | Purpose |
 |---|---|---|
 | `BOT_BRAIN` | `bridge` | `claude`\|`codex`\|`opencode`\|`kimi` (direct CLI), `bridge` (external harness), `echo` (test). **gen** |
-| `BOT_ACK_TEXT` | "Connecting you to the agent…" (bridge) | First-contact acknowledgement text. |
+| `BOT_ACK_TEXT` | "Connecting you to the agent…" (bridge) | First-contact acknowledgement text, sent next to the accept. Empty (the default for every other brain) sends the accept alone. |
 | `BOT_GREET` | `0` | `1` = message allowlisted owners once on startup (proof of life). **gen when --greet** |
 | `BOT_GREET_TEXT` | auto | Custom greeting text. |
 
