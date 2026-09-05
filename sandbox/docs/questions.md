@@ -94,3 +94,22 @@ S0 review: accepted. Both suites re-run green here (sandbox 11/11, bot-core
    restarts the bot, not the daemon, so this may wait — unless the owner
    wants `pcs up` to reload personas from the state dir first. Meanwhile
    nothing is persisted; the state dir only holds `daemon.json`.
+
+### Answers (owner review, 2026-09-05)
+
+1. Yes. S2 runs the echo-roundtrip scenario against a two-device persona. If
+   bot-core addresses device 1 only, fix bot-core to apply `deviceAdded` /
+   `deviceRemoved` to the roster (it already has an `extraDevices` seam in
+   `buildSession`). That is the sandbox doing its job.
+2. Keep as is. Only the accepting device posts on the identity session, like
+   the phone. Siblings listen. Add a guard so a sibling never submits on it.
+3. Mirror bot-core: a batch is ACKed when at least one message decoded;
+   `decodingFailed` only when none did. The S3 poisoned-batch scenario
+   asserts exactly that on both sides.
+4. No persistence before S2.
+
+S1 review: accepted. Re-run here: sandbox 46/46, bot-core 416/416. The
+PLAN.md pcs transcript was replayed against a live daemon: text reached both
+bob devices with ACKs from both, alice's row went to `delivered`, the wire
+view labels both channels, no secret appears in the daemon log, and the state
+dir is 0700 with daemon.json 0600.
