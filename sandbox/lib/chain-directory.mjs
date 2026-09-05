@@ -6,7 +6,7 @@
 //
 //   Resources.Consumers(account)    -> { identifier_key: [u8;65], lite_username, ... }
 //   Resources.UsernameOwnerOf(name) -> AccountId32
-//   GET {backend}/api/v1/usernames?prefix=<p> -> [{ username, candidateAccountId, status, onchainData }]
+//   GET {backend}/api/v1/usernames/search?prefix=<p> -> { usernames: [{ accountId, username, status }], nextCursor }
 //
 // The chain is the truth; the backend's search is a hint. Its records
 // survive a chain reset (a username can be ASSIGNED there and absent on
@@ -14,9 +14,15 @@
 // reported with `onChain`. Accounts this sandbox has seen — its personas,
 // attached bots, every successful lookup — are kept in a small cache so the
 // wire inspector can label them synchronously (`list()`).
+//
+// bot-core import allowed here by the S6 rules: lib/register.mjs is the
+// identity backend client (its search route, with the paging, rate-limit
+// and proof-of-compute handling, and the chain's form of a username);
+// the backend is not the chat protocol under test.
 
 import { AccountId, Binary } from "polkadot-api";
 
+import { searchUsernames } from "../../bot-core/lib/register.mjs";
 import { bytesToHex, hexToBytes, normHex } from "./bytes.mjs";
 import { unwrapIdentifierKey } from "./directory.mjs";
 
@@ -95,16 +101,12 @@ export function createChainDirectory({ client, backendUrl, fetchImpl = fetch, ti
      * still being attested); it cannot be messaged.
      */
     async search(prefix) {
-      const res = await fetchImpl(new URL(`/api/v1/usernames?prefix=${encodeURIComponent(String(prefix))}`, backendUrl), { signal: AbortSignal.timeout(timeoutMs) });
-      if (!res.ok) throw new Error(`identity backend search failed (${res.status})`);
-      const hits = await res.json();
-      if (!Array.isArray(hits)) throw new Error("identity backend search returned no list");
+      const hits = await searchUsernames({ backendUrl, prefix: String(prefix), fetchImpl: (url, init) => fetchImpl(url, { ...init, signal: AbortSignal.timeout(timeoutMs) }) });
       const out = [];
       for (const hit of hits) {
-        if (typeof hit?.username !== "string" || typeof hit?.candidateAccountId !== "string") continue;
-        const account = fromSs58(hit.candidateAccountId);
+        const account = normHex(hit.account);
         const owner = await directory.usernameOwner(hit.username).catch(() => null);
-        out.push({ username: hit.username, account, status: hit.status ?? null, onChain: owner === account });
+        out.push({ username: hit.username, account, status: hit.status, onChain: owner === account });
       }
       return out;
     },
