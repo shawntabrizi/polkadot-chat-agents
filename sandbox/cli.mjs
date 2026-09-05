@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { DEFAULT_PORT, defaultDir, startDaemon } from "./daemon.mjs";
+import { runScenario } from "./lib/scenario.mjs";
 
 const args = process.argv.slice(2);
 const flags = {};
@@ -62,6 +63,7 @@ const usage = `pcs — Polkadot chat sandbox
   pcs inbox <name> [--peer <name>] [--unread] [--device N]
   pcs wire [--peer <name>] [--signer <account>] [--raw]
   pcs bot attach <pca-bot-name>            # register a pca bot's account in the directory
+  pcs scenario run <file>                  # run a scripted scenario on a fresh daemon
   pcs events
 
   --url <api url>   daemon to talk to (default ${baseUrl}); --json forces JSON output.`;
@@ -218,6 +220,22 @@ switch (cmd) {
       ok(`${name} attached as ${entry.username} (${short(entry.account)})`);
       if (cfg.networkProfile !== "sandbox") warn(`${name} targets ${cfg.endpoint}, not this sandbox. To run it here:  pca create ${name} --network sandbox`);
       else note(`run it:  pca run ${name}`);
+    }
+    break;
+  }
+  case "scenario": {
+    const [sub, file] = rest;
+    if (sub !== "run" || !file) fail("usage: pcs scenario run <file>");
+    if (!fs.existsSync(file)) fail(`no scenario file ${file}`);
+    // Its own daemon, its own bots dir; nothing touches the daemon at --url.
+    if (!json) step(`Running ${file} on a fresh sandbox…`);
+    try {
+      const { ms } = await runScenario(file, { log: json ? () => {} : note });
+      if (json) out({ file, ok: true, ms });
+      else ok(`${file} passed in ${(ms / 1000).toFixed(1)}s`);
+    } catch (e) {
+      if (json) { out({ file, ok: false, error: e.message }); process.exit(1); }
+      fail(`${file} failed: ${e.message}`);
     }
     break;
   }

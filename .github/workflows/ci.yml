@@ -63,9 +63,12 @@ jobs:
         with: { node-version: 22.22.0, cache: npm, cache-dependency-path: sandbox/package-lock.json }
       - name: Install
         run: npm ci --no-audit --no-fund
+      - name: Install bot-core (the scenarios create and run a pca bot)
+        run: npm ci --no-audit --no-fund
+        working-directory: bot-core
       - name: Syntax check
-        run: for f in lib/*.mjs test/*.mjs; do node --check "$f"; done
-      - name: Tests
+        run: for f in daemon.mjs cli.mjs lib/*.mjs scenarios/*.mjs test/*.mjs; do node --check "$f"; done
+      - name: Tests (unit, end-to-end, and the scenarios)
         run: npm test
 
   openclaw-plugin:
