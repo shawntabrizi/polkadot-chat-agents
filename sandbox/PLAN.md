@@ -217,6 +217,55 @@ and the acceptance check recorded in `sandbox/docs/acceptance.md`.
   `hop_ack`, Bulletin allowance stand-ins, `pcs send --attach`, and the bot
   file-delivery scenarios.
 
+### S6 — `paseo` profile: the sandbox on Paseo Next
+
+Decided 2026-09-05: no chopsticks `local` profile (its executor lacks the
+statement-store host functions and its pre-decoder rejects the v5 general
+extrinsics Coinage needs; see `docs/research-local-profile.md`). The next
+profile is the real Paseo Next network, which also brings phones and deployed
+bots into the sandbox.
+
+- `pcs up --network paseo`: statement store = the real People RPC
+  (`lib/network-config.mjs` PASEO), directory = chain reads
+  (`Resources.Consumers`, `UsernameOwnerOf`) plus the identity backend's
+  username search; HOP = the Paseo Next HOP nodes with the testnet Bulletin
+  allowance helper bot-core already has. `mock` stays the default.
+- Registration on a real chain reuses bot-core's `lib/register.mjs`
+  (bandersnatch lite-person proof → identity backend → attestation). This is
+  the one place personas may import from bot-core: registration is not the
+  chat protocol under test. Personas on `paseo` are single-device: the
+  identity account is the device's statement account (like a bot), because a
+  second device needs the `AsResources` ring-proof origin only the phone can
+  mint. `pcs user add` on paseo waits for attestation and reports pending.
+- Faults, clock, node restart and the full-store wire view are `mock`-only;
+  on `paseo` the wire view shows what the personas subscribed to. Scenarios
+  that need none of those run on both profiles behind `--network`; on paseo
+  they are live checks, not CI.
+- Chain resets: store the genesis hash with the profile state; on mismatch
+  mark every persona and attached bot as needing re-registration and say so.
+  `pca register <bot> --again` re-registers a bot whose chain was reset
+  (macbot is the first customer). Regenerate bot-core's `.papi` descriptors
+  for the reset Paseo Next genesis.
+- Acceptance: alice (persona) ↔ macbot (re-registered) text and attachment on
+  Paseo Next; alice ↔ the owner's phone (shawntabrizi.02) request, accept,
+  text both ways, reaction, and a photo each way, recorded with screenshots.
+
+### S7 — payments to bots (Paseo Next)
+
+- bot-core: decode `coinagePayment` (16); verify the received coins on chain
+  (`Coinage.CoinsByOwner`); sweep them with an `AsCoin` v5 general extrinsic
+  (the faucet bot's `buildAsCoinV5Extrinsic` is the reference; Android's
+  planner and memo builder are canonical); a per-peer ledger in the state
+  dir (who paid how much, when, claimed or not); a gating hook so a brain or
+  a command can require a balance; `/balance`, `/paid` commands.
+- Personas: send and receive `coinagePayment`; forward coins they received
+  (sweep, then send) so a bot-to-persona refund path exists. Personas cannot
+  mint coins (unloading needs the phone's ring proof), so the owner's phone
+  is the source of funds in acceptance.
+- Acceptance: the phone pays macbot; macbot's ledger shows it; a gated
+  feature unlocks; macbot refunds part to a persona; the persona forwards it
+  to a second persona.
+
 ## References
 
 | topic | read first |
