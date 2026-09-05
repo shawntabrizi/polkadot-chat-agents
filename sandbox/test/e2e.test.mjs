@@ -42,6 +42,17 @@ test("alice (1 device) and bob (2 devices): request, accept, text, reply from de
   const accounts = await get("/accounts");
   assert.equal(accounts.filter((a) => a.allowance).length, 5, "identity + device accounts have allowances");
   await assert.rejects(post("/personas", { name: "alice", devices: 1 }), /exists/);
+  // The directory reads bot-core makes, and the registration a bot makes.
+  assert.deepEqual(await get("/usernames/bob"), { username: "bob", ...consumer });
+  await assert.rejects(get("/usernames/nobody"), /404/);
+  await assert.rejects(get(`/consumers/0x${"33".repeat(32)}`), /404/);
+  const botKey = `0x00${"44".repeat(32)}${"00".repeat(32)}`;
+  const registered = await post("/accounts/register", { account: `0x${"55".repeat(32)}`, username: "echobot", identifierKey: botKey });
+  assert.deepEqual(registered, { account: `0x${"55".repeat(32)}`, username: "echobot", identifierKey: botKey });
+  assert.equal((await get(`/consumers/0x${"55".repeat(32)}`)).identifierKey, botKey, "a registered bot is messageable");
+  assert.equal((await get("/accounts")).find((a) => a.username === "echobot").allowance, true, "and may submit statements");
+  await assert.rejects(post("/accounts/register", { account: `0x${"66".repeat(32)}`, username: "echobot", identifierKey: botKey }), /409/);
+  await assert.rejects(post("/accounts/register", { account: `0x${"66".repeat(32)}`, username: "x" }), /400/);
 
   // alice requests bob; every bob device sees it once.
   const { requestId } = await post("/personas/alice/requests", { to: "bob", welcome: "hi bob" });

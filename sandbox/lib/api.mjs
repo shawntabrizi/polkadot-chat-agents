@@ -72,9 +72,11 @@ export function createApi({ node, directory, personas, events, addPersona, resol
       if (!body.account) throw badRequest("account required");
       return directory.allow(body.account);
     }],
-    ["POST", "/accounts/:id/register", (p, _q, body) => {
-      if (!body.username || !body.identifierKey) throw badRequest("username and identifierKey required");
-      try { return directory.register(p.id, { username: body.username, identifierKey: body.identifierKey }); }
+    // `register_lite_person` for an account the sandbox holds no keys for (a
+    // bot-core bot): username, identifier-key container, statement allowance.
+    ["POST", "/accounts/register", (_p, _q, body) => {
+      if (!body.account || !body.username || !body.identifierKey) throw badRequest("account, username and identifierKey required");
+      try { return directory.register(body.account, { username: body.username, identifierKey: body.identifierKey }); }
       catch (e) { throw new ApiError(409, e.message); }
     }],
     ["GET", "/consumers/:account", (p) => directory.consumer(p.account) ?? (() => { throw notFound(`no consumer ${p.account}`); })()],

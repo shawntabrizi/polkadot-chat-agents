@@ -4,6 +4,10 @@
 // or with --json; otherwise short human lines (ok/step/note/warn/fail like
 // bot-core's pca).
 
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import { DEFAULT_PORT, defaultDir, startDaemon } from "./daemon.mjs";
 
 const args = process.argv.slice(2);
@@ -57,6 +61,7 @@ const usage = `pcs — Polkadot chat sandbox
   pcs edit <from> <to> <messageId> "text" [--device N]
   pcs inbox <name> [--peer <name>] [--unread] [--device N]
   pcs wire [--peer <name>] [--signer <account>] [--raw]
+  pcs bot attach <pca-bot-name>            # register a pca bot's account in the directory
   pcs events
 
   --url <api url>   daemon to talk to (default ${baseUrl}); --json forces JSON output.`;
@@ -194,6 +199,25 @@ switch (cmd) {
       step(`${s.signerLabel ?? short(s.signer ?? "?")}  ${s.channelLabel ?? (s.channel ? short(s.channel) : "no channel")}  seq ${s.sequence}  ${s.bytes}B${s.replacedCount ? `  replaced ×${s.replacedCount}` : ""}`);
       for (const t of s.topics) note(`topic ${t.label ?? t.hex}`);
       if (flags.raw) note(s.hex);
+    }
+    break;
+  }
+  case "bot": {
+    const [sub, name] = rest;
+    if (sub !== "attach" || !name) fail("usage: pcs bot attach <pca-bot-name>");
+    // Only the public half of the bot is read (account, identifier key,
+    // username). secret.json holds its seed and is never opened here.
+    const botsDir = process.env.PCA_BOTS_DIR ?? path.join(os.homedir(), ".pca", "bots");
+    const file = path.join(botsDir, name, "config.json");
+    let cfg;
+    try { cfg = JSON.parse(fs.readFileSync(file, "utf8")); } catch { fail(`no pca bot "${name}" (${file})`); }
+    if (!cfg.account || !cfg.identifierKey) fail(`${file} has no account/identifierKey`);
+    const entry = await api("POST", "/accounts/register", { account: cfg.account, username: cfg.username ?? name, identifierKey: cfg.identifierKey });
+    if (json) out(entry);
+    else {
+      ok(`${name} attached as ${entry.username} (${short(entry.account)})`);
+      if (cfg.networkProfile !== "sandbox") warn(`${name} targets ${cfg.endpoint}, not this sandbox. To run it here:  pca create ${name} --network sandbox`);
+      else note(`run it:  pca run ${name}`);
     }
     break;
   }

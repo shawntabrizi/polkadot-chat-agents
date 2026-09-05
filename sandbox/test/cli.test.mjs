@@ -71,4 +71,25 @@ test("pcs: user add/list, request, requests, accept, send, inbox --device, react
   assert.ok((await pcs("wire", "--raw")).every((s) => s.hex.startsWith("0x")));
   assert.equal((await pcsFails("bogus")).code, 1);
   assert.match((await pcsFails("send", "alice", "nobody", "x")).stderr, /unknown peer/);
+
+  // bot attach reads a pca bot's public config only and registers it.
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pcs-bots-"));
+  fs.mkdirSync(path.join(botsDir, "echobot"));
+  fs.writeFileSync(path.join(botsDir, "echobot", "config.json"), JSON.stringify({
+    name: "echobot", account: `0x${"77".repeat(32)}`, identifierKey: `0x00${"78".repeat(32)}${"00".repeat(32)}`, username: "echobot.42", networkProfile: "sandbox", endpoint: daemon.storeUrl,
+  }));
+  fs.writeFileSync(path.join(botsDir, "echobot", "secret.json"), JSON.stringify({ seedHex: "0xdeadbeef" }), { mode: 0o000 });
+  try {
+    const attached = await new Promise((resolve, reject) => {
+      execFile(process.execPath, [cli, "--url", daemon.url, "--json", "bot", "attach", "echobot"], { env: { ...process.env, PCA_BOTS_DIR: botsDir } }, (error, stdout, stderr) => {
+        if (error) return reject(new Error(`bot attach failed: ${stderr || stdout}`));
+        resolve(JSON.parse(stdout));
+      });
+    });
+    assert.equal(attached.username, "echobot.42");
+    assert.equal(daemon.directory.usernameOwner("echobot.42"), `0x${"77".repeat(32)}`);
+    assert.equal((await pcsFails("bot", "attach", "nosuchbot")).code, 1);
+  } finally {
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
 });
