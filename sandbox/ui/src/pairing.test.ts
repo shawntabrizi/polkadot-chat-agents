@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { Account, HexString, Persona, RequestRow } from './api';
-import { participantsOf, pickLeft, pickRight, readOnly, relationOf } from './conversation';
+import { participantsOf, pickLeft, pickRight, readOnly, relationOf } from './pairing';
 
 const hex = (n: number) => `0x${n.toString(16).padStart(64, '0')}` as HexString;
 const persona = (name: string, n: number): Persona => ({ name, account: hex(n), chatPublicKey: hex(n + 100), devices: [] });
