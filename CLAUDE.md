@@ -61,12 +61,14 @@ pattern earns nothing by incumbency.
 ## Testing
 
 - `node --check` each changed `.mjs` file.
-- Transport changes: `npm test` runs the offline e2e suite (mock statement
-  node, both ingress modes) and must pass. For live verification, run an
-  `echo`-brain bot and drive it with `bot-core/test-client.mjs`. Anything
-  touching session or inbound handling must also pass
-  `bot-core/test-client-device.mjs`, which reproduces how the mobile app
-  actually sends (see `docs/guide/testing.md`).
+- Transport changes: `npm test` runs the offline e2e suite (the sandbox's
+  store node, directory and HOP node, both ingress modes, a persona as the
+  peer) and must pass. For live verification, run an `echo`-brain bot and
+  drive it with `bot-core/test-client.mjs`. Anything touching session or
+  inbound handling must also keep the sandbox scenarios green (`cd sandbox
+  && npm test`): the personas send the way the mobile app does — per-device
+  statement accounts and encryption keys, HOP attachments (see
+  `docs/guide/testing.md`).
 - Do not claim a fix works without an end-to-end reproduction; log output alone
   is not verification.
 - Registration changes: the proof helper must produce byte-identical output via

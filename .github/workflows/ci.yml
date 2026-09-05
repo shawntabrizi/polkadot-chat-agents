@@ -25,7 +25,7 @@ jobs:
       - name: Descriptors resolve
         run: node -e 'import("./lib/descriptors.mjs").then(()=>console.log("descriptors OK"))'
       - name: Syntax check
-        run: for f in index.mjs cli.mjs test-client.mjs test-client-device.mjs lib/*.mjs; do node --check "$f"; done
+        run: for f in index.mjs cli.mjs test-client.mjs lib/*.mjs; do node --check "$f"; done
       - name: Unit tests
         run: npm test
       - name: Production dependency audit
