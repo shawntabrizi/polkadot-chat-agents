@@ -5,9 +5,10 @@ import { useEffect, useRef } from 'react';
 
 import type { SandboxEvent } from './api';
 
-// Every type the daemon emits: store events, faults, node restarts, the
-// personas' engines, and the persona state changes (contact/request/room/message).
-export const EVENT_TYPES = ['wire', 'fault', 'node', 'engine', 'persona', 'contact', 'request', 'room', 'message', 'clock'] as const;
+// Every type the daemon emits: store events, faults, node restarts, the HOP
+// pool, the personas' engines, and the persona state changes
+// (contact/request/room/message).
+export const EVENT_TYPES = ['wire', 'fault', 'node', 'hop', 'engine', 'persona', 'contact', 'request', 'room', 'message', 'clock'] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
 type Listener = (event: SandboxEvent) => void;

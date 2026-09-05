@@ -8,13 +8,21 @@
 // WebRTC; here it is one object) and every device's engine reacts to its
 // change events, so an accept on device 1 opens a session on device 2 too.
 
+import fs from "node:fs";
+import path from "node:path";
+
 import { x25519 } from "@noble/curves/ed25519.js";
 import { randomBytes } from "@noble/hashes/utils.js";
 import { createSr25519Secret, deriveSr25519PublicKey } from "@novasamatech/statement-store";
 
-import { bytesEqual, bytesToHex, normHex } from "./bytes.mjs";
+import { bytesEqual, bytesToHex, hexToBytes, log, normHex } from "./bytes.mjs";
 import { createChatEngine, previewOf } from "./chat.mjs";
 import { createDevice } from "./device.mjs";
+import { checkHopUrl, downloadFile, mintBulletinSigner, uploadFile } from "./hop.mjs";
+import { createMediaDir, describeFile, mimeOf } from "./media.mjs";
+
+/** The largest attachment a persona sends or claims (bot-core's BOT_MEDIA_MAX_BYTES default). */
+export const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
 
 /**
  * Identity keys: the account is sr25519 at `//wallet` from a random 32-byte
@@ -185,6 +193,15 @@ export function createPersonaState() {
         changed(message);
         return true;
       },
+      /** One attachment of a row moves through pending → claiming → claimed | failed (or is `sent`). */
+      updateAttachment(messageId, index, patch) {
+        const message = messages.get(messageId);
+        const attachment = message?.content.attachments?.[index];
+        if (!attachment) return false;
+        message.content = { ...message.content, attachments: message.content.attachments.map((a, i) => (i === index ? { ...a, ...patch } : a)) };
+        changed(message);
+        return true;
+      },
       /** An edit replaces the text of a text, reply or richText row; other rows cannot be edited. */
       applyEdit(messageId, text, editedAt) {
         const message = messages.get(messageId);
@@ -208,11 +225,86 @@ export function createPersonaState() {
 
 // ── The persona ───────────────────────────────────────────────────────────
 
-export function createPersona({ name, devices = 1, identity = mintIdentityKeys() }) {
+export function createPersona({ name, devices = 1, identity = mintIdentityKeys(), hopUrl = null, mediaDir = null }) {
   const state = createPersonaState();
   const deviceList = Array.from({ length: devices }, (_, i) => createDevice({ index: i + 1 }));
   const account = bytesToHex(identity.identityAccountId);
+  // The Bulletin allowance account that signs this persona's uploads (the
+  // phone's is its statement keypair; bot-core's a derived one). Registered
+  // with the identity so the HOP node accepts its submits.
+  const bulletin = mintBulletinSigner();
+  const media = mediaDir ? createMediaDir(mediaDir) : null;
+  // Pool entries this persona uploaded or claimed: hash -> { role, peer, messageId }, for the HOP view.
+  const hopEntries = new Map();
   let started = null;
+
+  const recordEntries = (identifier, chunks, peer, messageId) => {
+    hopEntries.set(normHex(identifier), { role: "metadata", peer, messageId });
+    chunks.forEach((hash, i) => hopEntries.set(normHex(hash), { role: `chunk ${i + 1}/${chunks.length}`, peer, messageId }));
+  };
+
+  /**
+   * Upload a file through HOP the way the desktop does, then send the rich
+   * text carrying its reference. The row keeps the public reference and a
+   * copy of the bytes under the media dir; the ticket goes on the wire only.
+   */
+  const sendFile = async (peer, { path: file, text = null }, { device: index = 1 } = {}) => {
+    if (!hopUrl) throw new Error(`${name} has no HOP node to upload to`);
+    if (!media) throw new Error(`${name} has no media directory`);
+    const stat = fs.statSync(file);
+    if (!stat.isFile()) throw new Error(`${file} is not a regular file`);
+    if (stat.size > MAX_ATTACHMENT_BYTES) throw new Error(`${file} exceeds the ${MAX_ATTACHMENT_BYTES}-byte attachment cap`);
+    const bytes = new Uint8Array(fs.readFileSync(file));
+    const mime = mimeOf(file);
+    const meta = describeFile(bytes, mime);
+    const uploaded = await uploadFile({ url: hopUrl, bytes, signer: bulletin });
+    const identifier = bytesToHex(uploaded.identifier);
+    const mediaId = identifier.slice(2);
+    media.save(mediaId, bytes, mime);
+    recordEntries(uploaded.identifier, uploaded.chunks, normHex(peer), null);
+    const reference = { ...meta, identifier, wssUrl: hopUrl, chunks: uploaded.chunks.map(bytesToHex), status: "sent", claimedBy: null, mediaId, error: null };
+    const wire = { type: "richText", text, attachments: [{ ...meta, identifier: uploaded.identifier, claimTicket: uploaded.claimTicket, wssUrl: hopUrl }] };
+    const ids = await device(index).engine.sendMessage(normHex(peer), { type: "richText", text, attachments: [reference] }, { wire });
+    for (const entry of hopEntries.values()) if (entry.peer === normHex(peer) && entry.messageId == null) entry.messageId = ids.messageId;
+    log("PERSONA_FILE_SENT", { name, device: index, peer: normHex(peer), mime, bytes: bytes.length, chunks: uploaded.chunks.length, id: identifier.slice(0, 18) });
+    return ids;
+  };
+
+  /**
+   * Claim every attachment of a freshly decoded message, on the device that
+   * decoded it. The other devices share the row and see "claimed by device
+   * N": the HOP claim is one-shot, so they never claim (the desktop's
+   * placeholder). Failures land on the row, never throw.
+   */
+  const claimAttachments = async ({ peer, messageId, claimTickets, device: index }) => {
+    const message = state.messages.get(messageId);
+    for (const [i, ticket] of claimTickets.entries()) {
+      const a = message?.content.attachments?.[i];
+      if (!a || !ticket) continue;
+      state.messages.updateAttachment(messageId, i, { status: "claiming", claimedBy: index });
+      try {
+        if (!media) throw new Error("no media directory");
+        if (!a.wssUrl) throw new Error("the message names no HOP node");
+        checkHopUrl(a.wssUrl);
+        if (!Number.isSafeInteger(a.fileSize) || a.fileSize > MAX_ATTACHMENT_BYTES) throw new Error(`declared size ${a.fileSize} exceeds the ${MAX_ATTACHMENT_BYTES}-byte cap`);
+        const identifier = hexToBytes(a.identifier);
+        const bytes = await downloadFile({
+          url: a.wssUrl, identifier, claimTicket: ticket, maxBytes: a.fileSize,
+          onChunks: (chunks) => recordEntries(identifier, chunks, peer, messageId),
+        });
+        if (bytes.length !== a.fileSize) throw new Error(`downloaded ${bytes.length} bytes, the message says ${a.fileSize}`);
+        const mediaId = a.identifier.slice(2);
+        media.save(mediaId, bytes, a.mimeType);
+        state.messages.updateAttachment(messageId, i, { status: "claimed", mediaId });
+        started?.onEvent?.({ persona: name, device: index, event: "attachment_claimed", peer, messageId, bytes: bytes.length, id: a.identifier.slice(0, 18) });
+        log("PERSONA_ATTACHMENT_CLAIMED", { name, device: index, peer, bytes: bytes.length, id: a.identifier.slice(0, 18) });
+      } catch (error) {
+        state.messages.updateAttachment(messageId, i, { status: "failed", error: error.message });
+        started?.onEvent?.({ persona: name, device: index, event: "attachment_failed", peer, messageId, error: error.message, id: a.identifier.slice(0, 18) });
+        log("PERSONA_ATTACHMENT_FAILED", { name, device: index, peer, id: a.identifier.slice(0, 18), error: error.message });
+      }
+    }
+  };
 
   const device = (index = 1) => {
     const found = deviceList[index - 1];
@@ -229,11 +321,22 @@ export function createPersona({ name, devices = 1, identity = mintIdentityKeys()
     identity,
     devices: deviceList,
     state,
-    /** Publish the identity and grant every device its statement allowance (mds.md: devices need their own). */
+    /** The public half of the upload signer. */
+    bulletinAccount: bulletin.account,
+    /**
+     * Publish the identity, grant every device its statement allowance
+     * (mds.md: devices need their own) and the upload signer its Bulletin
+     * allowance.
+     */
     register(directory) {
-      directory.register(account, { username: name, identifierKey: identity.identityChatPublicKey });
+      directory.register(account, { username: name, identifierKey: identity.identityChatPublicKey, bulletinAccount: bulletin.account });
       for (const d of deviceList) directory.allow(d.account);
     },
+    sendFile,
+    /** A media file this persona holds (sent or claimed), by identifier hex without 0x. */
+    media: (id) => media?.find(id) ?? null,
+    /** What this persona knows about a pool entry it uploaded or claimed. */
+    hopEntry: (hash) => hopEntries.get(normHex(hash)) ?? null,
     /** Add a device to a live persona; contacts learn it through the fan-out on their next accept. */
     addDevice() {
       const d = createDevice({ index: deviceList.length + 1 });
@@ -275,7 +378,7 @@ export function createPersona({ name, devices = 1, identity = mintIdentityKeys()
     edit: (peer, messageId, text, { device: index = 1 } = {}) => device(index).engine.edit(normHex(peer), messageId, text),
     markRead: (peer) => state.messages.markRoomRead(peer),
     /** Public half only. */
-    toJSON: () => ({ name, account, chatPublicKey: bytesToHex(identity.identityChatPublicKey), devices: deviceList.map((d) => d.toJSON()) }),
+    toJSON: () => ({ name, account, chatPublicKey: bytesToHex(identity.identityChatPublicKey), bulletinAccount: bulletin.account, devices: deviceList.map((d) => d.toJSON()) }),
   };
 
   function startDevice(d) {
@@ -289,6 +392,7 @@ export function createPersona({ name, devices = 1, identity = mintIdentityKeys()
       lookup: started.lookup,
       ownDevices: () => activeDevices().map((x) => x.info),
       onEvent: (event) => started.onEvent?.({ persona: name, device: d.index, ...event }),
+      onAttachments: (job) => void claimAttachments(job),
     });
   }
 

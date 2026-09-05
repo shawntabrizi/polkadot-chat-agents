@@ -35,7 +35,11 @@ test("fromWire maps rows, effects, roster variants, ignores and unknown tags", (
   assert.deepEqual(fromWire(viaWire({
     tag: "richText",
     value: { text: "photo", attachments: [{ tag: "p2pMixnet", value: { identifier: new Uint8Array([1]), claimTicket: new Uint8Array([2]), nodeEndpoint: { tag: "wssUrl", value: { url: "wss://hop" } }, meta: { tag: "image", value: { general: { mimeType: "image/png", fileSize: 10 }, width: 1, height: 1, thumbnail: undefined } } } }] },
-  })), { kind: "message", content: { type: "richText", text: "photo", attachments: [{ kind: "image", mimeType: "image/png", fileSize: 10 }] } });
+  })), {
+    kind: "message",
+    content: { type: "richText", text: "photo", attachments: [{ kind: "image", mimeType: "image/png", fileSize: 10, width: 1, height: 1, identifier: "0x01", wssUrl: "wss://hop" }] },
+    claimTickets: [new Uint8Array([2])],
+  }, "the reference is public; the ticket comes back beside the content, never in it");
   assert.deepEqual(fromWire(viaWire({ tag: "reply", value: { messageId: "a", ownContent: { text: "yes", attachments: undefined } } })), { kind: "message", content: { type: "reply", messageId: "a", text: "yes" } });
   assert.deepEqual(fromWire({ tag: "reacted", value: { messageId: "a", emoji: "👍" } }), { kind: "reaction", messageId: "a", emoji: "👍", add: true });
   assert.deepEqual(fromWire({ tag: "reactionRemoved", value: { messageId: "a", emoji: "👍" } }), { kind: "reaction", messageId: "a", emoji: "👍", add: false });

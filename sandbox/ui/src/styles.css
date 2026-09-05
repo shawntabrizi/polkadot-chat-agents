@@ -136,6 +136,10 @@ table.grid tr[aria-selected="true"] td { background: var(--bg-selection-containe
 .msg .quote { margin: 0 0 6px; padding: 2px 0 2px 8px; border-left: 2px solid var(--stroke-tertiary); color: var(--fg-secondary); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .msg[data-direction="outgoing"] .quote { color: var(--fg-secondary-inverted); border-color: var(--stroke-primary-inverted); }
 .msg .reactions { display: flex; gap: 4px; }
+.msg .attachment { margin: 6px 0 0; }
+.msg figure.attachment img { display: block; max-width: 100%; height: auto; border-radius: var(--radius-small); }
+.msg .attachment.placeholder { padding: 8px 10px; border: 1px dashed var(--stroke-tertiary); border-radius: var(--radius-small); }
+.msg[data-direction="outgoing"] .attachment.placeholder { border-color: var(--stroke-primary-inverted); }
 .msg .reactions .pill { cursor: pointer; }
 .composer { display: flex; gap: 8px; align-items: flex-end; margin-top: var(--gap); }
 .composer .textarea { flex: 1; min-height: 40px; max-height: 200px; }

@@ -3,7 +3,8 @@ import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from 
 import { labelOf, textOf } from '../../lib/markdown.mjs';
 
 import type { Session } from './App';
-import { type HexString, type Message, api, errorText } from './api';
+import { type Attachment, type HexString, type Message, api, errorText } from './api';
+import { attachmentView } from './attachment-view';
 import { useEvents } from './events';
 import { formatTime } from './format';
 import { useLoader } from './hooks';
@@ -94,16 +95,43 @@ export const Room = ({ session, peer, peerName }: Props) => {
     input.current?.focus();
   };
 
+  // An attachment as this device sees it: an image inline from the daemon's
+  // own media route, a file as a download link, or a placeholder (a sibling
+  // claimed the one-shot HOP entry, a claim in flight, a failure).
+  const attachment = (a: Attachment, i: number) => {
+    const v = attachmentView(a, persona.name, device);
+    if (v.kind === 'image') {
+      return (
+        <figure key={i} className="attachment" data-testid="attachment" data-status={a.status}>
+          <img src={v.src} alt={v.caption} width={a.width} height={a.height} />
+          <figcaption className="caption">{v.caption}</figcaption>
+        </figure>
+      );
+    }
+    if (v.kind === 'file') {
+      return (
+        <p key={i} className="attachment" data-testid="attachment" data-status={a.status}>
+          <a href={v.href} download>
+            {v.caption}
+          </a>
+        </p>
+      );
+    }
+    return (
+      <p key={i} className={`attachment placeholder caption${v.kind === 'failed' ? ' error' : ''}`} data-testid="attachment" data-status={a.status}>
+        {v.caption} — {v.note}
+      </p>
+    );
+  };
   const body = (m: Message) => {
     const text = textOf(m.content);
+    const attachments = m.content.type === 'richText' ? m.content.attachments : [];
     const isText = m.content.type === 'text' || m.content.type === 'reply' || (m.content.type === 'richText' && text != null);
     return (
       <>
         {m.content.type === 'reply' ? <blockquote className="quote">{quoteOf(byId.get(m.content.messageId))}</blockquote> : null}
-        {isText ? <MarkdownCell text={text} /> : <span className="tertiary">{labelOf(m.content) ?? 'Unknown message'}</span>}
-        {m.content.type === 'richText' && m.content.attachments.length > 0 ? (
-          <div className="caption">{m.content.attachments.map(a => `${a.kind} ${a.mimeType} (${a.fileSize} bytes)`).join(', ')}</div>
-        ) : null}
+        {isText ? <MarkdownCell text={text} /> : attachments.length > 0 ? null : <span className="tertiary">{labelOf(m.content) ?? 'Unknown message'}</span>}
+        {attachments.map(attachment)}
       </>
     );
   };

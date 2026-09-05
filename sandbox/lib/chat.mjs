@@ -35,10 +35,26 @@ import { intakeRequestStatement, sendChatRequest, subscribeToIncomingRequests } 
 // an existing row, a call offer is answered with `dataChannelClosed`, roster
 // variants go to the contact, and the rest is dropped with a warning.
 
+// An attachment on the wire (base-spec.md "P2PMixnetFile"): the HOP entry the
+// metadata lives under, the ticket that claims and decrypts it, the node it
+// was uploaded to, and the FileMeta the receiver renders a placeholder from.
+const toFileMeta = (a) => {
+  const general = { mimeType: a.mimeType, fileSize: a.fileSize };
+  if (a.kind === "image") return { tag: "image", value: { general, width: a.width, height: a.height, thumbnail: undefined } };
+  if (a.kind === "video") return { tag: "video", value: { general, duration: a.duration ?? 0, thumbnail: undefined } };
+  return { tag: "general", value: general };
+};
+const toFileVariant = (a) => ({
+  tag: "p2pMixnet",
+  value: { identifier: a.identifier, claimTicket: a.claimTicket, nodeEndpoint: { tag: "wssUrl", value: { url: a.wssUrl } }, meta: toFileMeta(a) },
+});
+
 export const toWire = (content) => {
   switch (content.type) {
     case "text":
       return { tag: "text", value: content.text };
+    case "richText":
+      return { tag: "richText", value: { text: content.text ?? undefined, attachments: content.attachments.map(toFileVariant) } };
     case "reply":
       return { tag: "reply", value: { messageId: content.messageId, ownContent: { text: content.text, attachments: undefined } } };
     case "reaction":
@@ -60,27 +76,41 @@ export const toWire = (content) => {
   }
 };
 
+// The claim ticket is key material: it comes back beside the content
+// (`claimTickets`, one per attachment), never inside it, so a row, the API,
+// the inspector and the logs carry the reference — identifier, node, meta —
+// and only the engine's claim path ever sees the ticket.
 const attachmentOf = (file) => {
   if (file.tag !== "p2pMixnet") return null;
   const meta = file.value.meta;
   if (meta.tag !== "general" && meta.tag !== "image" && meta.tag !== "video") return null;
   const general = meta.tag === "general" ? meta.value : meta.value.general;
-  return { kind: meta.tag, mimeType: general.mimeType, fileSize: general.fileSize };
+  return {
+    reference: {
+      kind: meta.tag,
+      mimeType: general.mimeType,
+      fileSize: general.fileSize,
+      ...(meta.tag === "image" ? { width: meta.value.width, height: meta.value.height } : {}),
+      ...(meta.tag === "video" ? { duration: meta.value.duration } : {}),
+      identifier: bytesToHex(file.value.identifier),
+      wssUrl: file.value.nodeEndpoint.tag === "wssUrl" ? file.value.nodeEndpoint.value.url : null,
+    },
+    claimTicket: file.value.claimTicket,
+  };
 };
 
 export const fromWire = (content) => {
   switch (content.tag) {
     case "text":
       return { kind: "message", content: { type: "text", text: content.value } };
-    case "richText":
+    case "richText": {
+      const files = (content.value.attachments ?? []).map(attachmentOf).filter((a) => a !== null);
       return {
         kind: "message",
-        content: {
-          type: "richText",
-          text: content.value.text ?? null,
-          attachments: (content.value.attachments ?? []).map(attachmentOf).filter((a) => a !== null),
-        },
+        content: { type: "richText", text: content.value.text ?? null, attachments: files.map((f) => f.reference) },
+        claimTickets: files.map((f) => f.claimTicket),
       };
+    }
     case "reply":
       return { kind: "message", content: { type: "reply", messageId: content.value.messageId, text: content.value.ownContent.text ?? "" } };
     case "reacted":
@@ -397,7 +427,7 @@ const systemRow = (peer, messageId, timestamp, content) => ({ messageId, peer, t
  * sends, identity channels and every session): the store compares expiries
  * per signing account, and independent counters can tie within a second.
  */
-export const createChatEngine = ({ identity, deviceKeys, deviceIndex, state, statementStore, lookup, ownDevices, onEvent = () => {} }) => {
+export const createChatEngine = ({ identity, deviceKeys, deviceIndex, state, statementStore, lookup, ownDevices, onEvent = () => {}, onAttachments = () => {} }) => {
   const prover = createSr25519Prover(deviceKeys.statementSeed);
   const allocator = createExpiryAllocator();
   const ownDevice = { statementAccountId: deviceKeys.statementAccountId, encryptionPublicKey: deviceKeys.encryptionPublicKey };
@@ -419,9 +449,17 @@ export const createChatEngine = ({ identity, deviceKeys, deviceIndex, state, sta
   const handleIncoming = async (peer, message) => {
     const effect = fromWire(message.content);
     switch (effect.kind) {
-      case "message":
-        state.messages.receive({ messageId: message.messageId, peer, timestamp: message.timestamp, direction: "incoming", status: "received", content: effect.content }, deviceIndex);
+      case "message": {
+        // An attachment row starts unclaimed; the persona (which owns the HOP
+        // client and the media dir) claims it, on the first device that
+        // decoded the message only — the HOP claim is one-shot (hop-node.mjs).
+        const content = effect.claimTickets
+          ? { ...effect.content, attachments: effect.content.attachments.map((a) => ({ ...a, status: "pending", claimedBy: null, mediaId: null, error: null })) }
+          : effect.content;
+        const fresh = state.messages.receive({ messageId: message.messageId, peer, timestamp: message.timestamp, direction: "incoming", status: "received", content }, deviceIndex);
+        if (fresh && effect.claimTickets?.length) onAttachments({ peer, messageId: message.messageId, claimTickets: effect.claimTickets, device: deviceIndex });
         return;
+      }
       case "reaction":
         state.messages.applyReaction(effect.messageId, effect.emoji, "peer", effect.add);
         return;
@@ -670,12 +708,17 @@ export const createChatEngine = ({ identity, deviceKeys, deviceIndex, state, sta
       state.requests.update(requestId, { status: "declined", device: deviceIndex });
     },
 
-    /** A new row: text, or a reply. Resolves once the row exists; delivery is tracked on the row. */
-    sendMessage: async (peer, content) => {
+    /**
+     * A new row: text, a reply, or a rich text with attachments. Resolves once
+     * the row exists; delivery is tracked on the row. `wire` is what goes on
+     * the wire when it differs from the row (an attachment's claim ticket
+     * rides the wire and never the row).
+     */
+    sendMessage: async (peer, content, { wire = content } = {}) => {
       const ids = { messageId: randomId(), timestamp: Date.now() };
       state.messages.add({ messageId: ids.messageId, peer, timestamp: ids.timestamp, direction: "outgoing", status: "sending", content, device: deviceIndex });
       // Too large, or no usable peer device: the row stays as evidence.
-      await submit(peer, content, ids).catch((error) => {
+      await submit(peer, wire, ids).catch((error) => {
         state.messages.setStatus(ids.messageId, "failed");
         throw error;
       });

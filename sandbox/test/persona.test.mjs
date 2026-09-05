@@ -47,7 +47,7 @@ test("a persona registers its identity and every device account, and never expos
   }
   assert.equal(bob.devices.map((d) => d.account).includes(bob.account), false, "device accounts differ from the identity account");
   const json = JSON.stringify(bob);
-  assert.deepEqual(Object.keys(JSON.parse(json)).sort(), ["account", "chatPublicKey", "devices", "name"]);
+  assert.deepEqual(Object.keys(JSON.parse(json)).sort(), ["account", "bulletinAccount", "chatPublicKey", "devices", "name"]);
   assert.deepEqual(Object.keys(JSON.parse(json).devices[0]).sort(), ["account", "encryptionPublicKey", "index", "online", "removed"]);
   for (const secret of [bob.identity.seed, bob.identity.identityChatPrivateKey, bob.devices[0].keys.statementSeed, bob.devices[0].keys.encryptionPrivateKey]) {
     assert.equal(json.includes(hex(secret).slice(2, 34)), false, "serialised persona leaks a secret");

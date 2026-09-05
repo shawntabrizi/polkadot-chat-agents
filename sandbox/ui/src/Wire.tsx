@@ -1,7 +1,7 @@
 import { type FormEvent, useState } from 'react';
 
 import type { Session } from './App';
-import { type Decoded, type SandboxEvent, type Statement, api, errorText } from './api';
+import { type Decoded, type HopFaultKind, type SandboxEvent, type Statement, api, errorText } from './api';
 import { useEvents } from './events';
 import { formatIso, shortHex } from './format';
 import { useLoader } from './hooks';
@@ -9,7 +9,14 @@ import { useLoader } from './hooks';
 type Props = { session: Session | null };
 type FaultForm = { kind: 'drop' | 'delay' | 'holdDump'; from: string; channel: string; topic: string; count: string; ms: string };
 const EMPTY_FAULT: FaultForm = { kind: 'drop', from: '', channel: '', topic: '', count: '1', ms: '1000' };
+type HopFaultForm = { kind: HopFaultKind; hash: string; method: 'claim' | 'ack' | 'submit'; count: string; ms: string };
+const EMPTY_HOP_FAULT: HopFaultForm = { kind: 'refuse', hash: '', method: 'claim', count: '1', ms: '1000' };
 const LOG_MAX = 300;
+
+// A decoded attachment on the wire: the reference the message carries (the
+// ticket never reaches the inspector).
+type WireAttachment = { kind: string; mimeType: string; fileSize: number; width?: number; height?: number; identifier: string; wssUrl: string | null };
+const attachmentLine = (a: WireAttachment) => `📎 ${a.kind} ${a.mimeType} ${a.fileSize}B${a.width ? ` ${a.width}×${a.height}` : ''} id ${shortHex(a.identifier)} on ${a.wssUrl ?? '?'}`;
 
 const summary = (d: Decoded | null): string => {
   if (!d) return '';
@@ -29,7 +36,8 @@ const messageLine = (m: NonNullable<Extract<Decoded, { kind: 'request' }>['messa
   const c = m.content;
   const text = typeof c.text === 'string' ? ` “${c.text}”` : '';
   const extra = c.type === 'reaction' ? ` ${String(c.emoji)} on ${shortHex(String(c.messageId))}` : c.type === 'edit' || c.type === 'reply' ? ` → ${shortHex(String(c.messageId))}` : '';
-  return `${c.type}${text}${extra}  ${shortHex(m.messageId, 4)}`;
+  const attachments = Array.isArray(c.attachments) ? (c.attachments as WireAttachment[]).map(a => `\n    ${attachmentLine(a)}`).join('') : '';
+  return `${c.type}${text}${extra}  ${shortHex(m.messageId, 4)}${attachments}`;
 };
 const eventLine = (e: SandboxEvent): string => {
   const { seq: _s, ts: _t, type: _y, ...rest } = e;
@@ -44,18 +52,21 @@ export const Wire = ({ session }: Props) => {
   const [channel, setChannel] = useState('');
   const [selected, setSelected] = useState<Statement | null>(null);
   const [fault, setFault] = useState<FaultForm>(EMPTY_FAULT);
+  const [hopFault, setHopFault] = useState<HopFaultForm>(EMPTY_HOP_FAULT);
   const [clockMs, setClockMs] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [log, setLog] = useState<SandboxEvent[]>([]);
 
   const wire = useLoader(() => api.wire({ peer, signer, channel }), [peer, signer, channel]);
   const node = useLoader(() => api.node(), []);
+  const hop = useLoader(() => api.hop(), []);
   const history = useLoader(() => (selected?.channel ? api.history(selected.channel, selected.signer ?? undefined) : Promise.resolve([])), [selected?.channel, selected?.signer]);
   useEvents(() => {
     wire.reload();
     if (selected) history.reload();
   }, ['wire', 'node', 'clock']);
   useEvents(() => node.reload(), ['fault', 'node', 'clock']);
+  useEvents(() => hop.reload(), ['hop', 'message']);
   useEvents(event => setLog(prev => [event, ...prev].slice(0, LOG_MAX)));
 
   const run = async (label: string, fn: () => Promise<unknown>) => {
@@ -73,6 +84,19 @@ export const Wire = ({ session }: Props) => {
     const count = fault.count.trim() === '' || fault.count === 'forever' ? null : Number(fault.count);
     void run('fault', () => api.addFault({ kind: fault.kind, from: fault.from.trim() || null, channel: fault.channel.trim() || null, topic: fault.topic.trim() || null, count, ...(fault.kind === 'delay' ? { ms: Number(fault.ms) } : {}) }));
   };
+  const addHopFault = (event: FormEvent) => {
+    event.preventDefault();
+    const count = hopFault.count.trim() === '' || hopFault.count === 'forever' ? null : Number(hopFault.count);
+    void run('HOP fault', async () => {
+      await api.addHopFault({ kind: hopFault.kind, hash: hopFault.hash.trim() || null, method: hopFault.method, count, ...(hopFault.kind === 'delay' ? { ms: Number(hopFault.ms) } : {}) });
+      hop.reload();
+    });
+  };
+  const clearHopFault = (id: number | 'all') =>
+    void run('HOP fault', async () => {
+      await api.clearHopFault(id);
+      hop.reload();
+    });
   const peers = [...(session?.personas.map(p => p.name) ?? []), ...(session?.accounts.filter(a => a.username && !session.isPersona(a.account)).map(a => a.username as string) ?? [])];
   const statements = wire.data ?? [];
   const current = selected ? statements.find(s => s.channel === selected.channel && s.signer === selected.signer) ?? selected : null;
@@ -263,6 +287,78 @@ export const Wire = ({ session }: Props) => {
                 </span>
                 <span className="spacer" style={{ flex: 1 }} />
                 <button type="button" className="btn ghost small" onClick={() => void run('clear', () => api.clearFault(f.id))}>
+                  Clear
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+        <section className="panel stack" data-testid="hop-panel">
+          <h2 className="label">HOP pool</h2>
+          <div className="caption">
+            {hop.data ? `${hop.data.url} · ${hop.data.status.entryCount} live entr${hop.data.status.entryCount === 1 ? 'y' : 'ies'} · ${hop.data.status.totalBytes} of ${hop.data.status.maxBytes} bytes` : '…'}
+          </div>
+          {hop.data && hop.data.entries.length === 0 ? <p className="empty">No entries yet.</p> : null}
+          <table className="grid">
+            <tbody>
+              {hop.data?.entries.map(e => (
+                <tr key={e.hash} data-testid="hop-entry" data-available={e.available}>
+                  <td className="mono">{shortHex(e.hash)}</td>
+                  <td>
+                    {e.role ?? 'entry'}
+                    {e.owner ? <span className="caption"> {e.owner}</span> : null}
+                  </td>
+                  <td className="mono">{e.bytes}B</td>
+                  <td className="caption">
+                    by {e.signerLabel ?? (e.signer ? shortHex(e.signer) : 'fixture')} · claimed ×{e.claims}
+                    {e.acked ? ' · acked' : ''}
+                    {e.available ? '' : ` · gone (${e.reason ?? 'removed'})`}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <form className="stack" style={{ gap: 6 }} onSubmit={addHopFault}>
+            <div className="row">
+              <select className="select" value={hopFault.kind} aria-label="HOP fault kind" onChange={e => setHopFault({ ...hopFault, kind: e.target.value as HopFaultKind })}>
+                {(['refuse', 'cut', 'delay', 'drop', 'corrupt'] as const).map(k => (
+                  <option key={k} value={k}>
+                    {k}
+                  </option>
+                ))}
+              </select>
+              <select className="select" value={hopFault.method} aria-label="HOP fault method" onChange={e => setHopFault({ ...hopFault, method: e.target.value as HopFaultForm['method'] })}>
+                <option value="claim">claim</option>
+                <option value="ack">ack</option>
+                <option value="submit">submit</option>
+              </select>
+              <input className="input" style={{ width: 90 }} value={hopFault.count} placeholder="count" aria-label="HOP fault count (or forever)" onChange={e => setHopFault({ ...hopFault, count: e.target.value })} />
+              {hopFault.kind === 'delay' ? <input className="input" style={{ width: 80 }} value={hopFault.ms} placeholder="ms" aria-label="HOP delay ms" onChange={e => setHopFault({ ...hopFault, ms: e.target.value })} /> : null}
+            </div>
+            <input className="input" value={hopFault.hash} placeholder="Entry hash (blank: any)" aria-label="HOP fault entry" onChange={e => setHopFault({ ...hopFault, hash: e.target.value })} />
+            <div className="row">
+              <button type="submit" className="btn small primary">
+                Add HOP fault
+              </button>
+              <button type="button" className="btn small ghost" disabled={!hop.data?.faults.length} onClick={() => clearHopFault('all')}>
+                Clear all
+              </button>
+            </div>
+          </form>
+          <ul className="stack" style={{ gap: 4 }}>
+            {hop.data?.faults.map(f => (
+              <li key={f.id} className="nested row caption" data-testid="hop-fault-row">
+                <span className="label">
+                  #{f.id} {f.kind}
+                </span>
+                <span>
+                  on {f.method}
+                  {f.hash ? ` of ${shortHex(f.hash)}` : ''}
+                  {f.ms != null ? ` ${f.ms} ms` : ''} hits {f.hits}
+                  {f.count != null ? `/${f.count}` : ''}
+                </span>
+                <span className="spacer" style={{ flex: 1 }} />
+                <button type="button" className="btn ghost small" onClick={() => clearHopFault(f.id)}>
                   Clear
                 </button>
               </li>

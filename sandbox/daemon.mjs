@@ -80,7 +80,8 @@ export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, hos
   const transport = { makeStatementStore, lookup, onEvent: (e) => events.emit("engine", e) };
 
   const addPersona = async (name, devices) => {
-    const persona = createPersona({ name, devices });
+    // Attachments a persona sends or claims live under its own media dir.
+    const persona = createPersona({ name, devices, hopUrl: hop.url, mediaDir: path.join(dir, "personas", name, "media") });
     persona.register(directory);
     personas.set(name, persona);
     persona.state.onChange((change) => events.emit(change.type, { persona: name, ...change }));
