@@ -227,7 +227,7 @@ and the acceptance check recorded in `sandbox/docs/acceptance.md`.
 | existing mock node and e2e harness | `bot-core/test/mock-statement-node.mjs`, `bot-core/test/transport.e2e.test.mjs` |
 | persona engine to port | `~/Documents/GitHub/polkadot-chat-web/src/domain/{requests,chat,identity,contacts}` and their specs |
 | golden vectors | iOS topic vectors in `polkadot-chat-web/src/domain/requests/topics.spec.ts`; `useragent-kit/conformance/chat-v2-golden.json` (private repo, copy into `sandbox/fixtures/` with a source note) |
-| how the apps really send | `bot-core/test-client-device.mjs` (until retired), Android `feature/chats` in `~/Documents/GitHub/polkadot-app-android-v2` |
+| how the apps really send | Android `feature/chats` in `~/Documents/GitHub/polkadot-app-android-v2`; the HOP upload path in `polkadot-desktop/src/domains/chat/p2p/file-transfer/gateway.ts` and `triangle-js-sdks/packages/handoff-service` (`bot-core/test-client-device.mjs` was retired in S5) |
 
 ## Known traps
 

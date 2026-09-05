@@ -202,10 +202,16 @@ export function createPersonaState() {
         changed(message);
         return true;
       },
-      /** An edit replaces the text of a text, reply or richText row; other rows cannot be edited. */
+      /**
+       * An edit replaces the text of a text, reply or richText row; other
+       * rows cannot be edited. Every earlier text stays in `editHistory`
+       * (oldest first): a bot's live reply is one row edited many times,
+       * and what it showed on the way is part of the record.
+       */
       applyEdit(messageId, text, editedAt) {
         const message = messages.get(messageId);
         if (!message || !["text", "reply", "richText"].includes(message.content.type)) return false;
+        message.editHistory = [...(message.editHistory ?? []), { text: message.content.text ?? null, until: editedAt }];
         message.content = { ...message.content, text };
         message.editedAt = editedAt;
         changed(message);
