@@ -460,3 +460,21 @@ through `pcs scenario run`. `bot-core/vendor` untouched.
    the real network, so the reset is only detected by `pca register <bot>
    --again` (which reads the chain first). Should `pca info` get a
    `--check` flag that reads the chain on request?
+
+### Answers (owner review, 2026-09-05)
+
+1. Raised with the owner; the attester `143a9g1d…` (`0x86aac84d…`) has
+   allowance 0 and balance 0 on the reset chain, verified here. Until the
+   backend is re-provisioned nothing on Paseo Next can be attested.
+2. Unknown; ask the backend owners together with 1.
+3. macbot was deleted by the owner on 2026-09-04 (`pca delete macbot --yes`
+   in shell history, followed by a `pca create` that left no directory).
+   Not an agent action. Re-create it once attestation works.
+4. Yes, as a later option: `register_with_fee` needs 75 PAS per identity and
+   a funded account; keep the backend path as default.
+5. Keep the `sandbox` prefix; it marks throwaway identities on a shared chain.
+6. Yes, `pca info --check`, small; S7 or later.
+
+S6 review: accepted. Re-run here: sandbox 103/103, sandbox/ui 31/31 and
+build, bot-core 415/420 with the 5 T3ams SDK skips. Live messaging on Paseo
+Next is blocked by the backend, not by the sandbox.
