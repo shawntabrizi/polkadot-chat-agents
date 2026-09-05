@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "check": "tsc --noEmit && vitest run && vite build",
-    "acceptance": "node e2e/acceptance.mjs"
+    "acceptance": "node e2e/acceptance.mjs",
+    "acceptance:conversation": "node e2e/conversation.mjs"
   },
   "dependencies": {
     "react": "19.2.8",

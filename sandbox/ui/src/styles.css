@@ -121,6 +121,7 @@ table.grid tr.clickable:hover td { background: var(--bg-selection-container-hove
 table.grid tr[aria-selected="true"] td { background: var(--bg-selection-container-active); }
 
 /* ── Room ─────────────────────────────────────────────────────────────── */
+.room-panel { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
 .room { display: flex; flex-direction: column; min-height: 0; flex: 1; }
 .messages { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 6px; padding: 4px 0; }
 .msg { max-width: 78%; padding: 8px 12px; border-radius: var(--radius-nested); background: var(--bg-surface-nested); }
@@ -131,6 +132,7 @@ table.grid tr[aria-selected="true"] td { background: var(--bg-selection-containe
 .msg[data-direction="outgoing"] .btn.ghost:hover { background: var(--bg-action-tertiary-inverted-hover); color: var(--fg-primary-inverted); }
 .msg[data-direction="system"] { align-self: center; background: transparent; color: var(--fg-tertiary); font-size: 12px; }
 .msg .meta { display: flex; align-items: center; gap: 8px; margin-top: 4px; font-size: 12px; line-height: 18px; }
+.msg .meta > .caption:first-child { white-space: nowrap; }
 .msg .actions { display: flex; gap: 2px; opacity: 0; transition: opacity .12s; }
 .msg:hover .actions, .msg:focus-within .actions { opacity: 1; }
 .msg .quote { margin: 0 0 6px; padding: 2px 0 2px 8px; border-left: 2px solid var(--stroke-tertiary); color: var(--fg-secondary); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -140,6 +142,9 @@ table.grid tr[aria-selected="true"] td { background: var(--bg-selection-containe
 .composer { display: flex; gap: 8px; align-items: flex-end; margin-top: var(--gap); }
 .composer .textarea { flex: 1; min-height: 40px; max-height: 200px; }
 .composer-mode { display: flex; align-items: center; gap: 8px; margin-top: var(--gap); }
+
+/* ── Conversation (both sides of one chat) ───────────────────────────── */
+.conversation { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); flex: 1; min-height: 0; }
 
 /* ── Markdown (the body of every text message) ─────────────────────── */
 .md { overflow-wrap: anywhere; }

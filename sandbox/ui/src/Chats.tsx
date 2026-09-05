@@ -48,7 +48,16 @@ export const Chats = ({ session }: Props) => {
         ))}
       </section>
       {current ? (
-        <Room key={`${persona.name}:${current.contact.account}`} session={session} peer={current.contact.account} peerName={current.contact.username} />
+        <section className="panel room-panel">
+          <div className="row">
+            <h2 className="heading">{current.contact.username}</h2>
+            <span className="spacer" style={{ flex: 1 }} />
+            <a className="caption" href={`./api/personas/${encodeURIComponent(persona.name)}/rooms/${current.contact.account}?format=html`} target="_blank" rel="noopener noreferrer">
+              as HTML
+            </a>
+          </div>
+          <Room key={`${persona.name}:${current.contact.account}`} persona={persona} device={session.device} peer={current.contact.account} peerName={current.contact.username} />
+        </section>
       ) : (
         <section className="panel">
           <p className="empty">Open a chat to read and send messages.</p>
