@@ -78,6 +78,11 @@ export function createApi({ node, directory, personas, events, addPersona, resol
       catch (e) { throw new ApiError(409, e.message); }
     }],
     ["GET", "/consumers/:account", (p) => directory.consumer(p.account) ?? (() => { throw notFound(`no consumer ${p.account}`); })()],
+    ["GET", "/usernames/:name", (p) => {
+      const account = directory.usernameOwner(p.name);
+      if (!account) throw notFound(`no username ${p.name}`);
+      return { username: p.name, ...directory.consumer(account) };
+    }],
 
     ["GET", "/personas", () => [...personas.values()].map((p) => p.toJSON())],
     ["POST", "/personas", async (_p, _q, body) => {

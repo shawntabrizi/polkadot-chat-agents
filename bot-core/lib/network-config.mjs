@@ -45,12 +45,27 @@ export const PASEO = Object.freeze({
   }),
 });
 
+// The local sandbox (sandbox/): a store node and a directory that plays the
+// People chain and the identity backend, on this machine only. It has no
+// fixed endpoints — `pca create --network sandbox` reads them from the running
+// daemon — and its store node speaks plain ws:// on loopback, the one place a
+// bot may connect without TLS. No Bulletin/HOP network exists yet (v1.5).
+export const SANDBOX = Object.freeze({
+  id: "sandbox",
+  name: "Local sandbox",
+  peopleEndpoints: Object.freeze([]),
+  identityBackendUrl: null,
+  identityRegistrationAuth: "sandbox",
+  bulletin: null,
+  insecureEndpoints: true,
+});
+
 export const DEFAULT_NETWORK_PROFILE = PRODUCTS_DEVNET.id;
+export const NETWORK_PROFILES = Object.freeze([PRODUCTS_DEVNET, PASEO, SANDBOX]);
+export const NETWORK_PROFILE_IDS = Object.freeze(NETWORK_PROFILES.map((profile) => profile.id));
 
 export function configuredNetworkProfile(id) {
-  if (id === PRODUCTS_DEVNET.id) return PRODUCTS_DEVNET;
-  if (id === PASEO.id) return PASEO;
-  return null;
+  return NETWORK_PROFILES.find((profile) => profile.id === id) ?? null;
 }
 
 export function peopleEndpointsFor(endpoint, profileId = null) {

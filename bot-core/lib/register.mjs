@@ -374,13 +374,14 @@ export async function registerIdentity({
   };
 }
 
-// Poll Resources.Consumers until the bot's identifier_key is on-chain (attested).
-export async function waitForAttestation(peopleApi, addressSs58, { timeoutMs = 180_000, pollMs = 5_000, onTick } = {}) {
+// Poll the directory (lib/people-directory.mjs) until the bot's identifier key
+// is published (attested on chain, or registered in the sandbox).
+export async function waitForAttestation(directory, accountHex, { timeoutMs = 180_000, pollMs = 5_000, onTick } = {}) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    let consumer = null;
-    try { consumer = await withTimeout(peopleApi.query.Resources.Consumers.getValue(addressSs58), pollMs, "attestation check"); } catch { /* transient or timed out */ }
-    if (consumer?.identifier_key != null) return true;
+    let identifierKey = null;
+    try { identifierKey = await withTimeout(directory.identifierKeyFor(accountHex), pollMs, "attestation check"); } catch { /* transient or timed out */ }
+    if (identifierKey != null) return true;
     if (Date.now() >= deadline) return false;
     onTick?.();
     await new Promise((r) => setTimeout(r, pollMs));

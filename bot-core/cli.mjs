@@ -23,16 +23,18 @@ import {
   ss58Address,
   ss58Decode,
 } from "@polkadot-labs/hdkd-helpers";
-import { createClient as createPapiClient, Binary } from "polkadot-api";
+import { createClient as createPapiClient } from "polkadot-api";
 import { getWsProvider } from "polkadot-api/ws";
 import { paseoPeopleNext, productsDevnetPeople } from "./lib/descriptors.mjs";
 import {
   DEFAULT_NETWORK_PROFILE,
   PASEO,
   PRODUCTS_DEVNET,
+  SANDBOX,
   configuredNetworkProfile,
   peopleEndpointsFor,
 } from "./lib/network-config.mjs";
+import { createChainDirectory, createSandboxDirectory } from "./lib/people-directory.mjs";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
 import {
   deriveX25519PrivateKey,
@@ -103,11 +105,15 @@ async function noteNewerRelease({ timeoutMs = 3000 } = {}) {
 // set PCA_BANDERSNATCH_CLI to a natively built binary to override.
 const BANDERSNATCH_BIN = process.env.PCA_BANDERSNATCH_CLI ?? null;
 
-async function withPeopleApi(config, fn) {
+// The People-chain reads pca makes (who owns a username, is an account
+// attested) go through lib/people-directory.mjs: the chain over a short-lived
+// papi client, or the sandbox directory for a bot that lives there.
+async function withDirectory(config, fn) {
+  if (config.networkProfile === SANDBOX.id) return fn(createSandboxDirectory(config.backendUrl));
   const endpoints = peopleEndpointsFor(config.endpoint, config.networkProfile);
   const client = createPapiClient(getWsProvider(endpoints));
   const descriptor = config.networkProfile === PASEO.id ? paseoPeopleNext : productsDevnetPeople;
-  try { return await fn(client.getTypedApi(descriptor)); }
+  try { return await fn(createChainDirectory(client.getTypedApi(descriptor))); }
   finally { client.destroy(); }
 }
 
@@ -195,8 +201,7 @@ async function resolvePeer(input, netCfg) {
   if (/^[a-z][a-z0-9-]{2,}(\.\d{2,})?$/.test(bare)) {
     let owner = null;
     try {
-      owner = await withPeopleApi(netCfg, (api) =>
-        withTimeout(api.query.Resources.UsernameOwnerOf.getValue(Binary.fromText(bare)), 15_000, "username lookup"));
+      owner = await withDirectory(netCfg, (directory) => directory.usernameOwner(bare));
     } catch { fail(`Couldn't reach the network to resolve "${bare}" — try again, or use the address (5…) or 0x… account id instead.`); }
     if (typeof owner !== "string" || owner === "") {
       fail(`Couldn't find the username "${bare}" on the network — check the spelling (it's shown in the app under your profile).`);
@@ -1181,8 +1186,8 @@ async function runRegistration(name, config, { secret, wantUsername, digits, wai
   step(`Waiting for the network to confirm (up to ${Math.round(waitMs / 1000)}s)…`);
   let attested = false;
   try {
-    attested = await withPeopleApi(config, (api) =>
-      waitForAttestation(api, config.address, { timeoutMs: waitMs, onTick: () => process.stdout.write(".") }));
+    attested = await withDirectory(config, (directory) =>
+      waitForAttestation(directory, config.account, { timeoutMs: waitMs, onTick: () => process.stdout.write(".") }));
     process.stdout.write("\n");
   } catch (e) { process.stdout.write("\n"); warn(`Couldn't reach the network: ${e instanceof Error ? e.message : String(e)}`); }
   if (attested) { config.registered = true; save(); ok("Confirmed — your bot is live and people can message it!"); return "registered"; }
@@ -1383,9 +1388,8 @@ async function cmdInfo(name) {
   let reachedNetwork = true;
   if (cfg.username && !cfg.registered) {
     try {
-      messageable = await withPeopleApi(cfg, async (api) =>
-        withTimeout(api.query.Resources.Consumers.getValue(cfg.address), 12_000, "network check")
-          .then((consumer) => consumer?.identifier_key != null));
+      messageable = await withDirectory(cfg, async (directory) =>
+        withTimeout(directory.identifierKeyFor(cfg.account), 12_000, "network check").then((key) => key != null));
       if (messageable) { cfg.registered = true; saveConfig(name, cfg); }
     } catch { reachedNetwork = false; }
   }

@@ -1,7 +1,9 @@
-// Offline transport e2e: bot-core + test-client-device against the in-memory
-// mock statement node. No chain, no network — the identifier lookup is pinned
-// via BOT_PEER_IDENTIFIER_KEYS, everything else is the real stack (vendored
-// codec, sessions, dedup, persistence, ACKs).
+// Offline transport e2e: bot-core + test-client-device against the local
+// sandbox (sandbox/daemon.mjs): its store node plays the statement store and
+// its directory plays the People chain, so identifier keys come through the
+// same seam a deployed bot uses (lib/people-directory.mjs). No chain, no
+// network — everything else is the real stack (vendored codec, sessions,
+// dedup, persistence, ACKs).
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -10,7 +12,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { startStoreNode } from "../../sandbox/lib/store-node.mjs";
+import { startDaemon } from "../../sandbox/daemon.mjs";
 import { startMockHopNode } from "./mock-hop-node.mjs";
 import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
 import {
@@ -37,14 +39,41 @@ const CLIENT_ID_KEY = idKeyOf(CLIENT_SEED);
 const TEST_BRIDGE_TOKEN = "transport-e2e-bridge-token-0123456789";
 const botStateDirs = new Map();
 
+// One sandbox per test: a store node plus the directory, on random ports, with
+// both throwaway identities registered (username, identifier key, statement
+// allowance). `url` is the store node the bot and the client connect to.
+async function startSandbox() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-e2e-sandbox-"));
+  const daemon = await startDaemon({ dir, port: 0 });
+  const register = async (account, username, identifierKey) => {
+    const res = await fetch(`${daemon.url}/accounts/${account}/register`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username, identifierKey }),
+    });
+    if (!res.ok) throw new Error(`register ${username}: ${res.status} ${await res.text()}`);
+  };
+  await register(`0x${BOT_ACCOUNT}`, "e2etest.00", `0x${BOT_ID_KEY}`);
+  await register(`0x${CLIENT_ACCOUNT}`, "e2eclient", `0x${CLIENT_ID_KEY}`);
+  return {
+    url: daemon.storeUrl,
+    apiUrl: daemon.url,
+    daemon,
+    async close() {
+      await daemon.stop();
+      fs.rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
 // Spawn the bot and expose its JSON-line events for assertions.
-async function startBot({ endpoint, stateDir, extraEnv = {} }) {
+async function startBot({ endpoint, apiUrl, stateDir, extraEnv = {} }) {
   botStateDirs.set(endpoint, stateDir);
   const bridgeToken = extraEnv.BOT_BRIDGE_TOKEN ?? TEST_BRIDGE_TOKEN;
   const child = spawn(process.execPath, [path.join(BOT_CORE, "index.mjs")], {
     env: {
       ...process.env,
       BOT_SEED_HEX: BOT_SEED,
+      BOT_NETWORK_PROFILE: "sandbox",
+      BOT_SANDBOX_URL: apiUrl,
       BOT_ENDPOINT: endpoint,
       // Port 0: the OS assigns a free one (tests run concurrently, so a
       // pick-then-bind helper would race); BOT_BRIDGE_LISTENING reports it.
@@ -54,7 +83,6 @@ async function startBot({ endpoint, stateDir, extraEnv = {} }) {
       BOT_BRAIN: "echo",
       BOT_USERNAME: "e2etest.00",
       BOT_POLL_MS: "250",
-      BOT_PEER_IDENTIFIER_KEYS: `${CLIENT_ACCOUNT}=${CLIENT_ID_KEY}`,
       ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -160,7 +188,7 @@ const attachSpecOf = (file, bytes, mime = "image/jpeg") => JSON.stringify({
 describe("transport e2e", { concurrency: 8 }, () => {
 
   test("public built-in direct brains start without an allowlist", async () => {
-    const node = await startStoreNode();
+    const node = await startSandbox();
     const bots = [];
     const stateDirs = [];
     try {
@@ -168,7 +196,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
         const stateDir = tmpState();
         stateDirs.push(stateDir);
         const bot = await startBot({
-          endpoint: node.url,
+          endpoint: node.url, apiUrl: node.apiUrl,
           stateDir,
           extraEnv: {
             BOT_SUBSCRIBE: "0",
@@ -198,9 +226,9 @@ describe("transport e2e", { concurrency: 8 }, () => {
     ["subscribe", { BOT_SUBSCRIBE: "1" }],
   ]) {
     test(`round trip with poison batches (${mode})`, async () => {
-      const node = await startStoreNode();
+      const node = await startSandbox();
       const stateDir = tmpState();
-      const bot = await startBot({ endpoint: node.url, stateDir, extraEnv });
+      const bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv });
       try {
         // In subscribe mode the sweep only runs every 30s, so replies inside the
         // client's 8s windows can only have arrived by subscription — but assert
@@ -227,9 +255,9 @@ describe("transport e2e", { concurrency: 8 }, () => {
     });
 
     test(`restart survival: session + dedup persist (${mode})`, async () => {
-      const node = await startStoreNode();
+      const node = await startSandbox();
       const stateDir = tmpState();
-      let bot = await startBot({ endpoint: node.url, stateDir, extraEnv });
+      let bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv });
       try {
         const first = await runClient(node.url, [], ["restart opener", "before-restart"]);
         assert.equal(first.code, 0, `client failed:\n${first.out}`);
@@ -241,7 +269,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
         assert.match(beforeRestart.peers[0].identifierKeyHex, /^[0-9a-f]{64}$/);
         assert.ok(beforeRestart.peers[0].devices.every((device) => /^[0-9a-f]{64}$/.test(device.e)));
 
-        bot = await startBot({ endpoint: node.url, stateDir, extraEnv });
+        bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv });
         const restored = await bot.waitFor((e) => e.event === "BOT_STATE_RESTORED", { label: "BOT_STATE_RESTORED" });
         assert.equal(restored.peers, 1);
         const afterRestart = JSON.parse(fs.readFileSync(path.join(stateDir, "session-state.json"), "utf8"));
@@ -260,12 +288,12 @@ describe("transport e2e", { concurrency: 8 }, () => {
     });
 
     test(`attachment download, reply quotes, reaction, call decline (${mode})`, async () => {
-      const node = await startStoreNode();
+      const node = await startSandbox();
       const hop = await startMockHopNode();
       const stateDir = tmpState();
       const photo = new Uint8Array(crypto.randomBytes(300_000));
       const file = hop.putFile(photo);
-      const bot = await startBot({ endpoint: node.url, stateDir, extraEnv: { ...extraEnv, BOT_HOP_ALLOW_INSECURE: "1" } });
+      const bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: { ...extraEnv, BOT_HOP_ALLOW_INSECURE: "1" } });
       try {
         if (extraEnv.BOT_SUBSCRIBE === "1") await bot.waitFor((e) => e.event === "BOT_SUBSCRIBED", { label: "BOT_SUBSCRIBED" });
         const r = await runClient(node.url, [
@@ -297,7 +325,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
     });
 
     test(`owed reply survives kill -9 mid-brain (${mode})`, async () => {
-      const node = await startStoreNode();
+      const node = await startSandbox();
       const stateDir = tmpState();
       const slowBrain = {
         ...extraEnv,
@@ -306,7 +334,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
         BOT_AI_ARGS: JSON.stringify(["-c", "sleep 3; printf '{\"type\":\"result\",\"result\":\"recovered-answer\"}\\n'"]),
         BOT_THINKING_TEXT: "", // keep the send log unambiguous
       };
-      let bot = await startBot({ endpoint: node.url, stateDir, extraEnv: slowBrain });
+      let bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: slowBrain });
       try {
         // Establish the session (the client's exit-0 rule needs at least one
         // ACKed follow-up, so warm up with one; each reply takes ~3s).
@@ -323,7 +351,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
         const state = JSON.parse(fs.readFileSync(path.join(stateDir, "session-state.json"), "utf8"));
         assert.equal(state.owed?.some((o) => o.t === "crash question"), true, "owed journal missing the question");
 
-        bot = await startBot({ endpoint: node.url, stateDir, extraEnv: slowBrain });
+        bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: slowBrain });
         const restored = await bot.waitFor((e) => e.event === "BOT_STATE_RESTORED", { label: "BOT_STATE_RESTORED" });
         assert.equal(restored.owed >= 1, true, `expected owed >= 1, got ${restored.owed}`);
         await bot.waitFor((e) => e.event === "BOT_SENT_TEXT", { label: "owed reply sent", timeoutMs: 20_000 });
@@ -339,7 +367,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   }
 
   test("v2 P-256 session keys are reset while key-independent state survives", async () => {
-    const node = await startStoreNode();
+    const node = await startSandbox();
     const stateDir = tmpState();
     fs.writeFileSync(path.join(stateDir, "session-state.json"), JSON.stringify({
       v: 2,
@@ -353,7 +381,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
       pendingOpenerAcks: ["old"],
       greeted: [CLIENT_ACCOUNT],
     }), { mode: 0o600 });
-    const bot = await startBot({ endpoint: node.url, stateDir, extraEnv: { BOT_SUBSCRIBE: "0" } });
+    const bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: { BOT_SUBSCRIBE: "0" } });
     try {
       const reset = await bot.waitFor((event) => event.event === "BOT_STATE_KEYS_RESET", { label: "BOT_STATE_KEYS_RESET" });
       assert.equal(reset.version, 2);
@@ -376,10 +404,10 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("legacy on-chain P-256 containers are rejected with a clear event", async () => {
-    const node = await startStoreNode();
+    const node = await startSandbox();
     const stateDir = tmpState();
     const bot = await startBot({
-      endpoint: node.url,
+      endpoint: node.url, apiUrl: node.apiUrl,
       stateDir,
       extraEnv: {
         BOT_SUBSCRIBE: "0",
@@ -402,10 +430,10 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("removing an allowlisted peer drops its restored session", async () => {
-    const node = await startStoreNode();
+    const node = await startSandbox();
     const stateDir = tmpState();
     let bot = await startBot({
-      endpoint: node.url,
+      endpoint: node.url, apiUrl: node.apiUrl,
       stateDir,
       extraEnv: { BOT_SUBSCRIBE: "0", BOT_ALLOWED_PEERS: CLIENT_ACCOUNT },
     });
@@ -415,7 +443,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
       await bot.stop();
 
       bot = await startBot({
-        endpoint: node.url,
+        endpoint: node.url, apiUrl: node.apiUrl,
         stateDir,
         extraEnv: { BOT_SUBSCRIBE: "0", BOT_ALLOWED_PEERS: "ff".repeat(32) },
       });
@@ -431,7 +459,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("graceful shutdown preserves an in-flight direct-agent turn", async () => {
-    const node = await startStoreNode();
+    const node = await startSandbox();
     const stateDir = tmpState();
     const slowBrain = {
       BOT_SUBSCRIBE: "0",
@@ -440,7 +468,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
       BOT_AI_ARGS: JSON.stringify(["-c", "sleep 3; printf '{\"type\":\"result\",\"result\":\"graceful-recovered\"}\\n'"]),
       BOT_THINKING_TEXT: "",
     };
-    let bot = await startBot({ endpoint: node.url, stateDir, extraEnv: slowBrain });
+    let bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: slowBrain });
     try {
       const opener = await runClient(node.url, [], ["graceful opener", "warmup"]);
       assert.equal(opener.code, 0, opener.out);
@@ -456,7 +484,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
       const state = JSON.parse(fs.readFileSync(path.join(stateDir, "session-state.json"), "utf8"));
       assert.equal(state.owed?.some((owed) => owed.t === "graceful question"), true, "graceful shutdown lost owed work");
 
-      bot = await startBot({ endpoint: node.url, stateDir, extraEnv: slowBrain });
+      bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: slowBrain });
       const restored = await bot.waitFor((event) => event.event === "BOT_STATE_RESTORED", { label: "BOT_STATE_RESTORED" });
       assert.equal(restored.owed >= 1, true, `expected owed >= 1, got ${restored.owed}`);
       await bot.waitFor((event) => event.event === "BOT_SENT_TEXT", { label: "recovered direct reply", timeoutMs: 20_000 });
@@ -468,13 +496,13 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("bridge surface: /inbound shape, /media, reply/edit/react, events", async () => {
-    const node = await startStoreNode();
+    const node = await startSandbox();
     const hop = await startMockHopNode();
     const stateDir = tmpState();
     const photo = new Uint8Array(crypto.randomBytes(200_000));
     const file = hop.putFile(photo);
     const bot = await startBot({
-      endpoint: node.url,
+      endpoint: node.url, apiUrl: node.apiUrl,
       stateDir,
       // Thinking placeholder disabled: this test exercises the raw bridge
       // contract; the live-reply lifecycle has its own dedicated test.
@@ -565,13 +593,13 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("/file put saves a same-message attachment in the durable peer vault", async () => {
-    const node = await startStoreNode();
+    const node = await startSandbox();
     const hop = await startMockHopNode();
     const stateDir = tmpState();
     const bytes = new Uint8Array(Buffer.from("durable client attachment\n"));
     const attachment = hop.putFile(bytes);
     const bot = await startBot({
-      endpoint: node.url,
+      endpoint: node.url, apiUrl: node.apiUrl,
       stateDir,
       extraEnv: { BOT_SUBSCRIBE: "0", BOT_HOP_ALLOW_INSECURE: "1" },
     });
@@ -602,11 +630,11 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("bridge /files uploads, lists, retrieves, and sends a vault file", async () => {
-    const node = await startStoreNode();
+    const node = await startSandbox();
     const hop = await startMockHopNode();
     const stateDir = tmpState();
     const bot = await startBot({
-      endpoint: node.url,
+      endpoint: node.url, apiUrl: node.apiUrl,
       stateDir,
       extraEnv: {
         BOT_SUBSCRIBE: "0",
@@ -685,10 +713,10 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("bridge leases renew long work and reject stale acknowledgements", async () => {
-    const node = await startStoreNode();
+    const node = await startSandbox();
     const stateDir = tmpState();
     const bot = await startBot({
-      endpoint: node.url,
+      endpoint: node.url, apiUrl: node.apiUrl,
       stateDir,
       extraEnv: { BOT_SUBSCRIBE: "0", BOT_BRAIN: "bridge", BOT_THINKING_TEXT: "", BOT_BRIDGE_LEASE_MS: "1000" },
     });
@@ -764,9 +792,9 @@ describe("transport e2e", { concurrency: 8 }, () => {
   };
 
   test("live reply: placeholder becomes progress frames, then a status line; the answer is a new message", async () => {
-    const node = await startStoreNode();
+    const node = await startSandbox();
     const stateDir = tmpState();
-    const bot = await startBot({ endpoint: node.url, stateDir, extraEnv: liveBrainEnv });
+    const bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: liveBrainEnv });
     try {
       // Two texts: the follow-up rides the device channel and earns the client
       // its exit-0 ACK; both turns are slow enough to get a placeholder.
@@ -799,9 +827,9 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("live reply: a peer that never ACKs gets a plain final message", async () => {
-    const node = await startStoreNode();
+    const node = await startSandbox();
     const stateDir = tmpState();
-    const bot = await startBot({ endpoint: node.url, stateDir, extraEnv: liveBrainEnv });
+    const bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: liveBrainEnv });
     try {
       // --settle-ms 0: the bot is silent for ~10s mid-window (brain + final-ACK
       // wait) before the plain fallback, so quiet-time early exit would cut it off.
@@ -818,10 +846,10 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("live reply: a bridge plain send retires the placeholder to a status line", async () => {
-    const node = await startStoreNode();
+    const node = await startSandbox();
     const stateDir = tmpState();
     const bot = await startBot({
-      endpoint: node.url,
+      endpoint: node.url, apiUrl: node.apiUrl,
       stateDir,
       extraEnv: {
         BOT_SUBSCRIBE: "0",
@@ -884,12 +912,12 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("live reply: an unanswered placeholder resolves to a timeout note", async () => {
-    const node = await startStoreNode();
+    const node = await startSandbox();
     const stateDir = tmpState();
     // Bridge brain with NO harness attached: the answer never comes; the
     // placeholder must finalize itself instead of ticking forever.
     const bot = await startBot({
-      endpoint: node.url,
+      endpoint: node.url, apiUrl: node.apiUrl,
       stateDir,
       extraEnv: {
         BOT_SUBSCRIBE: "0",
@@ -914,10 +942,10 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("engine: session token is captured from the stream and persisted per peer", async () => {
-    const node = await startStoreNode();
+    const node = await startSandbox();
     const stateDir = tmpState();
     const bot = await startBot({
-      endpoint: node.url,
+      endpoint: node.url, apiUrl: node.apiUrl,
       stateDir,
       extraEnv: {
         BOT_SUBSCRIBE: "0", BOT_BRAIN: "claude", BOT_AI_CMD: "sh", BOT_THINKING_TEXT: "",
@@ -942,10 +970,10 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("engine: /stop cancels a running turn and finalizes the placeholder", async () => {
-    const node = await startStoreNode();
+    const node = await startSandbox();
     const stateDir = tmpState();
     const bot = await startBot({
-      endpoint: node.url,
+      endpoint: node.url, apiUrl: node.apiUrl,
       stateDir,
       extraEnv: {
         BOT_SUBSCRIBE: "0", BOT_BRAIN: "claude", BOT_AI_CMD: "sh",
@@ -969,10 +997,10 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("engine: idle-silence backstop kills a wedged turn and apologizes", async () => {
-    const node = await startStoreNode();
+    const node = await startSandbox();
     const stateDir = tmpState();
     const bot = await startBot({
-      endpoint: node.url,
+      endpoint: node.url, apiUrl: node.apiUrl,
       stateDir,
       extraEnv: {
         BOT_SUBSCRIBE: "0", BOT_BRAIN: "claude", BOT_AI_CMD: "sh",
@@ -995,14 +1023,14 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("engine: a long answer is chunked into ordered parts, none lost", async () => {
-    const node = await startStoreNode();
+    const node = await startSandbox();
     const stateDir = tmpState();
     // Three ~300-byte paragraphs against a 400-byte chunk cap -> 3+ parts. The
     // paragraphs use only sh-quote-safe characters.
     const paras = ["alpha " + "a".repeat(300), "bravo " + "b".repeat(300), "charlie " + "c".repeat(300)];
     const resultLine = JSON.stringify({ type: "result", result: paras.join("\n\n") });
     const bot = await startBot({
-      endpoint: node.url,
+      endpoint: node.url, apiUrl: node.apiUrl,
       stateDir,
       extraEnv: {
         BOT_SUBSCRIBE: "0", BOT_BRAIN: "claude", BOT_AI_CMD: "sh",
@@ -1027,7 +1055,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("engine: a sent file is privately staged for the turn then cleaned up", async () => {
-    const node = await startStoreNode();
+    const node = await startSandbox();
     const hop = await startMockHopNode();
     const stateDir = tmpState();
     const bytes = new Uint8Array(Buffer.from("spec-content-123"));
@@ -1036,7 +1064,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
     // attachment's staged path. JSON.stringify keeps generated context
     // newlines valid in the mock result event.
     const bot = await startBot({
-      endpoint: node.url,
+      endpoint: node.url, apiUrl: node.apiUrl,
       stateDir,
       extraEnv: {
         BOT_SUBSCRIBE: "0", BOT_BRAIN: "claude", BOT_AI_CMD: process.execPath,
@@ -1069,12 +1097,12 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("engine: /project switches the turn cwd to the registered project", async () => {
-    const node = await startStoreNode();
+    const node = await startSandbox();
     const stateDir = tmpState();
     const projDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pca-proj-")));
     // The mock CLI answers with its own cwd, so the reply proves where it ran.
     const bot = await startBot({
-      endpoint: node.url,
+      endpoint: node.url, apiUrl: node.apiUrl,
       stateDir,
       extraEnv: {
         BOT_SUBSCRIBE: "0", BOT_BRAIN: "claude", BOT_AI_CMD: "sh",
@@ -1099,7 +1127,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("owed attachment survives kill -9 and re-processes after restart", async () => {
-    const node = await startStoreNode();
+    const node = await startSandbox();
     const hop = await startMockHopNode();
     const stateDir = tmpState();
     const photo = new Uint8Array(crypto.randomBytes(100_000));
@@ -1112,7 +1140,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
       BOT_THINKING_TEXT: "",
       BOT_HOP_ALLOW_INSECURE: "1",
     };
-    let bot = await startBot({ endpoint: node.url, stateDir, extraEnv: slowBrain });
+    let bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: slowBrain });
     try {
       const opener = await runClient(node.url, [], ["owed opener", "warmup"]);
       assert.equal(opener.code, 0, `client failed:\n${opener.out}`);
@@ -1131,7 +1159,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
       assert.equal(owed.a?.[0]?.i, bytesToHex(file.identifier), "journal lost the attachment identifier");
       assert.ok(owed.a?.[0]?.ct, "journal lost the claim ticket (restart couldn't re-download)");
 
-      bot = await startBot({ endpoint: node.url, stateDir, extraEnv: slowBrain });
+      bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: slowBrain });
       const restored = await bot.waitFor((e) => e.event === "BOT_STATE_RESTORED", { label: "BOT_STATE_RESTORED" });
       assert.equal(restored.owed >= 1, true, `expected owed >= 1, got ${restored.owed}`);
       await bot.waitFor((e) => e.event === "BOT_SENT_TEXT", { label: "owed reply sent", timeoutMs: 20_000 });
