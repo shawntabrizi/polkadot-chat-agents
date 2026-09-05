@@ -129,11 +129,23 @@ export class ApiError extends Error {
 }
 
 async function call<T>(method: string, route: string, body?: unknown): Promise<T> {
-  const res = await fetch(BASE + route, {
-    method,
-    headers: { 'content-type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let res: Response;
+  try {
+    res = await fetch(BASE + route, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    throw new ApiError(0, `Cannot reach the sandbox daemon at ${BASE}. Start it with "pcs up" (or point npm run dev at it with PCS_URL).`);
+  }
+  // A non-JSON answer means no daemon behind this path: the dev server's
+  // proxy error page, or another server on the port. WebKit's message for
+  // json() on such a body ("The string did not match the expected pattern")
+  // says nothing useful, so name the real cause.
+  if (!(res.headers.get('content-type') ?? '').includes('application/json')) {
+    throw new ApiError(res.status, `No sandbox daemon answered at ${BASE}${route} (${res.status} ${res.statusText || 'non-JSON reply'}). Start it with "pcs up".`);
+  }
   const data = (await res.json()) as T & { error?: string };
   if (!res.ok) throw new ApiError(res.status, data.error ?? `${method} ${route} failed (${res.status})`);
   return data;

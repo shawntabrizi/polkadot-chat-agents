@@ -2,17 +2,19 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { type Account, type Persona, type PersonaDetail, api } from './api';
 import { Chats } from './Chats';
+import { Conversation } from './Conversation';
 import { useConnection, useEvents } from './events';
 import { useLoader, useStored } from './hooks';
 import { Personas } from './Personas';
 import { Requests } from './Requests';
 import { Wire } from './Wire';
 
-type Tab = 'personas' | 'requests' | 'chats' | 'wire';
+type Tab = 'personas' | 'requests' | 'chats' | 'conversation' | 'wire';
 const TABS: { id: Tab; label: string }[] = [
   { id: 'personas', label: 'Personas' },
   { id: 'requests', label: 'Requests' },
   { id: 'chats', label: 'Chats' },
+  { id: 'conversation', label: 'Conversation' },
   { id: 'wire', label: 'Wire' },
 ];
 
@@ -128,6 +130,7 @@ export const App = () => {
           {tab === 'personas' ? <Personas session={session} personas={personas.data ?? []} onSelect={setActive} onAdded={personas.reload} /> : null}
           {tab === 'requests' ? session ? <Requests session={session} /> : <p className="empty">Add a persona first.</p> : null}
           {tab === 'chats' ? session ? <Chats session={session} /> : <p className="empty">Add a persona first.</p> : null}
+          {tab === 'conversation' ? session ? <Conversation session={session} /> : <p className="empty">Add a persona first.</p> : null}
           {tab === 'wire' ? <Wire session={session} /> : null}
         </div>
       </main>

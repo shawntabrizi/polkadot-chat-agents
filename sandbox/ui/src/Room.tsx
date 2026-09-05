@@ -2,8 +2,7 @@ import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from 
 
 import { labelOf, textOf } from '../../lib/markdown.mjs';
 
-import type { Session } from './App';
-import { type Attachment, type HexString, type Message, api, errorText } from './api';
+import { type Attachment, type HexString, type Message, type PersonaDetail, api, errorText } from './api';
 import { attachmentView } from './attachment-view';
 import { useEvents } from './events';
 import { formatTime } from './format';
@@ -12,14 +11,21 @@ import { MarkdownCell } from './MarkdownCell';
 import { statusOf } from './message-status';
 import { quoteOf } from './quote';
 
-type Props = { session: Session; peer: HexString; peerName: string };
+/**
+ * One persona's room with one peer: the messages as that persona sees them
+ * and a composer bound to one of its devices. `readOnly` shows the room
+ * without any way to act (a bot's side has no inbox, so the Conversation
+ * screen shows the peer's view of it). `active` gates marking incoming rows
+ * read: two panes of the same conversation must not both mark read, or the
+ * other side's unread count means nothing.
+ */
+type Props = { persona: PersonaDetail; device: number; peer: HexString; peerName: string; readOnly?: boolean; active?: boolean };
 type Composer = { mode: 'new' } | { mode: 'reply'; target: Message } | { mode: 'edit'; target: Message };
 
 const QUICK_REACTIONS = ['👍', '❤️', '😂'];
 const editable = (m: Message) => m.direction === 'outgoing' && (m.content.type === 'text' || m.content.type === 'reply');
 
-export const Room = ({ session, peer, peerName }: Props) => {
-  const { persona, device } = session;
+export const Room = ({ persona, device, peer, peerName, readOnly = false, active = true }: Props) => {
   const view = useLoader(() => api.room(persona.name, peer), [persona.name, peer]);
   useEvents(
     event => {
@@ -33,13 +39,13 @@ export const Room = ({ session, peer, peerName }: Props) => {
   const list = useRef<HTMLOListElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
 
-  // Everything that arrives while the room is open is read; the daemon then
-  // emits the rows' change, which this view picks up like any other.
+  // Everything that arrives while the room is open and active is read; the
+  // daemon then emits the rows' change, which this view picks up like any other.
   const messages = view.data?.messages ?? [];
   const unread = messages.filter(m => m.direction === 'incoming' && !m.read).length;
   useEffect(() => {
-    if (unread > 0) void api.markRead(persona.name, peer).catch(() => undefined);
-  }, [persona.name, peer, unread]);
+    if (active && unread > 0) void api.markRead(persona.name, peer).catch(() => undefined);
+  }, [persona.name, peer, unread, active]);
   useEffect(() => {
     list.current?.scrollTo({ top: list.current.scrollHeight });
   }, [messages.length]);
@@ -137,15 +143,8 @@ export const Room = ({ session, peer, peerName }: Props) => {
   };
 
   return (
-    <section className="panel room" data-testid="room">
-      <div className="row" style={{ marginBottom: 8 }}>
-        <h2 className="heading">{peerName}</h2>
-        {view.data?.contact && view.data.contact.devices.length === 0 ? <span className="caption error">No known device yet; messages cannot be sent.</span> : null}
-        <span className="spacer" style={{ flex: 1 }} />
-        <a className="caption" href={`./api/personas/${encodeURIComponent(persona.name)}/rooms/${peer}?format=html`} target="_blank" rel="noopener noreferrer">
-          as HTML
-        </a>
-      </div>
+    <div className="room" data-testid="room">
+      {view.data?.contact && view.data.contact.devices.length === 0 ? <p className="caption error">No known device yet; messages cannot be sent.</p> : null}
       {view.error ? <p className="error" role="alert">{view.error}</p> : null}
       <ol className="messages" ref={list} data-testid="messages">
         {messages.map(m => {
@@ -167,59 +166,65 @@ export const Room = ({ session, peer, peerName }: Props) => {
                   {m.reactions.length > 0 ? (
                     <span className="reactions">
                       {m.reactions.map(r => (
-                        <span key={`${r.emoji}:${r.by}`} className="pill" title={r.by === 'me' ? 'you' : peerName} onClick={() => void react(m, r.emoji)}>
+                        <span key={`${r.emoji}:${r.by}`} className="pill" title={r.by === 'me' ? 'you' : peerName} onClick={readOnly ? undefined : () => void react(m, r.emoji)}>
                           {r.emoji}
                         </span>
                       ))}
                     </span>
                   ) : null}
                   <span className="spacer" style={{ flex: 1 }} />
-                  <span className="actions">
-                    {QUICK_REACTIONS.map(emoji => (
-                      <button key={emoji} type="button" className="btn ghost small" title="React" onClick={() => void react(m, emoji)}>
-                        {emoji}
+                  {readOnly ? null : (
+                    <span className="actions">
+                      {QUICK_REACTIONS.map(emoji => (
+                        <button key={emoji} type="button" className="btn ghost small" title="React" onClick={() => void react(m, emoji)}>
+                          {emoji}
+                        </button>
+                      ))}
+                      <button type="button" className="btn ghost small" onClick={() => startReply(m)}>
+                        Reply
                       </button>
-                    ))}
-                    <button type="button" className="btn ghost small" onClick={() => startReply(m)}>
-                      Reply
-                    </button>
-                    {editable(m) ? (
-                      <button type="button" className="btn ghost small" onClick={() => startEdit(m)}>
-                        Edit
-                      </button>
-                    ) : null}
-                  </span>
+                      {editable(m) ? (
+                        <button type="button" className="btn ghost small" onClick={() => startEdit(m)}>
+                          Edit
+                        </button>
+                      ) : null}
+                    </span>
+                  )}
                 </div>
               )}
             </li>
           );
         })}
       </ol>
-      {error ? <p className="error" role="alert">{error}</p> : null}
-      {composer.mode !== 'new' ? (
-        <div className="composer-mode caption">
-          <span>{composer.mode === 'reply' ? 'Replying to' : 'Editing'}:</span>
-          <span className="quote" style={{ flex: 1 }}>{quoteOf(composer.target)}</span>
-          <button type="button" className="btn ghost small" onClick={cancel}>
-            Cancel
-          </button>
-        </div>
-      ) : null}
-      <form className="composer" onSubmit={event => void submit(event)}>
-        <textarea
-          ref={input}
-          className="textarea"
-          value={draft}
-          rows={2}
-          placeholder={`Message as ${persona.name} from device ${device} — Enter sends, Shift+Enter for a new line`}
-          aria-label="Message"
-          onChange={e => setDraft(e.target.value)}
-          onKeyDown={onKeyDown}
-        />
-        <button className="btn primary" type="submit" disabled={!draft.trim()}>
-          {composer.mode === 'edit' ? 'Save' : 'Send'}
-        </button>
-      </form>
-    </section>
+      {readOnly ? null : (
+        <>
+          {error ? <p className="error" role="alert">{error}</p> : null}
+          {composer.mode !== 'new' ? (
+            <div className="composer-mode caption">
+              <span>{composer.mode === 'reply' ? 'Replying to' : 'Editing'}:</span>
+              <span className="quote" style={{ flex: 1 }}>{quoteOf(composer.target)}</span>
+              <button type="button" className="btn ghost small" onClick={cancel}>
+                Cancel
+              </button>
+            </div>
+          ) : null}
+          <form className="composer" onSubmit={event => void submit(event)}>
+            <textarea
+              ref={input}
+              className="textarea"
+              value={draft}
+              rows={2}
+              placeholder={`Message as ${persona.name} from device ${device} — Enter sends, Shift+Enter for a new line`}
+              aria-label="Message"
+              onChange={e => setDraft(e.target.value)}
+              onKeyDown={onKeyDown}
+            />
+            <button className="btn primary" type="submit" disabled={!draft.trim()}>
+              {composer.mode === 'edit' ? 'Save' : 'Send'}
+            </button>
+          </form>
+        </>
+      )}
+    </div>
   );
 };
