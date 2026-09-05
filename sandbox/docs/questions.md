@@ -296,3 +296,70 @@ input (`<script>`, a `javascript:` link, raw `<a>`): script gone, the link
 rendered as literal text, raw HTML escaped, `https://` linkified with
 `rel="noopener noreferrer"`. The Room screenshot shows the echo bot's table
 and fenced code rendered on both sides with per-device ACKs.
+
+## S5
+
+1. **Who signs a persona's uploads.** base-spec.md ("hop_submit") says peer A
+   MUST sign submissions with its statement keypair `SP(A)` — for a
+   multi-device user, the sending device's statement account. bot-core signs
+   with a derived `//allowance//bulletin//chat` account, and the task asked
+   for "the persona's own allowance account". The persona mints one
+   sr25519 Bulletin key per persona (`bulletinAccount`, registered with the
+   identity like the bot's), not one per device. Should uploads be signed
+   per device (SP of the sending device, as the spec reads), which would
+   make the Bulletin allowance a per-device grant in the directory too?
+
+2. **AES-GCM in the spec, ChaCha20-Poly1305 everywhere.** base-spec.md
+   ("Encryption") says pool entries are AES-256-GCM. Every deployed client
+   uses ChaCha20-Poly1305 (`nonce ‖ ciphertext ‖ tag`): the mobile app's
+   HandoffService (bot-core's `hop-client.mjs` header), Polkadot Desktop's
+   `@novasamatech/handoff-service` (`crypto/encryption.ts`), and now the
+   sandbox. The spec text looks stale; is a spec fix in flight, or is there
+   a client somewhere that really uses AES-GCM?
+
+3. **Ack-before-chunks and the retry that cannot succeed.** The spec's
+   download flow acks the metadata entry before the chunks; a chunk that then
+   fails (corrupt bytes, a lost socket past the single retry) leaves the root
+   entry removed, so no later retry can succeed without RFC-0001's on-chain
+   fallback. `test/hop.test.mjs` pins that consequence. bot-core does the
+   same. Should a client defer the metadata ack until the last chunk is
+   persisted (the spec's "ack MUST follow durable persistence" reads as
+   allowing it), or is the fallback the intended answer?
+
+4. **The desktop's `hop_submit` is unsigned.** The handoff-service checkout
+   (`rpc/client.ts`) sends `hop_submit` as `[data, recipients, "0x"]` — no
+   signature, no signer, no timestamp — and its download never acks
+   ("claim already evicts the entry server-side"). That is an older dialect
+   than the spec and than bot-core's. The sandbox node implements the spec
+   (signed, five params, ack removes); a desktop build on that SDK could not
+   upload to it. Is the desktop already on the signed dialect in a newer SDK,
+   or should the node accept the unsigned form too (which would mean no
+   Bulletin allowance check for those uploads)?
+
+5. **RateLimited is retried once, like a cut socket.** bot-core retried only
+   transport losses; the spec's error table says PoolFull (1002) and
+   RateLimited (1020) mean "retry later". The fix gives them the same single
+   reconnect-and-resume retry, with no backoff. Should there be a delay
+   ("retry after the indicated delay") — and does the real node put that
+   delay in the error data, so a client can read it?
+
+6. **A bridge slot can over-count on the opener path.** The duplicate-answer
+   race fixed in bot-core (a receive path journals a message, awaits the
+   critical persist, and a settling turn pumps the entry meanwhile) had a
+   sibling on the opener path: the existing `owedReplies.has &&
+   !queuedOwed.has` guard stops the second brain run there, but when the
+   pump got to the entry first both sides reserved bridge admission and one
+   reservation is never released. Not reproduced, so not changed. Worth a
+   test with the bridge brain, or is the reservation count self-healing
+   somewhere I did not read?
+
+7. **`trailing slash` on the stamped node URL.** bot-core stamps
+   `new URL(BOT_HOP_UPLOAD_NODE).toString()` into the attachment, so
+   `ws://127.0.0.1:5000` becomes `ws://127.0.0.1:5000/`. Harmless for the
+   allowlist (a host match) and for clients (a URL). The scenario normalizes
+   before comparing. Fine as is, or stamp the operator's string verbatim?
+
+S5 self-check: sandbox 89/89 (15 scenarios), sandbox/ui 16/16, bot-core
+413 pass / 5 skipped (the uid-gated `workspaces.test.mjs` cases on this
+machine) on the tree before D; the D tree's numbers are in acceptance.md.
+No bot, daemon, node or dev server left behind.

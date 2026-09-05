@@ -13,6 +13,10 @@ describe('attachmentView', () => {
   it('shows a sent image the same way for the sender', () => {
     expect(attachmentView({ ...base, status: 'sent', mediaId: 'ab' }, 'alice', 1).kind).toBe('image');
   });
+  it('shows a held image inline by MIME even when the sender declared it a general file (bot-core returns vault files that way)', () => {
+    const v = attachmentView({ ...base, kind: 'general', width: undefined, height: undefined, status: 'claimed', claimedBy: 1, mediaId: 'ab' }, 'bob', 1);
+    expect(v.kind).toBe('image');
+  });
   it('offers a non-image file as a download link', () => {
     const v = attachmentView({ ...base, kind: 'general', mimeType: 'text/plain', width: undefined, height: undefined, status: 'claimed', claimedBy: 2, mediaId: 'ab' }, 'bob', 2);
     expect(v).toEqual({ kind: 'file', href: './api/personas/bob/media/ab', caption: 'general · text/plain · 2 KB' });

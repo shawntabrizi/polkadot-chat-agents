@@ -20,7 +20,9 @@ export const captionOf = (a: Attachment): string => `${a.kind} · ${a.mimeType} 
 export function attachmentView(a: Attachment, persona: string, device: number): AttachmentView {
   const caption = captionOf(a);
   const held = a.mediaId && (a.status === 'sent' || (a.status === 'claimed' && a.claimedBy === device));
-  if (held && a.kind === 'image') return { kind: 'image', src: `./api/personas/${encodeURIComponent(persona)}/media/${a.mediaId}`, caption };
+  // Inline by MIME, not by the sender's FileMeta kind: bot-core returns a
+  // vault file as `general` whatever its type, and the bytes are ours.
+  if (held && a.mimeType.startsWith('image/')) return { kind: 'image', src: `./api/personas/${encodeURIComponent(persona)}/media/${a.mediaId}`, caption };
   if (held) return { kind: 'file', href: `./api/personas/${encodeURIComponent(persona)}/media/${a.mediaId}`, caption };
   if (a.status === 'claimed') return { kind: 'placeholder', caption, note: `claimed by device ${a.claimedBy}` };
   if (a.status === 'claiming') return { kind: 'claiming', caption, note: `claiming on device ${a.claimedBy}${a.claimedBy === device ? ' (this one)' : ''}…` };

@@ -51,7 +51,8 @@ export function createRoomRenderer() {
   const attachment = (device) => (a, i) => {
     const what = `${escape(a.kind)} ${escape(a.mimeType)} ${a.fileSize} bytes`;
     const held = a.mediaId && (a.status === "sent" || (a.status === "claimed" && (device == null || a.claimedBy === device)));
-    if (held && a.kind === "image") return `<figure class="attachment" data-index="${i}" data-status="${escape(a.status)}"><img src="../media/${escape(a.mediaId)}" alt="${what}"${a.width ? ` width="${a.width}" height="${a.height}"` : ""}><figcaption>${what}</figcaption></figure>`;
+    // Inline by MIME, not by the sender's FileMeta kind (bot-core returns a vault file as `general` whatever its type).
+    if (held && String(a.mimeType).startsWith("image/")) return `<figure class="attachment" data-index="${i}" data-status="${escape(a.status)}"><img src="../media/${escape(a.mediaId)}" alt="${what}"${a.width ? ` width="${a.width}" height="${a.height}"` : ""}><figcaption>${what}</figcaption></figure>`;
     if (held) return `<p class="attachment" data-index="${i}" data-status="${escape(a.status)}"><a href="../media/${escape(a.mediaId)}" download>${what}</a></p>`;
     const state = a.status === "claimed" ? `claimed by device ${a.claimedBy}` : a.status === "claiming" ? `claiming on device ${a.claimedBy}` : a.status === "failed" ? `failed on device ${a.claimedBy}: ${a.error}` : "not claimed";
     return `<p class="attachment placeholder" data-index="${i}" data-status="${escape(a.status)}">${what} — ${escape(state)}</p>`;
