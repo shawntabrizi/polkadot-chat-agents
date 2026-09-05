@@ -15,6 +15,7 @@
     "@novasamatech/host-chat": "0.10.2",
     "@novasamatech/sdk-statement": "0.6.0",
     "@novasamatech/statement-store": "0.10.2",
+    "@polkadot-labs/hdkd-helpers": "0.0.33",
     "@scure/sr25519": "2.4.0",
     "dompurify": "3.4.14",
     "jsdom": "29.1.1",

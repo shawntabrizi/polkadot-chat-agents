@@ -95,7 +95,9 @@ function proofVerifies(decoded) {
 
 // A stored statement: { hex, topics: [bareHex], signer: bareHex|null, channel: bareHex|null,
 //   expiry: bigint, receivedAt: ms, replacedCount }
-function decodeStored(hexWithPrefix) {
+// Exported for the paseo profile's wire view, which records what the
+// personas' clients saw on the real store in this same shape.
+export function decodeStored(hexWithPrefix) {
   const decoded = statementCodec.dec(hexWithPrefix);
   const proof = decoded.proof ?? null;
   const signer = proof == null ? null : bareHex(proof.value?.signer ?? proof.value?.who ?? null);

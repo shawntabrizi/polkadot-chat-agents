@@ -231,14 +231,18 @@ export function createPersonaState() {
 
 // ── The persona ───────────────────────────────────────────────────────────
 
-export function createPersona({ name, devices = 1, identity = mintIdentityKeys(), hopUrl = null, mediaDir = null }) {
+// `deviceKeys` and `bulletin` are handed in on a real network, where they
+// are persisted (lib/registration.mjs): there the one device IS the identity
+// account, as for a bot. On the mock network everything is minted here.
+export function createPersona({ name, devices = 1, identity = mintIdentityKeys(), deviceKeys = null, bulletin = mintBulletinSigner(), hopUrl = null, mediaDir = null }) {
   const state = createPersonaState();
-  const deviceList = Array.from({ length: devices }, (_, i) => createDevice({ index: i + 1 }));
+  const deviceList = deviceKeys
+    ? deviceKeys.map((keys, i) => createDevice({ index: i + 1, keys }))
+    : Array.from({ length: devices }, (_, i) => createDevice({ index: i + 1 }));
   const account = bytesToHex(identity.identityAccountId);
   // The Bulletin allowance account that signs this persona's uploads (the
   // phone's is its statement keypair; bot-core's a derived one). Registered
   // with the identity so the HOP node accepts its submits.
-  const bulletin = mintBulletinSigner();
   const media = mediaDir ? createMediaDir(mediaDir) : null;
   // Pool entries this persona uploaded or claimed: hash -> { role, peer, messageId }, for the HOP view.
   const hopEntries = new Map();
@@ -329,6 +333,10 @@ export function createPersona({ name, devices = 1, identity = mintIdentityKeys()
     state,
     /** The public half of the upload signer. */
     bulletinAccount: bulletin.account,
+    /** The network username (the name itself on the mock network; `stem.NN` once a real backend assigned it). */
+    username: name,
+    /** Where a real-network registration stands (lib/registration.mjs `registrationView`); null on the mock network. */
+    registration: null,
     /**
      * Publish the identity, grant every device its statement allowance
      * (mds.md: devices need their own) and the upload signer its Bulletin
@@ -384,7 +392,7 @@ export function createPersona({ name, devices = 1, identity = mintIdentityKeys()
     edit: (peer, messageId, text, { device: index = 1 } = {}) => device(index).engine.edit(normHex(peer), messageId, text),
     markRead: (peer) => state.messages.markRoomRead(peer),
     /** Public half only. */
-    toJSON: () => ({ name, account, chatPublicKey: bytesToHex(identity.identityChatPublicKey), bulletinAccount: bulletin.account, devices: deviceList.map((d) => d.toJSON()) }),
+    toJSON: () => ({ name, account, username: persona.username, chatPublicKey: bytesToHex(identity.identityChatPublicKey), bulletinAccount: bulletin.account, registration: persona.registration, devices: deviceList.map((d) => d.toJSON()) }),
   };
 
   function startDevice(d) {

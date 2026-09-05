@@ -137,7 +137,12 @@ test("pcs: user add/list, request, requests, accept, send, inbox --device, react
     assert.equal(attached.username, "echobot.42");
     assert.equal(daemon.directory.usernameOwner("echobot.42"), `0x${"77".repeat(32)}`);
     assert.equal(daemon.hop.allowances.has(`0x${"79".repeat(32)}`), true, "the bot's upload signer got the Bulletin allowance");
+    assert.deepEqual((await pcs("bot", "list")).map((b) => [b.name, b.username, b.onChain]), [["echobot", "echobot.42", true]]);
     assert.equal((await pcsFails("bot", "attach", "nosuchbot")).code, 1);
+    // The bot is addressable by its pca name and by its username; the directory's names answer a search.
+    assert.deepEqual((await pcs("user", "find", "echo")).map((h) => [h.username, h.onChain]), [["echobot.42", true]]);
+    const toBot = await pcs("request", "alice", "echobot", "--welcome", "hi bot");
+    assert.equal(toBot.toName, "echobot.42");
   } finally {
     fs.rmSync(botsDir, { recursive: true, force: true });
   }

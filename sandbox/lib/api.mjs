@@ -57,7 +57,15 @@ const intParam = (value, fallback) => {
   return n;
 };
 
-export function createApi({ node, hop, directory, personas, events, addPersona, resolvePeer, storeUrl, setClock, restartNode, resetNode, staticDir = null }) {
+const conflict = (m) => new ApiError(409, m);
+
+export function createApi({ node, hop, directory, personas, bots = new Map(), events, addPersona, attachBot, resolvePeer, storeUrl, hopUrl, setClock, networkInfo, restartNode, resetNode, staticDir = null }) {
+  // Faults, the clock, node restarts and the pool view exist in the mock
+  // network only; on a real network the sandbox holds no node to break.
+  const mockOnly = (what) => {
+    const info = networkInfo();
+    if (!info.mock) throw conflict(`${what} is available on the mock network only; this sandbox runs on ${info.name} (${info.network})`);
+  };
   // The room page shares the UI's markdown pipeline (lib/markdown.mjs); one
   // jsdom window for DOMPurify. Loaded on first use: jsdom is heavy, and the
   // CLI imports this module on every `pcs` call.
@@ -71,20 +79,26 @@ export function createApi({ node, hop, directory, personas, events, addPersona, 
     if (!found) throw notFound(`no persona ${name}`);
     return found;
   };
-  const peerOf = (value) => {
-    const account = resolvePeer(value);
+  const peerOf = async (value) => {
+    const account = await resolvePeer(value);
     if (!account) throw notFound(`unknown peer ${value}`);
     return account;
   };
-  const nameOf = (account) => directory.consumer(account)?.username ?? null;
+  // The directory reads are async on a real network (chain queries); on the
+  // mock they resolve at once. An attached bot's pca name labels its account.
+  const nameOf = async (account) => {
+    const bot = [...bots.values()].find((b) => b.account === normHex(account));
+    if (bot) return bot.username ?? bot.name;
+    return (await directory.consumer(account))?.username ?? null;
+  };
   const wireDeps = () => ({ node, personas: [...personas.values()], directory });
   // A fault's `from`: a persona name (its identity and every device account),
   // a directory username (a bot's account) or an account hex.
-  const signersOf = (value) => {
+  const signersOf = async (value) => {
     if (value == null) return null;
     const p = personas.get(value);
     if (p) return [p.account, ...p.devices.map((d) => d.account)];
-    const account = resolvePeer(value);
+    const account = await resolvePeer(value);
     if (!account) throw notFound(`unknown signer ${value}`);
     return [account];
   };
@@ -114,39 +128,48 @@ export function createApi({ node, hop, directory, personas, events, addPersona, 
   };
   // What a persona knows about an entry it uploaded or claimed: its role
   // (metadata or chunk i/n) and the conversation it belongs to.
-  const hopRole = (hash) => {
+  const hopRole = async (hash) => {
     for (const p of personas.values()) {
       const known = p.hopEntry(hash);
-      if (known) return { role: known.role, owner: `${p.name} ⇄ ${nameOf(known.peer) ?? known.peer}`, messageId: known.messageId };
+      if (known) return { role: known.role, owner: `${p.name} ⇄ ${(await nameOf(known.peer)) ?? known.peer}`, messageId: known.messageId };
     }
     return {};
   };
-  const hopView = () => ({
+  const hopView = async () => ({
     url: hop.url,
     limits: hop.limits,
     status: hop.status(),
-    entries: hop.list().map((e) => ({ ...e, signerLabel: hopSignerLabel(e.signer), ...hopRole(e.hash) })),
+    entries: await Promise.all(hop.list().map(async (e) => ({ ...e, signerLabel: hopSignerLabel(e.signer), ...(await hopRole(e.hash)) }))),
     faults: hop.faults.list(),
   });
-  const roomView = (p, peer, { device = null, unread = false } = {}) => ({
+  const roomView = async (p, peer, { device = null, unread = false } = {}) => ({
     persona: p.name,
     device,
     peer,
-    peerName: nameOf(peer),
+    peerName: await nameOf(peer),
     room: p.state.messages.rooms().find((r) => r.peer === peer) ?? null,
     contact: p.state.contacts.get(peer) ?? null,
     messages: p.state.messages.list(peer, { device, unread }),
   });
+  const botEntry = (body) => {
+    if (!body.name || !body.account || !body.identifierKey) throw badRequest("name, account and identifierKey required");
+    if (!/^(0x)?[0-9a-f]{64}$/i.test(body.account)) throw badRequest("account must be 32 bytes of hex");
+    return { name: String(body.name), account: body.account, username: body.username ?? String(body.name), identifierKey: body.identifierKey, bulletinAccount: body.bulletinAccount ?? null, networkProfile: body.networkProfile ?? null };
+  };
 
   // [method, pattern, handler(params, query, body)] — patterns use :name segments.
   const routes = [
+    // The network: which one, its genesis on a real chain, and the node's
+    // counters (the seen-store's on a real network: what the personas saw).
     ["GET", "/node", () => ({
-      url: storeUrl, hopUrl: hop.url, statements: node.statements.length, allowances: node.allowances.size, limits: node.limits, clock: node.clock, faults: node.faults.list(),
+      ...networkInfo(),
+      url: storeUrl, hopUrl, statements: node.statements.length, allowances: node.allowances?.size ?? null, limits: node.limits ?? {}, clock: node.clock ?? null, faults: node.faults?.list() ?? [],
     })],
     // The HOP pool: every entry it held (bytes never leave the node), who
     // signed it, whether it was claimed and acked, and the faults set on it.
-    ["GET", "/hop", () => hopView()],
+    ["GET", "/hop", () => { mockOnly("the HOP pool view"); return hopView(); }],
     ["POST", "/hop/faults", (_p, _q, body) => {
+      mockOnly("a HOP fault");
       const kinds = { refuse: "refuse", cut: "cut", delay: "delay", drop: "drop", corrupt: "corrupt", bloat: "bloat" };
       const kind = kinds[body.kind];
       if (!kind) throw badRequest(`kind must be one of ${Object.keys(kinds).join(", ")}`);
@@ -163,26 +186,28 @@ export function createApi({ node, hop, directory, personas, events, addPersona, 
       return hopFaultOf(created.id);
     }],
     ["DELETE", "/hop/faults/:id", (p) => {
+      mockOnly("a HOP fault");
       if (p.id === "all") return { cleared: hop.faults.clear() };
       hopFaultOf(p.id);
       return { cleared: hop.faults.clear(Number(p.id)) };
     }],
-    ["GET", "/wire", (_p, q) => ({
+    ["GET", "/wire", async (_p, q) => ({
       statements: inspectWire(wireDeps(), {
-        topic: hexOf(q.get("topic"), "topic"), signer: q.get("signer") ? signersOf(q.get("signer"))[0] : null,
+        topic: hexOf(q.get("topic"), "topic"), signer: q.get("signer") ? (await signersOf(q.get("signer")))[0] : null,
         channel: hexOf(q.get("channel"), "channel"), peer: q.get("peer"), raw: q.get("raw") === "1",
       }),
     })],
-    ["GET", "/wire/history", (_p, q) => {
+    ["GET", "/wire/history", async (_p, q) => {
       if (!q.get("channel")) throw badRequest("channel required");
-      return { history: inspectHistory(wireDeps(), { channel: hexOf(q.get("channel"), "channel"), signer: q.get("signer") ? signersOf(q.get("signer"))[0] : null, raw: q.get("raw") === "1" }) };
+      return { history: inspectHistory(wireDeps(), { channel: hexOf(q.get("channel"), "channel"), signer: q.get("signer") ? (await signersOf(q.get("signer")))[0] : null, raw: q.get("raw") === "1" }) };
     }],
 
     // Faults live in the store node; names are resolved here so a scenario
     // can say "drop echobot's next statement on this channel".
-    ["GET", "/faults", () => node.faults.list()],
-    ["POST", "/faults", (_p, _q, body) => {
-      const match = { signer: signersOf(body.from ?? body.signer), channel: hexOf(body.channel, "channel"), topic: hexOf(body.topic, "topic") };
+    ["GET", "/faults", () => node.faults?.list() ?? []],
+    ["POST", "/faults", async (_p, _q, body) => {
+      mockOnly("a fault");
+      const match = { signer: await signersOf(body.from ?? body.signer), channel: hexOf(body.channel, "channel"), topic: hexOf(body.topic, "topic") };
       const count = body.count === undefined ? undefined : body.count === null ? null : intParam(body.count, null);
       let created;
       try {
@@ -198,61 +223,88 @@ export function createApi({ node, hop, directory, personas, events, addPersona, 
       return faultOf(created.id);
     }],
     ["DELETE", "/faults/:id", (p) => {
+      mockOnly("a fault");
       if (p.id === "all") return { cleared: node.faults.clear() };
       faultOf(p.id);
       return { cleared: node.faults.clear(Number(p.id)) };
     }],
     ["POST", "/clock", (_p, _q, body) => {
+      mockOnly("the clock");
       const offset = body.reset ? 0 : Number(body.offsetMs);
       if (!Number.isFinite(offset)) throw badRequest("offsetMs (milliseconds) or reset required");
       return setClock(offset);
     }],
-    ["POST", "/node/restart", async () => { await restartNode(); return { ok: true, statements: node.statements.length }; }],
-    ["POST", "/node/reset", async () => { await resetNode(); return { ok: true, statements: node.statements.length }; }],
+    ["POST", "/node/restart", async () => { mockOnly("a node restart"); await restartNode(); return { ok: true, statements: node.statements.length }; }],
+    ["POST", "/node/reset", async () => { mockOnly("a node reset"); await resetNode(); return { ok: true, statements: node.statements.length }; }],
 
     ["GET", "/accounts", () => directory.list()],
     ["POST", "/accounts", (_p, _q, body) => {
+      mockOnly("granting an allowance");
       if (!body.account) throw badRequest("account required");
       return directory.allow(body.account);
     }],
     // `register_lite_person` for an account the sandbox holds no keys for (a
     // bot-core bot): username, identifier-key container, statement allowance,
-    // and the Bulletin authorization for its upload signer when named.
+    // and the Bulletin authorization for its upload signer when named. On a
+    // real network registration goes through the identity backend
+    // (`pcs user add`, `pca create --network paseo`); see /bots/attach.
     ["POST", "/accounts/register", (_p, _q, body) => {
+      mockOnly("registering an account here (use pcs user add, or pca create --network paseo, then pcs bot attach)");
       if (!body.account || !body.username || !body.identifierKey) throw badRequest("account, username and identifierKey required");
       try { return directory.register(body.account, { username: body.username, identifierKey: body.identifierKey, bulletinAccount: body.bulletinAccount ?? null }); }
       catch (e) { throw new ApiError(409, e.message); }
     }],
     // `pca storage grant`'s stand-in: a Bulletin authorization for one account.
     ["POST", "/accounts/:account/bulletin", (p) => {
+      mockOnly("a Bulletin allowance grant (use pca storage <bot> grant)");
       try { return directory.grantBulletin(p.account); }
       catch (e) { throw badRequest(e.message); }
     }],
-    ["GET", "/consumers/:account", (p) => directory.consumer(p.account) ?? (() => { throw notFound(`no consumer ${p.account}`); })()],
-    ["GET", "/usernames/:name", (p) => {
-      const account = directory.usernameOwner(p.name);
+    ["GET", "/consumers/:account", async (p) => (await directory.consumer(p.account)) ?? (() => { throw notFound(`no consumer ${p.account}`); })()],
+    // A username search: the mock directory's names, or the identity
+    // backend's records each checked against the chain (`onChain`).
+    ["GET", "/usernames", async (_p, q) => {
+      const prefix = q.get("prefix") ?? "";
+      if (directory.search) return directory.search(prefix);
+      return directory.list().filter((e) => e.username?.startsWith(prefix)).map((e) => ({ username: e.username, account: e.account, status: "ASSIGNED", onChain: true }));
+    }],
+    ["GET", "/usernames/:name", async (p) => {
+      const account = await directory.usernameOwner(p.name);
       if (!account) throw notFound(`no username ${p.name}`);
-      return { username: p.name, ...directory.consumer(account) };
+      return { username: p.name, ...(await directory.consumer(account)) };
+    }],
+    // Attached pca bots: their public half, and on a real network whether
+    // the chain still holds them (a reset forgets every registration).
+    ["GET", "/bots", () => [...bots.values()]],
+    ["POST", "/bots/attach", async (_p, _q, body) => {
+      try { return await attachBot(botEntry(body)); }
+      catch (e) { if (e instanceof ApiError) throw e; throw conflict(e.message); }
     }],
 
     ["GET", "/personas", () => [...personas.values()].map((p) => p.toJSON())],
+    // On a real network an existing name resumes its registration (a
+    // pending attestation, a claim after a chain reset) instead of minting
+    // again; the daemon refuses a name that is attested and current.
     ["POST", "/personas", async (_p, _q, body) => {
       if (!body.name) throw badRequest("name required");
-      if (personas.has(body.name)) throw new ApiError(409, `persona ${body.name} exists`);
-      try { return (await addPersona(body.name, intParam(body.devices, 1))).toJSON(); }
-      catch (e) { throw new ApiError(409, e.message); }
+      if (personas.has(body.name) && networkInfo().mock) throw conflict(`persona ${body.name} exists`);
+      const options = { username: body.username ?? null, wait: body.wait ?? null };
+      try { return (await addPersona(body.name, intParam(body.devices, 1), options)).toJSON(); }
+      catch (e) { throw conflict(e.message); }
     }],
     ["GET", "/personas/:name", (p) => {
       const found = persona(p.name);
       return { ...found.toJSON(), contacts: found.state.contacts.list(), rooms: found.state.messages.rooms(), requests: found.state.requests.list() };
     }],
     ["POST", "/personas/:name/devices", (p) => {
+      mockOnly("adding a device (a persona on a real network is single-device)");
       const found = persona(p.name);
       const device = found.addDevice();
       directory.allow(device.account);
       return device.toJSON();
     }],
     ["DELETE", "/personas/:name/devices/:index", async (p) => {
+      mockOnly("removing a device");
       const found = persona(p.name);
       try { return (await found.removeDevice(intParam(p.index, 1))).toJSON(); }
       catch (e) { throw new ApiError(409, e.message); }
@@ -260,9 +312,9 @@ export function createApi({ node, hop, directory, personas, events, addPersona, 
 
     ["POST", "/personas/:name/requests", async (p, _q, body) => {
       const from = persona(p.name);
-      const to = peerOf(body.to);
-      const identity = directory.identityOf(to);
-      if (!identity) throw badRequest(`${body.to} is not messageable (no identifier key)`);
+      const to = await peerOf(body.to);
+      const identity = await directory.identityOf(to);
+      if (!identity) throw badRequest(`${body.to} is not messageable (no identifier key on this chain)`);
       const { requestId, timestamp } = await from.request(
         { accountId: Uint8Array.from(Buffer.from(to.slice(2), "hex")), username: identity.username, chatPublicKey: identity.chatPublicKey },
         body.welcome ?? null,
@@ -286,19 +338,19 @@ export function createApi({ node, hop, directory, personas, events, addPersona, 
       return found.state.requests.get(p.id);
     }],
 
-    ["GET", "/personas/:name/rooms", (p) => {
+    ["GET", "/personas/:name/rooms", async (p) => {
       const found = persona(p.name);
-      return found.state.messages.rooms().map((r) => ({ ...r, peerName: nameOf(r.peer) }));
+      return Promise.all(found.state.messages.rooms().map(async (r) => ({ ...r, peerName: await nameOf(r.peer) })));
     }],
     // `?format=html`: the room as a page rendered through the UI's markdown
     // pipeline, so an agent can assert on rendering without a browser.
     ["GET", "/personas/:name/rooms/:peer", async (p, q) => {
-      const view = roomView(persona(p.name), peerOf(p.peer), { device: intParam(q.get("device"), null), unread: q.get("unread") === "1" });
+      const view = await roomView(persona(p.name), await peerOf(p.peer), { device: intParam(q.get("device"), null), unread: q.get("unread") === "1" });
       return q.get("format") === "html" ? new Html(await renderRoom(view)) : view;
     }],
-    ["POST", "/personas/:name/rooms/:peer/read", (p) => {
+    ["POST", "/personas/:name/rooms/:peer/read", async (p) => {
       const found = persona(p.name);
-      found.markRead(peerOf(p.peer));
+      found.markRead(await peerOf(p.peer));
       return { ok: true };
     }],
     // Bytes of an attachment this persona sent or claimed (its own media
@@ -311,7 +363,7 @@ export function createApi({ node, hop, directory, personas, events, addPersona, 
     }],
     ["POST", "/personas/:name/rooms/:peer/messages", async (p, _q, body) => {
       const found = persona(p.name);
-      const peer = peerOf(p.peer);
+      const peer = await peerOf(p.peer);
       const opts = { device: intParam(body.device, 1) };
       try {
         if (body.react) {
