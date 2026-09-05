@@ -6,6 +6,7 @@ import { useConnection, useEvents } from './events';
 import { useLoader, useStored } from './hooks';
 import { Personas } from './Personas';
 import { Requests } from './Requests';
+import { Wire } from './Wire';
 
 type Tab = 'personas' | 'requests' | 'chats' | 'wire';
 const TABS: { id: Tab; label: string }[] = [
@@ -127,7 +128,8 @@ export const App = () => {
           {tab === 'personas' ? <Personas session={session} personas={personas.data ?? []} onSelect={setActive} onAdded={personas.reload} /> : null}
           {tab === 'requests' ? session ? <Requests session={session} /> : <p className="empty">Add a persona first.</p> : null}
           {tab === 'chats' ? session ? <Chats session={session} /> : <p className="empty">Add a persona first.</p> : null}
-                  </div>
+          {tab === 'wire' ? <Wire session={session} /> : null}
+        </div>
       </main>
     </div>
   );
