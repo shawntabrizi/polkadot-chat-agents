@@ -4,9 +4,12 @@
 //
 // Routes follow PLAN.md's table: one table, one handler per row.
 
+import fs from "node:fs";
 import http from "node:http";
+import path from "node:path";
 
 import { normHex } from "./bytes.mjs";
+import { createRoomRenderer } from "./room-html.mjs";
 import { inspectHistory, inspectWire, resolveHex } from "./wire.mjs";
 
 const replacer = (_k, v) => (v instanceof Uint8Array ? normHex(v) : typeof v === "bigint" ? v.toString() : v);
@@ -15,6 +18,21 @@ export const toJson = (value) => JSON.stringify(value, replacer);
 class ApiError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
+/** A handler result that is a page, not JSON. */
+class Html {
+  constructor(body) { this.body = body; }
+}
+
+// The built web UI (`sandbox/ui/dist`), served at `/` next to the API. Only
+// files that exist under the directory are served; the API's own paths win.
+const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon", ".json": "application/json", ".woff2": "font/woff2", ".map": "application/json" };
+const staticFile = (dir, pathname) => {
+  if (!dir) return null;
+  const file = path.resolve(dir, `.${pathname === "/" ? "/index.html" : pathname}`);
+  if (!file.startsWith(path.resolve(dir) + path.sep)) return null;
+  if (!fs.existsSync(file) || !fs.statSync(file).isFile()) return null;
+  return { file, type: MIME[path.extname(file)] ?? "application/octet-stream" };
+};
 const badRequest = (m) => new ApiError(400, m);
 const notFound = (m) => new ApiError(404, m);
 
@@ -36,7 +54,11 @@ const intParam = (value, fallback) => {
   return n;
 };
 
-export function createApi({ node, directory, personas, events, addPersona, resolvePeer, storeUrl, setClock, restartNode, resetNode }) {
+export function createApi({ node, directory, personas, events, addPersona, resolvePeer, storeUrl, setClock, restartNode, resetNode, staticDir = null }) {
+  // The room page shares the UI's markdown pipeline (lib/markdown.mjs); one
+  // jsdom window for DOMPurify, made on first use.
+  let roomRenderer = null;
+  const renderRoom = (view) => (roomRenderer ??= createRoomRenderer()).renderRoom(view);
   const persona = (name) => {
     const found = personas.get(name);
     if (!found) throw notFound(`no persona ${name}`);
@@ -201,7 +223,12 @@ export function createApi({ node, directory, personas, events, addPersona, resol
       const found = persona(p.name);
       return found.state.messages.rooms().map((r) => ({ ...r, peerName: nameOf(r.peer) }));
     }],
-    ["GET", "/personas/:name/rooms/:peer", (p, q) => roomView(persona(p.name), peerOf(p.peer), { device: intParam(q.get("device"), null), unread: q.get("unread") === "1" })],
+    // `?format=html`: the room as a page rendered through the UI's markdown
+    // pipeline, so an agent can assert on rendering without a browser.
+    ["GET", "/personas/:name/rooms/:peer", (p, q) => {
+      const view = roomView(persona(p.name), peerOf(p.peer), { device: intParam(q.get("device"), null), unread: q.get("unread") === "1" });
+      return q.get("format") === "html" ? new Html(renderRoom(view)) : view;
+    }],
     ["POST", "/personas/:name/rooms/:peer/read", (p) => {
       const found = persona(p.name);
       found.markRead(peerOf(p.peer));
@@ -258,19 +285,31 @@ export function createApi({ node, directory, personas, events, addPersona, resol
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
+    // The web UI calls every route under `/api` (its dev server proxies that
+    // prefix to the daemon); the CLI and the tests call the bare paths.
+    const pathname = url.pathname.startsWith("/api/") ? url.pathname.slice(4) : url.pathname;
     const send = (status, body) => {
+      if (body instanceof Html) {
+        res.writeHead(status, { "content-type": "text/html; charset=utf-8" });
+        return res.end(body.body);
+      }
       res.writeHead(status, { "content-type": "application/json" });
       res.end(toJson(body));
     };
     try {
-      if (req.method === "GET" && url.pathname === "/events") return serveEvents(req, res, url);
+      if (req.method === "GET" && pathname === "/events") return serveEvents(req, res, url);
       for (const route of routes) {
         if (route.method !== req.method) continue;
-        const match = url.pathname.match(route.regex);
+        const match = pathname.match(route.regex);
         if (!match) continue;
         const params = Object.fromEntries(route.keys.map((k, i) => [k, decodeURIComponent(match[i + 1])]));
         const body = req.method === "POST" || req.method === "DELETE" ? await readBody(req) : {};
         return send(200, await route.handler(params, url.searchParams, body));
+      }
+      const asset = req.method === "GET" && pathname === url.pathname ? staticFile(staticDir, pathname) : null;
+      if (asset) {
+        res.writeHead(200, { "content-type": asset.type });
+        return fs.createReadStream(asset.file).pipe(res);
       }
       return send(404, { error: `no route ${req.method} ${url.pathname}` });
     } catch (error) {

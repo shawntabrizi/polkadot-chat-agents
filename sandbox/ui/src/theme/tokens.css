@@ -1,0 +1,10 @@
+/* GENERATED from the design source by polkadot-design-tokens.
+   Do not edit by hand — the next palette re-cut overwrites this file. */
+
+/* Framework-agnostic entry point. Tailwind v4 projects import
+   index.css instead — it declares the semantic layer via @theme. */
+
+@import "./primitives.css";
+@import "./themes.css";
+@import "./semantics.css";
+@import "./base.css";

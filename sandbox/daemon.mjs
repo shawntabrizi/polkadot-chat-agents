@@ -9,6 +9,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { createLazyClient, createPapiStatementStoreAdapter } from "@novasamatech/statement-store";
 import { getWsProvider } from "polkadot-api/ws";
@@ -21,6 +22,7 @@ import { startStoreNode } from "./lib/store-node.mjs";
 
 export const DEFAULT_PORT = 7788;
 export const defaultDir = () => path.join(os.homedir(), ".pca", "sandbox", "default");
+const UI_DIST = path.join(path.dirname(fileURLToPath(import.meta.url)), "ui", "dist");
 const EVENT_BUFFER = 5000;
 
 /** Ordered event log with a bounded replay buffer, for SSE `since` catch-up. */
@@ -113,15 +115,18 @@ export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, hos
     return { ...node.clock };
   };
 
+  // The built web UI, when `npm run build` in sandbox/ui has produced it.
+  const staticDir = fs.existsSync(path.join(UI_DIST, "index.html")) ? UI_DIST : null;
   const api = createApi({
     node, directory, personas, events, addPersona, resolvePeer, storeUrl: node.url, setClock,
     restartNode: () => rewire(() => node.restart()),
     resetNode: () => rewire(() => node.reset()),
+    staticDir,
   });
   const apiPort = await api.listen(port, host);
   const url = `http://${host}:${apiPort}`;
   fs.writeFileSync(path.join(dir, "daemon.json"), JSON.stringify({ url, storeUrl: node.url, pid: process.pid, startedAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
-  log("SANDBOX_UP", { url, storeUrl: node.url, dir });
+  log("SANDBOX_UP", { url, storeUrl: node.url, dir, ui: staticDir != null });
 
   return {
     url,
