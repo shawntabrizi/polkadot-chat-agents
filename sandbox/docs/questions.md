@@ -277,3 +277,22 @@ changed only for the kind-18 decoder.
    the Vite dev server proxies that prefix and the built app is served at
    `/`). One prefix would be cleaner: move `pcs` and the tests to `/api`, or
    keep both?
+
+### Answers (owner review, 2026-09-05)
+
+1. Keep Berlin Day/Night by OS preference until the owner picks a theme.
+2. Keep plain CSS over the token bundle. No Tailwind, no shadcn.
+3. Links only. A protocol tool must never fetch a URL a peer chose. If a
+   chart bot ever needs images, add a per-viewer "load images" toggle then.
+4. Make it a bounded `waitFor` (2 s) and log the measured latency. A check
+   that fails on CLI start-up time is not measuring the invariant. Keep the
+   "why slower pcs loses the race" note open as an S5 investigation.
+5. Acceptable for the sandbox. The wire is made of accounts.
+6. One prefix. Move `pcs` and the tests to `/api` in S5; drop the bare paths.
+
+S4 review: accepted. Re-run here: sandbox 76/76, sandbox/ui 10/10 with a
+clean build, bot-core 417/417. The html route was replayed with hostile
+input (`<script>`, a `javascript:` link, raw `<a>`): script gone, the link
+rendered as literal text, raw HTML escaped, `https://` linkified with
+`rel="noopener noreferrer"`. The Room screenshot shows the echo bot's table
+and fenced code rendered on both sides with per-device ACKs.
