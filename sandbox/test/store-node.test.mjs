@@ -348,6 +348,27 @@ test("fault delay: the submit is stored and answered only after ms", () =>
     assert.deepEqual(node.faults.list(), []);
   }));
 
+// The real node pushes a stored statement to subscribers before it answers
+// the submitter; this fault widens that gap so a test can act inside it.
+test("fault delaySubmitReply: subscribers see the statement at once, the submitter's answer comes after ms", () =>
+  withNode({}, async (node, open) => {
+    const submitter = await open();
+    const watcher = await open();
+    await watcher.subscribe({ matchAll: [TOPIC] });
+    await watcher.waitPages(1); // the empty initial dump
+    const fault = node.faults.delaySubmitReply({ signer: alice.account, ms: 300 });
+    const started = Date.now();
+    const done = submitter.submit(await signed(alice, { channel: hex32("01"), topics: [TOPIC], expiry: expiryIn(60) }));
+    await sleep(100);
+    assert.equal(node.statements.length, 1, "stored at once");
+    assert.equal(watcher.pages.length, 2, "pushed to the subscriber at once");
+    assert.deepEqual(await done, { status: "new" });
+    assert.ok(Date.now() - started >= 290, `answered after ${Date.now() - started}ms`);
+    assert.equal(node.faults.list()[0].hits, 1);
+    fault.clear();
+    assert.deepEqual(node.faults.list(), []);
+  }));
+
 test("fault holdDump: a matching subscription gets nothing until released", () =>
   withNode({}, async (node, open) => {
     const writer = await open();

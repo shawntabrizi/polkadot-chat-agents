@@ -81,7 +81,7 @@ const usage = `pcs — Polkadot chat sandbox
   pcs inbox <name> [--peer <name>] [--unread] [--device N]
   pcs wire [--peer <name>] [--signer <account>] [--channel <hex|label>] [--decode] [--raw]
   pcs wire --history <channel hex|label>   # what the slot held before, oldest first
-  pcs fault drop|delay [--from <name|account>] [--channel <hex|label>] [--topic <hex|label>] [--count N|forever] [--ms N]
+  pcs fault drop|delay|delay-reply [--from <name|account>] [--channel <hex|label>] [--topic <hex|label>] [--count N|forever] [--ms N]
   pcs fault hold-dump [--topic <hex|label>] [--for <name>]
   pcs fault list | pcs fault clear [<id>]
   pcs clock +2h|-30m|+10s|reset            # move the store node's clock
@@ -326,14 +326,15 @@ switch (cmd) {
       const result = await api("DELETE", `/faults/${id ?? "all"}`);
       if (json) out(result);
       else ok(`cleared ${result.cleared} fault(s)`);
-    } else if (sub === "drop" || sub === "delay" || sub === "hold-dump") {
-      const body = { kind: sub === "hold-dump" ? "holdDump" : sub, from: flags.from ?? null, channel: flags.channel ?? null, topic: flags.topic ?? (flags.for ? `request→${flags.for}` : null) };
+    } else if (sub === "drop" || sub === "delay" || sub === "delay-reply" || sub === "hold-dump") {
+      const kinds = { drop: "drop", delay: "delay", "delay-reply": "delaySubmitReply", "hold-dump": "holdDump" };
+      const body = { kind: kinds[sub], from: flags.from ?? null, channel: flags.channel ?? null, topic: flags.topic ?? (flags.for ? `request→${flags.for}` : null) };
       if (flags.count != null) body.count = flags.count === "forever" ? null : Number(flags.count);
-      if (sub === "delay") { if (flags.ms == null) fail("usage: pcs fault delay --ms N [...]"); body.ms = Number(flags.ms); }
+      if (sub === "delay" || sub === "delay-reply") { if (flags.ms == null) fail(`usage: pcs fault ${sub} --ms N [...]`); body.ms = Number(flags.ms); }
       const fault = await api("POST", "/faults", body);
       if (json) out(fault);
       else ok(`fault #${fault.id} ${fault.kind} set${fault.count != null ? ` for ${fault.count} hit(s)` : " until cleared"}`);
-    } else fail("usage: pcs fault drop|delay|hold-dump [...] | pcs fault list | pcs fault clear [id]");
+    } else fail("usage: pcs fault drop|delay|delay-reply|hold-dump [...] | pcs fault list | pcs fault clear [id]");
     break;
   }
   case "clock": {

@@ -319,6 +319,12 @@ export function startStoreNode({
             log("STORE_NODE_SUBMIT_REFUSED", { ...outcome.result });
             emit({ event: "refused", signer: stored?.signer ?? null, channel: stored?.channel ?? null, ...outcome.result });
           }
+          // A delaySubmitReply fault holds only the answer: the statement is
+          // stored and pushed to subscribers as usual (the real node does that
+          // before it answers the submitter too), so a receiver can hold the
+          // statement while the sender still waits.
+          const late = stored && matchingFault("delaySubmitReply", stored);
+          if (late) { hitFault(late, stored); setTimeout(() => reply(outcome.result), late.ms); return; }
           reply(outcome.result);
         };
         // A delay fault holds the whole submit (validation included), like a
@@ -382,6 +388,13 @@ export function startStoreNode({
     delay: ({ signer = null, channel = null, topic = null, ms, count = null } = {}) => {
       if (!(ms >= 0)) throw new Error("delay fault needs ms >= 0");
       const entry = addFault({ kind: "delay", signers: signerSet(signer), channel: bareHex(channel), topic: bareHex(topic), ms, count });
+      return { id: entry.id, clear: () => clearFault(entry) };
+    },
+    // Matching submits are stored and pushed at once, but the submitter's
+    // answer comes `ms` later.
+    delaySubmitReply: ({ signer = null, channel = null, topic = null, ms, count = null } = {}) => {
+      if (!(ms >= 0)) throw new Error("delaySubmitReply fault needs ms >= 0");
+      const entry = addFault({ kind: "delaySubmitReply", signers: signerSet(signer), channel: bareHex(channel), topic: bareHex(topic), ms, count });
       return { id: entry.id, clear: () => clearFault(entry) };
     },
     // New subscriptions whose filter mentions `topic` (all of them when topic

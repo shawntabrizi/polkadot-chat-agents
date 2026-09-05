@@ -188,8 +188,9 @@ export function createApi({ node, hop, directory, personas, events, addPersona, 
       try {
         if (body.kind === "drop") created = node.faults.drop({ ...match, ...(count !== undefined ? { count } : {}) });
         else if (body.kind === "delay") created = node.faults.delay({ ...match, ms: Number(body.ms), ...(count !== undefined ? { count } : {}) });
+        else if (body.kind === "delaySubmitReply") created = node.faults.delaySubmitReply({ ...match, ms: Number(body.ms), ...(count !== undefined ? { count } : {}) });
         else if (body.kind === "holdDump") created = node.faults.holdDump({ topic: match.topic });
-        else throw badRequest("kind must be drop, delay or holdDump");
+        else throw badRequest("kind must be drop, delay, delaySubmitReply or holdDump");
       } catch (e) {
         if (e instanceof ApiError) throw e;
         throw badRequest(e.message);
