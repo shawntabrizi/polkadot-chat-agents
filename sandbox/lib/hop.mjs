@@ -73,12 +73,14 @@ const decrypt = (key, blob) => {
   return chacha20poly1305(key, blob.subarray(0, 12)).decrypt(blob.subarray(12));
 };
 
-/** A Bulletin allowance signer for uploads: a fresh sr25519 keypair (the persona's, minted at creation). */
-export const mintBulletinSigner = () => {
-  const secret = secretFromSeed(randomBytes(32));
+/** A Bulletin allowance signer for uploads from a 32-byte seed (a persona's, persisted on a real network). */
+export const bulletinSignerFromSeed = (seed) => {
+  const secret = secretFromSeed(seed);
   const publicKey = getPublicKey(secret);
   return { publicKey, account: bytesToHex(publicKey), sign: (payload) => sign(secret, payload) };
 };
+/** A fresh one, minted at creation on the mock network. */
+export const mintBulletinSigner = () => bulletinSignerFromSeed(randomBytes(32));
 
 /** The endpoint a message names is peer data: ws(s) only, no credentials. */
 export const checkHopUrl = (value) => {

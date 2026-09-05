@@ -14,32 +14,32 @@ const toBinary = (base64) => {
   return bytes;
 };
 
-const descriptorValues$3 = import('./descriptors-BWABXXCF.js').then((module) => module["PaseoPeopleNext"]);
-const metadataTypes$3 = import('./metadataTypes-Bq07QWt_.js').then(
+const descriptorValues$3 = import('./descriptors-NWOM1k9r.js').then((module) => module["PaseoPeopleNext"]);
+const metadataTypes$3 = import('./metadataTypes-CpkIq7SE.js').then(
   (module) => toBinary("default" in module ? module.default : module)
 );
 const asset$3 = {};
 const extensions$3 = {};
-const getMetadata$4 = () => import('./paseoPeopleNext_metadata-DfetSzwV.js').then(
+const getMetadata$4 = () => import('./paseoPeopleNext_metadata-BGNZi6lr.js').then(
   (module) => toBinary("default" in module ? module.default : module)
 );
-const genesis$3 = "0xc5af1826b31493f08b7e2a823842f98575b806a784126f28da9608c68665afa5";
+const genesis$3 = "0x4a2b5b737de1da59e209b0000a876ec2fa20035dc34fd292a848da32d255ad48";
 const _allDescriptors$3 = { descriptors: descriptorValues$3, metadataTypes: metadataTypes$3, asset: asset$3, extensions: extensions$3, getMetadata: getMetadata$4, genesis: genesis$3 };
 
-const descriptorValues$2 = import('./descriptors-BWABXXCF.js').then((module) => module["BulletinPaseoNextV2"]);
-const metadataTypes$2 = import('./metadataTypes-Bq07QWt_.js').then(
+const descriptorValues$2 = import('./descriptors-NWOM1k9r.js').then((module) => module["BulletinPaseoNextV2"]);
+const metadataTypes$2 = import('./metadataTypes-CpkIq7SE.js').then(
   (module) => toBinary("default" in module ? module.default : module)
 );
 const asset$2 = {};
 const extensions$2 = {};
-const getMetadata$3 = () => import('./bulletinPaseoNextV2_metadata-BaLIpmxp.js').then(
+const getMetadata$3 = () => import('./bulletinPaseoNextV2_metadata-BXuTEONY.js').then(
   (module) => toBinary("default" in module ? module.default : module)
 );
 const genesis$2 = "0x8cfe6717dc4becfda2e13c488a1e2061ff2dfee96e7d031157f72d36716c0a22";
 const _allDescriptors$2 = { descriptors: descriptorValues$2, metadataTypes: metadataTypes$2, asset: asset$2, extensions: extensions$2, getMetadata: getMetadata$3, genesis: genesis$2 };
 
-const descriptorValues$1 = import('./descriptors-BWABXXCF.js').then((module) => module["ProductsDevnetPeople"]);
-const metadataTypes$1 = import('./metadataTypes-Bq07QWt_.js').then(
+const descriptorValues$1 = import('./descriptors-NWOM1k9r.js').then((module) => module["ProductsDevnetPeople"]);
+const metadataTypes$1 = import('./metadataTypes-CpkIq7SE.js').then(
   (module) => toBinary("default" in module ? module.default : module)
 );
 const asset$1 = {};
@@ -50,8 +50,8 @@ const getMetadata$2 = () => import('./productsDevnetPeople_metadata-CwU9OBGy.js'
 const genesis$1 = "0xe6c30d6e148f250b887105237bcaa5cb9f16dd203bf7b5b9d4f1da7387cb86ec";
 const _allDescriptors$1 = { descriptors: descriptorValues$1, metadataTypes: metadataTypes$1, asset: asset$1, extensions: extensions$1, getMetadata: getMetadata$2, genesis: genesis$1 };
 
-const descriptorValues = import('./descriptors-BWABXXCF.js').then((module) => module["ProductsDevnetBulletin"]);
-const metadataTypes = import('./metadataTypes-Bq07QWt_.js').then(
+const descriptorValues = import('./descriptors-NWOM1k9r.js').then((module) => module["ProductsDevnetBulletin"]);
+const metadataTypes = import('./metadataTypes-CpkIq7SE.js').then(
   (module) => toBinary("default" in module ? module.default : module)
 );
 const asset = {};
@@ -99,7 +99,6 @@ const XcmV3TraitsError = _Enum;
 const XcmV4Response = _Enum;
 const XcmPalletVersionMigrationStage = _Enum;
 const XcmVersionedAssetId = _Enum;
-const IdentityData = _Enum;
 const MultiAddress = _Enum;
 const BalancesAdjustmentDirection = _Enum;
 const XcmVersionedXcm = _Enum;
@@ -113,10 +112,11 @@ const TransactionValidityUnknownTransaction = _Enum;
 const TransactionValidityTransactionSource = _Enum;
 const XcmVersionedAsset = _Enum;
 const IdentityJudgement = _Enum;
+const IdentityData = _Enum;
 
 const metadatas = {
-  ["0x097791dfb5f5285085f7c54145dad4e9c0c270020fc1a7335c224354436b0c01"]: _allDescriptors$3,
-  ["0x4fe167698d8a654b0d832ffa2b22471689331b278d93e1802b4f3d469b807d5a"]: _allDescriptors$2,
+  ["0x12c3c05947a1043efc4002dc82f25fed18cc0c78aff9b153db62b432a7602f1d"]: _allDescriptors$3,
+  ["0x5f6f2d48325e874a80f178e2c78c654b7bb916e881aa2a4160ebd1c6b27eef6c"]: _allDescriptors$2,
   ["0x82a343ddb8c1faf6d88721f6188dabb393b3d5b4fd54aae6d621bc3b0452ebbb"]: _allDescriptors$1,
   ["0x919b08470811f08edef7c2d15d387182adf5b501c2a2c8486c5b829a2c78018b"]: _allDescriptors
 };

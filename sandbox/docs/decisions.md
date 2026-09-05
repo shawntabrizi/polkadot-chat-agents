@@ -103,3 +103,36 @@ tests, `sandbox/ui/e2e/acceptance.mjs` and bot-core (`lib/people-directory.mjs`,
 registration) all call `/api/...`. Clients that take a route relative to the
 API root (`sandbox.get("/personas/alice")` in a scenario, `api.ts` in the UI)
 keep their short form; the prefix is added in one place per client.
+
+## D5 — The paseo profile is the same daemon with three seams swapped (S6)
+
+**Context.** PLAN.md S6: the sandbox on the real Paseo Next network, so
+personas chat with deployed bots and with a phone; `mock` unchanged.
+
+**Decision.** One daemon, one API, one CLI; the network is a profile
+(`lib/network.mjs`, endpoints from bot-core's `lib/network-config.mjs`
+PASEO entry) that swaps three seams:
+
+- *statement store*: the SDK's adapter over `createLazyClient(getWsProvider
+  (peopleEndpoints))`, as on the mock, only the URL differs;
+- *directory*: `lib/chain-directory.mjs`, `Resources.Consumers` and
+  `UsernameOwnerOf` through the sandbox's own papi (the unsafe api, no
+  descriptors: two storage reads do not justify a second descriptor set
+  and a papi-version coupling with bot-core), plus the identity backend's
+  `GET /api/v1/usernames?prefix=` with every hit checked against the chain;
+- *HOP*: the profile's Bulletin HOP node, the persona's upload signer
+  provisioned through bot-core's `lib/testnet-file-allowance.mjs`.
+
+Registration reuses bot-core's `lib/register.mjs` (the one place personas
+import bot-core's crypto: `deriveIdentityKeys` gives the persona the same
+//wallet pair and X25519 key the claim publishes). Every directory read is
+async on both profiles (the mock's resolve at once); the wire inspector's
+labels come from a synchronous cache of what the sandbox has seen.
+
+**The wire on a real network** is `lib/seen-store.mjs`: the statements the
+personas' clients submitted or received, mirrored from the papi client the
+SDK talks over (never from the SDK itself), kept in the store node's
+read-side shape so `pcs wire --decode` and the inspector are unchanged.
+
+**Refusals, not modes.** Faults, the clock, node restarts and the pool view
+answer `409` off-mock; nothing is emulated.

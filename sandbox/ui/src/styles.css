@@ -97,6 +97,8 @@ a:hover { color: var(--fg-link-hover); }
 .select { cursor: pointer; }
 .textarea { width: 100%; resize: vertical; }
 .pill { display: inline-block; padding: 1px 8px; border-radius: var(--radius-full); background: var(--bg-surface-nested); color: var(--fg-secondary); font-size: 12px; line-height: 18px; }
+.pill.network { margin: 0 12px 8px; align-self: flex-start; }
+.pill.network.live { background: var(--bg-status-success); color: var(--fg-on-accent, #fff); }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--fg-tertiary); }
 .dot.on { background: var(--bg-status-success); }
 

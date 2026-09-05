@@ -4,6 +4,10 @@
 // desktop's upload path. The bot must ACK the message, download the bytes
 // exactly once (after the ACK, per-chunk integrity checked), serve them at
 // its bridge /media route without the ticket, and answer the caption.
+//
+// On paseo (`--network paseo`, a live check) the photo goes through the
+// real Bulletin HOP node under the persona's faucet-provisioned allowance;
+// the pool view is mock-only, the rest holds unchanged.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -39,13 +43,17 @@ export async function run({ sandbox, openChat, bot: bots, log }) {
     assert.ok(!JSON.stringify(bot.events).match(/ticket/i), "the claim ticket never reaches the bot's log");
 
     // The HOP node: one chunk and the metadata, signed by alice, each claimed once and acked, the bytes gone.
-    const pool = await sandbox.get("/hop");
-    assert.deepEqual(pool.entries.map((e) => [e.signerLabel, e.role, e.owner, e.claims, e.acked, e.available]), [
-      ["alice", "chunk 1/1", "alice ⇄ echobot", 1, true, false],
-      ["alice", "metadata", "alice ⇄ echobot", 1, true, false],
-    ]);
-    assert.equal(pool.entries[1].hash, ref.identifier);
-    log(`pool: ${pool.entries.length} entries, each claimed once by the bot and acked`);
+    if (sandbox.mock) {
+      const pool = await sandbox.get("/hop");
+      assert.deepEqual(pool.entries.map((e) => [e.signerLabel, e.role, e.owner, e.claims, e.acked, e.available]), [
+        ["alice", "chunk 1/1", "alice ⇄ echobot", 1, true, false],
+        ["alice", "metadata", "alice ⇄ echobot", 1, true, false],
+      ]);
+      assert.equal(pool.entries[1].hash, ref.identifier);
+      log(`pool: ${pool.entries.length} entries, each claimed once by the bot and acked`);
+    } else {
+      await assert.rejects(sandbox.get("/hop"), /mock network only/, "no pool view on a real network");
+    }
 
     // The bridge serves the bytes byte-exact under the identifier.
     const served = await bots.bridge("echobot").get(`/media/${id}`);
@@ -56,7 +64,7 @@ export async function run({ sandbox, openChat, bot: bots, log }) {
     assert.equal(cached.mode & 0o777, 0o600, "the media cache file is private");
 
     // The wire: the rich text with the attachment's metadata (never the ticket), ACKed by the bot.
-    const statements = await chat.history("session alice#1→echobot /request");
+    const statements = await chat.history(`session alice#1→${sandbox.mock ? "echobot" : chat.cfg.username} /request`);
     const carrier = statements.find((s) => s.decoded?.messages?.some((m) => m.messageId === sent.messageId));
     assert.ok(carrier, "the rich text is on alice's session");
     const row = carrier.decoded.messages.find((m) => m.messageId === sent.messageId);

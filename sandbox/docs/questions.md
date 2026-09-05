@@ -407,3 +407,56 @@ through `pcs scenario run`. `bot-core/vendor` untouched.
    of re-running the command, so the visible effect is gone, but the entry
    still never leaves the journal in a bridge bot's lifetime. Not reproduced
    in a scenario; noted from reading `handleInbound`.
+
+## S6
+
+1. **The identity backend does not attest on the reset Paseo Next chain.**
+   `GET /api/v1/attester` returns `0x86aac84d…` (`5F7H1LkZi8rn…`), whose
+   `PeopleLite.AttestationAllowance` on the reset chain is 0 and whose
+   balance is 0. Every account on the reset chain (2814 `Consumers`, 2814
+   `LitePeople`) was attested by `5GCF223UbXNZ…` (allowance 997186), which
+   looks like a batch migration (backend records updated in bulk at
+   2026-09-01T09 and again at 2026-09-05T19). Live claims stay `RESERVED`:
+   `shawntabrizi.02` (the owner's phone, since 2026-09-04T18:31),
+   `openclawbot.19` (this session's `pca register --again --new-number`),
+   `sandboxalice.41` (this session's `pcs user add alice`). Every claim a
+   client signs names the attester the backend advertises
+   (`consumerRegistrationSignature` covers it), so even if `5GCF…` attested
+   them the on-chain check would fail. Who owns the backend's attester
+   provisioning, and is `5F7H…` meant to get an allowance, or should
+   `/attester` advertise `5GCF…`?
+
+2. **A second claim after a reset cannot keep its number.** The backend
+   refuses the old digits even to the account that owns them (`409
+   Preferred digits 49 already taken for username openclawbot`) and keeps
+   the old record `ASSIGNED` beside the new `RESERVED` one, so a bot comes
+   back under a new name. Is there (or should there be) a backend path to
+   re-attest an existing ASSIGNED record on a new chain, so `macbot.78`
+   stays `macbot.78`?
+
+3. **macbot's seed is not on this machine.** `~/.pca/bots/` holds
+   `macbot-workspace/` (empty) and no `macbot/`; its username is ASSIGNED
+   to `5DXPWoMyS7HS…` on the backend and absent on chain. Where does macbot
+   live (the VPS runbook lists hermesbot, openclawbot, codebot, dotbot,
+   claudebot)? `pca register macbot --again` was run on `openclawbot`
+   (local, `openclawbot.49`, same situation) instead; it is now
+   `openclawbot.19`, pending.
+
+4. **Self-registration with a fee.** The research report proved
+   `PeopleLite.register_with_fee` (75 PAS, no attester) on a fork; the reset
+   chain has two `Fee`-method lite people. It would make personas and bots
+   independent of the backend, at the cost of PAS per identity and a
+   hand-encoded extrinsic (papi 3 may encode it; 2.1.7 could not encode
+   `attest`). Worth a profile option, or is the backend the only sanctioned
+   path?
+
+5. **Username defaults.** A short persona name registers as
+   `sandbox<name>` (`sandboxalice.41`); `--username` overrides. Fine, or
+   should short names be refused so the network username is always
+   chosen on purpose?
+
+6. **`pca info` stays offline for a confirmed bot.** A live "is it still on
+   the chain?" check would make `pca info paseobot` in the unit tests hit
+   the real network, so the reset is only detected by `pca register <bot>
+   --again` (which reads the chain first). Should `pca info` get a
+   `--check` flag that reads the chain on request?

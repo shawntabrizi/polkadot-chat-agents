@@ -8,7 +8,7 @@ every command, including `project`, `model`, and `storage`.
 | Command | Purpose |
 |---|---|
 | `pca create <name>` | Generate an identity, register a username, and save the bot. |
-| `pca register <name>` | Finish or retry registration for an existing bot. |
+| `pca register <name> [--again]` | Finish or retry registration for an existing bot. `--again` re-registers a bot the chain forgot (a testnet reset): it claims the same username again and reports what the identity backend did; `--new-number` or `--digits NN` when the backend refuses the old number. |
 | `pca run <name>` | Start the bot locally in the foreground. |
 | `pca deploy <name> --host <ssh>` | Ship it to a Docker + SSH server and run it. |
 | `pca logs <name> [-f] [--tail N]` | Tail a bot's logs: the local `~/.pca/bots/<name>/bot.log` that `pca run` keeps (rotated at 20 MB), or the deployed container's when the bot has a saved host. |
@@ -38,6 +38,7 @@ every command, including `project`, `model`, and `storage`.
 | `--network paseo` | create | Use Paseo Next v2. Its People, identity, Bulletin, HOP, and storage settings remain available as a complete named profile. |
 | `--no-register` | create | Create the identity locally; complete registration later with `pca register`. |
 | `--wait <seconds>` | create, register | How long to wait for on-chain registration confirmation. |
+| `--again` / `--new-number` | register | Re-register after a chain reset. The Paseo Next backend keeps the old username as assigned and refuses its number to a second claim (`409 Preferred digits NN already taken`), so `--new-number` lets it assign a fresh one; the account and keys do not change. |
 | `--host <ssh>` | deploy, logs, status, stop | Target server (saved after first deploy). |
 | `--harness openclaw or hermes` | deploy | Agent framework for a bridge bot. |
 | `--allowed-tools <read,write,bash,web,subagents>` | run, deploy | Select exact lowercase portable direct-agent capabilities. `write` includes `read`; `bash` includes both. `web` grants search/fetch and is orthogonal — no `--tool-scope` bounds it. `subagents` grants delegation; a subagent inherits the parent's tool set, so it widens nothing by itself. |

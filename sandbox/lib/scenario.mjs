@@ -6,6 +6,13 @@
 // then tears everything down — every bot it started is stopped even when the
 // scenario throws, so a scenario can never leave an echo bot behind.
 //
+// `network: "paseo"` runs the same script on the real Paseo Next network
+// (`pcs scenario run <file> --network paseo`): the persona registers through
+// the identity backend, the bot is created with `pca create --network paseo`
+// and attached, and the waits are longer. Those are live checks, not CI;
+// a scenario that needs faults, the clock or a second device is mock-only
+// and says so through `sandbox.network`.
+//
 // The bot is started with `pca run <name>`, the path an operator uses. Its
 // pid comes from the bot.pid the runtime writes, so a scenario can kill -9
 // the bot itself (not the pca wrapper, which would orphan it) and restart it
@@ -55,8 +62,8 @@ const exec = (args, { env = {}, cwd } = {}) => new Promise((resolve) => {
 });
 
 /** `pcs <args>` against the daemon, parsed from --json output. Throws on a non-zero exit. */
-export const createPcs = (url) => async (...args) => {
-  const r = await exec([PCS, "--url", url, "--json", ...args.map(String)]);
+export const createPcs = (url, env = {}) => async (...args) => {
+  const r = await exec([PCS, "--url", url, "--json", ...args.map(String)], { env });
   if (r.code !== 0) throw new Error(`pcs ${args.join(" ")} failed: ${r.stderr || r.stdout}`);
   try { return JSON.parse(r.stdout); } catch { throw new Error(`pcs ${args.join(" ")} printed non-JSON: ${r.stdout}`); }
 };
@@ -69,13 +76,17 @@ export function createSandboxClient(daemon) {
     if (!res.ok) throw new Error(`${method} ${route} -> ${res.status} ${data.error}`);
     return data;
   };
+  const mock = daemon.network === "mock";
   return {
     url: daemon.url,
     storeUrl: daemon.storeUrl,
+    network: daemon.network,
+    mock,
     daemon,
     get: (route) => call("GET", route),
     post: (route, body) => call("POST", route, body),
-    waitFor,
+    // A real store answers in seconds, not milliseconds: every wait is longer there.
+    waitFor: (probe, options = {}) => waitFor(probe, { timeoutMs: mock ? 20_000 : 120_000, everyMs: mock ? 100 : 500, ...options }),
   };
 }
 
@@ -123,9 +134,10 @@ export const submitRaw = (storeUrl, hex) => new Promise((resolve, reject) => {
   });
 });
 
-export function createBotHelper({ sandboxUrl, botsDir, log = () => {} }) {
+export function createBotHelper({ sandboxUrl, botsDir, log = () => {}, network = "mock" }) {
   fs.mkdirSync(botsDir, { recursive: true, mode: 0o700 });
   const baseEnv = { PCA_BOTS_DIR: botsDir, PCA_NO_UPDATE_CHECK: "1", NO_COLOR: "1" };
+  const mock = network === "mock";
   const running = new Map(); // name -> handle
   const started = []; // every handle ever started, for diagnostics
   const botDir = (name) => path.join(botsDir, name);
@@ -213,12 +225,23 @@ export function createBotHelper({ sandboxUrl, botsDir, log = () => {} }) {
   return {
     botsDir,
     pca,
-    /** `pca create <name> --network sandbox …` on a free bridge port; returns config.json. */
+    /**
+     * `pca create <name> --network sandbox …` (or `--network paseo`, which
+     * registers through the identity backend and waits for the attestation)
+     * on a free bridge port, then attached so the sandbox can name it;
+     * returns config.json.
+     */
     async create(name, extra = []) {
       const port = await freePort();
-      const r = await pca("create", name, "--network", "sandbox", "--sandbox-url", sandboxUrl, "--port", port, ...extra);
+      const networkArgs = mock ? ["--network", "sandbox", "--sandbox-url", sandboxUrl] : ["--network", network];
+      const r = await pca("create", name, ...networkArgs, "--port", port, ...extra);
       log(`created ${name}: ${r.stdout.split("\n").find((l) => l.includes("Registered")) ?? "(no registration line)"}`);
-      return readJson(name, "config.json");
+      const cfg = readJson(name, "config.json");
+      if (!mock) {
+        if (!cfg.registered) throw new Error(`${name} was created but not confirmed on ${network}: ${r.stdout.split("\n").filter(Boolean).slice(-3).join(" | ")}`);
+        await createPcs(sandboxUrl, baseEnv)("bot", "attach", name);
+      }
+      return cfg;
     },
     config: (name) => readJson(name, "config.json"),
     /** The runtime's session-state.json (0600; it holds session keys, so scenarios only inspect it). */
@@ -261,9 +284,14 @@ export function createBotHelper({ sandboxUrl, botsDir, log = () => {} }) {
  * fan-out folded into the bot's roster. Resolves once the bot knows every
  * device, with the handles a scenario asserts on.
  */
-export async function openChat({ sandbox, pcs, bot }, { user = "alice", devices = 1, name = "echobot", brain = "echo", env = {}, welcome = "hello bot" } = {}) {
+export async function openChat({ sandbox, pcs, bot }, { user = "alice", devices = 1, name = "echobot", brain = "echo", env = {}, welcome = "hello bot", access = null } = {}) {
+  if (!sandbox.mock && devices !== 1) throw new Error(`a persona on ${sandbox.network} is single-device; this scenario needs ${devices}`);
   const persona = await pcs("user", "add", user, "--devices", devices);
-  const cfg = await bot.create(name, ["--brain", brain, "--public"]);
+  if (persona.registration && persona.registration.status !== "attested") throw new Error(`${user} is not attested on ${sandbox.network}: ${JSON.stringify(persona.registration)}`);
+  // A public bot on a testnet gets no file-delivery profile (pca protects
+  // the faucet's allowance), and without one bot-core trusts no HOP host;
+  // a real-network chat locks the bot to the persona instead.
+  const cfg = await bot.create(name, ["--brain", brain, ...(access ?? (sandbox.mock ? ["--public"] : ["--allow", persona.account]))]);
   const handle = await bot.start(name, { env });
   await handle.waitFor((e) => e.event === "BOT_SUBSCRIBED", { label: "BOT_SUBSCRIBED" });
   const request = await pcs("request", user, name, "--welcome", welcome);
@@ -300,14 +328,15 @@ export async function openChat({ sandbox, pcs, bot }, { user = "alice", devices 
  * rejects with the scenario's assertion error. Everything it started is gone
  * by the time the promise settles.
  */
-export async function runScenario(file, { log = () => {} } = {}) {
+export async function runScenario(file, { log = () => {}, network = "mock" } = {}) {
   const mod = await import(pathToFileURL(path.resolve(file)).href);
   if (typeof mod.run !== "function") throw new Error(`${file} does not export run()`);
+  if (network !== "mock" && mod.mockOnly) throw new Error(`${file} is mock-only: ${mod.mockOnly}`);
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "pcs-scenario-"));
-  const daemon = await startDaemon({ dir: path.join(work, "state"), port: 0 });
+  const daemon = await startDaemon({ dir: path.join(work, "state"), port: 0, network });
   const sandbox = createSandboxClient(daemon);
   const pcs = createPcs(daemon.url);
-  const bot = createBotHelper({ sandboxUrl: daemon.url, botsDir: path.join(work, "bots"), log });
+  const bot = createBotHelper({ sandboxUrl: daemon.url, botsDir: path.join(work, "bots"), log, network });
   const started = Date.now();
   try {
     await mod.run({ sandbox, pcs, bot, log, waitFor, sleep, openChat: (options) => openChat({ sandbox, pcs, bot }, options) });

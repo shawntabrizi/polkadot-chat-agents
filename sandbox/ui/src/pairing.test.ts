@@ -7,7 +7,7 @@ import type { Account, HexString, Persona, RequestRow } from './api';
 import { participantsOf, pickLeft, pickRight, readOnly, relationOf } from './pairing';
 
 const hex = (n: number) => `0x${n.toString(16).padStart(64, '0')}` as HexString;
-const persona = (name: string, n: number): Persona => ({ name, account: hex(n), chatPublicKey: hex(n + 100), bulletinAccount: hex(n + 300), devices: [] });
+const persona = (name: string, n: number): Persona => ({ name, account: hex(n), username: name, chatPublicKey: hex(n + 100), bulletinAccount: hex(n + 300), registration: null, devices: [] });
 const account = (username: string | null, n: number, messageable = true): Account => ({ account: hex(n), username, identifierKey: messageable ? hex(n + 200) : null, allowance: true });
 const request = (over: Partial<RequestRow>): RequestRow => ({
   requestId: 'r',

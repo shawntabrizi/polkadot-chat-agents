@@ -1028,6 +1028,25 @@ test("create --network sandbox registers through the sandbox directory and runs 
     assert.match(result.stdout, /^BOT_HOP_UPLOAD_NODE=ws:\/\/127\.0\.0\.1:2$/m, "the sandbox HOP node is the upload node");
     assert.match(result.stdout, /^BOT_HOP_ALLOWED_NODES=127\.0\.0\.1$/m, "and the one trusted download host");
 
+    // The sandbox forgets registrations when its daemon restarts (its
+    // directory is the mock chain); `register --again` takes the same
+    // registration again and waits for it, as it would after a testnet reset.
+    registered.clear();
+    result = await runCliAsync(botsDir, ["register", "sandboxbot", "--again"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Registering your bot in the sandbox again/);
+    assert.match(result.stdout, /Confirmed — your bot is live/);
+    assert.deepEqual([readBot(botsDir, "sandboxbot").username, readBot(botsDir, "sandboxbot").registered], ["sandboxbot", true]);
+    assert.equal(registered.get(bot.account)?.identifierKey, bot.identifierKey, "the same identity was registered again");
+    result = await runCliAsync(botsDir, ["register", "sandboxbot", "--again", "--username", "other"]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /--again keeps the bot's username/);
+    result = await runCliAsync(botsDir, ["create", "neverbot", "--brain", "echo", "--network", "sandbox", "--sandbox-url", sandboxUrl, "--no-register"]);
+    assert.equal(result.status, 0, result.stderr);
+    result = await runCliAsync(botsDir, ["register", "neverbot", "--again"]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /never registered/);
+
     // No daemon: a clear failure before any key is generated; ws:// stays sandbox-only.
     result = await runCliAsync(botsDir, ["create", "nodaemon", "--brain", "echo", "--network", "sandbox", "--sandbox-url", "http://127.0.0.1:9"]);
     assert.notEqual(result.status, 0);
