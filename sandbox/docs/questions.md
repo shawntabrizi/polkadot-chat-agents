@@ -163,3 +163,53 @@ bot-core 417/417 on two of three runs; the one failure was the pre-existing
 `workspaces.test.mjs` worktree-timeout race noted in the S0 record, unrelated
 to the sandbox. Make that test deterministic in S3. `bot-core/vendor` is
 untouched. No papi storage query remains outside `lib/people-directory.mjs`.
+
+## S3
+
+1. **Expiry never passes for a chat statement.** PLAN.md's S3 scenario
+   "expiry passing while a message is queued" asked to assert that the
+   sender re-allocates its expiry and the message still lands. Neither client
+   can: the SDK's allocator and bot-core's `expiryFactory` both pin the high
+   word to `0xffffffff` (never expires) and use the low word as a sequence,
+   so no clock jump short of the year 2106 expires a chat statement, and a
+   jump past it rejects every new one as `alreadyExpired` with no recovery
+   path in either client. `scenarios/expiry-while-queued.mjs` therefore
+   proves what holds — a queued statement survives `clock +2h`, a
+   hand-planted 60 s statement does not, the slot keeps advancing — and the
+   2106 case is recorded as a protocol limit, not exercised. Is a real
+   expiration ever expected on a chat channel (a future spec change, a
+   heartbeat with a TTL), so the sandbox should model it, or is the pinned
+   high word settled?
+
+2. **The persona has no resend timer.** The SDK re-submits an un-ACKed batch
+   only when a later message extends it, or at session init (it reads its
+   own statement back from the store). `ack-or-resend` proves the invariant
+   through the extension path (alice's next message carries the un-ACKed one
+   again). protocol.md says the app "resends its backlog until it sees an
+   ACK": does the phone have a timer-driven resend the persona should mimic
+   (a `pcs` option), or is the phone's resend the same extension-or-init
+   behaviour?
+
+3. **One response channel per session.** Every ACK a device sends rides its
+   single response channel, so the store keeps only the newest; the SDK
+   itself notes that reliably ACKing several outstanding requests needs a
+   protocol-level fix (`session/core.ts`). `every-device-session` sends the
+   three follow-ups one at a time for that reason. Should a concurrent
+   variant (three devices sending at once) exist, expected to expose the
+   limit and be reported as such?
+
+4. **`deviceRemoved` decoding lives in `index.mjs`, not the codec.** The task
+   rule says never touch `bot-core/vendor`; CLAUDE.md allows minimal
+   protocol-level fixes there. The kind-18 body (one compact-prefixed
+   account) is parsed in `index.mjs` from the codec's `unsupported` raw
+   content (`2081211`). Move it into `vendor/app-chat-codec.mjs` next to
+   `deviceAdded` the next time the codec is touched?
+
+5. **`test-client-device.mjs` stays.** The scenarios now cover everything it
+   did except a real HOP attachment (`--attach`, used by eight bot-core
+   offline tests) and sending over a live network from a real seed. Retire
+   it with the HOP sandbox (v1.5) and port those tests to the persona API
+   then, or port the non-attachment bot-core tests earlier?
+
+S3 self-check: sandbox 61/61 (11 scenarios), bot-core 417/417 on the final
+tree; no bot or daemon process left behind.

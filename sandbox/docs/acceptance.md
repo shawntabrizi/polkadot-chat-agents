@@ -554,3 +554,151 @@ Observations that are not defects but worth a look (questions.md S2):
 - The first answer after an accept reaches the requester's other devices
   only if it is sent after the fan-out; the sandbox asserts the gap, it
   does not close it.
+
+## S3 — Faults, clock, invariants (2026-09-05)
+
+### What was verified
+
+`cd sandbox && npm test` (Node v24.13.1), 61 tests in 8 files, on the final
+tree. New since S2: the store node's fault matching and slot history, the
+decoded wire with faults, clock and node restart over the API and `pcs`,
+the persona additions (poison batches, call offers, raw sends, device
+removal), and nine scenarios, one per invariant:
+
+```
+✔ peer session: one undecodable message in a batch is skipped, the rest delivered, the batch ACKed success; an all-poison batch is NACKed
+✔ pcs: user add/list, request, requests, accept, send, inbox --device, react, edit, wire --peer
+✔ faults, clock and node restart; the wire decodes both directions and matches ACKs per device
+✔ fault matching: by topic, by a set of signers, forever with count null; every set/hit/clear is an event
+✔ history(): a slot remembers what a replacement, an eviction or the clock pushed out, with the reason
+✔ scenario accept-without-welcome.mjs
+✔ scenario ack-or-resend.mjs
+✔ scenario bot-restart.mjs
+✔ scenario call-offer.mjs
+✔ scenario channel-clobber.mjs
+✔ scenario device-removed.mjs
+✔ scenario echo-roundtrip.mjs
+✔ scenario every-device-session.mjs
+✔ scenario expiry-while-queued.mjs
+✔ scenario no-ack-peer.mjs
+✔ scenario poison-batch.mjs
+ℹ tests 61
+ℹ pass 61
+ℹ fail 0
+ℹ duration_ms 67023.47125
+```
+
+`cd bot-core && npm test` on the final tree (the three bot-core commits
+below included, the transport e2e against the S3 daemon):
+
+```
+ℹ tests 417
+ℹ pass 417
+ℹ fail 0
+```
+
+Both suites were also run after each bot-core commit (417/417 each time)
+and the sandbox suite after each sandbox commit's tree. The bot-core run
+has no `STORE_NODE_SUBMIT_REFUSED` line. The sandbox run has 14: 13 from
+the store-node unit tests, which provoke every rejection on purpose, and
+one `channelPriorityTooLow` with a chat-client expiry (`…5061` against
+`…5062`) — a persona's superseded submission of an extended batch losing
+the slot race to its own extension, which the SDK settles as success and
+bot-core would retry with a bumped expiry. Benign, and the rule working.
+
+### The scenarios
+
+One `pcs scenario run` each on the final tree, with the line the scenario
+logged. Every scenario asserts on `GET /wire` (decoded payloads, ACK state,
+slot history) as well as on the inboxes and the bot's log.
+
+| scenario | invariant | result | what it proved |
+|---|---|---|---|
+| `ack-or-resend` | every inbound request is ACKed; a resend is answered once | pass (4.5 s) | The node dropped the bot's ACK once (`fault #1`, by bot name and channel label); alice's row stayed `sent`; her next message re-submitted the un-ACKed one as a superset under a new request id; the bot ACKed that and deduped "first": `BOT_RECEIVED_TEXT` ×2 for two messages, one answer row each, the replaced single-message statement in the slot history. |
+| `poison-batch` | one undecodable message never aborts the batch | pass (1.9 s) | The device test client's poison rode next to a text; the bot logged `BOT_UNDECODABLE_MESSAGES count 1`, answered the text once, ACKed the batch; the wire shows both in one statement, one marked undecodable, and an ACK on all 3 statements the slot ever held (the poison-only one too). The persona-side rule (success if anything decoded, `decodingFailed` if nothing) is pinned in the peer-session unit test. |
+| `channel-clobber` | direct submits clobber the un-fetched slot; outbound lanes never | pass (1.7 s) | Node: two direct submits on one (signer, channel), no fetch between, one statement left, history `[1 replaced, 2 live]`. Bot: 12 bridge `/send` calls at once → 3 statement versions, 1 lane extension, 0 takeovers, all 12 on alice with ACKs, every version a superset of its un-ACKed predecessor. |
+| `every-device-session` | follow-ups are polled on every device session | pass (3.1 s) | Three devices, each follow-up on its own `session alice#n→echobot /request`, each received once, answered on all three devices with ACKs from each, each request ACKed by the bot; envelopes name all three recipients; the persisted roster holds three. |
+| `expiry-while-queued` | (PLAN.md S3) expiry passing while a message is queued | pass (4.1 s), semantics changed — see below | Every chat statement of both implementations carries `expiresAt: null` (0xffffffff). With the bot stopped, alice's message waited in the store; `clock +2h` expired a hand-planted 60 s statement (history `expired`) and not hers; the restarted bot fetched, answered and ACKed it; her next statement took the slot with sequence 25440559 → 25440561. |
+| `no-ack-peer` | one un-ACKed request current per peer, queue behind it, the liveness backstop | pass (10.0 s) | alice's ACKs dropped forever. Nine answers → one statement (8 `BOT_OUTBOUND_EXTENDED`, each version a superset); the tenth queued, not submitted; `BOT_OUTBOUND_TAKEOVER dropped 9 queued 1` 3.0 s after the current statement (`BOT_OUTBOUND_ACK_GRACE_MS=3000`, measured on the bot's own log stamps); then the slot held only "Echo: q10"; q11 extended it and no second takeover fired with nothing queued; alice received all 11 answers once. |
+| `call-offer` | dataChannelOffer is ACKed, then declined | pass (2.0 s) | `BOT_CALL_OFFER purpose 0`, `BOT_CALL_DECLINED` naming alice's offer id; the ACK stamped at .975Z, the decline at .979Z; alice's inbox shows the decline under her offer; the brain never ran. |
+| `accept-without-welcome` | S2 answer 2: empty `BOT_ACK_TEXT` sends the accept alone | pass (3.3 s) | echobot's identity statement decodes to `[deviceChatAccepted]`, alice sees only `contactAdded`; a second bot with `BOT_ACK_TEXT="Welcome aboard"` sends `[deviceChatAccepted, text]` and bob sees the welcome once. |
+| `device-removed` | S2 answer 3: a removed device stops being addressed | pass (2.8 s) | alice removed device 2; device 1 fanned out `deviceRemoved`; `BOT_PEER_DEVICE_REMOVED remaining 1`; the persisted roster went 2 → 1; the next answer's envelope named `alice#1` alone; nothing new from device 2 on the wire. |
+| `echo-roundtrip` (S2) | per-device polling, ACKs, reaction/reply/edit | pass (4.9 s) | Unchanged except the welcome assertion: no empty welcome row any more. |
+| `bot-restart` (S2) | session rebuild on restart | pass (17.1 s) | Unchanged. |
+
+### bot-core defects found and fixed
+
+| finding | commit |
+|---|---|
+| An empty `BOT_ACK_TEXT` sent an empty text message next to the accept (an empty bubble on a phone; S2 question 2). Empty now sends the accept alone. | `d10db06` fix(transport) |
+| `deviceRemoved` (kind 18) was logged as unsupported; the bot kept wrapping envelopes for the dead device and watching its session topic (S2 question 3). Now applied to the roster, persisted, `BOT_PEER_DEVICE_REMOVED`. Decoded in `index.mjs` from the codec's raw content because `vendor/` is off limits by rule (questions.md S3.4). | `2081211` feat(transport) |
+| `test/workspaces.test.mjs` "worktree subprocess timeout reaps a stalled command" raced a fast fake `rev-parse` against the same 500 ms budget under load (S0, S2 runs). Every fake git call now stalls; the probe's error no longer hides a timeout behind "not a git repository". | `a0e94f0` test(workspaces) |
+
+### Invariants that did not hold
+
+None. Every CLAUDE.md invariant the scenarios target held on the first
+green run against bot-core; the only bot-core changes were the two
+S2-answer items above and the test flake. No scenario is skipped.
+
+### Deviations from PLAN.md, and why
+
+- **`expiry-while-queued` does not assert a re-allocation.** PLAN.md asked
+  to "assert the sender re-allocates expiry and the message still lands".
+  No chat client re-allocates on expiry: both pin the high word to
+  0xffffffff and treat the low word as a sequence (`createExpiryAllocator`
+  in the SDK, `expiryFactory` in bot-core), so a clock jump expires nothing
+  a chat client wrote. The scenario proves what holds and plants a
+  real-expiry statement by hand to show the clock does work. A jump past
+  2106 would expire everything with no recovery path in either client — a
+  protocol limit, recorded, not exercised (questions.md S3.1).
+- **`ack-or-resend` resends through the SDK's extension path**, not a
+  timer: the persona re-submits its un-ACKed batch with its next message,
+  which is the only resend the SDK has (questions.md S3.2).
+- **`every-device-session` sends the three follow-ups one at a time.** A
+  device's ACKs share one response channel, so three simultaneous requests
+  would race for one ACK slot — an SDK-acknowledged protocol limit, not
+  something the bot can fix (questions.md S3.3).
+- **No `faults.mjs`.** Faults live inside `store-node.mjs` since S0; the
+  API resolves names and labels in `api.mjs`. One less file than PLAN.md's
+  tree, nothing missing.
+- **`pcs fault hold-dump --for bob`** holds subscriptions that mention
+  bob's discovery topic (`request→bob`); session topics are held with
+  `--topic <label>`.
+- **`POST /node/reset`** exists next to `/node/restart` (the task asked for
+  it); both rebuild every persona's transport, because raw statement
+  subscriptions do not survive a socket drop.
+- **`test-client-device.mjs` is kept**, not deleted: the scenarios cover
+  everything it did except a real HOP attachment (`--attach`, eight bot-core
+  offline tests) and a live-network send from a real seed. Retire it with
+  the HOP sandbox (v1.5); `docs/guide/testing.md` says so.
+
+### What is verified
+
+- Faults by signer set (persona name), channel and topic (hex or label),
+  with `count` and `forever`; delay; hold-dump; every set/hit/clear in the
+  event stream. Clock offset. Node restart and reset with personas
+  recovering their sessions.
+- The wire decoded in both directions: persona↔persona, persona→bot
+  (opened with the sender device's key), bot→persona (opened with the
+  recipient device's key), chat requests addressed to a persona; the
+  request/response kind and id, envelope recipients, ACKs per device with
+  code and liveness, slot history with reasons. No seed or private key in
+  any output (asserted).
+- The nine invariant scenarios above, each against a `pca`-created echo
+  bot over the real `pca run` path.
+
+### What is not verified
+
+- No phone talked to the sandbox; the persona is still the SDK behind
+  Polkadot Desktop, not the app.
+- HOP attachments (v1.5); the bot-core offline suite still drives them with
+  `test-client-device.mjs`.
+- A chat request addressed to a bot cannot be decoded by the inspector (the
+  envelope key is the sender's ephemeral one); it is labelled and its ACK
+  state is not applicable (requests are never ACKed).
+- Live-push behaviour on channel replacement: the node still pushes every
+  stored statement; the real node's unreliability here (PLAN.md "Known
+  traps") is not modelled. `no-ack-peer` relies on the push to show alice
+  every version; against a real node her inbox could miss versions that a
+  later takeover dropped. That is what the takeover means, and why it is a
+  backstop.
