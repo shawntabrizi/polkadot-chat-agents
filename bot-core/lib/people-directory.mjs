@@ -7,7 +7,7 @@
 //
 // Two implementations of the same contract: the chain through papi
 // (`Resources.Consumers`, `Resources.UsernameOwnerOf`) and the local sandbox
-// through its control API (`GET /consumers/:account`, `GET /usernames/:name`),
+// through its control API (`GET /api/consumers/:account`, `GET /api/usernames/:name`),
 // which serves the same state for a network that exists only on this machine.
 // index.mjs and cli.mjs talk to this seam and nothing else: no storage query
 // is issued outside this file, so a bot can be pointed at either backend by
@@ -73,16 +73,16 @@ export function createSandboxDirectory(url, { timeoutMs = DEFAULT_TIMEOUT_MS } =
     kind: "sandbox",
     url: base,
     async identifierKeyFor(accountHex) {
-      const consumer = await call("GET", `/consumers/${normHex(accountHex)}`);
+      const consumer = await call("GET", `/api/consumers/${normHex(accountHex)}`);
       return consumer?.identifierKey == null ? null : normHex(consumer.identifierKey);
     },
     async usernameOwner(name) {
-      const entry = await call("GET", `/usernames/${encodeURIComponent(String(name))}`);
+      const entry = await call("GET", `/api/usernames/${encodeURIComponent(String(name))}`);
       return entry?.account == null ? null : normHex(entry.account);
     },
     /** The sandbox's `register_lite_person`: username + identifier key + statement allowance, in one call. */
     async register({ account, username, identifierKey }) {
-      return call("POST", "/accounts/register", { account: normHex(account), username, identifierKey: normHex(identifierKey) });
+      return call("POST", "/api/accounts/register", { account: normHex(account), username, identifierKey: normHex(identifierKey) });
     },
   };
 }

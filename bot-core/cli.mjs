@@ -974,7 +974,7 @@ async function cmdCreate(name, flags) {
   if (profile?.id === SANDBOX.id) {
     sandboxUrl = resolveSandboxUrl(flags["sandbox-url"]);
     try {
-      const res = await fetch(new URL("/node", sandboxUrl), { signal: AbortSignal.timeout(5000) });
+      const res = await fetch(new URL("/api/node", sandboxUrl), { signal: AbortSignal.timeout(5000) });
       sandboxStoreUrl = (await res.json()).url;
       if (typeof sandboxStoreUrl !== "string") throw new Error("no store node url");
     } catch { fail(`No sandbox at ${sandboxUrl} — start one with: pcs up   (or point at it with --sandbox-url / PCA_SANDBOX_URL)`); }

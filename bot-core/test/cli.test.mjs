@@ -955,8 +955,8 @@ test("create --network sandbox registers through the sandbox directory and runs 
   const registered = new Map(); // account -> entry, what the sandbox directory would hold
   const server = http.createServer((req, res) => {
     const reply = (status, body) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
-    if (req.method === "GET" && req.url === "/node") return reply(200, { url: "ws://127.0.0.1:1" });
-    if (req.method === "POST" && req.url === "/accounts/register") {
+    if (req.method === "GET" && req.url === "/api/node") return reply(200, { url: "ws://127.0.0.1:1" });
+    if (req.method === "POST" && req.url === "/api/accounts/register") {
       let raw = "";
       req.on("data", (d) => { raw += d; });
       req.on("end", () => {
@@ -967,9 +967,9 @@ test("create --network sandbox registers through the sandbox directory and runs 
       });
       return undefined;
     }
-    const consumer = /^\/consumers\/(0x[0-9a-f]{64})$/.exec(req.url ?? "");
+    const consumer = /^\/api\/consumers\/(0x[0-9a-f]{64})$/.exec(req.url ?? "");
     if (req.method === "GET" && consumer) return registered.has(consumer[1]) ? reply(200, registered.get(consumer[1])) : reply(404, { error: "no consumer" });
-    const username = /^\/usernames\/(.+)$/.exec(req.url ?? "");
+    const username = /^\/api\/usernames\/(.+)$/.exec(req.url ?? "");
     if (req.method === "GET" && username) {
       const entry = [...registered.values()].find((e) => e.username === decodeURIComponent(username[1]));
       return entry ? reply(200, entry) : reply(404, { error: "no username" });

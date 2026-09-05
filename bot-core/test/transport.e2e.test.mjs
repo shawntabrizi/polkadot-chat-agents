@@ -46,7 +46,7 @@ async function startSandbox() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-e2e-sandbox-"));
   const daemon = await startDaemon({ dir, port: 0 });
   const register = async (account, username, identifierKey) => {
-    const res = await fetch(`${daemon.url}/accounts/register`, {
+    const res = await fetch(`${daemon.url}/api/accounts/register`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ account, username, identifierKey }),
     });
     if (!res.ok) throw new Error(`register ${username}: ${res.status} ${await res.text()}`);
