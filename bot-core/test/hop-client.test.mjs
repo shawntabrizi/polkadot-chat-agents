@@ -177,3 +177,26 @@ test("a dropped connection resumes once and completes", async () => {
   const got = await download(node, file);
   assert.equal(Buffer.compare(got, original), 0);
 });
+
+// The spec's RateLimited (1020) and PoolFull (1002) mean "retry later": one
+// retry, like a dropped connection. NotFound and the other refusals are final.
+test("a rate-limited claim is retried once; a second refusal or a final refusal fails", async () => {
+  const node = await startNode();
+  const original = new Uint8Array(crypto.randomBytes(50_000));
+  const file = node.putFile(original);
+  node.faults.refuse({ count: 1 });
+  const retries = [];
+  const got = await download(node, file, { log: (event, data) => { if (event === "HOP_RETRY") retries.push(data.error); } });
+  assert.equal(Buffer.compare(got, original), 0);
+  assert.equal(retries.length, 1);
+  assert.match(retries[0], /HOP 1020/);
+
+  const second = node.putFile(original);
+  node.faults.refuse({ count: 2 });
+  await assert.rejects(() => download(node, second), /HOP 1020/, "one retry is the policy");
+
+  const third = node.putFile(original);
+  node.faults.drop({ count: 1 });
+  await assert.rejects(() => download(node, third), /HOP 1004/, "NotFound is final: no retry");
+  assert.equal(node.faults.list().length, 0, "the drop fault was hit exactly once");
+});
