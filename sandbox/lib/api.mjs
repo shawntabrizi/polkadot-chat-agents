@@ -21,6 +21,10 @@ class ApiError extends Error {
 class Html {
   constructor(body) { this.body = body; }
 }
+/** A handler result that is a file on disk (a persona's media), streamed with its type. */
+class FileBody {
+  constructor(file, type) { this.file = file; this.type = type; }
+}
 
 // The built web UI (`sandbox/ui/dist`), served at `/` next to the API. Only
 // files that exist under the directory are served; the API's own paths win.
@@ -53,7 +57,7 @@ const intParam = (value, fallback) => {
   return n;
 };
 
-export function createApi({ node, directory, personas, events, addPersona, resolvePeer, storeUrl, setClock, restartNode, resetNode, staticDir = null }) {
+export function createApi({ node, hop, directory, personas, events, addPersona, resolvePeer, storeUrl, setClock, restartNode, resetNode, staticDir = null }) {
   // The room page shares the UI's markdown pipeline (lib/markdown.mjs); one
   // jsdom window for DOMPurify. Loaded on first use: jsdom is heavy, and the
   // CLI imports this module on every `pcs` call.
@@ -96,8 +100,37 @@ export function createApi({ node, directory, personas, events, addPersona, resol
     if (!found) throw notFound(`no fault ${id}`);
     return found;
   };
+  const hopFaultOf = (id) => {
+    const found = hop.faults.list().find((f) => f.id === Number(id));
+    if (!found) throw notFound(`no HOP fault ${id}`);
+    return found;
+  };
+  // Who signed a pool entry: a registered identity's Bulletin account, or a persona's.
+  const hopSignerLabel = (signer) => {
+    if (!signer) return null;
+    const p = [...personas.values()].find((x) => x.bulletinAccount === signer);
+    if (p) return p.name;
+    return directory.list().find((e) => e.bulletinAccount === signer)?.username ?? null;
+  };
+  // What a persona knows about an entry it uploaded or claimed: its role
+  // (metadata or chunk i/n) and the conversation it belongs to.
+  const hopRole = (hash) => {
+    for (const p of personas.values()) {
+      const known = p.hopEntry(hash);
+      if (known) return { role: known.role, owner: `${p.name} ⇄ ${nameOf(known.peer) ?? known.peer}`, messageId: known.messageId };
+    }
+    return {};
+  };
+  const hopView = () => ({
+    url: hop.url,
+    limits: hop.limits,
+    status: hop.status(),
+    entries: hop.list().map((e) => ({ ...e, signerLabel: hopSignerLabel(e.signer), ...hopRole(e.hash) })),
+    faults: hop.faults.list(),
+  });
   const roomView = (p, peer, { device = null, unread = false } = {}) => ({
     persona: p.name,
+    device,
     peer,
     peerName: nameOf(peer),
     room: p.state.messages.rooms().find((r) => r.peer === peer) ?? null,
@@ -108,8 +141,32 @@ export function createApi({ node, directory, personas, events, addPersona, resol
   // [method, pattern, handler(params, query, body)] — patterns use :name segments.
   const routes = [
     ["GET", "/node", () => ({
-      url: storeUrl, statements: node.statements.length, allowances: node.allowances.size, limits: node.limits, clock: node.clock, faults: node.faults.list(),
+      url: storeUrl, hopUrl: hop.url, statements: node.statements.length, allowances: node.allowances.size, limits: node.limits, clock: node.clock, faults: node.faults.list(),
     })],
+    // The HOP pool: every entry it held (bytes never leave the node), who
+    // signed it, whether it was claimed and acked, and the faults set on it.
+    ["GET", "/hop", () => hopView()],
+    ["POST", "/hop/faults", (_p, _q, body) => {
+      const kinds = { refuse: "refuse", cut: "cut", delay: "delay", drop: "drop", corrupt: "corrupt", bloat: "bloat" };
+      const kind = kinds[body.kind];
+      if (!kind) throw badRequest(`kind must be one of ${Object.keys(kinds).join(", ")}`);
+      const opts = {
+        ...(body.hash ? { hash: normHex(body.hash) } : {}),
+        ...(body.method ? { method: body.method } : {}),
+        ...(body.count === undefined ? {} : { count: body.count === null ? null : intParam(body.count, null) }),
+        ...(body.ms != null ? { ms: Number(body.ms) } : {}),
+        ...(body.bytes != null ? { bytes: Number(body.bytes) } : {}),
+      };
+      let created;
+      try { created = hop.faults[kind](opts); }
+      catch (e) { throw badRequest(e.message); }
+      return hopFaultOf(created.id);
+    }],
+    ["DELETE", "/hop/faults/:id", (p) => {
+      if (p.id === "all") return { cleared: hop.faults.clear() };
+      hopFaultOf(p.id);
+      return { cleared: hop.faults.clear(Number(p.id)) };
+    }],
     ["GET", "/wire", (_p, q) => ({
       statements: inspectWire(wireDeps(), {
         topic: hexOf(q.get("topic"), "topic"), signer: q.get("signer") ? signersOf(q.get("signer"))[0] : null,
@@ -131,8 +188,9 @@ export function createApi({ node, directory, personas, events, addPersona, resol
       try {
         if (body.kind === "drop") created = node.faults.drop({ ...match, ...(count !== undefined ? { count } : {}) });
         else if (body.kind === "delay") created = node.faults.delay({ ...match, ms: Number(body.ms), ...(count !== undefined ? { count } : {}) });
+        else if (body.kind === "delaySubmitReply") created = node.faults.delaySubmitReply({ ...match, ms: Number(body.ms), ...(count !== undefined ? { count } : {}) });
         else if (body.kind === "holdDump") created = node.faults.holdDump({ topic: match.topic });
-        else throw badRequest("kind must be drop, delay or holdDump");
+        else throw badRequest("kind must be drop, delay, delaySubmitReply or holdDump");
       } catch (e) {
         if (e instanceof ApiError) throw e;
         throw badRequest(e.message);
@@ -158,11 +216,17 @@ export function createApi({ node, directory, personas, events, addPersona, resol
       return directory.allow(body.account);
     }],
     // `register_lite_person` for an account the sandbox holds no keys for (a
-    // bot-core bot): username, identifier-key container, statement allowance.
+    // bot-core bot): username, identifier-key container, statement allowance,
+    // and the Bulletin authorization for its upload signer when named.
     ["POST", "/accounts/register", (_p, _q, body) => {
       if (!body.account || !body.username || !body.identifierKey) throw badRequest("account, username and identifierKey required");
-      try { return directory.register(body.account, { username: body.username, identifierKey: body.identifierKey }); }
+      try { return directory.register(body.account, { username: body.username, identifierKey: body.identifierKey, bulletinAccount: body.bulletinAccount ?? null }); }
       catch (e) { throw new ApiError(409, e.message); }
+    }],
+    // `pca storage grant`'s stand-in: a Bulletin authorization for one account.
+    ["POST", "/accounts/:account/bulletin", (p) => {
+      try { return directory.grantBulletin(p.account); }
+      catch (e) { throw badRequest(e.message); }
     }],
     ["GET", "/consumers/:account", (p) => directory.consumer(p.account) ?? (() => { throw notFound(`no consumer ${p.account}`); })()],
     ["GET", "/usernames/:name", (p) => {
@@ -237,6 +301,14 @@ export function createApi({ node, directory, personas, events, addPersona, resol
       found.markRead(peerOf(p.peer));
       return { ok: true };
     }],
+    // Bytes of an attachment this persona sent or claimed (its own media
+    // dir only; the id regex in media.mjs is the path guard). The UI shows
+    // images from here and nowhere else.
+    ["GET", "/personas/:name/media/:id", (p) => {
+      const found = persona(p.name).media(p.id);
+      if (!found) throw notFound(`no media ${p.id} for ${p.name}`);
+      return new FileBody(found.path, found.mime);
+    }],
     ["POST", "/personas/:name/rooms/:peer/messages", async (p, _q, body) => {
       const found = persona(p.name);
       const peer = peerOf(p.peer);
@@ -259,6 +331,13 @@ export function createApi({ node, directory, personas, events, addPersona, resol
           if (!/^0x([0-9a-f]{2})+$/i.test(body.raw)) throw badRequest("raw must be 0x hex");
           const token = await found.sendRaw(peer, Uint8Array.from(Buffer.from(body.raw.slice(2), "hex")), opts);
           return { raw: true, bytes: (body.raw.length - 2) / 2, token };
+        }
+        // A file from the daemon's host, uploaded through HOP, sent as a rich text with an optional caption.
+        if (body.file) {
+          if (typeof body.file !== "string" || !path.isAbsolute(body.file)) throw badRequest("file must be an absolute path on the daemon's host");
+          if (body.text != null && typeof body.text !== "string") throw badRequest("text must be a string");
+          const { messageId } = await found.sendFile(peer, { path: body.file, text: body.text ?? null }, opts);
+          return found.state.messages.get(messageId);
         }
         if (typeof body.text !== "string") throw badRequest("text, react, edit, call or raw required");
         const content = body.replyTo ? { type: "reply", messageId: body.replyTo, text: body.text } : { type: "text", text: body.text };
@@ -292,20 +371,24 @@ export function createApi({ node, directory, personas, events, addPersona, resol
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
-    // The web UI calls every route under `/api` (its dev server proxies that
-    // prefix to the daemon); the CLI and the tests call the bare paths.
-    const pathname = url.pathname.startsWith("/api/") ? url.pathname.slice(4) : url.pathname;
+    // Every route lives under `/api` — the UI, the CLI, the tests and bot-core
+    // all use that one prefix (decisions.md D4). Anything else is the built UI.
+    const pathname = url.pathname.startsWith("/api/") ? url.pathname.slice(4) : null;
     const send = (status, body) => {
       if (body instanceof Html) {
         res.writeHead(status, { "content-type": "text/html; charset=utf-8" });
         return res.end(body.body);
+      }
+      if (body instanceof FileBody) {
+        res.writeHead(status, { "content-type": body.type, "content-length": fs.statSync(body.file).size });
+        return fs.createReadStream(body.file).pipe(res);
       }
       res.writeHead(status, { "content-type": "application/json" });
       res.end(toJson(body));
     };
     try {
       if (req.method === "GET" && pathname === "/events") return serveEvents(req, res, url);
-      for (const route of routes) {
+      for (const route of pathname ? routes : []) {
         if (route.method !== req.method) continue;
         const match = pathname.match(route.regex);
         if (!match) continue;
@@ -313,7 +396,7 @@ export function createApi({ node, directory, personas, events, addPersona, resol
         const body = req.method === "POST" || req.method === "DELETE" ? await readBody(req) : {};
         return send(200, await route.handler(params, url.searchParams, body));
       }
-      const asset = req.method === "GET" && pathname === url.pathname ? staticFile(staticDir, pathname) : null;
+      const asset = req.method === "GET" && !pathname ? staticFile(staticDir, url.pathname) : null;
       if (asset) {
         res.writeHead(200, { "content-type": asset.type });
         return fs.createReadStream(asset.file).pipe(res);

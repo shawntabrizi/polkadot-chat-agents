@@ -675,6 +675,14 @@ function configuredFileDelivery(cfg) {
 }
 
 function fileDeliveryEnvironment(cfg) {
+  // The sandbox's HOP node (saved by create) is the bot's upload node and its
+  // one trusted download host; the sandbox profile permits its ws:// loopback.
+  if (cfg.networkProfile === SANDBOX.id) {
+    if (typeof cfg.hopUrl !== "string" || !cfg.hopUrl) return {};
+    let host;
+    try { host = new URL(cfg.hopUrl).hostname; } catch { fail(`Invalid hopUrl in the configuration of "${cfg.name ?? "this bot"}".`); }
+    return { BOT_HOP_UPLOAD_NODE: cfg.hopUrl, BOT_HOP_ALLOWED_NODES: host };
+  }
   const profile = configuredFileDelivery(cfg);
   if (!profile) return {};
   return {
@@ -970,13 +978,17 @@ async function cmdCreate(name, flags) {
   // control API doubles as the bot's identity backend (it registers the bot)
   // and as its People directory (BOT_SANDBOX_URL at run time).
   let sandboxStoreUrl = null;
+  let sandboxHopUrl = null;
   let sandboxUrl = null;
   if (profile?.id === SANDBOX.id) {
     sandboxUrl = resolveSandboxUrl(flags["sandbox-url"]);
     try {
-      const res = await fetch(new URL("/node", sandboxUrl), { signal: AbortSignal.timeout(5000) });
-      sandboxStoreUrl = (await res.json()).url;
+      const res = await fetch(new URL("/api/node", sandboxUrl), { signal: AbortSignal.timeout(5000) });
+      const nodeInfo = await res.json();
+      sandboxStoreUrl = nodeInfo.url;
       if (typeof sandboxStoreUrl !== "string") throw new Error("no store node url");
+      // The daemon's HOP node plays the Bulletin network for attachments.
+      sandboxHopUrl = typeof nodeInfo.hopUrl === "string" ? nodeInfo.hopUrl : null;
     } catch { fail(`No sandbox at ${sandboxUrl} — start one with: pcs up   (or point at it with --sandbox-url / PCA_SANDBOX_URL)`); }
   }
   const endpoint = String(flags.endpoint ?? sandboxStoreUrl ?? profile?.peopleEndpoints[0] ?? requestedNetwork);
@@ -1087,6 +1099,11 @@ async function cmdCreate(name, flags) {
     ...(fileDeliveryProfile && allow.length > 0
       ? { fileDelivery: { profile: fileDeliveryProfile.profile } }
       : {}),
+    // The sandbox's HOP node is free: every sandbox bot may return files.
+    ...(sandboxHopUrl ? { hopUrl: sandboxHopUrl } : {}),
+    // The public half of the upload signer (//allowance//bulletin//chat);
+    // /health reports it too. The sandbox registers it for its allowance.
+    bulletinAccount: fileAllowanceAccount(seed).hex,
     ...(flags.model != null ? { model: flagValue(flags.model, "model") } : {}), // pin per-brain model
     bridgePort: portFlag(flags.port ?? 8799),
     bridgeToken: newBridgeToken(),
@@ -1163,7 +1180,7 @@ async function runRegistration(name, config, { secret, wantUsername, digits, wai
     step("Registering your bot in the sandbox…");
     const username = digits && !/\.\d{2}$/.test(wantUsername) ? `${wantUsername}.${digits}` : wantUsername;
     try {
-      const entry = await createSandboxDirectory(config.backendUrl).register({ account: config.account, username, identifierKey: config.identifierKey });
+      const entry = await createSandboxDirectory(config.backendUrl).register({ account: config.account, username, identifierKey: config.identifierKey, bulletinAccount: config.bulletinAccount ?? null });
       config.username = entry.username;
       save();
     } catch (e) {

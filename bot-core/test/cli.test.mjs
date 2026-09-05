@@ -955,8 +955,8 @@ test("create --network sandbox registers through the sandbox directory and runs 
   const registered = new Map(); // account -> entry, what the sandbox directory would hold
   const server = http.createServer((req, res) => {
     const reply = (status, body) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
-    if (req.method === "GET" && req.url === "/node") return reply(200, { url: "ws://127.0.0.1:1" });
-    if (req.method === "POST" && req.url === "/accounts/register") {
+    if (req.method === "GET" && req.url === "/api/node") return reply(200, { url: "ws://127.0.0.1:1", hopUrl: "ws://127.0.0.1:2" });
+    if (req.method === "POST" && req.url === "/api/accounts/register") {
       let raw = "";
       req.on("data", (d) => { raw += d; });
       req.on("end", () => {
@@ -967,9 +967,9 @@ test("create --network sandbox registers through the sandbox directory and runs 
       });
       return undefined;
     }
-    const consumer = /^\/consumers\/(0x[0-9a-f]{64})$/.exec(req.url ?? "");
+    const consumer = /^\/api\/consumers\/(0x[0-9a-f]{64})$/.exec(req.url ?? "");
     if (req.method === "GET" && consumer) return registered.has(consumer[1]) ? reply(200, registered.get(consumer[1])) : reply(404, { error: "no consumer" });
-    const username = /^\/usernames\/(.+)$/.exec(req.url ?? "");
+    const username = /^\/api\/usernames\/(.+)$/.exec(req.url ?? "");
     if (req.method === "GET" && username) {
       const entry = [...registered.values()].find((e) => e.username === decodeURIComponent(username[1]));
       return entry ? reply(200, entry) : reply(404, { error: "no username" });
@@ -989,10 +989,13 @@ test("create --network sandbox registers through the sandbox directory and runs 
     assert.equal(bot.endpoint, "ws://127.0.0.1:1", "the store node the daemon reported");
     assert.equal(bot.backendUrl, sandboxUrl, "the control API doubles as identity backend and directory");
     assert.deepEqual([bot.username, bot.registered], ["sandboxbot", true]);
-    assert.equal("fileDelivery" in bot, false, "no Bulletin/HOP network in the sandbox yet");
+    assert.equal("fileDelivery" in bot, false, "no testnet allowance profile for a sandbox bot");
+    assert.equal(bot.hopUrl, "ws://127.0.0.1:2", "the daemon's HOP node is the bot's upload node");
+    assert.match(bot.bulletinAccount, /^0x[0-9a-f]{64}$/, "the upload signer's public half is saved");
     const entry = registered.get(bot.account);
     assert.ok(entry, "the bot's account was registered");
     assert.equal(entry.identifierKey, bot.identifierKey);
+    assert.equal(entry.bulletinAccount, bot.bulletinAccount, "the upload signer was registered for the sandbox's Bulletin allowance");
     assert.equal(entry.identifierKey.length, 2 + 65 * 2, "the 65-byte RFC-0004 container");
     const secret = JSON.parse(fs.readFileSync(path.join(botsDir, "sandboxbot", "secret.json"), "utf8"));
     assert.ok(!result.stdout.includes(secret.seedHex) && !result.stdout.includes(secret.mnemonic));
@@ -1022,6 +1025,8 @@ test("create --network sandbox registers through the sandbox directory and runs 
     assert.match(result.stdout, /^BOT_NETWORK_PROFILE=sandbox$/m);
     assert.match(result.stdout, new RegExp(`^BOT_SANDBOX_URL=${sandboxUrl.replace(/[.]/g, "\\.")}$`, "m"));
     assert.match(result.stdout, /^BOT_ENDPOINT=ws:\/\/127\.0\.0\.1:1$/m);
+    assert.match(result.stdout, /^BOT_HOP_UPLOAD_NODE=ws:\/\/127\.0\.0\.1:2$/m, "the sandbox HOP node is the upload node");
+    assert.match(result.stdout, /^BOT_HOP_ALLOWED_NODES=127\.0\.0\.1$/m, "and the one trusted download host");
 
     // No daemon: a clear failure before any key is generated; ws:// stays sandbox-only.
     result = await runCliAsync(botsDir, ["create", "nodaemon", "--brain", "echo", "--network", "sandbox", "--sandbox-url", "http://127.0.0.1:9"]);

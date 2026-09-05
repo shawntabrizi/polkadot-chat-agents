@@ -38,7 +38,7 @@ const out = (value) => console.log(JSON.stringify(value, null, 2));
 const api = async (method, route, body) => {
   let res;
   try {
-    res = await fetch(baseUrl + route, { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+    res = await fetch(`${baseUrl}/api${route}`, { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
   } catch {
     fail(`no sandbox at ${baseUrl} — start one with: pcs up`);
   }
@@ -49,6 +49,18 @@ const api = async (method, route, body) => {
 const device = flags.device ? { device: Number(flags.device) } : {};
 const short = (hex) => `${hex.slice(0, 10)}…`;
 const when = (ms) => new Date(ms).toISOString().slice(11, 19);
+const size = (bytes) => (bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`);
+// One line per attachment: what it is, and where its bytes are from the
+// viewing device's side — claimed here, claimed by a sibling (the
+// desktop's placeholder), still claiming, or failed with the reason.
+const attachmentLine = (a, viewDevice) => {
+  const what = `📎 ${a.kind} ${a.mimeType} ${size(a.fileSize)}${a.width ? ` ${a.width}×${a.height}` : ""}`;
+  if (a.status === "sent") return `${what} [sent, media ${a.mediaId}]`;
+  if (a.status === "claimed") return viewDevice && a.claimedBy !== viewDevice ? `${what} [claimed by device ${a.claimedBy}]` : `${what} [claimed on #${a.claimedBy}, media ${a.mediaId}]`;
+  if (a.status === "claiming") return `${what} [claiming on #${a.claimedBy}]`;
+  if (a.status === "failed") return `${what} [failed on #${a.claimedBy}: ${a.error}]`;
+  return `${what} [not claimed]`;
+};
 
 const usage = `pcs — Polkadot chat sandbox
 
@@ -60,6 +72,7 @@ const usage = `pcs — Polkadot chat sandbox
   pcs accept <name> [<requestId>] [--device N]
   pcs decline <name> [<requestId>]
   pcs send <from> <to> "text" [--reply <messageId>] [--device N]
+  pcs send <from> <to> --attach <file> [--caption "text"] [--device N]   # a photo or file through HOP
   pcs send <from> <to> --raw 0x<bytes>       # raw message bytes into the batch (an undecodable message)
   pcs call <from> <to> [--device N]          # a WebRTC offer; the peer's decline shows in the inbox
   pcs device add <name> | pcs device remove <name> <n>
@@ -68,12 +81,15 @@ const usage = `pcs — Polkadot chat sandbox
   pcs inbox <name> [--peer <name>] [--unread] [--device N]
   pcs wire [--peer <name>] [--signer <account>] [--channel <hex|label>] [--decode] [--raw]
   pcs wire --history <channel hex|label>   # what the slot held before, oldest first
-  pcs fault drop|delay [--from <name|account>] [--channel <hex|label>] [--topic <hex|label>] [--count N|forever] [--ms N]
+  pcs fault drop|delay|delay-reply [--from <name|account>] [--channel <hex|label>] [--topic <hex|label>] [--count N|forever] [--ms N]
   pcs fault hold-dump [--topic <hex|label>] [--for <name>]
   pcs fault list | pcs fault clear [<id>]
   pcs clock +2h|-30m|+10s|reset            # move the store node's clock
   pcs node restart|reset                   # drop every socket (keep / wipe the store)
-  pcs bot attach <pca-bot-name>            # register a pca bot's account in the directory
+  pcs hop                                  # the HOP pool: every entry, who signed and claimed it
+  pcs hop fault refuse|cut|delay|drop|corrupt [--hash <entry>] [--method claim|ack|submit] [--count N|forever] [--ms N]
+  pcs hop clear [<id>]
+  pcs bot attach <pca-bot-name>            # register a pca bot's account (and its Bulletin signer) in the directory
   pcs scenario run <file>                  # run a scripted scenario on a fresh daemon
   pcs events
 
@@ -127,11 +143,12 @@ const parseOffset = (value) => {
 const printMessages = (view) => {
   for (const m of view.messages) {
     const who = m.direction === "incoming" ? view.peerName ?? short(view.peer) : m.direction === "system" ? "·" : view.persona;
-    const text = m.content.text ?? (m.content.type === "contactAdded" ? "chat accepted" : m.content.type);
+    const text = m.content.text ?? (m.content.type === "contactAdded" ? "chat accepted" : m.content.type === "richText" ? "" : m.content.type);
     const status = m.direction === "outgoing" ? ` [${m.status}${m.device ? ` from #${m.device}` : ""}]`
       : m.direction === "incoming" ? ` [on #${m.receivedBy.join(",#")}${m.ackedBy.length ? ` acked #${m.ackedBy.join(",#")}` : ""}${m.read ? "" : " unread"}]` : "";
     const extras = [m.content.type === "reply" ? `↩ ${short(m.content.messageId)}` : "", m.editedAt ? "(edited)" : "", ...m.reactions.map((r) => `${r.emoji}${r.by === "me" ? "" : "·peer"}`)].filter(Boolean).join(" ");
     console.log(`${when(m.timestamp)} ${who}: ${text}${status}${extras ? ` ${extras}` : ""}`);
+    for (const a of m.content.attachments ?? []) note(attachmentLine(a, flags.device ? Number(flags.device) : null));
     note(`id ${m.messageId}`);
   }
 };
@@ -141,10 +158,11 @@ switch (cmd) {
   case "up": {
     const dir = flags.dir ?? defaultDir();
     const daemon = await startDaemon({ dir, port: Number(flags.port ?? DEFAULT_PORT) });
-    if (json) out({ url: daemon.url, storeUrl: daemon.storeUrl, dir });
+    if (json) out({ url: daemon.url, storeUrl: daemon.storeUrl, hopUrl: daemon.hopUrl, dir });
     else {
       ok(`sandbox up at ${daemon.url}`);
       note(`statement store node ${daemon.storeUrl}`);
+      note(`HOP node (attachments) ${daemon.hopUrl}`);
       note(`state dir ${dir}`);
       note("ctrl-c to stop");
     }
@@ -199,11 +217,24 @@ switch (cmd) {
   }
   case "send": {
     const [from, to, text] = rest;
-    if (!from || !to || (text == null && !flags.raw)) fail('usage: pcs send <from> <to> "text" [--reply id] [--device N] | pcs send <from> <to> --raw 0x..');
+    if (!from || !to || (text == null && !flags.raw && !flags.attach)) fail('usage: pcs send <from> <to> "text" [--reply id] [--device N] | pcs send <from> <to> --attach <file> [--caption "text"] | pcs send <from> <to> --raw 0x..');
     if (flags.raw && flags.raw !== true) {
       const result = await api("POST", `/personas/${from}/rooms/${to}/messages`, { raw: flags.raw, ...device });
       if (json) out(result);
       else ok(`${from} → ${to}: ${result.bytes} raw bytes queued`);
+      break;
+    }
+    if (flags.attach) {
+      if (flags.attach === true) fail("usage: pcs send <from> <to> --attach <file> [--caption \"text\"]");
+      const file = path.resolve(String(flags.attach));
+      if (!fs.existsSync(file)) fail(`no such file: ${file}`);
+      const message = await api("POST", `/personas/${from}/rooms/${to}/messages`, { file, text: flags.caption ?? text ?? null, ...device });
+      if (json) out(message);
+      else {
+        const [a] = message.content.attachments;
+        ok(`${from} → ${to}: ${message.status}  id ${message.messageId}`);
+        note(`${a.kind} ${a.mimeType} ${size(a.fileSize)}${a.width ? ` ${a.width}×${a.height}` : ""}  ${a.chunks.length} chunk(s) on ${a.wssUrl}  id ${short(a.identifier)}`);
+      }
       break;
     }
     const message = await api("POST", `/personas/${from}/rooms/${to}/messages`, { text, replyTo: flags.reply ?? null, ...device });
@@ -295,14 +326,15 @@ switch (cmd) {
       const result = await api("DELETE", `/faults/${id ?? "all"}`);
       if (json) out(result);
       else ok(`cleared ${result.cleared} fault(s)`);
-    } else if (sub === "drop" || sub === "delay" || sub === "hold-dump") {
-      const body = { kind: sub === "hold-dump" ? "holdDump" : sub, from: flags.from ?? null, channel: flags.channel ?? null, topic: flags.topic ?? (flags.for ? `request→${flags.for}` : null) };
+    } else if (sub === "drop" || sub === "delay" || sub === "delay-reply" || sub === "hold-dump") {
+      const kinds = { drop: "drop", delay: "delay", "delay-reply": "delaySubmitReply", "hold-dump": "holdDump" };
+      const body = { kind: kinds[sub], from: flags.from ?? null, channel: flags.channel ?? null, topic: flags.topic ?? (flags.for ? `request→${flags.for}` : null) };
       if (flags.count != null) body.count = flags.count === "forever" ? null : Number(flags.count);
-      if (sub === "delay") { if (flags.ms == null) fail("usage: pcs fault delay --ms N [...]"); body.ms = Number(flags.ms); }
+      if (sub === "delay" || sub === "delay-reply") { if (flags.ms == null) fail(`usage: pcs fault ${sub} --ms N [...]`); body.ms = Number(flags.ms); }
       const fault = await api("POST", "/faults", body);
       if (json) out(fault);
       else ok(`fault #${fault.id} ${fault.kind} set${fault.count != null ? ` for ${fault.count} hit(s)` : " until cleared"}`);
-    } else fail("usage: pcs fault drop|delay|hold-dump [...] | pcs fault list | pcs fault clear [id]");
+    } else fail("usage: pcs fault drop|delay|delay-reply|hold-dump [...] | pcs fault list | pcs fault clear [id]");
     break;
   }
   case "clock": {
@@ -321,6 +353,38 @@ switch (cmd) {
     else ok(`node ${sub === "restart" ? "restarted" : "reset"}: every socket dropped, ${result.statements} statement(s) in the store`);
     break;
   }
+  case "hop": {
+    const [sub, kind] = rest;
+    if (sub === "fault") {
+      if (!["refuse", "cut", "delay", "drop", "corrupt"].includes(kind)) fail("usage: pcs hop fault refuse|cut|delay|drop|corrupt [--hash <entry>] [--method claim|ack|submit] [--count N|forever] [--ms N]");
+      const body = { kind, hash: flags.hash ?? null, method: flags.method ?? null };
+      if (flags.count != null) body.count = flags.count === "forever" ? null : Number(flags.count);
+      if (kind === "delay") { if (flags.ms == null) fail("usage: pcs hop fault delay --ms N [...]"); body.ms = Number(flags.ms); }
+      const fault = await api("POST", "/hop/faults", body);
+      if (json) out(fault);
+      else ok(`HOP fault #${fault.id} ${fault.kind} on ${fault.method}${fault.hash ? ` of ${short(fault.hash)}` : ""} set${fault.count != null ? ` for ${fault.count} hit(s)` : " until cleared"}`);
+      break;
+    }
+    if (sub === "clear") {
+      const result = await api("DELETE", `/hop/faults/${kind ?? "all"}`);
+      if (json) out(result);
+      else ok(`cleared ${result.cleared} HOP fault(s)`);
+      break;
+    }
+    if (sub != null) fail("usage: pcs hop | pcs hop fault … | pcs hop clear [id]");
+    const pool = await api("GET", "/hop");
+    if (json) out(pool);
+    else {
+      step(`HOP node ${pool.url}: ${pool.status.entryCount} entr${pool.status.entryCount === 1 ? "y" : "ies"} holding ${pool.status.totalBytes}B of ${pool.status.maxBytes}B`);
+      if (pool.entries.length === 0) note("no entries");
+      for (const e of pool.entries) {
+        const role = e.role ? `${e.role}${e.owner ? ` of ${e.owner}` : ""}` : "entry";
+        note(`${short(e.hash)}  ${role}  ${e.bytes}B  by ${e.signerLabel ?? (e.signer ? short(e.signer) : "fixture")}  claimed ×${e.claims}${e.acked ? "  acked" : ""}${e.available ? "" : `  gone (${e.reason ?? "removed"})`}`);
+      }
+      for (const f of pool.faults) note(`fault #${f.id} ${f.kind} on ${f.method}${f.hash ? ` of ${short(f.hash)}` : ""}  hits ${f.hits}${f.count != null ? `/${f.count}` : ""}`);
+    }
+    break;
+  }
   case "bot": {
     const [sub, name] = rest;
     if (sub !== "attach" || !name) fail("usage: pcs bot attach <pca-bot-name>");
@@ -331,10 +395,12 @@ switch (cmd) {
     let cfg;
     try { cfg = JSON.parse(fs.readFileSync(file, "utf8")); } catch { fail(`no pca bot "${name}" (${file})`); }
     if (!cfg.account || !cfg.identifierKey) fail(`${file} has no account/identifierKey`);
-    const entry = await api("POST", "/accounts/register", { account: cfg.account, username: cfg.username ?? name, identifierKey: cfg.identifierKey });
+    // bulletinAccount is the public half of the bot's upload signer; without
+    // it the bot can receive attachments but not return files.
+    const entry = await api("POST", "/accounts/register", { account: cfg.account, username: cfg.username ?? name, identifierKey: cfg.identifierKey, bulletinAccount: cfg.bulletinAccount ?? null });
     if (json) out(entry);
     else {
-      ok(`${name} attached as ${entry.username} (${short(entry.account)})`);
+      ok(`${name} attached as ${entry.username} (${short(entry.account)})${entry.bulletinAccount ? ", file delivery allowed" : ""}`);
       if (cfg.networkProfile !== "sandbox") warn(`${name} targets ${cfg.endpoint}, not this sandbox. To run it here:  pca create ${name} --network sandbox`);
       else note(`run it:  pca run ${name}`);
     }
@@ -358,7 +424,7 @@ switch (cmd) {
   }
   case "events": {
     let res;
-    try { res = await fetch(`${baseUrl}/events`); } catch { fail(`no sandbox at ${baseUrl} — start one with: pcs up`); }
+    try { res = await fetch(`${baseUrl}/api/events`); } catch { fail(`no sandbox at ${baseUrl} — start one with: pcs up`); }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";

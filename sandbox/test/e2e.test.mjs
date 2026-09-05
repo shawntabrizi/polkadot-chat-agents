@@ -13,7 +13,7 @@ import { startDaemon } from "../daemon.mjs";
 import { waitFor } from "./helpers.mjs";
 
 const call = async (url, method, route, body) => {
-  const res = await fetch(url + route, { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+  const res = await fetch(`${url}/api${route}`, { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
   const json = await res.json();
   if (!res.ok) throw new Error(`${method} ${route} -> ${res.status} ${json.error}`);
   return json;
@@ -48,10 +48,16 @@ test("alice (1 device) and bob (2 devices): request, accept, text, reply from de
   await assert.rejects(get("/usernames/nobody"), /404/);
   await assert.rejects(get(`/consumers/0x${"33".repeat(32)}`), /404/);
   const botKey = `0x00${"44".repeat(32)}${"00".repeat(32)}`;
-  const registered = await post("/accounts/register", { account: `0x${"55".repeat(32)}`, username: "echobot", identifierKey: botKey });
-  assert.deepEqual(registered, { account: `0x${"55".repeat(32)}`, username: "echobot", identifierKey: botKey });
+  const botSigner = `0x${"56".repeat(32)}`;
+  const registered = await post("/accounts/register", { account: `0x${"55".repeat(32)}`, username: "echobot", identifierKey: botKey, bulletinAccount: botSigner });
+  assert.deepEqual(registered, { account: `0x${"55".repeat(32)}`, username: "echobot", identifierKey: botKey, bulletinAccount: botSigner });
   assert.equal((await get(`/consumers/0x${"55".repeat(32)}`)).identifierKey, botKey, "a registered bot is messageable");
-  assert.equal((await get("/accounts")).find((a) => a.username === "echobot").allowance, true, "and may submit statements");
+  const echobotEntry = (await get("/accounts")).find((a) => a.username === "echobot");
+  assert.equal(echobotEntry.allowance, true, "and may submit statements");
+  assert.equal(echobotEntry.hopAllowance, true, "and its upload signer may hop_submit");
+  assert.equal(daemon.hop.allowances.has(botSigner), true, "the HOP node holds that Bulletin allowance");
+  assert.equal(node.hopUrl, daemon.hopUrl, "GET /node names the HOP node");
+  assert.deepEqual(Object.keys(await get("/hop")).sort(), ["entries", "faults", "limits", "status", "url"]);
   await assert.rejects(post("/accounts/register", { account: `0x${"66".repeat(32)}`, username: "echobot", identifierKey: botKey }), /409/);
   await assert.rejects(post("/accounts/register", { account: `0x${"66".repeat(32)}`, username: "x" }), /400/);
 
@@ -142,7 +148,7 @@ test("alice (1 device) and bob (2 devices): request, accept, text, reply from de
   assert.ok((await get("/wire?raw=1")).statements.every((s) => s.hex.startsWith("0x")));
 
   // Events: every state change was published, with a replayable sequence.
-  const res = await fetch(`${api}/events?since=0`);
+  const res = await fetch(`${api}/api/events?since=0`);
   const reader = res.body.getReader();
   const { value } = await reader.read();
   await reader.cancel();
@@ -275,7 +281,7 @@ test("faults, clock and node restart; the wire decodes both directions and match
   assert.equal((await get("/wire")).statements.every((s) => s.signerLabel), true);
 
   // Faults, clock and node events are in the stream, typed apart from wire events.
-  const res = await fetch(`${api}/events?since=0`);
+  const res = await fetch(`${api}/api/events?since=0`);
   const reader = res.body.getReader();
   const { value } = await reader.read();
   await reader.cancel();

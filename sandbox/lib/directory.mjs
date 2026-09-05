@@ -8,6 +8,12 @@
 // account (`Resources::UsernameOwnerOf`), and every account that may submit
 // statements — the identity and each device statement account (mds.md
 // "Statement Store allowance") — is added to the store node's allowance set.
+//
+// The Bulletin chain's storage authorization is the second allowance: the
+// account a client signs `hop_submit` with (bot-core's derived
+// `//allowance//bulletin//chat`, a persona's minted Bulletin key) goes into
+// the HOP node's allowance set at registration, as `pca storage grant`
+// would put it on the Bulletin chain.
 
 import { bytesEqual, hexToBytes, normHex } from "./bytes.mjs";
 
@@ -35,38 +41,57 @@ export function unwrapIdentifierKey(container) {
 
 const validUsername = (name) => /^[a-z0-9][a-z0-9._-]{0,31}$/.test(name);
 
-export function createDirectory({ allowances }) {
-  const accounts = new Map(); // account hex -> { account, username, identifierKey (container hex) | null }
+export function createDirectory({ allowances, hopAllowances = new Set() }) {
+  const accounts = new Map(); // account hex -> { account, username, identifierKey (container hex) | null, bulletinAccount | null }
   const owners = new Map(); // username -> account hex
 
   const grant = (account) => { allowances.add(account); };
+  const account32 = (value, what) => {
+    const hex = normHex(value);
+    if (hexToBytes(hex).length !== 32) throw new Error(`${what} must be 32 bytes`);
+    return hex;
+  };
 
   return {
     /**
      * `register_lite_person` for the sandbox: username + identifier key +
-     * statement allowance in one step. Re-registering an account updates its
-     * key (`update_identifier_key`); usernames stay unique across accounts.
+     * statement allowance in one step, plus the Bulletin storage authorization
+     * for the account's upload signer when one is named. Re-registering an
+     * account updates its key (`update_identifier_key`); usernames stay
+     * unique across accounts.
      */
-    register(account, { username, identifierKey }) {
-      const acct = normHex(account);
-      if (hexToBytes(acct).length !== 32) throw new Error("account must be 32 bytes");
+    register(account, { username, identifierKey, bulletinAccount = null }) {
+      const acct = account32(account, "account");
       if (!validUsername(username)) throw new Error(`invalid username: ${username}`);
       const owner = owners.get(username);
       if (owner != null && owner !== acct) throw new Error(`username taken: ${username}`);
       const existing = accounts.get(acct);
       if (existing?.username && existing.username !== username) throw new Error(`${acct} already owns username ${existing.username}`);
       const container = wrapIdentifierKey(identifierKey);
-      const entry = { account: acct, username, identifierKey: normHex(container) };
+      const bulletin = bulletinAccount == null ? existing?.bulletinAccount ?? null : account32(bulletinAccount, "bulletinAccount");
+      const entry = { account: acct, username, identifierKey: normHex(container), bulletinAccount: bulletin };
       accounts.set(acct, entry);
       owners.set(username, acct);
       grant(acct);
+      if (bulletin) hopAllowances.add(bulletin);
       return { ...entry };
+    },
+
+    /** The Bulletin storage authorization alone (`pca storage grant`): the account may `hop_submit`. */
+    grantBulletin(account) {
+      const acct = account32(account, "account");
+      hopAllowances.add(acct);
+      return { account: acct, hopAllowance: true };
+    },
+    /** Who signs uploads for a registered identity, or null. */
+    bulletinAccountOf(account) {
+      return accounts.get(normHex(account))?.bulletinAccount ?? null;
     },
 
     /** `set_statement_store_account`: bandwidth only, no username, no key (device accounts). */
     allow(account) {
       const acct = normHex(account);
-      if (!accounts.has(acct)) accounts.set(acct, { account: acct, username: null, identifierKey: null });
+      if (!accounts.has(acct)) accounts.set(acct, { account: acct, username: null, identifierKey: null, bulletinAccount: null });
       grant(acct);
       return { ...accounts.get(acct) };
     },
@@ -93,9 +118,10 @@ export function createDirectory({ allowances }) {
     },
 
     hasAllowance: (account) => allowances.has(normHex(account)),
+    hasBulletinAllowance: (account) => hopAllowances.has(normHex(account)),
 
     list() {
-      return [...accounts.values()].map((e) => ({ ...e, allowance: allowances.has(e.account) }));
+      return [...accounts.values()].map((e) => ({ ...e, allowance: allowances.has(e.account), hopAllowance: e.bulletinAccount != null && hopAllowances.has(e.bulletinAccount) }));
     },
   };
 }

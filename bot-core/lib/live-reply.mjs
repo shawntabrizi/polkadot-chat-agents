@@ -29,12 +29,15 @@ const defaultTimers = {
   clear: (t) => clearTimeout(t),
 };
 
-// send({ peerHex, text, editOf?, supersedes? }) -> Promise<{ messageId, delivered }>
+// send({ peerHex, text, editOf?, supersedes?, ephemeral? }) -> Promise<{ messageId, delivered }>
 //   `delivered` is an opaque token for awaitAck (in production: a promise that
 //   resolves once the peer ACKed the statement carrying the message).
 //   `supersedes: [messageId]` asks the outbound lane to drop those messages if
 //   the peer never fetched them (used by the no-ACK finalize fallback so the
 //   stale placeholder bubble is replaced by the answer, not shown above it).
+//   `ephemeral: true` marks the placeholder and its progress frames: they are
+//   not the turn's answer, so the transport must not journal them as one (a
+//   restart would then re-send a placeholder instead of running the brain).
 // awaitAck(delivered) -> Promise<boolean> (false on timeout)
 export const createLiveReplies = ({
   send,
@@ -103,7 +106,7 @@ export const createLiveReplies = ({
           log("BOT_LIVE_EDIT_FENCED", { to: lane.peerHex, messageId: lane.messageId });
           return;
         }
-        await send({ peerHex: lane.peerHex, text, editOf: lane.messageId, guard });
+        await send({ peerHex: lane.peerHex, text, editOf: lane.messageId, guard, ephemeral: true });
         lane.lastSentText = text;
         lane.editsSent += 1;
         lane.lastEditAt = now();
@@ -189,7 +192,7 @@ export const createLiveReplies = ({
   return {
     // Send a live placeholder message; edits unlock when the peer ACKs it.
     async begin(peerHex, text, { guard = null } = {}) {
-      const { messageId, delivered } = await send({ peerHex, text, guard });
+      const { messageId, delivered } = await send({ peerHex, text, guard, ephemeral: true });
       const lane = makeLane(peerHex, messageId, "pending", guard);
       lane.lastSentText = text;
       lane.lastEditAt = now();

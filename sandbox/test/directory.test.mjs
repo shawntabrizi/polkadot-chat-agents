@@ -62,7 +62,7 @@ test("allow grants a device account bandwidth without making it messageable", ()
   assert.ok(allowances.has(hex(acct(7))));
   assert.equal(directory.consumer(acct(7)), null, "no identifier key: nobody can open a chat with a device account");
   assert.equal(directory.identityOf(acct(7)), null);
-  assert.deepEqual(directory.list(), [{ account: hex(acct(7)), username: null, identifierKey: null, allowance: true }]);
+  assert.deepEqual(directory.list(), [{ account: hex(acct(7)), username: null, identifierKey: null, bulletinAccount: null, allowance: true, hopAllowance: false }]);
   assert.equal(directory.hasAllowance(acct(7)), true);
   assert.equal(directory.hasAllowance(acct(8)), false);
 });

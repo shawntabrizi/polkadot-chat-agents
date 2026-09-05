@@ -17,6 +17,7 @@ import { getWsProvider } from "polkadot-api/ws";
 import { createApi } from "./lib/api.mjs";
 import { hexToBytes, log, normHex } from "./lib/bytes.mjs";
 import { createDirectory } from "./lib/directory.mjs";
+import { startHopNode } from "./lib/hop-node.mjs";
 import { createPersona } from "./lib/persona.mjs";
 import { startStoreNode } from "./lib/store-node.mjs";
 
@@ -49,14 +50,21 @@ export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, hos
 
   const allowances = new Set();
   const node = await startStoreNode({ port: storePort, host, allowances });
-  const directory = createDirectory({ allowances });
+  // The HOP node beside the store node: attachments' bytes live there, and
+  // its allowance set is the Bulletin storage authorization the directory
+  // grants at registration.
+  const hopAllowances = new Set();
+  const hop = await startHopNode({ host, allowances: hopAllowances });
+  const directory = createDirectory({ allowances, hopAllowances });
   const personas = new Map();
   const events = createEvents();
   const clients = [];
 
   // Store events are "wire"; faults and node restarts get their own types so
-  // `pcs events` readers can tell a broken network from a chatty one.
+  // `pcs events` readers can tell a broken network from a chatty one. The
+  // pool's events are "hop".
   node.watch((e) => events.emit(e.event === "fault" ? "fault" : e.event === "node" ? "node" : "wire", e));
+  hop.watch((e) => events.emit("hop", e));
 
   const lookup = {
     getPeerIdentity: async (accountId) => {
@@ -72,7 +80,8 @@ export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, hos
   const transport = { makeStatementStore, lookup, onEvent: (e) => events.emit("engine", e) };
 
   const addPersona = async (name, devices) => {
-    const persona = createPersona({ name, devices });
+    // Attachments a persona sends or claims live under its own media dir.
+    const persona = createPersona({ name, devices, hopUrl: hop.url, mediaDir: path.join(dir, "personas", name, "media") });
     persona.register(directory);
     personas.set(name, persona);
     persona.state.onChange((change) => events.emit(change.type, { persona: name, ...change }));
@@ -118,21 +127,23 @@ export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, hos
   // The built web UI, when `npm run build` in sandbox/ui has produced it.
   const staticDir = fs.existsSync(path.join(UI_DIST, "index.html")) ? UI_DIST : null;
   const api = createApi({
-    node, directory, personas, events, addPersona, resolvePeer, storeUrl: node.url, setClock,
+    node, hop, directory, personas, events, addPersona, resolvePeer, storeUrl: node.url, setClock,
     restartNode: () => rewire(() => node.restart()),
     resetNode: () => rewire(() => node.reset()),
     staticDir,
   });
   const apiPort = await api.listen(port, host);
   const url = `http://${host}:${apiPort}`;
-  fs.writeFileSync(path.join(dir, "daemon.json"), JSON.stringify({ url, storeUrl: node.url, pid: process.pid, startedAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
-  log("SANDBOX_UP", { url, storeUrl: node.url, dir, ui: staticDir != null });
+  fs.writeFileSync(path.join(dir, "daemon.json"), JSON.stringify({ url, storeUrl: node.url, hopUrl: hop.url, pid: process.pid, startedAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
+  log("SANDBOX_UP", { url, storeUrl: node.url, hopUrl: hop.url, dir, ui: staticDir != null });
 
   return {
     url,
     storeUrl: node.url,
+    hopUrl: hop.url,
     dir,
     node,
+    hop,
     directory,
     personas,
     events,
@@ -143,6 +154,7 @@ export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, hos
       await dropClients();
       await api.close();
       await node.close();
+      await hop.close();
       try { fs.rmSync(path.join(dir, "daemon.json")); } catch { /* already gone */ }
       log("SANDBOX_DOWN");
     },

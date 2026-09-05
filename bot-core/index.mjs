@@ -400,7 +400,10 @@ const mediaMaxInflightBytes = numberEnv(
   { min: mediaMemoryReservation(mediaMaxBytes), max: 4 * 1024 * 1024 * 1024 },
 );
 const mediaDownloadQueueCap = numberEnv("BOT_MEDIA_DOWNLOAD_QUEUE_CAP", 100, { min: 1, max: 10_000 });
-const hopAllowInsecure = env.BOT_HOP_ALLOW_INSECURE === "1"; // tests only: mock node is plain ws
+// Plain ws:// and IP-literal HOP hosts are permitted on the network profile
+// that already permits them for the statement store (the local sandbox, whose
+// HOP node is on loopback) and for tests via BOT_HOP_ALLOW_INSECURE.
+const hopAllowInsecure = env.BOT_HOP_ALLOW_INSECURE === "1" || Boolean(networkProfile?.insecureEndpoints);
 const hopAllowedNodes = String(env.BOT_HOP_ALLOWED_NODES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 const mediaStore = createMediaStore({
   dir: env.BOT_STATE_DIR ? path.join(env.BOT_STATE_DIR, "media") : fs.mkdtempSync(path.join(os.tmpdir(), "bot-media-")),
@@ -1021,8 +1024,10 @@ const outbound = createOutboundLanes({
 // react to, plus a `delivered` promise that resolves true once the peer ACKed
 // the statement carrying the message. replyTo quotes a peer message; editOf
 // rewrites one of our own; supersedes drops never-fetched messages from the
-// slot (live-reply fallback).
-const submitMessage = async (peerHex, { text, replyTo = null, editOf = null, supersedes = [] }) => {
+// slot (live-reply fallback). Sent during an owed turn, the message is that
+// inbound's answer and is journaled before the lane takes it (see
+// journalAnswer); `ephemeral` opts a placeholder/progress frame out.
+const submitMessage = async (peerHex, { text, replyTo = null, editOf = null, supersedes = [], ephemeral = false }) => {
   const k = norm(peerHex);
   if (sessions.get(k) == null) throw new Error("no active session for peer");
   const messageId = makeAppUuid();
@@ -1032,6 +1037,7 @@ const submitMessage = async (peerHex, { text, replyTo = null, editOf = null, sup
     : editOf
       ? encodeOpaqueEditedMessage({ messageId, timestamp, targetMessageId: editOf, text })
       : encodeOpaqueTextMessage({ messageId, timestamp, text });
+  if (!ephemeral) await journalAnswer(k, { messageId, opaque, supersedes });
   const { submitted, delivered } = outbound.enqueue(k, opaque, { messageId, supersedes });
   await submitted;
   log("BOT_SENT_TEXT", { to: peerHex, chars: text.length, ...(replyTo ? { replyTo } : {}), ...(editOf ? { editOf } : {}) });
@@ -1079,6 +1085,9 @@ const sendAttachment = async (peerHex, { filePath, mime, size, text = null }) =>
       fileKind: "general",
     }],
   });
+  // The envelope holds the claim ticket; journaled, it lands in the 0600
+  // state file like an inbound attachment's ticket does (see snapshotState).
+  await journalAnswer(k, { messageId, opaque, supersedes: [] });
   const { submitted, delivered } = outbound.enqueue(k, opaque, { messageId });
   await submitted;
   disarmThinking(peerHex);
@@ -1088,7 +1097,7 @@ const sendAttachment = async (peerHex, { filePath, mime, size, text = null }) =>
 
 // ---------- live replies (one evolving message per slow turn) ----------
 const liveReplies = createLiveReplies({
-  send: ({ peerHex, text, editOf, supersedes }) => submitMessage(peerHex, { text, editOf, supersedes }),
+  send: ({ peerHex, text, editOf, supersedes, ephemeral }) => submitMessage(peerHex, { text, editOf, supersedes, ephemeral }),
   // The lane's delivered promise, bounded: a peer that never fetches the
   // placeholder must not gate the final answer forever.
   awaitAck: (delivered) => Promise.race([
@@ -1340,14 +1349,29 @@ const handleInbound = async (peerHex, msg, owedId = null, { reservedBridge = fal
 const enqueueOwed = (peerHex, owedId, msg, requestId, { reservedBridge = false } = {}) => {
   if (queuedOwed.has(owedId)) return false;
   queuedOwed.add(owedId);
+  const k = norm(peerHex);
   enqueueWork(peerHex, async () => {
+    const answer = owedReplies.get(owedId)?.answer;
+    if (answer?.length) {
+      // An earlier life already answered; at most the statement is missing.
+      // Re-send the journaled answer as-is and never run the brain again.
+      if (reservedBridge) releaseBridgeReservation();
+      if (await resendAnswer(k, answer)) settleOwed(owedId);
+      else queuedOwed.delete(owedId);
+      return;
+    }
     let handedOff = false;
+    // Everything a direct turn sends is this inbound's answer (journalAnswer).
+    // A bridge turn only hands the message to the harness, whose POST /send
+    // answers later under its own lease contract — never journaled here.
+    if (!usesBridgeQueue) owedTurns.set(k, owedId);
     try {
       // Direct runtimes return false only when global shutdown interrupted a
       // turn. Keep that durable owed entry for restart; user /stop and every
       // completed/error reply return a settled result and are safe to remove.
       handedOff = (await handleInbound(peerHex, msg, owedId, { reservedBridge })) !== false;
     } finally {
+      if (owedTurns.get(k) === owedId) owedTurns.delete(k);
       if (!usesBridgeQueue && handedOff) settleOwed(owedId);
       else if (!handedOff) queuedOwed.delete(owedId);
     }
@@ -1378,35 +1402,92 @@ const messageDedupId = (peerHex, requestId, text, messageId) =>
 // stays until a direct brain has answered, or a bridge consumer explicitly ACKs
 // its leased delivery. This is intentionally bounded: full queues defer the
 // protocol statement before its session ACK, allowing the peer to retry later.
-const owedReplies = new Map(); // owedId -> { peerHex, requestId, msg, byteSize }
+//
+// The journal holds the ANSWER too, once it exists: every message a direct
+// turn sends is recorded (id + exact bytes) and made durable before the lane
+// submits it. The store pushes a statement to subscribers before it answers
+// the submitter, so a crash there leaves the peer holding an answer the
+// journal would otherwise not know about — the restart would run the brain
+// again and send a second answer under a new id (with an LLM, a different
+// one). With the answer journaled, a restart re-sends those exact bytes under
+// the same ids instead (peers dedup by id) and runs the brain only for
+// entries that have no answer yet.
+const owedReplies = new Map(); // owedId -> { peerHex, requestId, msg, answer: [{ messageId, opaque, supersedes }], byteSize }
 const queuedOwed = new Set();
+// peerHex -> owedId of the direct turn running on that peer. Work is
+// serialized per peer, so there is at most one; submitMessage/sendAttachment
+// journal into it.
+const owedTurns = new Map();
+// Owed ids a receive path has journaled but not yet enqueued: it awaits the
+// critical persist in between, and a turn settling on that peer meanwhile
+// pumps every un-queued owed entry. Without this set the pump ran the brain
+// on the fresh message and the receive path ran it again (two answers with
+// different ids — a phone shows the bot answering twice). Found by the
+// sandbox's persona, which sends its follow-up as the previous turn ends.
+const owedInAdmission = new Set();
 let pumpOwed = () => {};
 let owedReplyBytes = 0;
-const owedByteSize = (owedId, peerHex, requestId, msg) =>
-  Buffer.byteLength(JSON.stringify({ id: owedId, p: peerHex, r: requestId, m: msg }));
+const answerByteSize = (a) => Buffer.byteLength(JSON.stringify({ id: a.messageId, o: bytesToHex(a.opaque), s: a.supersedes }));
+const owedByteSize = (owedId, peerHex, requestId, msg, answer = []) =>
+  Buffer.byteLength(JSON.stringify({ id: owedId, p: peerHex, r: requestId, m: msg }))
+  + answer.reduce((sum, a) => sum + answerByteSize(a), 0);
 const removeOwed = (owedId) => {
   const owed = owedReplies.get(owedId);
   if (!owed) return null;
   owedReplies.delete(owedId);
-  owedReplyBytes = Math.max(0, owedReplyBytes - (owed.byteSize ?? owedByteSize(owedId, owed.peerHex, owed.requestId, owed.msg)));
+  owedReplyBytes = Math.max(0, owedReplyBytes - (owed.byteSize ?? owedByteSize(owedId, owed.peerHex, owed.requestId, owed.msg, owed.answer)));
   return owed;
 };
 const restoreOwed = (owedId, owed) => {
   if (!owed || owedReplies.has(owedId)) return false;
-  const byteSize = owed.byteSize ?? owedByteSize(owedId, owed.peerHex, owed.requestId, owed.msg);
+  const byteSize = owed.byteSize ?? owedByteSize(owedId, owed.peerHex, owed.requestId, owed.msg, owed.answer);
   if (owedReplyBytes + byteSize > MAX_OWED_BYTES) return false;
   owedReplies.set(owedId, { ...owed, byteSize });
   owedReplyBytes += byteSize;
   return true;
 };
-const oweReply = (owedId, peerHex, msg, requestId) => {
+const oweReply = (owedId, peerHex, msg, requestId, answer = []) => {
   if (owedReplies.has(owedId)) return true;
   if (owedReplies.size >= MAX_OWED) return false;
-  const byteSize = owedByteSize(owedId, peerHex, requestId, msg);
+  const byteSize = owedByteSize(owedId, peerHex, requestId, msg, answer);
   if (byteSize > MAX_OWED_BYTES || owedReplyBytes + byteSize > MAX_OWED_BYTES) return false;
-  owedReplies.set(owedId, { peerHex, requestId, msg, byteSize });
+  owedReplies.set(owedId, { peerHex, requestId, msg, answer, byteSize });
   owedReplyBytes += byteSize;
   return true;
+};
+// Record one outgoing message as (part of) the answer to the owed turn
+// running on this peer, durably, BEFORE the lane submits it: a crash after
+// the submit must never lose the fact that this answer exists. Outside an
+// owed turn (bridge sends, reactions, declines) there is nothing to journal.
+// Answers never push the entry past the byte cap: the cap throttles new
+// inbounds (oweReply), and an answer already composed must reach the peer.
+// A failed persist is logged and the message still goes out — a dead disk
+// must not silence the bot; the crash-duplicate risk it reopens is the old one.
+const journalAnswer = async (k, { messageId, opaque, supersedes }) => {
+  const owedId = owedTurns.get(k);
+  const owed = owedId ? owedReplies.get(owedId) : null;
+  if (!owed) return;
+  const entry = { messageId, opaque, supersedes: supersedes?.length ? [...supersedes] : [] };
+  owed.answer = [...(owed.answer ?? []), entry];
+  const bytes = answerByteSize(entry);
+  owed.byteSize = (owed.byteSize ?? 0) + bytes;
+  owedReplyBytes += bytes;
+  if (!(await persistCritical())) log("BOT_OWED_ANSWER_PERSIST_FAILED", { to: k, messageId });
+};
+// Re-publish a journaled answer under its original ids and bytes (same
+// timestamps, same supersedes). Enqueued in one tick, the parts ride one
+// statement. A peer that already fetched them dedups by id; one that never
+// did finally gets them.
+const resendAnswer = async (k, answer) => {
+  try {
+    const sends = answer.map((a) => outbound.enqueue(k, a.opaque, { messageId: a.messageId, supersedes: a.supersedes }));
+    await Promise.all(sends.map((send) => send.submitted));
+    log("BOT_OWED_ANSWER_RESENT", { to: k, messages: answer.length });
+    return true;
+  } catch (e) {
+    log("BOT_OWED_ANSWER_RESEND_FAILED", { to: k, error: String(e?.message ?? e) });
+    return false;
+  }
 };
 const settleOwed = (owedId) => {
   queuedOwed.delete(owedId);
@@ -1449,11 +1530,13 @@ const snapshotState = () => ({
   // natural ceiling is the durable owed-work budget rather than the semantic
   // dedup window.
   pendingOpenerAcks: [...pendingOpenerAcks].slice(-MAX_OWED),
-  // Additive optional fields (k/q/e/a) keep the snapshot readable by older
-  // binaries, which fall back to answering from t (caption or synthesized
-  // text). The attachment claim ticket ("ct") is key material — acceptable
-  // here because this file is 0600 and already holds session keys, and owed
-  // entries are transient (settled when the reply pipeline takes custody).
+  // Additive optional fields (k/q/e/a/ans) keep the snapshot readable by
+  // older binaries, which fall back to answering from t (caption or
+  // synthesized text). The attachment claim ticket ("ct", and inside a
+  // journaled file answer's bytes) is key material — acceptable here because
+  // this file is 0600 and already holds session keys, and owed entries are
+  // transient (settled when the reply pipeline takes custody). "ans" is the
+  // answer so far: message id, exact envelope bytes, superseded ids.
   owed: [...owedReplies.entries()].map(([id, o]) => ({
     id,
     p: o.peerHex,
@@ -1469,6 +1552,9 @@ const snapshotState = () => ({
         ...(x.width != null ? { w: x.width, h: x.height } : {}),
         ...(x.duration != null ? { d: x.duration } : {}),
       })),
+    } : {}),
+    ...(o.answer?.length ? {
+      ans: o.answer.map((a) => ({ id: a.messageId, o: bytesToHex(a.opaque), ...(a.supersedes.length ? { s: a.supersedes } : {}) })),
     } : {}),
   })),
   greeted: [...greetedPeers],
@@ -1663,7 +1749,7 @@ pumpOwed = () => {
   let pumped = 0;
   let deferred = 0;
   for (const [owedId, owed] of owedReplies) {
-    if (queuedOwed.has(owedId)) continue;
+    if (queuedOwed.has(owedId) || owedInAdmission.has(owedId)) continue;
     if (!reserveAdmission(owed.peerHex, 1, { alreadyOwed: true })) { deferred += 1; continue; }
     if (!enqueueOwed(owed.peerHex, owedId, owed.msg, owed.requestId, { reservedBridge: usesBridgeQueue })) {
       releaseBridgeReservation();
@@ -1803,13 +1889,15 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
   }
   if (fresh.length && !reserveAdmission(peerHex, fresh.length)) return "deferred";
   const addedOwed = [];
+  const dropAdded = () => { for (const id of addedOwed) { removeOwed(id); owedInAdmission.delete(id); } };
   for (const f of fresh) {
     if (!oweReply(f.id, peerHex, f.msg, decoded.requestId)) {
-      for (const id of addedOwed) removeOwed(id);
+      dropAdded();
       releaseBridgeReservation(fresh.length);
       return "deferred";
     }
     addedOwed.push(f.id);
+    owedInAdmission.add(f.id); // this path enqueues it below; the pump must not
   }
   for (const id of newlySeen) seenRequests.add(id);
   trimSet(seenRequests, SEEN_CAP);
@@ -1818,7 +1906,7 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
     // the app statement un-ACKed and let normal retransmission retry it.
     if (!(await persistCritical())) {
       for (const id of newlySeen) seenRequests.delete(id);
-      for (const id of addedOwed) removeOwed(id);
+      dropAdded();
       // See opener rollback above: retain only the post-rollback state for a
       // later retry if storage recovers.
       persist();
@@ -1830,6 +1918,7 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
   // retried when the peer resends; dedup suppresses a second model invocation.
   for (const f of fresh) {
     log("BOT_RECEIVED_TEXT", { from: peerHex, chars: f.msg.text.length, ...(f.msg.kind !== "text" ? { kind: f.msg.kind } : {}), ...(f.msg.attachments ? { attachments: f.msg.attachments.length } : {}) });
+    owedInAdmission.delete(f.id);
     enqueueOwed(peerHex, f.id, f.msg, decoded.requestId, { reservedBridge: usesBridgeQueue });
   }
   // ACK means "delivered", not "answered" — send it before any brain work so
@@ -2491,14 +2580,16 @@ const restored = normalizeRestoredState(rawStoredState);
 // scoped to the engine + the cwd they were captured in; see agent-runtime).
 agentRuntime?.noteRestoredAgent(restored?.agent ?? null);
 let restoredPeers = 0;
-let restoredUnauthorized = 0;
+// Peers refused by the current allowlist: a session and its owed entries
+// are one refused peer, not one refusal per record.
+const restoredUnauthorized = new Set();
 for (const p of restored?.peers ?? []) {
   // Per-peer guard: one malformed persisted entry must not crash startup and
   // trip a Docker restart loop — skip it and keep the rest of the sessions.
   try {
     if (!p || typeof p !== "object" || typeof p.peerHex !== "string" || typeof p.identifierKeyHex !== "string") continue;
     if (!isAllowed(p.peerHex)) {
-      restoredUnauthorized += 1;
+      restoredUnauthorized.add(norm(p.peerHex));
       log("BOT_STATE_PEER_UNAUTHORIZED", { peer: norm(p.peerHex) });
       continue;
     }
@@ -2526,12 +2617,13 @@ for (const id of restored?.greeted ?? []) if (typeof id === "string") greetedPee
 agentRuntime?.restoreIntroduced((restored?.intro ?? []).filter((peerHex) => typeof peerHex === "string" && isAllowed(peerHex)));
 // Re-run anything that was ACKed but not yet answered when the last process
 // died — the app will never resend these, the journal is their only way back.
+// An entry whose answer is journaled is re-sent as-is, not re-run.
 let restoredOwed = 0;
 for (const o of restored?.owed ?? []) {
   try {
     if (!o?.id || !o?.p || typeof o?.t !== "string") continue;
     if (!isAllowed(o.p)) {
-      restoredUnauthorized += 1;
+      restoredUnauthorized.add(norm(o.p));
       log("BOT_STATE_OWED_UNAUTHORIZED", { peer: norm(o.p) });
       continue;
     }
@@ -2549,7 +2641,11 @@ for (const o of restored?.owed ?? []) {
         })),
       } : {}),
     };
-    if (oweReply(o.id, o.p, msg, o.r)) restoredOwed += 1;
+    const answer = (Array.isArray(o.ans) ? o.ans : []).map((a) => {
+      if (typeof a?.id !== "string" || typeof a?.o !== "string") throw new Error("journaled answer needs an id and bytes");
+      return { messageId: a.id, opaque: hexToBytes(a.o), supersedes: Array.isArray(a.s) ? a.s.filter((x) => typeof x === "string") : [] };
+    });
+    if (oweReply(o.id, o.p, msg, o.r, answer)) restoredOwed += 1;
   } catch (e) { log("BOT_STATE_OWED_SKIPPED", { error: String(e?.message ?? e) }); }
 }
 pumpOwed();
@@ -2564,7 +2660,7 @@ if (restored) log("BOT_STATE_RESTORED", {
   peers: restoredPeers,
   seen: restored.seen?.length ?? 0,
   owed: restoredOwed,
-  ...(restoredUnauthorized ? { unauthorized: restoredUnauthorized } : {}),
+  ...(restoredUnauthorized.size ? { unauthorized: restoredUnauthorized.size } : {}),
 });
 for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { void gracefulShutdown(0); });
 

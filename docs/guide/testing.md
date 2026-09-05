@@ -12,27 +12,36 @@ next:
 ## The local sandbox: a whole network on your machine
 
 `sandbox/` is a local replica of the chat network: a statement-store node,
-a directory that plays the People chain and the identity backend, and
-"personas" — users with one or more devices, driven from the terminal with
-`pcs`. Personas run the SDK behind Polkadot Desktop, not bot-core's
-transport, so a bot is tested against an independent implementation of the
-protocol. No phone, no testnet, no proof.
+a HOP node (the attachment pool the Bulletin network provides), a directory
+that plays the People chain and the identity backend, and "personas" —
+users with one or more devices, driven from the terminal with `pcs`.
+Personas run the SDK behind Polkadot Desktop, not bot-core's transport, so
+a bot is tested against an independent implementation of the protocol. No
+phone, no testnet, no proof.
 
 ```bash
 cd sandbox && npm ci
-pcs up                                   # store node + directory + control API
-pca create mybot --brain echo --network sandbox   # registers through the sandbox, no proof
+pcs up                                   # store node + HOP node + directory + control API
+pca create mybot --brain echo --network sandbox   # registers through the sandbox, no proof;
+                                         # the sandbox HOP node becomes the bot's upload node
 pca run mybot                            # in another terminal
 pcs user add alice --devices 2
 pcs request alice mybot --welcome "hello"   # alice opens the chat; the bot accepts
 pcs send alice mybot "from my laptop" --device 2
-pcs inbox alice --device 2               # the bot's answers, with per-device ACK state
+pcs send alice mybot --attach photo.png --caption "look"   # through HOP, like the desktop
+pcs inbox alice --device 2               # the bot's answers, with per-device ACK state;
+                                         # an attachment the bot returned: claimed on one
+                                         # device, "claimed by device N" on the other
 pcs wire --peer alice                    # every statement, labelled by session and channel
+pcs hop                                  # the pool: every entry, who signed and claimed it
+pcs hop fault refuse|cut|delay|drop|corrupt [--hash <entry>] [--count N]
 ```
 
 `pca create --network sandbox` finds the daemon through `--sandbox-url`,
 `PCA_SANDBOX_URL`, or the `daemon.json` that `pcs up` writes. `pcs bot attach
-<name>` registers a bot's account by hand (it reads only `config.json`).
+<name>` registers a bot's account by hand (it reads only `config.json`,
+including the public half of the bot's upload signer, which the sandbox
+grants its Bulletin allowance).
 
 The wire is readable wherever the sandbox holds a key, and breakable on
 purpose:
@@ -43,6 +52,7 @@ pcs wire --decode                        # every statement decrypted: kind, requ
 pcs wire --history "session alice#1→echobot /request"   # what the slot held before
 pcs fault drop --from echobot --channel "session echobot#1→alice /response" --count 1
 pcs fault delay --from alice --ms 2000 --count forever
+pcs fault delay-reply --from echobot --ms 30000 --count forever   # store and push at once, answer the submitter late
 pcs fault list | pcs fault clear
 pcs clock +2h | pcs clock reset          # the store node's clock (expiry checks)
 pcs node restart | pcs node reset        # drop every socket; keep / wipe the store
@@ -67,6 +77,10 @@ pcs scenario run scenarios/no-ack-peer.mjs      # one un-ACKed statement, queue,
 pcs scenario run scenarios/call-offer.mjs       # ACK, then dataChannelClosed
 pcs scenario run scenarios/accept-without-welcome.mjs # empty BOT_ACK_TEXT: the accept alone
 pcs scenario run scenarios/device-removed.mjs   # the bot stops addressing an unpaired device
+pcs scenario run scenarios/attachment-to-bot.mjs      # a photo in: ACK, one download, /media, the answer
+pcs scenario run scenarios/attachment-from-bot.mjs    # /file get: one device claims, the other a placeholder
+pcs scenario run scenarios/poison-attachment-batch.mjs # an undecodable attachment next to a real one
+pcs scenario run scenarios/hop-faults.mjs       # cut, rate-limited, corrupt, gone: retries and notes
 ```
 
 Every scenario asserts on the wire (`GET /wire`, decoded) as well as on the
@@ -89,37 +103,43 @@ npm run acceptance                         # echo bot + headless Chromium, scree
 ```
 
 An agent checks rendering without a browser:
-`GET /personas/alice/rooms/echobot?format=html` returns the room as a page
+`GET /api/personas/alice/rooms/echobot?format=html` returns the room as a page
 through the same markdown pipeline the Room view uses (`sandbox/lib/markdown.mjs`),
 so a `<table>` or `<pre><code>` in that response is what a person sees.
 
 ## Offline, automated (no network at all)
 
 `npm test` in `bot-core/` runs the transport end-to-end against the sandbox
-daemon (`sandbox/daemon.mjs`: its store node and its directory, so the
-identifier-key lookup is the deployed path through `lib/people-directory.mjs`,
-not a pin list). It covers, in both ingress modes (poll-only and subscription):
+daemon (`sandbox/daemon.mjs`: its store node, its HOP node and its
+directory, so the identifier-key lookup is the deployed path through
+`lib/people-directory.mjs`, not a pin list). The peer is a sandbox persona
+driven through the daemon's API — a device whose statement account and
+encryption key differ from its identity's, as a phone's do. It covers, in
+both ingress modes (poll-only and subscription):
 
 - round trips with poison batches, restart survival with dedup, and owed-reply
   crash recovery;
-- the rich features — attachment download (against an in-memory HOP node,
-  `test/mock-hop-node.mjs`), reply quotes, reactions, and call auto-decline.
+- the rich features — attachment download (a real HOP upload by the persona),
+  reply quotes, reactions, and call auto-decline.
 
 Single-mode tests cover the bridge surface (`/inbound` shape, `/media`,
-`reply_to`/`edit_of`/`/react`, `events=1`), an owed *attachment* surviving
-kill -9, and the live-reply lifecycle: placeholder → ACK-gated progress edits
-with stream-json tool actions → final-as-edit, the no-ACK plain-message
-fallback, and bridge auto-upgrade with throttled harness edits.
+`reply_to`/`edit_of`/`/react`, `events=1`), the durable vault (`/file put`,
+bridge `/files`, a vault file returned through HOP and claimed by the
+persona), an owed *attachment* surviving kill -9, and the live-reply
+lifecycle: placeholder → ACK-gated progress edits with stream-json tool
+actions → final-as-edit (the persona keeps a row's edit history, so every
+frame is asserted), the no-ACK plain-message fallback (the node drops the
+persona's ACKs), and bridge auto-upgrade with throttled harness edits.
 
-CI runs this on every push. The device client ACKs bot requests like the
-app does; `--no-ack` simulates a peer that never fetches.
+CI runs this on every push.
 
 ## Live network
 
-Both test clients send real messages over the Statement Store from an attested
-identity and print the bot's replies. You need the sender's root seed and the
-target bot's account id and identifier key (`pca info <name>` prints the bot's
-values; the account and identifier key are in its `config.json`).
+`test-client.mjs` sends real messages over the Statement Store from an
+attested identity and prints the bot's replies. You need the sender's root
+seed and the target bot's account id and identifier key (`pca info <name>`
+prints the bot's values; the account and identifier key are in its
+`config.json`).
 
 ## Basic round trip
 
@@ -142,37 +162,25 @@ the text you actually sent.
 
 ## Device-channel round trip
 
-The mobile app does not send follow-ups the way `test-client.mjs` does: it uses a
-per-device encryption key, which puts messages on a different session channel
-than the identity key would. `test-client-device.mjs` reproduces that behavior,
-including a multi-device envelope opener and an undecodable message in a batch:
+The mobile app does not send follow-ups the way `test-client.mjs` does: it
+uses a per-device encryption key and a per-device statement account, which
+puts messages on a different session channel than the identity key would.
+The sandbox personas reproduce that behavior (a device is its own statement
+account and encryption key), including the multi-device envelope, an
+undecodable message in a batch, and HOP attachments; bot-core's offline
+suite and the sandbox scenarios both drive them.
 
-```bash
-node bot-core/test-client-device.mjs \
-  --seed-hex 0x<sender-root-seed> \
-  --bot-account 0x<bot-account-hex> \
-  --bot-identifier-key 0x<bot-identifier-container-hex> \
-  "hello from a device channel"
-```
+If a bot answers `test-client.mjs` but not the app, the sandbox is the repro
+tool: open a chat from a two-device persona (`pcs user add alice --devices
+2`, `pcs request`, `pcs send … --device 2`) and read `pcs wire --decode` —
+the bug is almost certainly in device-session polling or ACKs.
 
-If a bot answers `test-client.mjs` but not the app, this client is the repro
-tool: the bug is almost certainly in device-session polling or ACKs.
-
-The sandbox scenarios cover the same ground with the real SDK (opener,
-per-device follow-ups, reaction, reply, edit, restart survival, the poison
-message, a peer that never ACKs, a call offer, device removal) and are the
-preferred check. `test-client-device.mjs` stays for exactly two things the
-sandbox cannot do yet: a real HOP attachment (`--attach`, which bot-core's
-offline suite uses in its attachment, `/file put`, bridge `/files`, engine
-staging and owed-attachment tests — the sandbox has no HOP node until
-v1.5) and sending over a live network from a real seed. Known limit: it
-keys the multi-device envelope by the peer's identity account, ignoring
-the `statementAccountId` in `deviceChatAccepted`, so a peer whose device
-account differs from its identity account (a persona, a phone) cannot
-decrypt its follow-ups; bot-core's own device account equals its identity
-account, so the offline suite is unaffected. It will be retired with the
-HOP sandbox (v1.5), when the remaining bot-core tests move to the persona
-API.
+`test-client-device.mjs`, the earlier headless reproduction of the device
+channel, was retired in sandbox S5: everything it did (including its
+`--attach` HOP attachment and the poison-in-a-batch case) is covered by the
+persona API, and it keyed the multi-device envelope by the peer's identity
+account, which a phone's device account never equals. Live-network sends
+from a real seed use `test-client.mjs` (identity channel).
 
 ## Named-testnet outbound file delivery
 
@@ -233,13 +241,6 @@ The retry reuses or refreshes the saved session. To regression-test the
 alternate network, add `--network paseo`. `PCA_IDENTITY_TOKEN` is an optional
 controlled-automation override; `PCA_IDENTITY_VOUCHER` is only a fallback if
 the hosted environment later hard-enforces platform attestation.
-
-Optional flags exercise the rich features after the follow-ups: `--reply 1`
-(follow-ups quote the bot's last message), `--react "🔥"` (expect an ACK and no
-reply), `--offer-call 1` (send a WebRTC offer; exit code fails unless the bot
-declines it), and `--attach '<json>'` + `--attach-caption` (send a real
-richText attachment pre-uploaded to a HOP node — the offline suite generates
-the JSON via the mock node's `putFile`).
 
 ## Live checklist with a real phone
 

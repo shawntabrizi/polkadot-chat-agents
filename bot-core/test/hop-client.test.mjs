@@ -6,11 +6,11 @@ import os from "node:os";
 import path from "node:path";
 import { downloadP2PFile, uploadP2PFile, validateHopUrl } from "../lib/hop-client.mjs";
 import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
-import { startMockHopNode } from "./mock-hop-node.mjs";
+import { startHopNode } from "../../sandbox/lib/hop-node.mjs";
 
 const nodes = [];
 const startNode = async () => {
-  const node = await startMockHopNode();
+  const node = await startHopNode();
   nodes.push(node);
   return node;
 };
@@ -156,7 +156,7 @@ test("allowlist rejects hosts outside it", () => {
 test("hostile RPC frames are rejected before JSON parsing", async () => {
   const node = await startNode();
   const file = node.putFile(new Uint8Array(16));
-  node.failures.oversizedFrameBytes = 8 * 1024;
+  node.faults.bloat({ bytes: 8 * 1024 });
   await assert.rejects(() => download(node, file, { maxRpcFrameBytes: 1024 }), /frame exceeds 1024 bytes/);
 });
 
@@ -164,7 +164,7 @@ test("ack failures never fail the download", async () => {
   const node = await startNode();
   const original = new Uint8Array(crypto.randomBytes(50_000));
   const file = node.putFile(original);
-  node.failures.ack = true;
+  node.faults.refuse({ method: "ack", count: null });
   const got = await download(node, file);
   assert.equal(Buffer.compare(got, original), 0);
 });
@@ -173,7 +173,30 @@ test("a dropped connection resumes once and completes", async () => {
   const node = await startNode();
   const original = new Uint8Array(crypto.randomBytes(3_000_000)); // 2 chunks
   const file = node.putFile(original);
-  node.failures.dropConnections = 1;
+  node.faults.cut({ count: 1 });
   const got = await download(node, file);
   assert.equal(Buffer.compare(got, original), 0);
+});
+
+// The spec's RateLimited (1020) and PoolFull (1002) mean "retry later": one
+// retry, like a dropped connection. NotFound and the other refusals are final.
+test("a rate-limited claim is retried once; a second refusal or a final refusal fails", async () => {
+  const node = await startNode();
+  const original = new Uint8Array(crypto.randomBytes(50_000));
+  const file = node.putFile(original);
+  node.faults.refuse({ count: 1 });
+  const retries = [];
+  const got = await download(node, file, { log: (event, data) => { if (event === "HOP_RETRY") retries.push(data.error); } });
+  assert.equal(Buffer.compare(got, original), 0);
+  assert.equal(retries.length, 1);
+  assert.match(retries[0], /HOP 1020/);
+
+  const second = node.putFile(original);
+  node.faults.refuse({ count: 2 });
+  await assert.rejects(() => download(node, second), /HOP 1020/, "one retry is the policy");
+
+  const third = node.putFile(original);
+  node.faults.drop({ count: 1 });
+  await assert.rejects(() => download(node, third), /HOP 1004/, "NotFound is final: no retry");
+  assert.equal(node.faults.list().length, 0, "the drop fault was hit exactly once");
 });

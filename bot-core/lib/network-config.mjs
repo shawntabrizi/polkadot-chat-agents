@@ -48,8 +48,10 @@ export const PASEO = Object.freeze({
 // The local sandbox (sandbox/): a store node and a directory that plays the
 // People chain and the identity backend, on this machine only. It has no
 // fixed endpoints — `pca create --network sandbox` reads them from the running
-// daemon — and its store node speaks plain ws:// on loopback, the one place a
-// bot may connect without TLS. No Bulletin/HOP network exists yet (v1.5).
+// daemon — and its store node and HOP node speak plain ws:// on loopback, the
+// one place a bot may connect without TLS. The daemon's HOP node plays the
+// Bulletin network: `pca create` saves its URL as the bot's upload node and
+// registers the bot's upload signer for the sandbox's Bulletin allowance.
 export const SANDBOX = Object.freeze({
   id: "sandbox",
   name: "Local sandbox",

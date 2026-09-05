@@ -249,6 +249,7 @@ Named profiles are deliberately complete rather than aliases for one RPC:
 |---|---|---|---|
 | `devnet` (default) | `wss://people-paseo.rotko.net` (with the other Products Devnet community RPCs as fallbacks) | `https://polkadot-app.api.polkadotcommunity.foundation` | `wss://bullet.sik.rocks` plus the Products Devnet HOP node set |
 | `paseo` | `wss://paseo-people-next-system-rpc.polkadot.io` | `https://identity-backend-next.parity-testnet.parity.io` | `wss://paseo-bulletin-next-rpc.polkadot.io` and the two `paseo-hop-next-*` nodes |
+| `sandbox` | the daemon's store node (`pcs up`, read at create time) | the daemon's control API | the daemon's HOP node (`ws://` on loopback; saved as `hopUrl`, written as `BOT_HOP_UPLOAD_NODE`/`BOT_HOP_ALLOWED_NODES`; the bot's upload signer is registered for the sandbox's Bulletin allowance) |
 
 Devnet registration normally needs no environment credential: `pca` obtains a
 challenge and proves possession of the bot's `//wallet` key to mint the
@@ -422,7 +423,7 @@ peer-ACK gate.
 | `BOT_MEDIA_MAX_INFLIGHT_BYTES` | max(2 x single-file cap + 4 MiB, 64 MiB) | Reserved in-memory budget across attachment downloads. |
 | `BOT_HOP_TIMEOUT_MS` | 120000 | Per-download deadline. |
 | `BOT_HOP_RPC_FRAME_MAX_BYTES` | 4.5 MB | Max HOP RPC frame. |
-| `BOT_HOP_ALLOW_INSECURE` | `0` | Tests only: permit `ws://` and IP-literal hosts. |
+| `BOT_HOP_ALLOW_INSECURE` | `0` | Tests only: permit `ws://` and IP-literal hosts. The `sandbox` profile permits them by itself (its HOP node is on loopback). |
 | `BOT_HOP_UPLOAD_NODE` | `""` | Operator-pinned HOP endpoint for returning files. It must match `BOT_HOP_ALLOWED_NODES` in production and needs an active Bulletin allowance. |
 | `BOT_HOP_UPLOAD_TIMEOUT_MS` | 120000 | Whole-upload deadline. |
 

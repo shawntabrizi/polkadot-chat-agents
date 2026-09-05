@@ -5,7 +5,7 @@
 export type HexString = `0x${string}`;
 
 export type Device = { index: number; account: HexString; encryptionPublicKey: HexString; online: boolean; removed: boolean };
-export type Persona = { name: string; account: HexString; chatPublicKey: HexString; devices: Device[] };
+export type Persona = { name: string; account: HexString; chatPublicKey: HexString; bulletinAccount: HexString; devices: Device[] };
 export type ContactDevice = { statementAccountId: HexString; encryptionPublicKey: HexString };
 export type Contact = { account: HexString; username: string; devices: ContactDevice[]; createdAt: number; updatedAt: number };
 export type Room = { peer: HexString; unreadCount: number; lastMessageAt: number; lastPreview: string; createdAt: number; updatedAt: number; peerName?: string | null };
@@ -23,10 +23,27 @@ export type RequestRow = {
 export type PersonaDetail = Persona & { contacts: Contact[]; rooms: Room[]; requests: RequestRow[] };
 export type Account = { account: HexString; username: string | null; identifierKey: HexString | null; allowance: boolean };
 
+// A HOP attachment as a row carries it: the public reference (never the
+// claim ticket) and where its bytes are from this persona's side.
+export type Attachment = {
+  kind: 'general' | 'image' | 'video';
+  mimeType: string;
+  fileSize: number;
+  width?: number;
+  height?: number;
+  duration?: number;
+  identifier: HexString;
+  wssUrl: string | null;
+  chunks?: HexString[];
+  status: 'sent' | 'pending' | 'claiming' | 'claimed' | 'failed';
+  claimedBy: number | null;
+  mediaId: string | null;
+  error: string | null;
+};
 export type Content =
   | { type: 'text'; text: string }
   | { type: 'reply'; messageId: string; text: string }
-  | { type: 'richText'; text: string | null; attachments: { kind: string; mimeType: string; fileSize: number }[] }
+  | { type: 'richText'; text: string | null; attachments: Attachment[] }
   | { type: 'contactAdded' }
   | { type: 'leftChat' }
   | { type: 'callOffer' }
@@ -47,10 +64,32 @@ export type Message = {
   ackedBy: number[];
   read: boolean;
 };
-export type RoomView = { persona: string; peer: HexString; peerName: string | null; room: Room | null; contact: Contact | null; messages: Message[] };
+export type RoomView = { persona: string; device: number | null; peer: HexString; peerName: string | null; room: Room | null; contact: Contact | null; messages: Message[] };
 
 export type Fault = { id: number; kind: 'drop' | 'delay' | 'holdDump'; signer: HexString[] | null; channel: HexString | null; topic: HexString | null; ms?: number; count: number | null; hits: number; held: number };
-export type NodeInfo = { url: string; statements: number; allowances: number; limits: Record<string, number>; clock: { offsetMs: number }; faults: Fault[] };
+export type NodeInfo = { url: string; hopUrl: string; statements: number; allowances: number; limits: Record<string, number>; clock: { offsetMs: number }; faults: Fault[] };
+
+// The HOP pool: entries never carry bytes; a persona that uploaded or claimed one names its role and conversation.
+export type HopEntry = {
+  hash: HexString;
+  bytes: number;
+  signer: HexString | null;
+  signerLabel: string | null;
+  recipients: number;
+  submittedAt: string;
+  claims: number;
+  claimedAt: string | null;
+  acked: boolean;
+  available: boolean;
+  removedAt?: string;
+  reason?: string;
+  role?: string;
+  owner?: string;
+  messageId?: string | null;
+};
+export type HopFaultKind = 'refuse' | 'cut' | 'delay' | 'drop' | 'corrupt' | 'bloat';
+export type HopFault = { id: number; kind: HopFaultKind; method: 'submit' | 'claim' | 'ack'; hash: HexString | null; count: number | null; hits: number; ms?: number; bytes?: number };
+export type HopView = { url: string; limits: Record<string, number>; status: { entryCount: number; totalBytes: number; maxBytes: number }; entries: HopEntry[]; faults: HopFault[] };
 
 // The wire shows every kind the codec knows (reactions, edits, roster changes...), not only inbox rows.
 export type DecodedMessage = { messageId: string; timestamp: number; content: { type: string; [key: string]: unknown } } | { undecodable: true; bytes: number; error: string };
@@ -130,6 +169,9 @@ export const api = {
   clock: (offsetMs: number) => call<{ offsetMs: number }>('POST', '/clock', offsetMs === 0 ? { reset: true } : { offsetMs }),
   restartNode: () => call<{ ok: true }>('POST', '/node/restart'),
   resetNode: () => call<{ ok: true }>('POST', '/node/reset'),
+  hop: () => call<HopView>('GET', '/hop'),
+  addHopFault: (body: { kind: HopFaultKind; hash?: string | null; method?: string | null; count?: number | null; ms?: number }) => call<HopFault>('POST', '/hop/faults', body),
+  clearHopFault: (id: number | 'all') => call<{ cleared: number }>('DELETE', `/hop/faults/${id}`),
   accounts: () => call<Account[]>('GET', '/accounts'),
   personas: () => call<Persona[]>('GET', '/personas'),
   persona: (name: string) => call<PersonaDetail>('GET', `/personas/${enc(name)}`),

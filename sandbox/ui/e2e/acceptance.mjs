@@ -12,6 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import zlib from "node:zlib";
 
 import { chromium } from "playwright";
 
@@ -35,6 +36,18 @@ const TEXT = [
   "const echo = (s) => `Echo: ${s}`;",
   "```",
 ].join("\n");
+
+// A real, visible PNG (a 240×120 gradient), built here so the screenshot
+// shows an image and not a 1×1 fixture. Eight-bit RGB, no filter.
+const png = (width, height) => {
+  const crcTable = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+  const crc = (buf) => { let c = 0xffffffff; for (const b of buf) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (type, data) => { const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const body = Buffer.concat([Buffer.from(type), data]); const c = Buffer.alloc(4); c.writeUInt32BE(crc(body)); return Buffer.concat([len, body, c]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4); ihdr[8] = 8; ihdr[9] = 2; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+  const raw = Buffer.alloc((width * 3 + 1) * height);
+  for (let y = 0; y < height; y++) { raw[y * (width * 3 + 1)] = 0; for (let x = 0; x < width; x++) { const at = y * (width * 3 + 1) + 1 + x * 3; raw[at] = Math.round(230 * x / width); raw[at + 1] = Math.round(60 + 120 * y / height); raw[at + 2] = 200 - Math.round(100 * x / width); } }
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", zlib.deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]);
+};
 
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "pcs-accept-"));
 const log = (line) => console.log(`  ${line}`);
@@ -116,6 +129,33 @@ try {
   await own.filter({ hasText: "edited" }).locator(".md table td").filter({ hasText: "2" }).waitFor({ timeout: 30_000 });
   log("reply quoted, reaction shown, own message edited");
 
+  // Attachments: alice sends a photo through HOP from pcs; the Room view
+  // shows her image inline (from the daemon's media route) and the echo of
+  // the caption; then /file put + /file get bring the photo back from the
+  // bot — claimed on device 1 (inline), a placeholder on device 2.
+  const photo = path.join(work, "gradient.png");
+  fs.writeFileSync(photo, png(240, 120));
+  const sentPhoto = await pcs("send", "alice", "echobot", "--attach", photo, "--caption", "a photo for you");
+  const own2 = page.locator(`li[data-id="${sentPhoto.messageId}"]`);
+  await own2.locator("figure.attachment img").waitFor({ timeout: 30_000 });
+  await page.locator('li[data-direction="incoming"]').filter({ hasText: "Echo: a photo for you" }).waitFor({ timeout: 30_000 });
+  await handle.waitFor((e) => e.event === "BOT_MEDIA_DOWNLOADED", { label: "BOT_MEDIA_DOWNLOADED" });
+  await pcs("send", "alice", "echobot", "--attach", photo, "--caption", "/file put gradient.png");
+  await page.locator('li[data-direction="incoming"]').filter({ hasText: "Saved gradient.png" }).waitFor({ timeout: 30_000 });
+  await composer.type("/file get gradient.png");
+  await composer.press("Enter");
+  const returned = page.locator('li[data-direction="incoming"][data-status="received"]').filter({ has: page.locator('[data-testid="attachment"]') }).last();
+  await returned.locator("figure.attachment img").waitFor({ timeout: 30_000 });
+  await returned.getByTestId("status").filter({ hasText: "on #1,#2 · acked #1,#2" }).waitFor({ timeout: 30_000 });
+  await page.screenshot({ path: path.join(images, "s5-room-attachment.png") });
+  log("alice's photo and the bot's returned file render inline on device 1");
+  // Device 2 did not claim: the placeholder, as the desktop renders one instead of claiming a one-shot entry twice.
+  await page.getByTestId("device-select").selectOption("2");
+  await returned.locator('[data-testid="attachment"][data-status="claimed"]').filter({ hasText: "claimed by device 1" }).waitFor({ timeout: 10_000 });
+  await page.screenshot({ path: path.join(images, "s5-room-placeholder.png") });
+  await page.getByTestId("device-select").selectOption("1");
+  log("device 2 shows the placeholder for the returned file");
+
   // Wire: the inspector on the same conversation, then the fault and clock controls.
   await page.getByRole("button", { name: "Wire" }).click();
   await page.getByLabel("Peer").selectOption("alice");
@@ -123,8 +163,19 @@ try {
   await page.locator("table[data-testid=wire-table] tbody tr").filter({ hasText: "session echobot#1→alice /request" }).first().click();
   await page.getByTestId("statement-detail").waitFor();
   await page.screenshot({ path: path.join(images, "s4-wire.png") });
+  // The HOP pool panel: alice's and the bot's entries, claimed and acked; a HOP fault set and cleared.
+  await page.getByTestId("hop-entry").first().waitFor();
+  const entries = await page.getByTestId("hop-entry").count();
+  if (entries < 6) throw new Error(`expected at least 6 pool entries (three uploads), saw ${entries}`);
+  await page.getByLabel("HOP fault kind").selectOption("corrupt");
+  await page.getByRole("button", { name: "Add HOP fault" }).click();
+  await page.getByTestId("hop-fault-row").filter({ hasText: "corrupt" }).waitFor();
+  await page.screenshot({ path: path.join(images, "s5-wire-hop.png") });
+  await page.getByTestId("hop-fault-row").getByRole("button", { name: "Clear" }).click();
+  await sandbox.waitFor(async () => (await sandbox.get("/hop")).faults.length === 0, { label: "the HOP fault cleared" });
+  log(`HOP panel: ${entries} pool entries, a corrupt fault set and cleared`);
   await page.getByLabel("From").fill("echobot");
-  await page.getByLabel("Count (or forever)").fill("2");
+  await page.getByLabel("Count (or forever)", { exact: true }).fill("2");
   await page.getByRole("button", { name: "Add fault" }).click();
   await page.getByTestId("fault-row").filter({ hasText: "drop" }).filter({ hasText: "hits 0/2" }).waitFor();
   await page.getByTestId("event-log").getByText("fault", { exact: true }).first().waitFor();
@@ -132,7 +183,7 @@ try {
   await page.getByText("clock +10000 ms").waitFor();
   await page.getByRole("button", { name: "Reset clock" }).click();
   await page.getByText("clock +0 ms").waitFor();
-  await page.getByRole("button", { name: "Clear all" }).click();
+  await page.getByRole("button", { name: "Clear all" }).first().click();
   await page.getByText("No faults.").waitFor();
   const faults = await sandbox.get("/faults");
   if (faults.length !== 0) throw new Error("faults not cleared");
@@ -148,7 +199,7 @@ try {
   await dark.close();
 
   // The html route, as an agent would read it.
-  const res = await fetch(`${daemon.url}/personas/alice/rooms/echobot?format=html`);
+  const res = await fetch(`${daemon.url}/api/personas/alice/rooms/echobot?format=html`);
   const html = await res.text();
   if (!/<article[^>]*data-direction="incoming"[\s\S]*?<table>[\s\S]*?<td>rendered<\/td>[\s\S]*?<pre><code class="language-js">/.test(html)) throw new Error("html route: the echo did not render a table and a code block");
   fs.writeFileSync(path.join(work, "room.html"), html);

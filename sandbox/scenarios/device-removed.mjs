@@ -26,8 +26,12 @@ export async function run({ sandbox, openChat, pcs, bot: bots, log }) {
   const fanout = await chat.slot("session alice#1→echobot /request");
   const notice = fanout.decoded.messages.find((m) => m.content.type === "deviceRemoved");
   assert.equal(notice?.content.statementAccountId, persona.devices[1].account, "the deviceRemoved rode alice#1's session");
-  assert.ok(fanout.acks.some((a) => a.by === "echobot" && a.code === "success"), "and was ACKed");
-  log("deviceRemoved received, roster 2 → 1, persisted");
+  // The bot ACKs after it logs BOT_PEER_DEVICE_REMOVED, so the ACK can land
+  // after the read above. A bounded wait measures that gap instead of
+  // racing it (S4 answer 4); what is asserted is that the ACK exists.
+  const ackedAt = Date.now();
+  const ack = await sandbox.waitFor(async () => (await chat.slot("session alice#1→echobot /request")).acks.find((a) => a.by === "echobot" && a.code === "success"), { timeoutMs: 2000, label: "the bot's ACK of the deviceRemoved" });
+  log(`deviceRemoved received, roster 2 → 1, persisted; ACK seen ${Date.now() - ackedAt} ms after the event (stamped ${ack.at})`);
 
   // From now on the bot addresses device 1 alone.
   const after = await chat.send("after the removal", 1);

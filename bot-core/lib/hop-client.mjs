@@ -35,6 +35,10 @@ const MIN_CHUNK_PLAINTEXT_BYTES = 64 * 1024;
 const MAX_METADATA_CHUNKS = 4_096;
 const HOP_DIALECTS = new Set(["legacy", "t3ams"]);
 const CONTENT_HASH_ALGORITHMS = new Set(["sha256", "blake2b-256"]);
+// The spec's "retry later" answers (base-spec.md "HOP Protocol" errors):
+// PoolFull (1002) and RateLimited (1020). Everything else a node refuses
+// (NotFound, InvalidSignature, NotRecipient, NotAuthorized) is final.
+const HOP_RETRY_LATER_CODES = new Set([1002, 1020]);
 
 const toHex = (bytes) => `0x${Buffer.from(bytes).toString("hex")}`;
 const fromHex = (hex) => {
@@ -226,7 +230,7 @@ const makeRpc = (ws, rpcTimeoutMs, maxFrameBytes) => {
     if (!p) return;
     pending.delete(msg.id);
     clearTimeout(p.timer);
-    if (msg.error) p.reject(new Error(`HOP ${msg.error.code ?? ""} ${String(msg.error.message ?? "error").slice(0, 500)}`.trim()));
+    if (msg.error) p.reject(Object.assign(new Error(`HOP ${msg.error.code ?? ""} ${String(msg.error.message ?? "error").slice(0, 500)}`.trim()), { code: msg.error.code }));
     else p.resolve(msg.result);
   });
   ws.addEventListener("close", () => failAll("HOP connection closed"));
@@ -482,10 +486,11 @@ export async function downloadP2PFile({
   try {
     await runAttempt();
   } catch (error) {
-    // One reconnect-and-resume retry: transient socket loss shouldn't cost the
-    // whole download, but integrity failures fail immediately.
+    // One reconnect-and-resume retry: transient socket loss and the node's
+    // own "retry later" answers shouldn't cost the whole download, but
+    // integrity failures and final refusals fail immediately.
     const msg = String(error?.message ?? error);
-    if (!/connection|connect|timeout/i.test(msg)) throw error;
+    if (!/connection|connect|timeout/i.test(msg) && !HOP_RETRY_LATER_CODES.has(error?.code)) throw error;
     checkDeadline();
     log("HOP_RETRY", { host: url.hostname, chunk: chunkIndex, error: msg });
     await runAttempt();

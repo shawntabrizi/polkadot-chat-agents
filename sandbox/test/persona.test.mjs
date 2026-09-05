@@ -47,7 +47,7 @@ test("a persona registers its identity and every device account, and never expos
   }
   assert.equal(bob.devices.map((d) => d.account).includes(bob.account), false, "device accounts differ from the identity account");
   const json = JSON.stringify(bob);
-  assert.deepEqual(Object.keys(JSON.parse(json)).sort(), ["account", "chatPublicKey", "devices", "name"]);
+  assert.deepEqual(Object.keys(JSON.parse(json)).sort(), ["account", "bulletinAccount", "chatPublicKey", "devices", "name"]);
   assert.deepEqual(Object.keys(JSON.parse(json).devices[0]).sort(), ["account", "encryptionPublicKey", "index", "online", "removed"]);
   for (const secret of [bob.identity.seed, bob.identity.identityChatPrivateKey, bob.devices[0].keys.statementSeed, bob.devices[0].keys.encryptionPrivateKey]) {
     assert.equal(json.includes(hex(secret).slice(2, 34)), false, "serialised persona leaks a secret");
@@ -113,6 +113,10 @@ test("messages: reactions toggle per emoji and side; edits touch text rows only"
   messages.applyEdit("sys", "edited", 9);
   assert.deepEqual([messages.get("a").content, messages.get("a").editedAt], [{ type: "text", text: "edited" }, 9]);
   assert.deepEqual([messages.get("sys").content, messages.get("sys").editedAt], [{ type: "contactAdded" }, null]);
+  // A live reply is one row edited many times; every frame it showed stays readable, oldest first.
+  messages.applyEdit("a", "edited twice", 10);
+  assert.deepEqual(messages.get("a").editHistory, [{ text: "a", until: 9 }, { text: "edited", until: 10 }]);
+  assert.equal(messages.get("sys").editHistory, undefined, "a row that cannot be edited has no history");
 });
 
 test("messages: a batch ack moves outgoing rows sent before it to delivered, nothing else", () => {

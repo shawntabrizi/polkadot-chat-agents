@@ -88,3 +88,18 @@ win). `npm run dev` in `sandbox/ui` proxies `/api` to a daemon
 (`PCS_URL`, default `http://127.0.0.1:7788`), SSE included. The UI is one
 `EventSource` on `/api/events`; every screen refetches on the events that
 concern it and nothing polls.
+
+## D4 — One API prefix (S5)
+
+**Context.** D3 accepted every route both bare (`/personas`, used by `pcs`,
+the tests and bot-core's sandbox directory client) and under `/api` (used
+by the UI). Two spellings of one table invite drift, and the bare paths
+shadowed the built UI's static files. S4 answer 6 asked for one prefix.
+
+**Decision.** The daemon answers only under `/api`; a request outside it is
+a static file of the built UI or a 404. `pcs`, the scenario client, the
+tests, `sandbox/ui/e2e/acceptance.mjs` and bot-core (`lib/people-directory.mjs`,
+`pca create --network sandbox`'s `GET /api/node`, the transport e2e's
+registration) all call `/api/...`. Clients that take a route relative to the
+API root (`sandbox.get("/personas/alice")` in a scenario, `api.ts` in the UI)
+keep their short form; the prefix is added in one place per client.

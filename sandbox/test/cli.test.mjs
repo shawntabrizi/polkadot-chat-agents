@@ -98,11 +98,33 @@ test("pcs: user add/list, request, requests, accept, send, inbox --device, react
   assert.equal((await pcsFails("bogus")).code, 1);
   assert.match((await pcsFails("send", "alice", "nobody", "x")).stderr, /unknown peer/);
 
-  // bot attach reads a pca bot's public config only and registers it.
+  // An attachment: --attach uploads through the HOP node, the inbox shows the
+  // claim per device, and `pcs hop` lists the pool without any bytes or ticket.
+  const photo = path.join(dir, "photo.png");
+  fs.writeFileSync(photo, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64"));
+  const attached = await pcs("send", "alice", "bob", "--attach", photo, "--caption", "a photo");
+  assert.deepEqual([attached.content.type, attached.content.text, attached.content.attachments[0].status, attached.content.attachments[0].kind], ["richText", "a photo", "sent", "image"]);
+  const claimed = await waitFor(async () => {
+    const [view] = await pcs("inbox", "bob", "--peer", "alice");
+    const m = view.messages.find((x) => x.messageId === attached.messageId);
+    return m?.content.attachments[0].status === "claimed" ? m : null;
+  }, { attempts: 400, everyMs: 25 });
+  assert.equal(claimed.content.attachments[0].mediaId, attached.content.attachments[0].identifier.slice(2));
+  const pool = await pcs("hop");
+  assert.equal(pool.entries.length, 2);
+  assert.deepEqual(pool.entries.map((e) => [e.signerLabel, e.role, e.acked]), [["alice", "chunk 1/1", true], ["alice", "metadata", true]]);
+  assert.ok(!JSON.stringify([attached, claimed, pool]).match(/ticket/i), "no claim ticket in any pcs output");
+  const hopFault = await pcs("hop", "fault", "drop", "--count", "2");
+  assert.deepEqual([hopFault.kind, hopFault.method, hopFault.count], ["drop", "claim", 2]);
+  assert.deepEqual(await pcs("hop", "clear"), { cleared: 1 });
+  assert.equal((await pcsFails("hop", "fault", "explode")).code, 1);
+  assert.equal((await pcsFails("send", "alice", "bob", "--attach", path.join(dir, "nope.png"))).code, 1, "a missing file is a clear failure");
+
+  // bot attach reads a pca bot's public config only and registers it, upload signer included.
   const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pcs-bots-"));
   fs.mkdirSync(path.join(botsDir, "echobot"));
   fs.writeFileSync(path.join(botsDir, "echobot", "config.json"), JSON.stringify({
-    name: "echobot", account: `0x${"77".repeat(32)}`, identifierKey: `0x00${"78".repeat(32)}${"00".repeat(32)}`, username: "echobot.42", networkProfile: "sandbox", endpoint: daemon.storeUrl,
+    name: "echobot", account: `0x${"77".repeat(32)}`, identifierKey: `0x00${"78".repeat(32)}${"00".repeat(32)}`, username: "echobot.42", networkProfile: "sandbox", endpoint: daemon.storeUrl, bulletinAccount: `0x${"79".repeat(32)}`,
   }));
   fs.writeFileSync(path.join(botsDir, "echobot", "secret.json"), JSON.stringify({ seedHex: "0xdeadbeef" }), { mode: 0o000 });
   try {
@@ -114,6 +136,7 @@ test("pcs: user add/list, request, requests, accept, send, inbox --device, react
     });
     assert.equal(attached.username, "echobot.42");
     assert.equal(daemon.directory.usernameOwner("echobot.42"), `0x${"77".repeat(32)}`);
+    assert.equal(daemon.hop.allowances.has(`0x${"79".repeat(32)}`), true, "the bot's upload signer got the Bulletin allowance");
     assert.equal((await pcsFails("bot", "attach", "nosuchbot")).code, 1);
   } finally {
     fs.rmSync(botsDir, { recursive: true, force: true });

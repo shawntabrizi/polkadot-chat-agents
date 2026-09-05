@@ -950,3 +950,324 @@ should wait for the ACK instead.
 - The UI was only run in Chromium (headless). No other browser.
 - No phone talked to the sandbox; the persona is still the SDK behind
   Polkadot Desktop.
+
+## S5 — HOP attachments (2026-09-05)
+
+### What was verified
+
+`cd sandbox && npm test` (Node v24.13.1), 89 tests in 13 files, on the final
+tree. New since S4: the HOP node's rules and fault hooks, the persona's HOP
+client round trip, attachments between two personas over the daemon, the
+`pcs` attachment and pool commands, the rows' edit history, and four
+scenarios:
+
+```
+✔ hop_submit: a signed entry from an allowed account is stored; the allowance, the proof and the caps are checked
+✔ hop_claim and hop_ack: recipient-signed, read-only until every recipient acked, then the entry is gone
+✔ bot-core's by-name params run the same checks as the spec's positional ones
+✔ faults: refuse, drop, corrupt, delay and cut hit a claim once each and are events
+✔ a frame over the cap closes the socket; putFile stores a fixture without a signer
+✔ upload then download: three chunks and the metadata, byte-exact, every entry claimed once and acked
+✔ download refuses what it cannot trust: a wrong ticket, a corrupt chunk, a size over the cap
+✔ ticket derivation matches the spec: keyed blake2b for the AEAD key and the signer seed
+✔ alice sends a photo to bob (2 devices): one claim, one placeholder, bytes served, the pool and the wire show metadata only
+✔ scenario attachment-from-bot.mjs
+✔ scenario attachment-to-bot.mjs
+✔ scenario hop-faults.mjs
+✔ scenario poison-attachment-batch.mjs
+ℹ tests 89
+ℹ pass 89
+ℹ fail 0
+ℹ duration_ms 83212.07175
+```
+
+The run has the same 14 `STORE_NODE_SUBMIT_REFUSED` lines as S3/S4 and 22
+`HOP_NODE_REFUSED` lines: every one provoked on purpose (the node's unit
+tests, the client's refusal tests, the fault scenarios).
+
+`cd sandbox/ui && npm run check` (tsc --noEmit, vitest, vite build):
+
+```
+ Test Files  4 passed (4)
+      Tests  17 passed (17)
+dist/index.html                   0.67 kB
+dist/assets/index-*.css          49.32 kB
+dist/assets/index-*.js          369.76 kB
+```
+
+The new vitest file is `attachment-view.test.ts`: an image the viewing
+device holds renders inline from the daemon's own media route and nothing
+else (by MIME, even when the sender declared a general file), a non-image
+file is a download link, a sibling device's claim is the placeholder even
+though the persona's disk has the bytes, a claim in flight and a failure
+are text that never names the message's URL.
+
+`cd bot-core && npm test` on the final tree (bot-core last changed in the
+D commits; the transport e2e is the ported one):
+
+```
+ℹ tests 418
+ℹ pass 413
+ℹ fail 0
+ℹ skipped 5
+ℹ duration_ms 19207.753458
+```
+
+The five skips are `test/workspaces.test.mjs`'s uid-gated cases on this
+machine (present before S5). The run took 19 s instead of S4's 74 s: the
+ported e2e waits for rows and events instead of the device client's fixed
+8 s windows. Each sandbox commit was made on a tree whose sandbox suite and
+UI check were green; each bot-core commit on a tree whose bot-core suite
+was green.
+
+### The acceptance session: alice ↔ echobot with attachments (pcs)
+
+`pcs up` on port 7799, a bot created and run through `pca` (the sandbox
+HOP node becomes its upload node; its upload signer is registered for the
+Bulletin allowance), alice with two devices. Human (TTY) output; the 1×1
+PNG fixture from the tests and a 24-byte text file; ids abbreviated where
+the CLI abbreviates them.
+
+```
+$ pca create echobot --brain echo --public --network sandbox --port 8811
+→ Creating bot "echobot"…
+✓ Generated your bot's identity
+→ Registering your bot in the sandbox…
+✓ Registered as echobot
+✓ Confirmed — your bot is live and people can message it!
+  Start it:  pca run echobot
+
+$ pca run echobot          # (in another terminal)
+
+$ pcs user add alice --devices 2
+✓ alice registered as 0x74510201… with 2 device(s)
+  device 1: 0x78a42037…
+  device 2: 0xde73b38f…
+
+$ pcs request alice echobot --welcome hello
+✓ alice → echobot: request cc1011eb-1f50-415a-be0d-9e5d10e72613
+
+$ pcs send alice echobot --attach photo.png --caption "look at this"
+✓ alice → echobot: sent  id c7498483-48ac-4f7f-b351-5863df0dd34e
+  image image/png 1 KB 1×1  1 chunk(s) on ws://127.0.0.1:61625  id 0x3cd6ea7c…
+
+$ pcs inbox alice --peer echobot
+→ alice ⇄ echobot  2 unread
+17:00:49 alice: hello [delivered from #1]
+17:00:49 ·: chat accepted
+17:00:49 echobot: Echo: hello [on #1 acked #1 unread]
+17:00:52 alice: look at this [delivered from #1]
+  📎 image image/png 1 KB 1×1 [sent, media 3cd6ea7c694e5f0b7992fb4dde6344f9a4a299f395fb34b9868ab87baf1c2cbf]
+17:00:52 echobot: Echo: look at this [on #1,#2 acked #1,#2 unread]
+
+$ pcs send alice echobot --attach notes.txt --caption "/file put notes.txt"
+✓ alice → echobot: sent  id 80d7981f-ab82-4c20-991d-f2ee98397604
+  general text/plain 1 KB  1 chunk(s) on ws://127.0.0.1:61625  id 0x414a861d…
+
+$ pcs send alice echobot "/file get notes.txt" --device 2
+✓ alice → echobot: sent  id b3592f66-4bef-4e6d-8f71-65ebf04dba68
+
+$ pcs inbox alice --peer echobot --device 1
+…
+17:00:56 echobot: Saved notes.txt (24 B). [on #1,#2 acked #1,#2 unread]
+17:00:59 alice: /file get notes.txt [delivered from #2]
+17:00:59 echobot: notes.txt [on #1,#2 acked #1,#2 unread]
+  📎 general text/plain 1 KB [claimed on #1, media b9127593030a966373f382300d3b06cbb18836274c4ceefbacb5ae00b8d99228]
+
+$ pcs inbox alice --peer echobot --device 2
+…
+17:00:59 echobot: notes.txt [on #1,#2 acked #1,#2 unread]
+  📎 general text/plain 1 KB [claimed by device 1]
+
+$ pcs hop
+→ HOP node ws://127.0.0.1:61625: 0 entries holding 0B of 67108864B
+  0x03a3a6c0…  chunk 1/1 of alice ⇄ echobot  98B  by alice  claimed ×1  acked  gone (acked)
+  0x3cd6ea7c…  metadata of alice ⇄ echobot  70B  by alice  claimed ×1  acked  gone (acked)
+  0xbc600273…  chunk 1/1 of alice ⇄ echobot  52B  by alice  claimed ×1  acked  gone (acked)
+  0x414a861d…  metadata of alice ⇄ echobot  70B  by alice  claimed ×1  acked  gone (acked)
+  0x60aa4f45…  chunk 1/1 of alice ⇄ echobot  52B  by echobot  claimed ×1  acked  gone (acked)
+  0xb9127593…  metadata of alice ⇄ echobot  70B  by echobot  claimed ×1  acked  gone (acked)
+
+$ pcs wire --peer alice --decode --channel "session echobot#1→alice /request"
+→ echobot  session echobot#1→alice /request  seq 25462860  629B  replaced ×3
+  topic session echobot#1→alice
+  request A5CDA6A0-B…  1 message(s)  for alice#1,alice#2  acked by alice#1 (success), alice#2 (success)
+    richText "notes.txt" +1 attachment(s)  id 08771A45-E…
+
+$ grep -E 'MEDIA|HOP_|FILE' bot.log      # the bot's side
+{"event":"BOT_HOP_UPLOAD_CONFIGURED","account":"0x30445b70…","host":"127.0.0.1","maxBytes":52428800}
+{"event":"HOP_DOWNLOADED","host":"127.0.0.1","id":"0x3cd6ea7c694e5f0b","bytes":70,"chunks":1}
+{"event":"BOT_MEDIA_DOWNLOADED","id":"3cd6ea7c694e5f0b","mime":"image/png","bytes":70}
+{"event":"HOP_DOWNLOADED","host":"127.0.0.1","id":"0x414a861d7f05ca67","bytes":24,"chunks":1}
+{"event":"BOT_MEDIA_DOWNLOADED","id":"414a861d7f05ca67","mime":"text/plain","bytes":24}
+{"event":"BOT_FILE_SAVED","peer":"74510201…","path":"notes.txt","bytes":24,"replaced":false}
+{"event":"HOP_UPLOADED","host":"127.0.0.1","id":"0xb9127593030a9663","bytes":24,"chunks":1}
+{"event":"BOT_SENT_FILE","to":"74510201…","mime":"text/plain","bytes":24}
+{"event":"BOT_FILE_DELIVERED","peer":"74510201…","path":"notes.txt","bytes":24}
+```
+
+Read it against the protocol: every upload is one chunk plus a metadata
+entry, signed by the sender's Bulletin account (alice's minted key, the
+bot's `//allowance//bulletin//chat`); every entry was claimed exactly once
+and acked, after which the pool dropped its bytes ("gone (acked)") — the
+bot downloaded each of alice's files once, and only one of alice's devices
+claimed the bot's file; the other shows the placeholder. The bot's log
+never contains a ticket; neither does any `pcs` output. No process was
+left behind after the session.
+
+### The browser session (headless Chromium)
+
+`cd sandbox/ui && npm run build && npm run acceptance` — the S4 script,
+extended: after the markdown, reply, reaction and edit steps, `pcs send
+alice echobot --attach gradient.png --caption "a photo for you"` (a 240×120
+PNG the script builds) while the Room view is open:
+
+1. alice's outgoing row renders the image inline from
+   `./api/personas/alice/media/<id>`; the echo of the caption arrives with
+   `on #1,#2 · acked #1,#2`; `BOT_MEDIA_DOWNLOADED` in the bot's log.
+2. `/file put gradient.png` (with the same photo attached) → `Saved
+   gradient.png (73 KB).`; `/file get gradient.png` typed in the composer →
+   the bot's rich text `gradient.png` arrives on both devices and renders
+   the image inline on device 1, the device that claimed
+   (`docs/images/s5-room-attachment.png`).
+3. The device selector switched to device 2: the same row shows
+   `general · image/png · 73 KB — claimed by device 1` in a dashed
+   placeholder, no image (`docs/images/s5-room-placeholder.png`).
+4. Wire: the HOP pool panel lists the six entries (alice's two uploads,
+   the bot's one; chunk/metadata, owner `alice ⇄ echobot`, signer, claimed
+   ×1, acked, gone); a `corrupt` fault is added from the form and shows as
+   `#1 corrupt on claim hits 0/1`, the `hop` fault event is in the log
+   (`docs/images/s5-wire-hop.png`); then cleared.
+
+The S4 steps and screenshots were re-run unchanged. No process was left
+behind after the run.
+
+### bot-core defects found and fixed
+
+| finding | commit |
+|---|---|
+| A follow-up that arrived while the previous turn settled was answered twice. The session receive path journals the message (`oweReply`), then awaits the critical persist; a turn settling on that peer meanwhile runs `pumpOwed()`, which enqueues the fresh entry and runs the brain; the receive path enqueues it again. Two answers with different ids — a phone shows the bot answering twice. The device client's 8 s windows never got there; the persona sends its follow-up as the opener's turn ends and hit it on every run. Ids journaled but not yet enqueued are now in `owedInAdmission`, which the pump skips; the ported restart test pins one answer per message. | `409b2fb` fix(transport) |
+| A claim the node answered `RateLimited` (1020) or `PoolFull` (1002) — "retry later" in the spec's error table — failed at once; only transport losses were retried. Those two codes now take the same single reconnect-and-resume retry; NotFound and the other refusals stay final, integrity failures never retry. Found by `scenarios/hop-faults.mjs`; pinned by a hop-client unit test. | `61eef61` fix(hop) |
+| A bot stopped after its answer reached the peer but before the store answered its submit answered the question again after the restart, under a new id. The store pushes to subscribers before it replies to the submitter; `settleOwed` runs after the submit returns; the journal held the question only, so the restart ran the brain again. CI hit it on the ported restart tests (`2 !== 1`: two "Echo: before-restart" rows); a real crash there does the same to a phone, and with an LLM the second answer differs. The owed entry now journals the answer (id, exact bytes, superseded ids), durably, before the lane submits it; a restart re-sends a journaled answer under the same ids and runs the brain only for entries without one. Reproduced deterministically by `scenarios/restart-with-sent-reply.mjs` with the new `delaySubmitReply` node fault (two rows before the fix, one after). | fix(transport): journal the answer |
+
+Also changed in bot-core, not defects: the sandbox profile's
+`insecureEndpoints` now covers the HOP node (`hopAllowInsecure`), `pca
+create --network sandbox` saves the daemon's HOP node and registers the
+bot's upload signer (`e4b0d16`); the T3ams media test uploads a fresh copy
+for its wrong-hash check because an acked single-recipient entry is gone
+on a spec-faithful node; the hop-client tests use the node's fault hooks;
+the sandbox callers use `/api` (`2a924e8`).
+
+Observed, not fixed (questions.md S5): `/file get` returns every vault
+file as `FileMeta::general`, a photo included — a phone renders a document
+card, not an image; the sandbox viewers render inline by MIME for what
+they hold. The stamped upload node carries a trailing slash
+(`new URL(...).toString()`). The opener path has the same journal-then-
+await window as the fixed session path; its `owedReplies.has &&
+!queuedOwed.has` guard prevents a second brain run, but a bridge admission
+reservation can be counted twice there (not reproduced).
+
+### test-client-device.mjs
+
+Retired: deleted from the tree, `package.json` `files`, the CI syntax
+check, `CLAUDE.md`, `docs/guide/testing.md`, `protocol.md` and
+`PLAN.md`. Every bot-core offline test that spawned it now drives a
+sandbox persona through the daemon's API (`startPersona` in
+`test/transport.e2e.test.mjs`). No assertion was weakened; these got
+stronger:
+
+- restart survival pins the persisted roster's device account as the
+  persona's *device* account (the device client's device account equaled
+  its identity account) and one answer per message across the restart;
+- the attachment test reads `BOT_RECEIVED_TEXT.attachments` and the
+  media file by the persona's identifier, and asserts the bot's log holds
+  no ticket;
+- the bridge test asserts the reply row's quote target, the persona's row
+  for the bot's edit (`editedAt`, new text), the bot's outbound reaction
+  on the persona's row, and the attachment's `width`/`height`/`kind`;
+- the bridge `/files` test asserts the persona claimed the returned file
+  (`claimedBy`, bytes byte-exact) and that every pool entry was claimed
+  once and acked;
+- the live-reply tests read every frame the placeholder showed from the
+  row's `editHistory` (the device client printed each `[BOT EDIT]` line;
+  the persona keeps them), and the never-ACK peer is a node fault on the
+  persona's two response channels instead of `--no-ack`.
+
+No case could not be ported. The live-network use (`--seed-hex` against a
+real node) stays with `test-client.mjs`, the identity-channel client.
+
+### Invariants that did not hold
+
+- **Every inbound message is answered once** did not hold in bot-core
+  when a follow-up landed as the previous turn settled (the first row of
+  the defect table). Fixed. It also did not hold across a restart when the
+  process died between the store's push of its answer and the store's
+  reply to the submit (third row; found by CI after the S5 review, held
+  open by the `delaySubmitReply` fault in the new scenario). Fixed.
+- **A download failure is a note, never a dropped message** held for
+  every fault; the retry policy was narrower than the spec's error table
+  (second row). Fixed.
+- Every other CLAUDE.md invariant the scenarios target held: the poison
+  attachment never blocked its batch, every request was ACKed, the bot's
+  file went through the outbound lane, the claim ticket never left the
+  encrypted message on either side.
+
+### Deviations from PLAN.md and the task, and why
+
+- **A persona signs uploads with one minted Bulletin key**, not a
+  per-device statement key (questions.md S5.1). The task asked for "the
+  persona's own allowance account"; the spec's `SP(A)` wording may mean
+  per device.
+- **The sandbox node's acks remove entries** (the spec's non-custodial
+  pool), so a second download of the same entry is `NotFound`. bot-core's
+  T3ams test assumed a re-claim after an ack; it now uploads again.
+- **ChaCha20-Poly1305, not the spec's AES-GCM** (questions.md S5.2): every
+  deployed client uses ChaCha20.
+- **The persona's HOP dialect is the spec's signed, positional one**, not
+  the desktop SDK checkout's unsigned `[data, recipients, "0x"]`
+  (questions.md S5.4). The node also accepts bot-core's by-name form.
+- **`poison-attachment-batch` drops the bot's first ACK** so the SDK
+  extends the un-ACKed batch and both messages ride one statement, as
+  the device client's single submit did; the SDK has no other way to put
+  two messages in one statement.
+- **Viewers render an attachment inline by MIME**, not by the sender's
+  FileMeta kind, because bot-core returns vault files as `general`.
+- **`hop-faults` uses a mock brain that echoes its prompt** so the note
+  bot-core rendered for the brain is readable in alice's inbox; an echo
+  brain would echo only the caption.
+- **The HOP pool cap is 64 MiB**, a sandbox choice: room for one largest
+  durable file (`BOT_FILE_MAX_BYTES`, 50 MB); the spec's example pool
+  status is not a documented limit.
+- **A `refuse` fault answers `RateLimited`**, the one refusal a client
+  should retry; the other refusals are reached through `drop`
+  (`NotFound`) and a wrong ticket (`NotRecipient`).
+
+### What is verified
+
+- The HOP node against the spec's rules with known answers, and against
+  two independent clients (bot-core's `hop-client.mjs`, the persona's
+  `lib/hop.mjs`), which also interoperate through it in both directions.
+- Attachments persona↔persona and persona↔bot (both directions), one
+  claim per persona, the placeholder on the other device, bytes served
+  from each holder's own media dir (0600), the pool listing and the wire
+  decoding without a ticket, the five fault hooks and bot-core's response
+  to each, the size cap on send.
+- The UI: images inline from the local media route only, download links,
+  placeholders, the HOP panel and its faults; driven by the script above.
+
+### What is not verified
+
+- No phone talked to the sandbox; the persona is the SDK behind Polkadot
+  Desktop with a spec-dialect HOP client, not the app.
+- RFC-0001's inline root entries and on-chain fallback are not modelled;
+  a lost chunk after the metadata ack is unrecoverable here, as it is in
+  bot-core.
+- Video FileMeta is encoded (`duration: 0`) but no video was sent.
+- The Wire screen's HOP fault form was exercised for `corrupt` only; the
+  other kinds were driven through `pcs` and the API.
+- The delayed-claim fault was exercised in the node's unit test, not
+  against bot-core (its per-download deadline is 120 s).
+- S4 question 4's open note — why slower `pcs` start-up lost the
+  device-removed race — was not investigated beyond replacing the sharp
+  check with the bounded wait; the measured latency is in the scenario's
+  log line.
