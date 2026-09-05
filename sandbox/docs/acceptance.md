@@ -1271,3 +1271,306 @@ real node) stays with `test-client.mjs`, the identity-channel client.
   device-removed race — was not investigated beyond replacing the sharp
   check with the bounded wait; the measured latency is in the scenario's
   log line.
+
+## S6 — `paseo` profile: the sandbox on Paseo Next (2026-09-05)
+
+### What was verified (offline, CI)
+
+`cd sandbox && npm test` (Node v24.13.1) on the final tree: 103 tests in 17
+files, every scenario on the mock. New since S5:
+
+```
+✔ mock is the default; paseo mirrors bot-core's PASEO profile; a typo is refused
+✔ consumer, identityOf and usernameOwner read Resources through papi and remember what they saw
+✔ search asks the identity backend and checks every hit against the chain
+✔ remember keeps the public half of a persona or an attached bot for the labels
+✔ the default username is the name when the backend takes it, else a padded one, else nothing
+✔ a minted record holds the keys a single-device identity needs, and keysOf derives them as bot-core would
+✔ claim, wait, pending, resume, attested — one claim in total; a reset claims a new username
+✔ the Bulletin allowance is provisioned through bot-core's testnet helper; failure is recorded, not thrown
+✔ markChainReset leaves records registered on this genesis alone and marks attached bots too
+✔ on paseo: faults, clock, node restart/reset, the pool and local registration answer 409 naming the network
+✔ on paseo: the node info carries the network and genesis; the wire is what the personas saw; bots attach with their chain state
+✔ on the mock, the same routes stay open (the refusal is the network's, not the route's)
+ℹ tests 103
+ℹ pass 103
+ℹ fail 0
+```
+
+`cd sandbox/ui && npm run check`: tsc, 17 vitest tests, vite build.
+`cd bot-core && npm test`: 420 tests, 415 pass, 5 skipped (the uid-gated
+`workspaces.test.mjs` cases), including the new `deriveIdentityKeys` and
+`reregisterIdentity` tests and the `register --again` flow against the
+mock sandbox directory.
+
+### The chain, first
+
+Paseo People Next was reset since S5's descriptors were generated:
+genesis `0xc5af1826…` → `0x4a2b5b73…` (`next-people-paseo` 3002000,
+finalized block 167495 during this session). Bulletin Paseo Next kept its
+genesis (`0x8cfe6717…`) but its runtime moved, so `pca storage <bot>
+status` failed with `Incompatible runtime entry
+Storage(TransactionStorage.Authorizations)` until the descriptors were
+regenerated (`papi update paseoPeopleNext bulletinPaseoNextV2`, `npm run
+prepare`, commit `47528ab`). After it:
+
+```
+$ pca storage codebot status
+→ Checking Bulletin Paseo Next v2 file allowance…
+  allowance: 5FxibxxzpFj7qwQDoQ3BntaWPhyvhW6EiDcKnCTo1HWUfyYq
+  storage:   not authorized
+```
+
+On the reset chain: 2814 `Resources.Consumers`, 2816 `PeopleLite.LitePeople`
+(2814 attested by `5GCF223UbXNZ…`, 2 by fee). None of this machine's paseo
+bots is among them (`codebot.03`, `hermesbot.54`, `openclawbot.49`), nor
+`macbot.78`, nor the owner's phone (`shawntabrizi.01` ASSIGNED on the
+backend, `shawntabrizi.02` RESERVED since 2026-09-04T18:31, both absent
+on chain).
+
+### (a) `pca register macbot --again`
+
+Blocked twice, precisely:
+
+1. **macbot is not on this machine.** `~/.pca/bots/` holds
+   `macbot-workspace/` (empty) and no `macbot/` with a seed; the VPS runbook
+   does not list it either. The backend has `macbot.78` ASSIGNED to
+   `5DXPWoMyS7HS7cfv98jGT4mUUXgNMgo7XvxZSvBMTfvHhxxQ` at old-chain block
+   659047; the chain has no `Consumers` entry for it.
+2. So the command was exercised on `openclawbot` (local, `openclawbot.49`,
+   the same situation: ASSIGNED on the backend at block 658192, absent on
+   chain). What the backend does on a second claim:
+
+```
+$ pca register openclawbot --again --wait 240
+→ Checking the chain for openclawbot.49…
+⚠ The identity backend refused a second claim of openclawbot.49: 409 Conflict: {"error":"Preferred digits 49 already taken for username openclawbot"}
+  The backend still lists the username as assigned on the old chain, and the chain has no record of this bot.
+  Let the backend assign a new number:  pca register openclawbot --again --new-number   (or pick one: --digits <NN>)
+  The bot's account and keys stay the same; only the number after the dot changes. Tell its contacts.
+
+$ pca register openclawbot --again --new-number --wait 240
+→ Checking the chain for openclawbot.49…
+⚠ The backend assigned openclawbot.19; openclawbot.49 is no longer this bot's name. Tell its contacts.
+→ Waiting for the network to confirm (up to 240s)…
+.............................................
+⚠ Not confirmed yet — this can take a few minutes. Check or retry:  pca register openclawbot
+→ Provisioning Bulletin Paseo Next v2 file allowance…
+⚠ The public Paseo Next v2 faucet may have accepted this allowance grant. Do not retry it yet.
+  Wait for finalization, then check:  pca storage openclawbot status
+  After verifying the result, clear the local guard:  pca storage openclawbot recover
+
+$ pca storage openclawbot status
+  storage:   active through block 1952095 (201458 blocks remaining); 1000 transactions and 95.3 MiB remain
+$ pca storage openclawbot recover
+✓ Verified allowance is sufficient; cleared the local recovery guard.
+```
+
+The backend keeps `openclawbot.49` ASSIGNED (old chain) beside
+`openclawbot.19` RESERVED (`GET /api/v1/usernames?prefix=openclawbot`),
+and `openclawbot.19` **stayed RESERVED for the rest of the session** (polled
+every two minutes; `Resources.Consumers` for the account stayed empty). The
+reason is on the chain: the attester the backend advertises
+(`GET /api/v1/attester` → `0x86aac84d…` = `5F7H1LkZi8rnSH8PvUsp4LD2WkvcpnjkyQyvLPu1ntbhNr5T`)
+has `PeopleLite.AttestationAllowance` 0 and balance 0 on the reset chain;
+the only attester with an allowance is `5GCF223U…` (997186 left), which
+attested the 2814 migrated accounts. Every claim a client signs covers the
+advertised attester, so nothing the client does can change the outcome.
+This is the identity backend's to fix (questions.md S6.1). So: `--again`
+succeeds or reports exactly why not — here it reported the backend's 409
+verbatim, then claimed a new number that the backend does not attest.
+
+### (b) `pcs up --network paseo`, `pcs user add alice`
+
+Human output is JSON here because the commands ran without a TTY.
+
+```
+$ pcs up --network paseo --dir <scratch>/paseo-state --port 7799
+{"event":"SANDBOX_UP","url":"http://127.0.0.1:7799","network":"paseo","genesis":"0x4a2b5b737de1da59e209b0000a876ec2fa20035dc34fd292a848da32d255ad48","storeUrl":"wss://paseo-people-next-system-rpc.polkadot.io","hopUrl":"wss://paseo-hop-next-0.polkadot.io",…,"personas":[]}
+
+$ pcs user add alice --wait 150
+{ "name": "alice", "account": "0x1a8137d1…", "username": "sandboxalice.41",
+  "registration": { "username": "sandboxalice.41", "status": "claimed", "genesis": "0x4a2b5b73…",
+                    "claimedAt": "2026-09-05T19:14:18.841Z", "attestedAt": null, "bulletin": "failed" },
+  "devices": [ { "index": 1, "account": "0x1a8137d1…", … } ] }
+daemon log:
+  SANDBOX_PERSONA_UP {"name":"alice","account":"0x1a8137d1…","devices":1,"username":"sandboxalice"}
+  SANDBOX_PERSONA_CLAIMED {"name":"alice","username":"sandboxalice.41","again":false}
+  SANDBOX_PERSONA_BULLETIN_FAILED {"address":"5HK4TU5r9m1B…","error":"The Bulletin Paseo Next v2 Faucet submission may have reached the chain, but finalization could not be confirmed…"}
+  SANDBOX_PERSONA_PENDING {"name":"alice","username":"sandboxalice.41"}
+```
+
+`alice` is too short for a username, so the claim was `sandboxalice` and
+the backend assigned `.41`; the device account equals the identity account
+(single-device); the mnemonic went to
+`paseo-state/personas/alice/identity.json` (0600). Attestation did not land
+(the backend does not attest, see (a)); the faucet's answer came after the
+helper's 30 s deadline. The daemon was then stopped and started again:
+
+```
+$ pcs up --network paseo --dir <scratch>/paseo-state --port 7799
+{"event":"SANDBOX_UP",…,"personas":["alice"]}
+$ pcs user list
+alice  sandboxalice.41  claimed  (Bulletin allowance: failed)
+$ pcs user add alice --wait 30                    # resume: no second claim
+{ "username": "sandboxalice.41", "status": "claimed", …, "bulletin": "authorized" }
+  SANDBOX_PERSONA_RESUME {"name":"alice","status":"claimed","bulletin":"failed"}
+  SANDBOX_PERSONA_BULLETIN {"address":"5HK4TU5r9m1B…","action":"already-authorized"}
+  SANDBOX_PERSONA_PENDING {"name":"alice","username":"sandboxalice.41"}
+```
+
+The persona survived the restart with its state; the resume made no new
+claim (the backend still lists one `sandboxalice.41`), re-read the
+Bulletin chain and found the faucet grant had landed. The fix for the
+first run's `failed` — re-reading the chain for 90 s after an unconfirmed
+submit — landed after this run (commit `4974744`).
+
+The rest of the profile, live:
+
+```
+$ pcs bot attach openclawbot
+{ "name": "openclawbot", "username": "openclawbot.19", "onChain": false, "needsReregistration": true, "networkProfile": "paseo", … }
+$ pcs user find shawntabrizi
+[ { "username": "shawntabrizi.01", "account": "0xdaf98cb2…", "status": "ASSIGNED", "onChain": false },
+  { "username": "shawntabrizi.02", "account": "0x486a22fe…", "status": "RESERVED", "onChain": false } ]
+$ pcs user find macbot
+[ { "username": "macbot.78", "account": "0x40961ce0…", "status": "ASSIGNED", "onChain": false } ]
+$ pcs fault drop --from alice
+✗ a fault is available on the mock network only; this sandbox runs on Paseo Next v2 (paseo)
+$ pcs clock +2h
+✗ the clock is available on the mock network only; this sandbox runs on Paseo Next v2 (paseo)
+$ pcs node restart
+✗ a node restart is available on the mock network only; this sandbox runs on Paseo Next v2 (paseo)
+$ pcs hop
+✗ the HOP pool view is available on the mock network only; this sandbox runs on Paseo Next v2 (paseo)
+$ pcs user add bob --devices 2
+✗ a persona on Paseo Next v2 is single-device (the identity account is its device; only the phone can mint a second one)
+```
+
+The UI served by that daemon (`docs/images/s6-paseo-personas.png`,
+`s6-paseo-wire.png`): the rail badge reads `paseo`; Personas shows
+`sandboxalice.41 · attestation pending · Bulletin allowance authorized` and
+no "Add device"; Wire shows "Faults, the clock and node restarts exist on
+the mock network only; the wire shows what the personas' subscriptions
+saw." and no fault form (checked by the screenshot script: 0 "Add fault"
+controls).
+
+### (c) alice ↔ macbot text and attachments
+
+Not reached. macbot is unavailable (a); the fresh bot:
+
+```
+$ pca create sandboxecho --brain echo --network paseo --allow 0x1a8137d1… --wait 150 --port 8833
+→ Creating bot "sandboxecho"…
+✓ Generated your bot's identity
+→ Registering your bot on the network…
+✓ Registered as sandboxecho.91
+→ Waiting for the network to confirm (up to 150s)…
+.............................
+⚠ Not confirmed yet — this can take a few minutes. Check or retry:  pca register sandboxecho
+→ Provisioning Bulletin Paseo Next v2 file allowance…
+⚠ The public Paseo Next v2 faucet may have accepted this allowance grant. Do not retry it yet.
+  …
+  or search: sandboxecho.91
+$ pca storage sandboxecho status      # later: the grant landed; recover cleared the guard
+$ pcs bot attach sandboxecho
+{ "name": "sandboxecho", "username": "sandboxecho.91", "onChain": false, "needsReregistration": true, … }
+$ pcs request alice sandboxecho --welcome "hello from the sandbox"
+✗ sandboxecho is not messageable (no identifier key on this chain)
+```
+
+Both sides are claimed and both stay RESERVED on the backend; without an
+attestation neither has a statement allowance nor an identifier key, so
+no message can be sent. The path is complete up to the point the backend
+must act. To finish once it does: `pcs user add alice` (resumes, reports
+`attested`), `pca register sandboxecho` (resumes), then
+`pcs request alice sandboxecho --welcome hi`, `pca run sandboxecho`,
+`pcs send alice sandboxecho --attach photo.png --caption look`,
+`pcs send alice sandboxecho --attach notes.txt --caption "/file put notes.txt"`,
+`pcs send alice sandboxecho "/file get notes.txt"`, `pcs inbox alice`,
+`pcs wire --decode`; or the same as one script,
+`pcs scenario run scenarios/echo-roundtrip.mjs --network paseo` and
+`pcs scenario run scenarios/attachment-to-bot.mjs --network paseo`.
+
+### (d) The phone check — the owner's
+
+Precondition: the identity backend attests again (S6.1), and
+`shawntabrizi.02` (RESERVED since 2026-09-04) is attested — `pcs user find
+shawntabrizi` shows `onChain: true` for it.
+
+1. `pcs up --network paseo` (the default state dir keeps alice), then
+   `pcs user add alice` until it reports `attested`.
+2. `pcs request alice shawntabrizi.02 --welcome "hello from the sandbox"`
+   — the phone shows a request from `sandboxalice.41`.
+3. Accept it on the phone; `pcs requests alice` shows `accepted`;
+   `pcs inbox alice` shows the "chat accepted" row.
+4. Phone → sandbox: send a text, react to the welcome message, send a
+   photo. `pcs inbox alice --peer shawntabrizi.02` shows the text, the
+   reaction on the welcome row, and the photo `claimed on #1` with a
+   `media` id; `pcs wire --decode --peer alice` shows the phone's
+   statements on `session shawntabrizi.02#1→alice /request` and alice's
+   ACKs.
+5. Sandbox → phone: `pcs send alice shawntabrizi.02 "hi phone"`,
+   `pcs react alice shawntabrizi.02 <phone message id> 👍`,
+   `pcs send alice shawntabrizi.02 --attach photo.png --caption "from alice"`
+   — the phone shows each; `pcs inbox alice` shows `delivered` after the
+   phone's ACK.
+6. Screenshots: the phone's chat, `pcs inbox alice`, the Room view in the
+   UI (`http://127.0.0.1:7788`, Chats → shawntabrizi.02).
+
+Result: ______________________________________ (owner)
+
+### Deviations from PLAN.md and the task, and why
+
+- **The chain directory reads through the sandbox's own papi, not
+  bot-core's `createChainDirectory`.** Two storage reads did not justify a
+  second descriptor set and a papi-version coupling (sandbox 3.1.0,
+  bot-core 2.1.7); the unsafe api decodes from the chain's metadata. The
+  read contract bot-core's `waitForAttestation` needs is the same.
+- **Short persona names register as `sandbox<name>`** (`sandboxalice.41`):
+  the backend's rule is six or more letters and the task's `pcs user add
+  alice` had to work; `--username` overrides (questions.md S6.5).
+- **A re-registration claims without the old number** (persona and bot
+  alike): the backend refuses it to the account that owns it, so
+  `pcs user add` after a reset takes a new number silently while `pca
+  register --again` asks for `--new-number` first — a bot's name is known
+  to its contacts, a persona's is not.
+- **`pca info` does not re-check a confirmed bot against the chain**: a
+  live check would make `pca info paseobot` in bot-core's unit tests hit
+  the real network. The reset is detected by `pca register --again`
+  (questions.md S6.6).
+- **Bulletin allowance: the chain is re-read for 90 s after an
+  unconfirmed faucet submit** instead of leaving a guard for an operator
+  to recover, because a sandbox persona has no `pca storage` command;
+  bot-core's own guard for bots is untouched.
+- **The live acceptance stops at the claim** on both sides: the identity
+  backend does not attest on the reset chain (S6.1). Everything up to that
+  point ran against the real network and is recorded above.
+
+### What is verified
+
+- The paseo daemon against the real network: connect, genesis, persona
+  minting and claim through the identity backend (a real proof, a real
+  claim: `sandboxalice.41`, `sandboxecho.91`, `openclawbot.19`), the
+  Bulletin faucet allowance for a persona's upload signer, persistence
+  across a restart, the resume path, the backend search checked against
+  the chain, `bot attach` reading the chain, every refusal, the UI.
+- The chain reset marking (unit), the re-registration outcomes (unit, and
+  the backend's real answers above), the registration flow (unit).
+- Nothing in the mock changed: the full suite and every scenario.
+
+### What is not verified
+
+- A message over Paseo Next between a persona and a bot, or a phone: no
+  attestation landed for any claim made this week (the phone's included).
+- The two scenarios on `--network paseo` (they need an attested persona
+  and bot); their mock runs are in the suite.
+- A chain reset observed live by the daemon (the unit test marks records;
+  the live daemon saw one genesis).
+- The bot-core side of the "finalization unknown" faucet answer for a
+  persona is handled; for a bot it remains the S5 operator flow.
+
+No bot, daemon or dev server was left behind: `sandboxecho` was created
+and attached but never run; the paseo daemon on port 7799 was stopped at
+the end (the owner's own `pcs up` on port 7788, pid 27053, started before
+this session, was left untouched).
