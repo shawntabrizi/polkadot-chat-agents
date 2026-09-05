@@ -6,9 +6,9 @@
 // then tears everything down — every bot it started is stopped even when the
 // scenario throws, so a scenario can never leave an echo bot behind.
 //
-// `network: "paseo"` runs the same script on the real Paseo Next network
-// (`pcs scenario run <file> --network paseo`): the persona registers through
-// the identity backend, the bot is created with `pca create --network paseo`
+// `network: "paseo"` or `"devnet"` runs the same script on that testnet
+// (`pcs scenario run <file> --network <id>`): the persona registers through
+// the identity backend, the bot is created with `pca create --network <id>`
 // and attached, and the waits are longer. Those are live checks, not CI;
 // a scenario that needs faults, the clock or a second device is mock-only
 // and says so through `sandbox.network`.
@@ -226,7 +226,7 @@ export function createBotHelper({ sandboxUrl, botsDir, log = () => {}, network =
     botsDir,
     pca,
     /**
-     * `pca create <name> --network sandbox …` (or `--network paseo`, which
+     * `pca create <name> --network sandbox …` (or `--network <testnet>`, which
      * registers through the identity backend and waits for the attestation)
      * on a free bridge port, then attached so the sandbox can name it;
      * returns config.json.

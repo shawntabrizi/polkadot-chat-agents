@@ -66,8 +66,8 @@ const attachmentLine = (a, viewDevice) => {
 const usage = `pcs — Polkadot chat sandbox
 
   pcs up [--dir ~/.pca/sandbox/default] [--port ${DEFAULT_PORT}] [--network ${NETWORK_IDS.join("|")}]
-                                           # mock (default): every part on this machine; paseo: the real Paseo Next network
-  pcs user add <name> [--devices N]        # on paseo: single-device, registered through the identity backend;
+                                           # mock (default): every part on this machine; paseo, devnet: a real testnet
+  pcs user add <name> [--devices N]        # on a testnet: single-device, registered through the identity backend;
                                            #   [--username <6+ letters>] [--wait <secs>]; run again to keep waiting
   pcs user list
   pcs user find <prefix>                   # usernames: the directory's, or the identity backend's checked against the chain
@@ -94,9 +94,9 @@ const usage = `pcs — Polkadot chat sandbox
   pcs hop fault refuse|cut|delay|drop|corrupt [--hash <entry>] [--method claim|ack|submit] [--count N|forever] [--ms N]
   pcs hop clear [<id>]
   pcs bot attach <pca-bot-name>            # mock: register a pca bot's account (and its Bulletin signer) in the directory;
-                                           # paseo: check the chain holds the bot, so the sandbox can name it
+                                           # testnet: check the chain holds the bot, so the sandbox can name it
   pcs bot list
-  pcs scenario run <file> [--network paseo]   # run a scripted scenario on a fresh daemon
+  pcs scenario run <file> [--network paseo|devnet]   # run a scripted scenario on a fresh daemon
   pcs events
 
   --url <api url>   daemon to talk to (default ${baseUrl}); --json forces JSON output.`;
@@ -453,7 +453,7 @@ switch (cmd) {
   }
   case "scenario": {
     const [sub, file] = rest;
-    if (sub !== "run" || !file) fail("usage: pcs scenario run <file> [--network paseo]");
+    if (sub !== "run" || !file) fail(`usage: pcs scenario run <file> [--network ${NETWORK_IDS.join("|")}]`);
     if (!fs.existsSync(file)) fail(`no scenario file ${file}`);
     const network = String(flags.network ?? DEFAULT_NETWORK);
     if (!NETWORK_IDS.includes(network)) fail(`--network must be one of ${NETWORK_IDS.join(", ")}`);

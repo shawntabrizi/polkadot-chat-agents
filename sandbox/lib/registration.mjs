@@ -5,17 +5,26 @@
 // statements, and its device encryption key is a persisted random X25519
 // key. Only the phone can mint the ring-proof origin a second device needs.
 //
+// The backend admits a claim the way the profile says
+// (`identityRegistrationAuth`): Paseo Next takes it as is; Products Devnet
+// wants a bearer the persona mints by proving its own //wallet key (the
+// client-proof exchange `pca create --network devnet` runs), with the same
+// operator overrides — PCA_IDENTITY_TOKEN, an issued bearer, and
+// PCA_IDENTITY_VOUCHER, a single-use enrollment voucher presented only
+// after the backend refused the client proof. See docs/guide/devnet.md.
+//
 // bot-core imports allowed here by the S6 rules, and only these:
-// lib/register.mjs (the claim and the attestation wait; registration is not
-// the chat protocol under test) and lib/testnet-file-allowance.mjs (the
-// Bulletin allowance the persona's upload signer needs on a testnet).
+// lib/register.mjs (the claim, the session and the attestation wait;
+// registration is not the chat protocol under test) and
+// lib/testnet-file-allowance.mjs (the Bulletin allowance the persona's
+// upload signer needs on a testnet).
 
 import { AccountId } from "polkadot-api";
 import { generateMnemonic } from "@polkadot-labs/hdkd-helpers";
 import { x25519 } from "@noble/curves/ed25519.js";
 import { randomBytes } from "@noble/hashes/utils.js";
 
-import { deriveIdentityKeys, normalizeUsername, registerIdentity, waitForAttestation } from "../../bot-core/lib/register.mjs";
+import { acquireIdentitySession, deriveIdentityKeys, normalizeUsername, registerIdentity, waitForAttestation } from "../../bot-core/lib/register.mjs";
 import { ensureTestnetFileAllowance, getTestnetFileAllowanceStatus, hasSufficientTestnetFileAllowance } from "../../bot-core/lib/testnet-file-allowance.mjs";
 import { bytesToHex, hexToBytes, log } from "./bytes.mjs";
 import { wrapIdentifierKey } from "./directory.mjs";
@@ -78,6 +87,43 @@ export const registrationView = (record) => ({
   bulletin: record.bulletin?.status ?? "none",
 });
 
+const isAuthRejection = (error) => error?.status === 401 || error?.status === 403;
+
+/**
+ * The bearer a claim carries, per the profile's `identityRegistrationAuth`.
+ * "client-proof": bot-core's session flow with the persona's mnemonic — an
+ * issued PCA_IDENTITY_TOKEN wins, else the saved session (refreshed when it
+ * expires), else a fresh challenge signed with the //wallet key, and the
+ * PCA_IDENTITY_VOUCHER fallback only after that was refused. The session is
+ * persisted in the record (0600) before the claim so a claim that fails
+ * later reuses it, and dropped once the claim is in. "none": no session; an
+ * issued token is still passed on, as `pca` does.
+ */
+async function identityTokenFor(record, { backendUrl, identityAuth, env, save, fetchImpl }) {
+  const issued = env.PCA_IDENTITY_TOKEN?.trim() || null;
+  if (identityAuth !== "client-proof") return issued;
+  try {
+    const session = await acquireIdentitySession({
+      backendUrl,
+      mnemonic: record.mnemonic,
+      accessToken: issued,
+      enrollmentVoucher: env.PCA_IDENTITY_VOUCHER,
+      savedSession: record.identityRegistrationSession ?? null,
+      persistSession: async (session) => { record.identityRegistrationSession = session; await save(record); },
+      fetchImpl,
+    });
+    return session?.token ?? null;
+  } catch (error) {
+    if (!isAuthRejection(error)) throw error;
+    // The enrollment rules of docs/guide/devnet.md, as the `pcs user add` error.
+    const tried = env.PCA_IDENTITY_VOUCHER?.trim() ? "the client proof and the PCA_IDENTITY_VOUCHER" : issued ? "PCA_IDENTITY_TOKEN" : "the client proof of its wallet key";
+    throw new Error(`the identity backend refused to enroll ${record.name} with ${tried} (${error.message}). `
+      + "It admits a client that proves its own wallet key; if the operator turned on hard platform attestation, start the daemon with "
+      + "PCA_IDENTITY_VOUCHER (a single-use enrollment voucher) or PCA_IDENTITY_TOKEN (an issued bearer) in its environment — never on the command line — "
+      + `then run  pcs user add ${record.name}  again`);
+  }
+}
+
 /**
  * Claim the username (once) and wait for the attestation. Idempotent and
  * resumable: a claimed record only waits, an attested one returns at once,
@@ -88,6 +134,7 @@ export const registrationView = (record) => ({
  */
 export async function registerPersona(record, {
   backendUrl, directory, genesis, save, waitMs = DEFAULT_WAIT_MS, fetchImpl = fetch, bandersnatchBin = null, onProgress = () => {},
+  identityAuth = "none", env = process.env,
 }) {
   const reg = record.registration;
   const { account } = keysOf(record);
@@ -95,9 +142,11 @@ export async function registerPersona(record, {
   if (reg.status === "minted" || reg.needsReregistration) {
     const again = reg.needsReregistration;
     onProgress(again ? `claiming a new username for ${record.name} (the chain was reset)…` : `claiming ${record.usernameBase} for ${record.name}…`);
-    const result = await registerIdentity({ mnemonic: record.mnemonic, username: record.usernameBase, digits: null, backendUrl, bandersnatchBin, fetchImpl });
+    const identityToken = await identityTokenFor(record, { backendUrl, identityAuth, env, save, fetchImpl });
+    const result = await registerIdentity({ mnemonic: record.mnemonic, username: record.usernameBase, digits: null, backendUrl, bandersnatchBin, identityToken, fetchImpl });
     record.username = result.username;
     record.registration = { status: "claimed", genesis, claimedAt: new Date().toISOString(), attestedAt: null, needsReregistration: false };
+    delete record.identityRegistrationSession;
     await save(record);
     log("SANDBOX_PERSONA_CLAIMED", { name: record.name, username: record.username, account, again });
   }

@@ -11,9 +11,9 @@
 // `deviceAdded` fan-out, which she sends after his accept. A phone's sibling
 // devices have the same gap. Everything after the fan-out reaches both.
 //
-// On paseo (`--network paseo`, a live check) alice is single-device — the
+// On a testnet (`--network paseo|devnet`, a live check) alice is single-device — the
 // identity account is her device, as for a bot — so the device-2 steps run
-// from device 1, the bot is `pca create --network paseo` locked to her
+// from device 1, the bot is `pca create --network <id>` locked to her
 // (a public testnet bot gets no file-delivery profile and trusts no HOP
 // host), its username carries the backend's number, and the wire is what
 // alice's subscriptions saw on the real store.
@@ -91,7 +91,7 @@ export async function run({ sandbox, pcs, bot, log }) {
   assert.equal(view.messages.filter((m) => m.direction === "incoming" && m.content.type === "text" && !m.content.text.startsWith("Echo:")).length, 0, "BOT_ACK_TEXT is empty for the echo brain: the accept rode alone, no empty welcome bubble");
 
   // The wire: the bot's statements on the labelled per-device channels, every
-  // signer named. On paseo the bot is labelled by its username, and the
+  // signer named. On a testnet the bot is labelled by its username, and the
   // wire is what alice's subscriptions saw plus what she submitted.
   const wire = await pcs("wire", "--peer", "alice");
   const botLabel = mock ? "echobot" : cfg.username;

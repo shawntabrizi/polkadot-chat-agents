@@ -2,14 +2,15 @@
 // The sandbox daemon: the network, the personas and the control API in one
 // process. `pcs up` runs this; tests start it in-process on random ports.
 //
-// Two networks (lib/network.mjs). `mock` (the default): a store node, a HOP
+// The networks (lib/network.mjs). `mock` (the default): a store node, a HOP
 // node and a directory that plays the People chain and the identity
-// backend, all on this machine. `paseo`: the real Paseo Next network — the
-// People chain's statement store and Resources pallet, Parity's identity
+// backend, all on this machine. `paseo` and `devnet`: a real testnet — the
+// People chain's statement store and Resources pallet, its identity
 // backend, the Bulletin HOP nodes — so personas chat with deployed bots and
-// with a phone. Personas reach the store the way Polkadot Desktop does — a
-// WebSocket per device through papi's provider and the SDK's adapter — so
-// the node is exercised over the wire on both networks.
+// with a phone; the two differ only by their profile. Personas reach the
+// store the way Polkadot Desktop does — a WebSocket per device through
+// papi's provider and the SDK's adapter — so the node is exercised over the
+// wire on every network.
 
 import fs from "node:fs";
 import os from "node:os";
@@ -90,9 +91,9 @@ async function startMockNetwork({ host, storePort }) {
   };
 }
 
-// ── Paseo Next: the real network ─────────────────────────────────────────
+// ── A testnet: the real network the profile names ────────────────────────
 
-async function startPaseoNetwork({ profile, fetchImpl }) {
+async function startTestnet({ profile, fetchImpl }) {
   // One papi client for chain reads (the directory) and the genesis; the
   // personas' statement traffic rides their own lazy clients, mirrored into
   // the seen-store so `pcs wire` shows what their subscriptions saw.
@@ -125,16 +126,19 @@ async function startPaseoNetwork({ profile, fetchImpl }) {
   };
 }
 
-export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, host = "127.0.0.1", storePort = 0, network = DEFAULT_NETWORK, fetchImpl = fetch, waitMs = DEFAULT_WAIT_MS } = {}) {
+// `env` is where the identity backend's operator credentials are read from
+// (PCA_IDENTITY_TOKEN, PCA_IDENTITY_VOUCHER — the daemon's environment,
+// never a flag or the API).
+export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, host = "127.0.0.1", storePort = 0, network = DEFAULT_NETWORK, fetchImpl = fetch, waitMs = DEFAULT_WAIT_MS, env = process.env } = {}) {
   const profile = networkProfile(network);
   // The state dir holds persona seeds on a real network; private from day one.
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   fs.chmodSync(dir, 0o700);
 
-  const net = profile.mock ? await startMockNetwork({ host, storePort }) : await startPaseoNetwork({ profile, fetchImpl });
+  const net = profile.mock ? await startMockNetwork({ host, storePort }) : await startTestnet({ profile, fetchImpl });
   const { node, hop, directory, genesis } = net;
   const personas = new Map();
-  const records = new Map(); // name -> persisted record (paseo only)
+  const records = new Map(); // name -> persisted record (testnets only)
   const bots = new Map(); // name -> attached bot { name, account, username, identifierKey, bulletinAccount, genesis, onChain, needsReregistration }
   const events = createEvents();
   const store = profile.mock ? null : createPersonaStore(dir);
@@ -170,7 +174,7 @@ export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, hos
     return persona;
   };
 
-  // ── Personas on paseo: persisted, registered through the identity backend ──
+  // ── Personas on a testnet: persisted, registered through the identity backend ──
   const save = async (record) => {
     store.savePersona(record);
     const persona = personas.get(record.name);
@@ -187,13 +191,13 @@ export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, hos
     wirePersona(persona);
     return persona;
   };
-  const registrationDeps = { backendUrl: profile.identityBackendUrl, directory, genesis, save, waitMs, fetchImpl, onProgress: (text) => events.emit("persona", { persona: null, progress: text }) };
+  const registrationDeps = { backendUrl: profile.identityBackendUrl, identityAuth: profile.identityRegistrationAuth, env, directory, genesis, save, waitMs, fetchImpl, onProgress: (text) => events.emit("persona", { persona: null, progress: text }) };
   const registerOrResume = async (record) => {
     const view = await registerPersona(record, { ...registrationDeps, waitMs });
     if (record.username) directory.remember({ account: keysOf(record).account, username: record.username });
     return view;
   };
-  const addPaseoPersona = async (name, devices, { username = null, wait = null } = {}) => {
+  const addTestnetPersona = async (name, devices, { username = null, wait = null } = {}) => {
     if (devices !== 1) throw new Error(`a persona on ${profile.name} is single-device (the identity account is its device; only the phone can mint a second one)`);
     const waitFor = wait == null ? waitMs : Number(wait) * 1000;
     const existing = records.get(name);
@@ -223,7 +227,7 @@ export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, hos
     events.emit("persona", { persona: name, devices: 1, registration: view });
     return persona;
   };
-  const addPersona = (name, devices, options) => (profile.mock ? addMockPersona(name, devices) : addPaseoPersona(name, devices, options));
+  const addPersona = (name, devices, options) => (profile.mock ? addMockPersona(name, devices) : addTestnetPersona(name, devices, options));
 
   // ── Attached bots (`pcs bot attach`): a pca bot's public half ──
   const persistBots = () => store?.saveBots([...bots.values()]);
@@ -261,7 +265,7 @@ export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, hos
     return null;
   };
 
-  // ── Restore (paseo): persisted personas and bots, and the chain reset check ──
+  // ── Restore (testnets): persisted personas and bots, and the chain reset check ──
   let chainReset = null;
   if (store) {
     const previous = store.loadNetwork();
@@ -347,7 +351,7 @@ export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, hos
     addPersona,
     attachBot,
     resolvePeer,
-    /** Resume a pending or reset registration (paseo). */
+    /** Resume a pending or reset registration (testnets). */
     register: (name) => registerOrResume(records.get(name) ?? (() => { throw new Error(`no persona ${name}`); })()),
     async stop() {
       for (const p of personas.values()) p.stop();

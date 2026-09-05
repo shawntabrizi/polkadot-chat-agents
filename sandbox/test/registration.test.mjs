@@ -10,12 +10,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { x25519 } from "@noble/curves/ed25519.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { deriveSr25519PublicKey } from "@novasamatech/statement-store";
+import { verify as verifySr25519 } from "@scure/sr25519";
 import { createPersonaStore, markChainReset } from "../lib/persona-store.mjs";
 import { defaultUsername, keysOf, mintPersonaRecord, provisionBulletin, registerPersona, registrationView } from "../lib/registration.mjs";
 import { unwrapIdentifierKey } from "../lib/directory.mjs";
 
 const GENESIS = `0x${"4a".repeat(32)}`;
+const concatBytes = (...parts) => { const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; } return out; };
 const RESET = `0x${"5b".repeat(32)}`;
 
 function fakeProofHelper(dir) {
@@ -145,4 +148,107 @@ test("markChainReset leaves records registered on this genesis alone and marks a
   const bots = [{ name: "echobot", genesis: GENESIS }, { name: "oldbot", genesis: RESET }, { name: "unknown", genesis: null }];
   assert.deepEqual(markChainReset(bots, GENESIS), ["oldbot"]);
   assert.deepEqual(bots.map((b) => b.needsReregistration ?? false), [false, true, false]);
+});
+
+// The identity backend of a client-proof profile (Products Devnet): the
+// challenge, the token minted with the persona's own //wallet key, the
+// bearer on the claim, the session persisted 0600 before the claim and
+// dropped after it, an issued PCA_IDENTITY_TOKEN in place of the exchange,
+// the PCA_IDENTITY_VOUCHER fallback after a refusal, and the refusal itself
+// as the `pcs user add` error that names the enrollment rules.
+function fakeClientProofBackend({ refuse = () => false, assign = (body) => `${body.username}.05` } = {}) {
+  const calls = [];
+  const challenge = Buffer.alloc(48, 5).toString("base64");
+  return {
+    calls,
+    fetchImpl: async (url, options = {}) => {
+      const route = new URL(String(url)).pathname;
+      const headers = new Headers(options.headers ?? {});
+      calls.push({ route, headers, body: options.body ?? null });
+      if (route.endsWith("/auth/challenges")) return new Response(JSON.stringify({ challenge }), { status: 201 });
+      if (route.endsWith("/auth/token")) {
+        if (refuse(headers)) return new Response(JSON.stringify({ error: "platform attestation required" }), { status: 401, statusText: "Unauthorized" });
+        return new Response(JSON.stringify({ token: "access.jwt.token", refreshToken: "refresh-token" }), { status: 200 });
+      }
+      if (route.endsWith("/attester")) return new Response(JSON.stringify({ attester: `0x${"33".repeat(32)}` }), { status: 200 });
+      return new Response(JSON.stringify({ username: assign(JSON.parse(options.body)) }), { status: 202 });
+    },
+  };
+}
+
+test("client-proof: the claim carries a bearer minted with the persona's wallet key; the session is saved before the claim and gone after", async (t) => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pcs-registration-"));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  const bandersnatchBin = fakeProofHelper(temp);
+  const store = createPersonaStore(path.join(temp, "state"));
+  const file = path.join(temp, "state", "personas", "alice", "identity.json");
+  const backend = fakeClientProofBackend();
+  const sessionsOnDiskAtClaim = [];
+  const fetchImpl = async (url, options) => {
+    if (new URL(String(url)).pathname.endsWith("/usernames")) sessionsOnDiskAtClaim.push(JSON.parse(fs.readFileSync(file, "utf8")).identityRegistrationSession ?? null);
+    return backend.fetchImpl(url, options);
+  };
+  const record = mintPersonaRecord("alice", { genesis: GENESIS });
+  store.savePersona(record);
+  const deps = { backendUrl: "https://identity.example.test", identityAuth: "client-proof", env: {}, directory: fakeChain(), genesis: GENESIS, save: async (r) => store.savePersona(r), fetchImpl, bandersnatchBin, waitMs: 30 };
+
+  const view = await registerPersona(record, deps);
+  assert.deepEqual([view.status, view.username], ["claimed", "sandboxalice.05"]);
+  assert.deepEqual(backend.calls.map((c) => c.route), ["/api/v1/auth/challenges", "/api/v1/auth/token", "/api/v1/attester", "/api/v1/usernames"], "challenge, token, then the claim");
+  const token = backend.calls[1];
+  const { identity } = keysOf(record);
+  assert.deepEqual(new Uint8Array(Buffer.from(token.headers.get("auth-clientid"), "base64")), identity.identityAccountId, "the client is the persona's //wallet key — the account the claim registers");
+  assert.equal(token.headers.has("auth-attestation-type"), false, "no voucher offered before a refusal");
+  const proof = new Uint8Array(Buffer.from(token.headers.get("auth-clientproof"), "base64"));
+  const challenge = new Uint8Array(Buffer.from(token.headers.get("auth-challenge"), "base64"));
+  const clientDataHash = sha256(concatBytes(challenge, identity.identityAccountId, sha256(new TextEncoder().encode(token.body))));
+  assert.equal(verifySr25519(clientDataHash, proof, identity.identityAccountId), true, "the proof is the persona's signature over the backend's client-data hash");
+  assert.equal(backend.calls[3].headers.get("authorization"), "Bearer access.jwt.token", "the claim carries the minted bearer");
+  assert.deepEqual(sessionsOnDiskAtClaim, [{ backendUrl: "https://identity.example.test/", token: "access.jwt.token", refreshToken: "refresh-token" }], "the session was on disk before the claim, so a failed claim reuses it");
+  assert.equal(record.identityRegistrationSession, undefined, "and is dropped once the claim is in");
+  assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).identityRegistrationSession, undefined);
+  assert.ok(!JSON.stringify(view).includes("access.jwt.token"), "no view carries the token");
+});
+
+test("client-proof: an issued PCA_IDENTITY_TOKEN skips the exchange; a refusal names the enrollment rules; the voucher is offered only after it", async (t) => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pcs-registration-"));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  const bandersnatchBin = fakeProofHelper(temp);
+  const base = { backendUrl: "https://identity.example.test", identityAuth: "client-proof", directory: fakeChain(), genesis: GENESIS, save: async () => {}, bandersnatchBin, waitMs: 30 };
+
+  // An issued bearer: no challenge, the token as given.
+  const issued = fakeClientProofBackend();
+  const withToken = await registerPersona(mintPersonaRecord("alice", { genesis: GENESIS }), { ...base, env: { PCA_IDENTITY_TOKEN: "issued.jwt.token" }, fetchImpl: issued.fetchImpl });
+  assert.equal(withToken.status, "claimed");
+  assert.deepEqual(issued.calls.map((c) => c.route), ["/api/v1/attester", "/api/v1/usernames"]);
+  assert.equal(issued.calls[1].headers.get("authorization"), "Bearer issued.jwt.token");
+
+  // The backend refuses the client proof and no voucher is set: no claim, the record stays minted, the error tells the operator what to set and where.
+  const refusing = fakeClientProofBackend({ refuse: () => true });
+  const record = mintPersonaRecord("alice", { genesis: GENESIS });
+  await assert.rejects(registerPersona(record, { ...base, env: {}, fetchImpl: refusing.fetchImpl }), (error) => {
+    assert.match(error.message, /refused to enroll alice with the client proof of its wallet key \(401 Unauthorized/);
+    assert.match(error.message, /PCA_IDENTITY_VOUCHER \(a single-use enrollment voucher\) or PCA_IDENTITY_TOKEN \(an issued bearer\) in its environment/);
+    assert.match(error.message, /pcs user add alice {2}again/);
+    return true;
+  });
+  assert.equal(record.registration.status, "minted");
+  assert.ok(!refusing.calls.some((c) => c.route.endsWith("/usernames")), "nothing was claimed without a bearer");
+
+  // A voucher in the environment: presented on the second try only, and the claim goes through.
+  const voucher = Buffer.alloc(32, 7).toString("base64");
+  const gated = fakeClientProofBackend({ refuse: (headers) => headers.get("auth-attestation-type") !== "voucher" });
+  const view = await registerPersona(record, { ...base, env: { PCA_IDENTITY_VOUCHER: voucher }, fetchImpl: gated.fetchImpl });
+  assert.equal(view.status, "claimed");
+  const tokenTries = gated.calls.filter((c) => c.route.endsWith("/auth/token"));
+  assert.equal(tokenTries.length, 2);
+  assert.deepEqual(tokenTries.map((c) => c.headers.get("auth-attestation-type")), [null, "voucher"], "the client proof first, the voucher after the refusal");
+  assert.equal(tokenTries[1].headers.get("auth-voucher-secret"), voucher);
+  assert.ok(!JSON.stringify(view).includes(voucher), "no view carries the voucher");
+
+  // A profile without a bearer (Paseo Next): no exchange at all, and no authorization header.
+  const open = fakeClientProofBackend();
+  await registerPersona(mintPersonaRecord("alice", { genesis: GENESIS }), { ...base, identityAuth: "none", env: {}, fetchImpl: open.fetchImpl });
+  assert.deepEqual(open.calls.map((c) => c.route), ["/api/v1/attester", "/api/v1/usernames"]);
+  assert.equal(open.calls[1].headers.get("authorization"), null);
 });
