@@ -145,3 +145,21 @@ dir is 0700 with daemon.json 0600.
 
 S2 self-check: sandbox 48/48, bot-core 417/417 on the final tree; no bot
 or daemon process left behind (`pgrep` clean after every run).
+
+### Answers (owner review, 2026-09-05)
+
+1. Confirmed in `substrate/client/statement-store/src/lib.rs`
+   `subscribe_statement`: an empty dump sends `{statements: [], remaining: 0}`.
+   The S0 answer 2 was wrong and is withdrawn. No deployed node predates that
+   event format for chat. Node behaviour stays.
+2. Not intended. An empty `BOT_ACK_TEXT` must send the accept alone; an empty
+   text bubble on a phone is a defect. Fix in bot-core in S3, with a scenario
+   asserting the persona sees only `contactAdded` after the accept.
+3. Add `deviceRemoved` decoding to bot-core in S3, together with persona
+   device removal, and a scenario that a removed device stops receiving.
+
+S2 review: accepted. Re-run here: sandbox 48/48 including both scenarios,
+bot-core 417/417 on two of three runs; the one failure was the pre-existing
+`workspaces.test.mjs` worktree-timeout race noted in the S0 record, unrelated
+to the sandbox. Make that test deterministic in S3. `bot-core/vendor` is
+untouched. No papi storage query remains outside `lib/people-directory.mjs`.
