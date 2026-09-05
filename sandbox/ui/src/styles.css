@@ -121,6 +121,7 @@ table.grid tr.clickable:hover td { background: var(--bg-selection-container-hove
 table.grid tr[aria-selected="true"] td { background: var(--bg-selection-container-active); }
 
 /* ── Room ─────────────────────────────────────────────────────────────── */
+.room-panel { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
 .room { display: flex; flex-direction: column; min-height: 0; flex: 1; }
 .messages { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 6px; padding: 4px 0; }
 .msg { max-width: 78%; padding: 8px 12px; border-radius: var(--radius-nested); background: var(--bg-surface-nested); }
