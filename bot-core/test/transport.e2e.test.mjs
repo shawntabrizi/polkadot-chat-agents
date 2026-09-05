@@ -10,7 +10,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { startMockStatementNode } from "./mock-statement-node.mjs";
+import { startMockStatementNode } from "../../sandbox/lib/store-node.mjs";
 import { startMockHopNode } from "./mock-hop-node.mjs";
 import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
 import {

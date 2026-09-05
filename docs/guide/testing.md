@@ -12,7 +12,7 @@ next:
 ## Offline, automated (no network at all)
 
 `npm test` in `bot-core/` runs the transport end-to-end against an in-memory
-statement node (`test/mock-statement-node.mjs`). It covers, in both ingress
+statement node (`sandbox/lib/store-node.mjs`, shared with the sandbox). It covers, in both ingress
 modes (poll-only and subscription):
 
 - round trips with poison batches, restart survival with dedup, and owed-reply

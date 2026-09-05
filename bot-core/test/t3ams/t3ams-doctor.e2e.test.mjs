@@ -6,7 +6,7 @@ import path from "node:path";
 import { once } from "node:events";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { startMockStatementNode } from "../mock-statement-node.mjs";
+import { startMockStatementNode } from "../../../sandbox/lib/store-node.mjs";
 import {
   bytesToHex,
   deriveT3amsIdentity,
