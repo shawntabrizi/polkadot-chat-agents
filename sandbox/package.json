@@ -3,15 +3,23 @@
   "private": true,
   "type": "module",
   "description": "Local replica of the Polkadot chat network: statement-store node, personas, faults. See PLAN.md.",
+  "bin": {
+    "pcs": "cli.mjs"
+  },
   "scripts": {
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test --test-timeout=120000 test/*.test.mjs"
   },
   "dependencies": {
+    "@noble/curves": "2.4.0",
+    "@noble/hashes": "2.4.0",
+    "@novasamatech/host-chat": "0.10.2",
     "@novasamatech/sdk-statement": "0.6.0",
+    "@novasamatech/statement-store": "0.10.2",
+    "@scure/sr25519": "2.4.0",
+    "neverthrow": "8.2.0",
+    "polkadot-api": "3.1.0",
+    "scale-ts": "1.6.1",
     "ws": "8.21.0"
-  },
-  "devDependencies": {
-    "@scure/sr25519": "2.2.0"
   },
   "engines": {
     "node": ">=22"

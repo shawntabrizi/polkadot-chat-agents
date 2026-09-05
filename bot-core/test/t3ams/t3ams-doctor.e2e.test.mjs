@@ -6,7 +6,7 @@ import path from "node:path";
 import { once } from "node:events";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { startMockStatementNode } from "../../../sandbox/lib/store-node.mjs";
+import { startStoreNode } from "../../../sandbox/lib/store-node.mjs";
 import {
   bytesToHex,
   deriveT3amsIdentity,
@@ -77,7 +77,7 @@ function runProcess(file, args, env, timeoutMs = 15_000) {
 }
 
 test("pca t3ams doctor proves a live public bot inbox end to end", { timeout: 30_000, skip: SDK_SKIP }, async () => {
-  const node = await startMockStatementNode();
+  const node = await startStoreNode();
   const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-t3ams-doctor-"));
   const name = "doctorbot";
   const dir = path.join(botsDir, name);

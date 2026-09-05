@@ -8,9 +8,10 @@ import assert from "node:assert/strict";
 import WebSocket from "ws";
 import { createExpiry, getStatementSigner, statementCodec } from "@novasamatech/sdk-statement";
 import { getPublicKey, secretFromSeed, sign } from "@scure/sr25519";
-import { startMockStatementNode } from "../lib/store-node.mjs";
+import { startStoreNode } from "../lib/store-node.mjs";
 
 const toHex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+const hexToBytes = (h) => Uint8Array.from(Buffer.from(h.replace(/^0x/, ""), "hex"));
 const hex32 = (fill) => `0x${fill.repeat(2).slice(0, 2).repeat(32)}`;
 const nowSecs = () => Math.floor(Date.now() / 1000);
 // Expiry = expiration seconds << 32 | sequence; default one hour ahead.
@@ -20,7 +21,7 @@ function makeSigner(seedByte) {
   const secret = secretFromSeed(Uint8Array.from({ length: 32 }, () => seedByte));
   const publicKey = getPublicKey(secret);
   const signer = getStatementSigner(publicKey, "sr25519", async (data) => sign(secret, data));
-  return { account: toHex(publicKey), signer };
+  return { account: toHex(publicKey), signer, secret };
 }
 
 // Signed statement hex, the way a real client submits it.
@@ -87,7 +88,7 @@ const CHANNEL = hex32("aa");
 const TOPIC = hex32("0a");
 
 async function withNode(options, fn) {
-  const node = await startMockStatementNode(options);
+  const node = await startStoreNode(options);
   const clients = [];
   const open = async () => { const c = await connect(node.url); clients.push(c); return c; };
   try { await fn(node, open); }
@@ -206,14 +207,43 @@ test("list() filters by topic, signer and channel and never needs a key", () =>
     assert.equal(node.list({ signer: alice.account })[0].topics.length, 2, "list() hands out copies");
   }));
 
-test("invalid submits: no proof, already expired, undecodable", () =>
+test("invalid submits: no proof, bad proof, already expired, undecodable", () =>
   withNode({}, async (node, open) => {
     const c = await open();
     assert.deepEqual(await c.submit(unsigned({ channel: CHANNEL, topics: [TOPIC], expiry: expiryIn(60) })), { status: "invalid", reason: "noProof" });
+
+    // Signed with alice's key but claiming bob's account: the signature does
+    // not verify for the signer it names.
+    const impostor = { signer: getStatementSigner(hexToBytes(bob.account), "sr25519", async (data) => sign(alice.secret, data)) };
+    assert.deepEqual(await c.submit(await signed(impostor, { channel: CHANNEL, topics: [TOPIC], expiry: expiryIn(60) })), { status: "invalid", reason: "badProof" });
+    // A valid signature over different bytes: the data was changed after signing.
+    const tampered = statementCodec.dec(await signed(alice, { channel: CHANNEL, topics: [TOPIC], expiry: expiryIn(60) }));
+    tampered.data = new TextEncoder().encode("hj");
+    assert.deepEqual(await c.submit(`0x${toHex(statementCodec.enc(tampered))}`), { status: "invalid", reason: "badProof" });
+    // A signer the node cannot verify at all (not a ristretto point) is a bad proof, not a crash.
+    const garbageSigner = { signer: getStatementSigner(new Uint8Array(32).fill(1), "sr25519", async (data) => sign(alice.secret, data)) };
+    assert.deepEqual(await c.submit(await signed(garbageSigner, { channel: CHANNEL, topics: [TOPIC], expiry: expiryIn(60) })), { status: "invalid", reason: "badProof" });
     assert.deepEqual(await c.submit(await signed(alice, { channel: CHANNEL, topics: [TOPIC], expiry: expiryIn(-1) })), { status: "invalid", reason: "alreadyExpired" });
     assert.deepEqual(await c.submit(await signed(alice, { channel: CHANNEL, topics: [TOPIC], expiry: createExpiry(nowSecs()) })), { status: "invalid", reason: "alreadyExpired" });
     await assert.rejects(c.submit("0xdeadbeef"), (e) => e.code === 7001 && /Statement store error/.test(e.message));
     assert.equal(node.statements.length, 0);
+  }));
+
+test("watch(): stored and refused events carry signer, channel and replacement", () =>
+  withNode({}, async (node, open) => {
+    const c = await open();
+    const events = [];
+    const stop = node.watch((e) => events.push(e));
+    const e = expiryIn(3600, 1);
+    await c.submit(await signed(alice, { channel: hex32("01"), topics: [TOPIC], expiry: e }));
+    await c.submit(await signed(alice, { channel: hex32("01"), topics: [TOPIC], expiry: e + 1n, data: new Uint8Array([2]) }));
+    await c.submit(await signed(alice, { channel: hex32("01"), topics: [TOPIC], expiry: e, data: new Uint8Array([3]) }));
+    assert.deepEqual(events.map((x) => [x.event, x.replaced ?? x.reason]), [["stored", false], ["stored", true], ["refused", "channelPriorityTooLow"]]);
+    assert.equal(events[0].signer, alice.account);
+    assert.equal(events[0].channel, "01".repeat(32));
+    stop();
+    await c.submit(await signed(alice, { channel: hex32("02"), topics: [TOPIC], expiry: e }));
+    assert.equal(events.length, 3, "a stopped watcher gets nothing more");
   }));
 
 test("fault drop: matching submits are answered new but never stored, for count hits", () =>

@@ -10,7 +10,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { startMockStatementNode } from "../../sandbox/lib/store-node.mjs";
+import { startStoreNode } from "../../sandbox/lib/store-node.mjs";
 import { startMockHopNode } from "./mock-hop-node.mjs";
 import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
 import {
@@ -160,7 +160,7 @@ const attachSpecOf = (file, bytes, mime = "image/jpeg") => JSON.stringify({
 describe("transport e2e", { concurrency: 8 }, () => {
 
   test("public built-in direct brains start without an allowlist", async () => {
-    const node = await startMockStatementNode();
+    const node = await startStoreNode();
     const bots = [];
     const stateDirs = [];
     try {
@@ -198,7 +198,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
     ["subscribe", { BOT_SUBSCRIBE: "1" }],
   ]) {
     test(`round trip with poison batches (${mode})`, async () => {
-      const node = await startMockStatementNode();
+      const node = await startStoreNode();
       const stateDir = tmpState();
       const bot = await startBot({ endpoint: node.url, stateDir, extraEnv });
       try {
@@ -227,7 +227,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
     });
 
     test(`restart survival: session + dedup persist (${mode})`, async () => {
-      const node = await startMockStatementNode();
+      const node = await startStoreNode();
       const stateDir = tmpState();
       let bot = await startBot({ endpoint: node.url, stateDir, extraEnv });
       try {
@@ -260,7 +260,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
     });
 
     test(`attachment download, reply quotes, reaction, call decline (${mode})`, async () => {
-      const node = await startMockStatementNode();
+      const node = await startStoreNode();
       const hop = await startMockHopNode();
       const stateDir = tmpState();
       const photo = new Uint8Array(crypto.randomBytes(300_000));
@@ -297,7 +297,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
     });
 
     test(`owed reply survives kill -9 mid-brain (${mode})`, async () => {
-      const node = await startMockStatementNode();
+      const node = await startStoreNode();
       const stateDir = tmpState();
       const slowBrain = {
         ...extraEnv,
@@ -339,7 +339,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   }
 
   test("v2 P-256 session keys are reset while key-independent state survives", async () => {
-    const node = await startMockStatementNode();
+    const node = await startStoreNode();
     const stateDir = tmpState();
     fs.writeFileSync(path.join(stateDir, "session-state.json"), JSON.stringify({
       v: 2,
@@ -376,7 +376,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("legacy on-chain P-256 containers are rejected with a clear event", async () => {
-    const node = await startMockStatementNode();
+    const node = await startStoreNode();
     const stateDir = tmpState();
     const bot = await startBot({
       endpoint: node.url,
@@ -402,7 +402,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("removing an allowlisted peer drops its restored session", async () => {
-    const node = await startMockStatementNode();
+    const node = await startStoreNode();
     const stateDir = tmpState();
     let bot = await startBot({
       endpoint: node.url,
@@ -431,7 +431,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("graceful shutdown preserves an in-flight direct-agent turn", async () => {
-    const node = await startMockStatementNode();
+    const node = await startStoreNode();
     const stateDir = tmpState();
     const slowBrain = {
       BOT_SUBSCRIBE: "0",
@@ -468,7 +468,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("bridge surface: /inbound shape, /media, reply/edit/react, events", async () => {
-    const node = await startMockStatementNode();
+    const node = await startStoreNode();
     const hop = await startMockHopNode();
     const stateDir = tmpState();
     const photo = new Uint8Array(crypto.randomBytes(200_000));
@@ -565,7 +565,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("/file put saves a same-message attachment in the durable peer vault", async () => {
-    const node = await startMockStatementNode();
+    const node = await startStoreNode();
     const hop = await startMockHopNode();
     const stateDir = tmpState();
     const bytes = new Uint8Array(Buffer.from("durable client attachment\n"));
@@ -602,7 +602,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("bridge /files uploads, lists, retrieves, and sends a vault file", async () => {
-    const node = await startMockStatementNode();
+    const node = await startStoreNode();
     const hop = await startMockHopNode();
     const stateDir = tmpState();
     const bot = await startBot({
@@ -685,7 +685,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("bridge leases renew long work and reject stale acknowledgements", async () => {
-    const node = await startMockStatementNode();
+    const node = await startStoreNode();
     const stateDir = tmpState();
     const bot = await startBot({
       endpoint: node.url,
@@ -764,7 +764,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   };
 
   test("live reply: placeholder becomes progress frames, then a status line; the answer is a new message", async () => {
-    const node = await startMockStatementNode();
+    const node = await startStoreNode();
     const stateDir = tmpState();
     const bot = await startBot({ endpoint: node.url, stateDir, extraEnv: liveBrainEnv });
     try {
@@ -799,7 +799,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("live reply: a peer that never ACKs gets a plain final message", async () => {
-    const node = await startMockStatementNode();
+    const node = await startStoreNode();
     const stateDir = tmpState();
     const bot = await startBot({ endpoint: node.url, stateDir, extraEnv: liveBrainEnv });
     try {
@@ -818,7 +818,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("live reply: a bridge plain send retires the placeholder to a status line", async () => {
-    const node = await startMockStatementNode();
+    const node = await startStoreNode();
     const stateDir = tmpState();
     const bot = await startBot({
       endpoint: node.url,
@@ -884,7 +884,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("live reply: an unanswered placeholder resolves to a timeout note", async () => {
-    const node = await startMockStatementNode();
+    const node = await startStoreNode();
     const stateDir = tmpState();
     // Bridge brain with NO harness attached: the answer never comes; the
     // placeholder must finalize itself instead of ticking forever.
@@ -914,7 +914,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("engine: session token is captured from the stream and persisted per peer", async () => {
-    const node = await startMockStatementNode();
+    const node = await startStoreNode();
     const stateDir = tmpState();
     const bot = await startBot({
       endpoint: node.url,
@@ -942,7 +942,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("engine: /stop cancels a running turn and finalizes the placeholder", async () => {
-    const node = await startMockStatementNode();
+    const node = await startStoreNode();
     const stateDir = tmpState();
     const bot = await startBot({
       endpoint: node.url,
@@ -969,7 +969,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("engine: idle-silence backstop kills a wedged turn and apologizes", async () => {
-    const node = await startMockStatementNode();
+    const node = await startStoreNode();
     const stateDir = tmpState();
     const bot = await startBot({
       endpoint: node.url,
@@ -995,7 +995,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("engine: a long answer is chunked into ordered parts, none lost", async () => {
-    const node = await startMockStatementNode();
+    const node = await startStoreNode();
     const stateDir = tmpState();
     // Three ~300-byte paragraphs against a 400-byte chunk cap -> 3+ parts. The
     // paragraphs use only sh-quote-safe characters.
@@ -1027,7 +1027,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("engine: a sent file is privately staged for the turn then cleaned up", async () => {
-    const node = await startMockStatementNode();
+    const node = await startStoreNode();
     const hop = await startMockHopNode();
     const stateDir = tmpState();
     const bytes = new Uint8Array(Buffer.from("spec-content-123"));
@@ -1069,7 +1069,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("engine: /project switches the turn cwd to the registered project", async () => {
-    const node = await startMockStatementNode();
+    const node = await startStoreNode();
     const stateDir = tmpState();
     const projDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pca-proj-")));
     // The mock CLI answers with its own cwd, so the reply proves where it ran.
@@ -1099,7 +1099,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   test("owed attachment survives kill -9 and re-processes after restart", async () => {
-    const node = await startMockStatementNode();
+    const node = await startStoreNode();
     const hop = await startMockHopNode();
     const stateDir = tmpState();
     const photo = new Uint8Array(crypto.randomBytes(100_000));

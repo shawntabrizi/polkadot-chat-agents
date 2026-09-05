@@ -30,15 +30,24 @@
 //   - Initial dumps are paged; each page carries `remaining` = how many
 //     matching statements follow, the last page has `remaining: 0`. Live
 //     pushes carry no `remaining` (the real node sends `None`).
+//   - The proof signature is checked (`invalid/badProof`) over the same bytes
+//     the real node signs: the SCALE encoding of every field except the proof,
+//     without the collection length prefix (`sp_statement_store::Statement::
+//     signature_material`, and `getStatementSigner` in the SDK). sr25519 and
+//     ed25519 are verified; ecdsa and onChain proofs are not modelled and are
+//     refused as `badProof` so a client cannot slip past the check.
 //
-// Not modelled (yet): signature verification (`badProof`), per-account byte
-// limits (`dataTooLarge`), global store limits (`storeFull`).
+// Not modelled (yet): per-account byte limits (`dataTooLarge`), global store
+// limits (`storeFull`).
 //
 // Usable as a module (start/stop from tests) or standalone:
 //   node lib/store-node.mjs --port 9944
 
 import { WebSocketServer } from "ws";
 import { statementCodec } from "@novasamatech/sdk-statement";
+import { ed25519 } from "@noble/curves/ed25519.js";
+import { verify as verifySr25519 } from "@scure/sr25519";
+import { compact } from "scale-ts";
 
 const DEFAULT_MAX_COUNT_PER_ACCOUNT = 1000;
 const DEFAULT_PAGE_SIZE = 100;
@@ -54,6 +63,31 @@ const toJson = (value) => JSON.stringify(value, (_k, v) => (typeof v === "bigint
   .replace(/"\\u0000big:(\d+)\\u0000"/g, "$1");
 const log = (event, extra = {}) => process.stderr.write(`${toJson({ ts: new Date().toISOString(), event, ...extra })}\n`);
 
+const hexToBytes = (h) => Uint8Array.from(Buffer.from(stripHex(h), "hex"));
+
+// The bytes a statement proof signs: every field but the proof, SCALE-encoded
+// in field order, minus the Vec length prefix the codec adds (the real node
+// signs `Field` entries one after another, not a `Vec<Field>`).
+function signatureMaterial(decoded) {
+  const { proof: _proof, ...unsigned } = decoded;
+  const encoded = statementCodec.enc(unsigned);
+  return encoded.slice(compact.enc(compact.dec(encoded)).length);
+}
+
+// A malformed signer or signature makes the verifiers throw; that is a bad
+// proof too, not a node crash.
+function proofVerifies(decoded) {
+  const proof = decoded.proof;
+  try {
+    const material = signatureMaterial(decoded);
+    if (proof.type === "sr25519") return verifySr25519(material, hexToBytes(proof.value.signature), hexToBytes(proof.value.signer));
+    if (proof.type === "ed25519") return ed25519.verify(hexToBytes(proof.value.signature), material, hexToBytes(proof.value.signer));
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 // A stored statement: { hex, topics: [bareHex], signer: bareHex|null, channel: bareHex|null,
 //   expiry: bigint, receivedAt: ms, replacedCount }
 function decodeStored(hexWithPrefix) {
@@ -67,6 +101,7 @@ function decodeStored(hexWithPrefix) {
     channel: bareHex(decoded.channel),
     expiry: decoded.expiry ?? 0n,
     hasProof: proof != null,
+    proofOk: proof != null && proofVerifies(decoded),
   };
 }
 
@@ -89,7 +124,7 @@ const filterMentions = (filter, topic) => {
   return topics.some((t) => stripHex(t) === stripHex(topic));
 };
 
-export function startMockStatementNode({
+export function startStoreNode({
   port = 0,
   host = "127.0.0.1",
   allowances = null,
@@ -101,6 +136,7 @@ export function startMockStatementNode({
   let nextSub = 1;
   let nextFault = 1;
   const faultList = []; // { id, kind, signer, channel, count, ms, topic, hits, held: [] }
+  const watchers = new Set(); // listeners for wire events (the daemon's event stream)
 
   const node = {
     port: 0,
@@ -128,6 +164,8 @@ export function startMockStatementNode({
     if (fault.count != null && fault.hits >= fault.count) faultList.splice(faultList.indexOf(fault), 1);
     log("STORE_NODE_FAULT_HIT", { id: fault.id, kind: fault.kind, hits: fault.hits });
   };
+
+  const emit = (event) => { for (const fn of watchers) fn(event); };
 
   const send = (ws, payload) => { if (ws.readyState === ws.OPEN) ws.send(toJson(payload)); };
   const notify = (ws, subId, page) => send(ws, {
@@ -168,6 +206,7 @@ export function startMockStatementNode({
     if (isExpired(stored)) return { result: { status: "invalid", reason: "alreadyExpired" } };
     if (statements.some((s) => stripHex(s.hex) === stripHex(stored.hex))) return { result: { status: "known" } };
     if (!stored.hasProof) return { result: { status: "invalid", reason: "noProof" } };
+    if (!stored.proofOk) return { result: { status: "invalid", reason: "badProof" } };
     if (node.allowances != null && !node.allowances.has(stored.signer) && !node.allowances.has(`0x${stored.signer}`)) {
       return { result: { status: "rejected", reason: "noAllowance" } };
     }
@@ -210,6 +249,7 @@ export function startMockStatementNode({
         notify(sub.ws, id, { event: "newStatements", data: { statements: [stored.hex] } });
       }
     }
+    emit({ event: "stored", signer: stored.signer, channel: stored.channel, topics: [...stored.topics], expiry: stored.expiry, replaced: previous != null, evicted: evicted.length - (previous ? 1 : 0) });
     return { result: { status: "new" } };
   };
 
@@ -255,6 +295,7 @@ export function startMockStatementNode({
           if (outcome.error) return replyError(RPC_STATEMENT_STORE_ERROR, `Statement store error: ${outcome.error}`);
           if (outcome.result.status !== "new" && outcome.result.status !== "known") {
             log("STORE_NODE_SUBMIT_REFUSED", { ...outcome.result });
+            emit({ event: "refused", signer: stored?.signer ?? null, channel: stored?.channel ?? null, ...outcome.result });
           }
           reply(outcome.result);
         };
@@ -340,6 +381,9 @@ export function startMockStatementNode({
         .map(({ hex, topics, signer: sg, channel: ch, expiry, receivedAt, replacedCount }) =>
           ({ hex, topics: [...topics], signer: sg, channel: ch, expiry, receivedAt, replacedCount }));
     },
+    // Wire events for the inspector: `stored` (with `replaced` when the
+    // statement took over a channel slot) and `refused` (rule rejections).
+    watch: (fn) => { watchers.add(fn); return () => watchers.delete(fn); },
     // A node restart: every connection drops, the store survives.
     restart: () => { dropClients(); log("STORE_NODE_RESTART", { statements: statements.length }); },
     // A wipe: connections drop and the store is emptied. Faults stay set.
@@ -361,6 +405,6 @@ export function startMockStatementNode({
 if (import.meta.url === `file://${process.argv[1]}`) {
   const portArg = process.argv.indexOf("--port");
   const port = portArg >= 0 ? Number(process.argv[portArg + 1]) : 9944;
-  const node = await startMockStatementNode({ port });
+  const node = await startStoreNode({ port });
   console.log(`statement store node listening on ${node.url}`);
 }
