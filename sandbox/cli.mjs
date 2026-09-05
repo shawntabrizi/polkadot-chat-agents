@@ -25,7 +25,7 @@ for (let i = 0; i < args.length; i++) {
 const json = Boolean(flags.json) || !process.stdout.isTTY;
 const baseUrl = flags.url ?? process.env.PCS_URL ?? `http://127.0.0.1:${flags.port ?? DEFAULT_PORT}`;
 
-const c = (s, code) => (process.stdout.isTTY ? `\x1b[${code}m${s}\x1b[0m` : s);
+const c = (s, code) => (process.stdout.isTTY && !process.env.NO_COLOR ? `\x1b[${code}m${s}\x1b[0m` : s);
 const ok = (s) => console.log(`${c("✓", "32")} ${s}`);
 const step = (s) => console.log(`${c("→", "36")} ${s}`);
 const note = (s) => console.log(`  ${c(s, "90")}`);

@@ -9,11 +9,48 @@ next:
 
 # Testing a bot without a phone
 
+## The local sandbox: a whole network on your machine
+
+`sandbox/` is a local replica of the chat network: a statement-store node,
+a directory that plays the People chain and the identity backend, and
+"personas" — users with one or more devices, driven from the terminal with
+`pcs`. Personas run the SDK behind Polkadot Desktop, not bot-core's
+transport, so a bot is tested against an independent implementation of the
+protocol. No phone, no testnet, no proof.
+
+```bash
+cd sandbox && npm ci
+pcs up                                   # store node + directory + control API
+pca create mybot --brain echo --network sandbox   # registers through the sandbox, no proof
+pca run mybot                            # in another terminal
+pcs user add alice --devices 2
+pcs request alice mybot --welcome "hello"   # alice opens the chat; the bot accepts
+pcs send alice mybot "from my laptop" --device 2
+pcs inbox alice --device 2               # the bot's answers, with per-device ACK state
+pcs wire --peer alice                    # every statement, labelled by session and channel
+```
+
+`pca create --network sandbox` finds the daemon through `--sandbox-url`,
+`PCA_SANDBOX_URL`, or the `daemon.json` that `pcs up` writes. `pcs bot attach
+<name>` registers a bot's account by hand (it reads only `config.json`).
+
+Scenarios are scripted conversations with assertions, run as tests:
+
+```bash
+pcs scenario run scenarios/echo-roundtrip.mjs   # alice (2 devices) ↔ echo bot: opener,
+                                                # device-2 follow-up, reaction, reply, edit
+pcs scenario run scenarios/bot-restart.mjs      # kill -9 with a reply owed, restart: one answer
+```
+
+`npm test` in `sandbox/` runs them with the rest of the suite (and CI does).
+Anything that touches sessions or inbound handling must keep both green.
+
 ## Offline, automated (no network at all)
 
-`npm test` in `bot-core/` runs the transport end-to-end against an in-memory
-statement node (`sandbox/lib/store-node.mjs`, shared with the sandbox). It covers, in both ingress
-modes (poll-only and subscription):
+`npm test` in `bot-core/` runs the transport end-to-end against the sandbox
+daemon (`sandbox/daemon.mjs`: its store node and its directory, so the
+identifier-key lookup is the deployed path through `lib/people-directory.mjs`,
+not a pin list). It covers, in both ingress modes (poll-only and subscription):
 
 - round trips with poison batches, restart survival with dedup, and owed-reply
   crash recovery;
@@ -26,9 +63,8 @@ kill -9, and the live-reply lifecycle: placeholder → ACK-gated progress edits
 with stream-json tool actions → final-as-edit, the no-ACK plain-message
 fallback, and bridge auto-upgrade with throttled harness edits.
 
-CI runs this on every push. `BOT_PEER_IDENTIFIER_KEYS` pins peer identifier
-keys so no people chain is needed. The device client ACKs bot requests like
-the app does; `--no-ack` simulates a peer that never fetches.
+CI runs this on every push. The device client ACKs bot requests like the
+app does; `--no-ack` simulates a peer that never fetches.
 
 ## Live network
 
@@ -73,6 +109,19 @@ node bot-core/test-client-device.mjs \
 
 If a bot answers `test-client.mjs` but not the app, this client is the repro
 tool: the bug is almost certainly in device-session polling or ACKs.
+
+The sandbox scenarios cover the same ground with the real SDK (opener,
+per-device follow-ups, reaction, reply, edit, restart survival) and are the
+preferred check. `test-client-device.mjs` stays for what they do not cover
+yet: an undecodable message in a batch (the "poison" richText), a real HOP
+attachment, `--no-ack`, a call offer, and sending over a live network. It is
+also the harness of bot-core's offline suite. Known limit: it keys the
+multi-device envelope by the peer's identity account, ignoring the
+`statementAccountId` in `deviceChatAccepted`, so a peer whose device account
+differs from its identity account (a persona, a phone) cannot decrypt its
+follow-ups; bot-core's own device account equals its identity account, so
+the offline suite is unaffected. It will be retired when the sandbox covers
+the remaining cases (S3, v1.5).
 
 ## Named-testnet outbound file delivery
 
@@ -183,5 +232,6 @@ bot-core logs one JSON line per event. The ones worth grepping:
 
 `.github/workflows/ci.yml` runs on every push: bot-core installs from scratch and
 its CLI creates a bot offline, the vendored wasm proof helper is run against a
-known answer, the OpenClaw plugin bundle is rebuilt and compared to the committed
+known answer, the sandbox suite runs with its scenarios (a pca bot against
+personas), the OpenClaw plugin bundle is rebuilt and compared to the committed
 `dist/`, and the Rust proof helper builds for native and wasm targets.
