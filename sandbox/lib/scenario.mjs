@@ -226,8 +226,9 @@ export function createBotHelper({ sandboxUrl, botsDir, log = () => {} }) {
     /** The bot's HTTP bridge, as an agent framework drives it. The token never leaves this process. */
     bridge(name) {
       const cfg = readJson(name, "config.json");
+      const headers = { authorization: `Bearer ${cfg.bridgeToken}` };
       const call = async (route, body) => {
-        const res = await fetch(`http://127.0.0.1:${cfg.bridgePort}${route}`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${cfg.bridgeToken}` }, body: JSON.stringify(body) });
+        const res = await fetch(`http://127.0.0.1:${cfg.bridgePort}${route}`, { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify(body) });
         const data = await res.json();
         if (!res.ok) throw new Error(`bridge ${route} -> ${res.status} ${data.error}`);
         return data;
@@ -235,6 +236,11 @@ export function createBotHelper({ sandboxUrl, botsDir, log = () => {} }) {
       return {
         /** POST /send: a message from the bot to `peer` (a 0x account). */
         send: (peer, text) => call("/send", { chat_id: peer.replace(/^0x/, ""), text }),
+        /** GET a bridge route (e.g. `/media/<id>`): status, content type and bytes. */
+        get: async (route) => {
+          const res = await fetch(`http://127.0.0.1:${cfg.bridgePort}${route}`, { headers });
+          return { status: res.status, type: res.headers.get("content-type"), bytes: Buffer.from(await res.arrayBuffer()) };
+        },
       };
     },
     start,
