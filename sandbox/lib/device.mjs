@@ -45,12 +45,14 @@ export function createDevice({ index, keys = mintDeviceKeys() }) {
     info: { statementAccountId: keys.statementAccountId, encryptionPublicKey: keys.encryptionPublicKey },
     /** The chat engine while online (persona.start wires it): subscriptions and sessions of this device only. */
     engine: null,
+    /** Unpaired: never comes back online, keeps its index. */
+    removed: false,
     stop() {
       device.engine?.dispose();
       device.engine = null;
     },
     /** Public half only: safe to log and to hand to the API. */
-    toJSON: () => ({ index, account: device.account, encryptionPublicKey: bytesToHex(keys.encryptionPublicKey), online: device.engine != null }),
+    toJSON: () => ({ index, account: device.account, encryptionPublicKey: bytesToHex(keys.encryptionPublicKey), online: device.engine != null, removed: device.removed }),
   };
   return device;
 }

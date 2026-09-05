@@ -23,8 +23,11 @@ test("toWire encodes every outgoing variant as the apps expect", () => {
   assert.deepEqual(viaWire(toWire({ type: "reaction", messageId: "a", emoji: "🔥", add: false })), { tag: "reactionRemoved", value: { messageId: "a", emoji: "🔥" } });
   assert.equal(viaWire(toWire({ type: "edit", messageId: "a", text: "new" })).value.newContent.text, "new");
   assert.deepEqual(viaWire(toWire({ type: "callDecline", offerMessageId: "o" })), { tag: "dataChannelClosed", value: { offerMessageId: "o" } });
+  const offer = viaWire(toWire({ type: "callOffer" }));
+  assert.deepEqual([offer.tag, offer.value.purpose, offer.value.sdp.length > 0], ["dataChannelOffer", "AUDIO_CALL", true]);
   const id = new Uint8Array(32).fill(3);
   assert.deepEqual(viaWire(toWire({ type: "deviceAdded", device: { statementAccountId: id, encryptionPublicKey: id } })), { tag: "deviceAdded", value: { statementAccountId: id, encryptionPublicKey: id } });
+  assert.deepEqual(viaWire(toWire({ type: "deviceRemoved", statementAccountId: id })), { tag: "deviceRemoved", value: { statementAccountId: id } });
 });
 
 test("fromWire maps rows, effects, roster variants, ignores and unknown tags", () => {
@@ -38,6 +41,7 @@ test("fromWire maps rows, effects, roster variants, ignores and unknown tags", (
   assert.deepEqual(fromWire({ tag: "reactionRemoved", value: { messageId: "a", emoji: "👍" } }), { kind: "reaction", messageId: "a", emoji: "👍", add: false });
   assert.deepEqual(fromWire({ tag: "edit", value: { messageId: "a", newContent: { text: "x", attachments: undefined } } }), { kind: "edit", messageId: "a", text: "x" });
   assert.deepEqual(fromWire({ tag: "dataChannelOffer", value: { sdp: new Uint8Array(), purpose: "AUDIO_CALL" } }), { kind: "callOffer" });
+  assert.deepEqual(fromWire({ tag: "dataChannelClosed", value: { offerMessageId: "o" } }), { kind: "callClosed", offerMessageId: "o" });
   assert.deepEqual(fromWire({ tag: "contactAdded", value: undefined }), { kind: "message", content: { type: "contactAdded" } });
   assert.deepEqual(fromWire({ tag: "leftChat", value: undefined }), { kind: "message", content: { type: "leftChat" } });
   assert.deepEqual(fromWire({ tag: "coinagePayment", value: { totalValue: 1n, coinKeys: [] } }), { kind: "message", content: { type: "unsupported", tag: "coinagePayment" } });
@@ -119,9 +123,18 @@ const openSession = (store, identity, device, peer, peerDevices) => {
     onSent: (id) => side.sent.push(id),
     onDelivered: (id) => side.delivered.push(id),
     onBatchDelivered: () => { side.batches += 1; },
-    onAcked: (ids) => side.acked.push(...ids),
+    onAcked: (ids, code) => { side.acked.push(...ids); side.codes.push(code); },
   });
+  side.codes = [];
   return side;
+};
+
+// The poison of bot-core's device test client: a richText whose attachment
+// body is junk. Both codecs (the SDK's and bot-core's) refuse it.
+export const poisonMessage = () => {
+  const enc = new TextEncoder();
+  const id = enc.encode(crypto.randomUUID());
+  return Uint8Array.from([id.length << 2, ...id, ...new Uint8Array(8), 0, 15, 0, 1, 4, 0, 0, 0, 0]);
 };
 
 // Bob has two devices; Alice's one statement must reach both, and Alice's
@@ -158,6 +171,38 @@ test("peer session delivers a text to every device of a two-device peer, reports
   assert.deepEqual(bPhone.received.map((m) => m.messageId), ["m1", "m3", "m4"]);
 
   for (const side of [a, bPhone, bLaptop]) side.session.dispose();
+});
+
+// S1 answer 3: a batch is ACKed `success` when at least one message decoded
+// and `decodingFailed` only when none did; the good messages are delivered
+// either way and the undecodable one is skipped, not fatal.
+test("peer session: one undecodable message in a batch is skipped, the rest delivered, the batch ACKed success; an all-poison batch is NACKed", async () => {
+  const store = makeStore();
+  const alice = makePeer();
+  const bob = makePeer();
+  const a = openSession(store, alice.identity, alice.device, bob.identity, [target(bob.device)]);
+  const b = openSession(store, bob.identity, bob.device, alice.identity, [target(alice.device)]);
+
+  // The SDK submits [poison] at once and, when the text follows before the
+  // ACK, extends it to [poison, text] under a new request id; so the peer
+  // may see a poison-only batch first (NACKed), then the superset (ACKed).
+  await a.session.sendRaw(poisonMessage());
+  await a.session.send({ tag: "text", value: "after the poison" }, { messageId: "m1", timestamp: 1 });
+  await waitFor(() => b.received.length === 1);
+  assert.deepEqual(b.received[0].content, { tag: "text", value: "after the poison" });
+  await waitFor(() => a.delivered.includes("m1"));
+  assert.equal(b.codes.at(-1), "success", `codes ${b.codes}`);
+  assert.ok(b.codes.every((c) => c === "success" || c === "decodingFailed"), `codes ${b.codes}`);
+
+  // Nothing readable at all: NACK, and the sender learns it (the SDK settles
+  // the batch on any response code).
+  const bCodes = b.codes.length;
+  await a.session.sendRaw(poisonMessage());
+  await waitFor(() => b.codes.length > bCodes);
+  assert.equal(b.codes.at(-1), "decodingFailed");
+  assert.equal(b.received.length, 1, "no row for the poison");
+  a.session.dispose();
+  b.session.dispose();
 });
 
 test("peer session rejects a send with no known device and picks up a device added to the roster", async () => {
@@ -392,6 +437,27 @@ test("engine: declines a call offer with dataChannelClosed, shows a bot welcome 
 
   await transport.channel.post({ tag: "text", value: "welcome from identity session" });
   await waitFor(() => state.messages.list(peerKey).some((r) => r.content.type === "text" && r.content.text === "welcome from identity session"));
+
+  // The other way round: our own call offer is a row; the peer's
+  // dataChannelClosed becomes a system row under it, a stray close is noise.
+  const { messageId: offerId } = await engine.call(peerKey);
+  const offer = await waitFor(() => transport.received.find((m) => m.content.tag === "dataChannelOffer"));
+  assert.equal(offer.messageId, offerId);
+  assert.equal(state.messages.get(offerId).content.type, "callOffer");
+  await transport.send({ tag: "dataChannelClosed", value: { offerMessageId: "never-sent" } });
+  await transport.send({ tag: "dataChannelClosed", value: { offerMessageId: offerId } });
+  const hungUp = await waitFor(() => state.messages.get(`call-closed:${offerId}`));
+  assert.deepEqual([hungUp.direction, hungUp.content], ["system", { type: "callDeclined", offerMessageId: offerId }]);
+  assert.equal(state.messages.get("call-closed:never-sent"), undefined);
+
+  // Raw bytes ride the batch with no row of their own.
+  await engine.sendRaw(peerKey, poisonMessage());
+  assert.equal(state.messages.list(peerKey).filter((r) => r.direction === "outgoing").length, 1, "the offer is the only outgoing row");
+
+  // Device removal fans out to every contact; the peer drops the device.
+  await engine.announceDeviceRemoved(web.device.statementAccountId);
+  const removed = await waitFor(() => transport.received.find((m) => m.content.tag === "deviceRemoved"));
+  assert.deepEqual(removed.content.value.statementAccountId, web.device.statementAccountId);
 
   await assert.rejects(engine.sendMessage(`0x${"dead".repeat(16)}`, { type: "text", text: "x" }), /no chat session/);
   assert.ok(state.messages.list(`0x${"dead".repeat(16)}`).every((r) => r.status === "failed"));

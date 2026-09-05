@@ -19,7 +19,9 @@ for (let i = 0; i < args.length; i++) {
   if (!a.startsWith("--")) { positional.push(a); continue; }
   const key = a.slice(2);
   const next = args[i + 1];
-  if (["json", "unread", "raw", "remove", "decode"].includes(key) || next == null || next.startsWith("--")) flags[key] = true;
+  // --raw is a switch for `wire` and takes hex bytes for `send`.
+  const isSwitch = ["json", "unread", "remove", "decode"].includes(key) || (key === "raw" && !/^0x/i.test(next ?? ""));
+  if (isSwitch || next == null || next.startsWith("--")) flags[key] = true;
   else { flags[key] = next; i += 1; }
 }
 const json = Boolean(flags.json) || !process.stdout.isTTY;
@@ -58,6 +60,9 @@ const usage = `pcs — Polkadot chat sandbox
   pcs accept <name> [<requestId>] [--device N]
   pcs decline <name> [<requestId>]
   pcs send <from> <to> "text" [--reply <messageId>] [--device N]
+  pcs send <from> <to> --raw 0x<bytes>       # raw message bytes into the batch (an undecodable message)
+  pcs call <from> <to> [--device N]          # a WebRTC offer; the peer's decline shows in the inbox
+  pcs device add <name> | pcs device remove <name> <n>
   pcs react <from> <to> <messageId> <emoji> [--remove] [--device N]
   pcs edit <from> <to> <messageId> "text" [--device N]
   pcs inbox <name> [--peer <name>] [--unread] [--device N]
@@ -194,10 +199,37 @@ switch (cmd) {
   }
   case "send": {
     const [from, to, text] = rest;
-    if (!from || !to || text == null) fail('usage: pcs send <from> <to> "text" [--reply id] [--device N]');
+    if (!from || !to || (text == null && !flags.raw)) fail('usage: pcs send <from> <to> "text" [--reply id] [--device N] | pcs send <from> <to> --raw 0x..');
+    if (flags.raw && flags.raw !== true) {
+      const result = await api("POST", `/personas/${from}/rooms/${to}/messages`, { raw: flags.raw, ...device });
+      if (json) out(result);
+      else ok(`${from} → ${to}: ${result.bytes} raw bytes queued`);
+      break;
+    }
     const message = await api("POST", `/personas/${from}/rooms/${to}/messages`, { text, replyTo: flags.reply ?? null, ...device });
     if (json) out(message);
     else ok(`${from} → ${to}: ${message.status}  id ${message.messageId}`);
+    break;
+  }
+  case "call": {
+    const [from, to] = rest;
+    if (!from || !to) fail("usage: pcs call <from> <to> [--device N]");
+    const message = await api("POST", `/personas/${from}/rooms/${to}/messages`, { call: true, ...device });
+    if (json) out(message);
+    else ok(`${from} → ${to}: call offer ${message.messageId}`);
+    break;
+  }
+  case "device": {
+    const [sub, name, index] = rest;
+    if (sub === "add" && name) {
+      const added = await api("POST", `/personas/${name}/devices`);
+      if (json) out(added);
+      else ok(`${name} device ${added.index}: ${short(added.account)}`);
+    } else if (sub === "remove" && name && index) {
+      const removed = await api("DELETE", `/personas/${name}/devices/${index}`);
+      if (json) out(removed);
+      else ok(`${name} device ${removed.index} removed; contacts told`);
+    } else fail("usage: pcs device add <name> | pcs device remove <name> <n>");
     break;
   }
   case "react": {

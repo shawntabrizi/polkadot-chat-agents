@@ -217,9 +217,11 @@ export function createPersona({ name, devices = 1, identity = mintIdentityKeys()
   const device = (index = 1) => {
     const found = deviceList[index - 1];
     if (!found) throw new Error(`${name} has no device ${index} (has ${deviceList.length})`);
+    if (found.removed) throw new Error(`${name}#${index} was removed`);
     if (!found.engine) throw new Error(`${name}#${index} is offline`);
     return found;
   };
+  const activeDevices = () => deviceList.filter((d) => !d.removed);
 
   const persona = {
     name,
@@ -239,9 +241,23 @@ export function createPersona({ name, devices = 1, identity = mintIdentityKeys()
       if (started) startDevice(d);
       return d;
     },
+    /**
+     * Remove a device, as unpairing a phone: it goes offline for good (its
+     * index stays, so the others keep their numbers) and a remaining device
+     * tells every contact `deviceRemoved`, so peers stop wrapping for it.
+     */
+    async removeDevice(index) {
+      const gone = device(index);
+      const remaining = activeDevices().find((d) => d !== gone && d.engine);
+      if (!remaining) throw new Error(`${name} cannot remove its last device`);
+      gone.stop();
+      gone.removed = true;
+      await remaining.engine.announceDeviceRemoved(gone.keys.statementAccountId);
+      return gone;
+    },
     start(deps) {
       started = deps;
-      for (const d of deviceList) startDevice(d);
+      for (const d of activeDevices()) startDevice(d);
     },
     stop() {
       for (const d of deviceList) d.stop();
@@ -253,6 +269,8 @@ export function createPersona({ name, devices = 1, identity = mintIdentityKeys()
     accept: (requestId, { device: index = 1 } = {}) => device(index).engine.acceptRequest(requestId),
     decline: (requestId, { device: index = 1 } = {}) => device(index).engine.declineRequest(requestId),
     send: (peer, content, { device: index = 1 } = {}) => device(index).engine.sendMessage(normHex(peer), content),
+    sendRaw: (peer, bytes, { device: index = 1 } = {}) => device(index).engine.sendRaw(normHex(peer), bytes),
+    call: (peer, { device: index = 1 } = {}) => device(index).engine.call(normHex(peer)),
     react: (peer, messageId, emoji, add, { device: index = 1 } = {}) => device(index).engine.react(normHex(peer), messageId, emoji, add),
     edit: (peer, messageId, text, { device: index = 1 } = {}) => device(index).engine.edit(normHex(peer), messageId, text),
     markRead: (peer) => state.messages.markRoomRead(peer),
@@ -269,7 +287,7 @@ export function createPersona({ name, devices = 1, identity = mintIdentityKeys()
       state,
       statementStore: started.makeStatementStore(d),
       lookup: started.lookup,
-      ownDevices: () => deviceList.map((x) => x.info),
+      ownDevices: () => activeDevices().map((x) => x.info),
       onEvent: (event) => started.onEvent?.({ persona: name, device: d.index, ...event }),
     });
   }

@@ -163,6 +163,11 @@ export function createApi({ node, directory, personas, events, addPersona, resol
       directory.allow(device.account);
       return device.toJSON();
     }],
+    ["DELETE", "/personas/:name/devices/:index", async (p) => {
+      const found = persona(p.name);
+      try { return (await found.removeDevice(intParam(p.index, 1))).toJSON(); }
+      catch (e) { throw new ApiError(409, e.message); }
+    }],
 
     ["POST", "/personas/:name/requests", async (p, _q, body) => {
       const from = persona(p.name);
@@ -215,7 +220,17 @@ export function createApi({ node, directory, personas, events, addPersona, resol
           await found.edit(peer, body.edit.messageId, body.edit.text, opts);
           return found.state.messages.get(body.edit.messageId);
         }
-        if (typeof body.text !== "string") throw badRequest("text, react or edit required");
+        if (body.call) {
+          const { messageId } = await found.call(peer, opts);
+          return found.state.messages.get(messageId);
+        }
+        // Raw bytes into the batch (no row): an undecodable message next to good ones.
+        if (body.raw) {
+          if (!/^0x([0-9a-f]{2})+$/i.test(body.raw)) throw badRequest("raw must be 0x hex");
+          const token = await found.sendRaw(peer, Uint8Array.from(Buffer.from(body.raw.slice(2), "hex")), opts);
+          return { raw: true, bytes: (body.raw.length - 2) / 2, token };
+        }
+        if (typeof body.text !== "string") throw badRequest("text, react, edit, call or raw required");
         const content = body.replyTo ? { type: "reply", messageId: body.replyTo, text: body.text } : { type: "text", text: body.text };
         const { messageId } = await found.send(peer, content, opts);
         return found.state.messages.get(messageId);

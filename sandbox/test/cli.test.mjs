@@ -87,6 +87,14 @@ test("pcs: user add/list, request, requests, accept, send, inbox --device, react
   assert.equal((await pcsFails("clock", "soon")).code, 1);
   assert.deepEqual(await pcs("clock", "reset"), { offsetMs: 0 });
   assert.equal((await pcs("node", "restart")).ok, true);
+  const offer = await pcs("call", "alice", "bob");
+  assert.equal(offer.content.type, "callOffer");
+  assert.deepEqual((await pcs("send", "alice", "bob", "--raw", "0x0102")).bytes, 2);
+  const third = await pcs("device", "add", "bob");
+  assert.equal(third.index, 3);
+  const removed = await pcs("device", "remove", "bob", "2");
+  assert.deepEqual([removed.index, removed.removed], [2, true]);
+  assert.equal((await pcsFails("device", "remove", "bob")).code, 1);
   assert.equal((await pcsFails("bogus")).code, 1);
   assert.match((await pcsFails("send", "alice", "nobody", "x")).stderr, /unknown peer/);
 

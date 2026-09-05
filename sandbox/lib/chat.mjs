@@ -47,8 +47,14 @@ export const toWire = (content) => {
       return { tag: "edit", value: { messageId: content.messageId, newContent: { text: content.text, attachments: undefined } } };
     case "callDecline":
       return { tag: "dataChannelClosed", value: { offerMessageId: content.offerMessageId } };
+    // A WebRTC offer as the phone sends it: an SDP blob and the call kind.
+    // The sandbox has no media stack; the blob is a placeholder.
+    case "callOffer":
+      return { tag: "dataChannelOffer", value: { sdp: new TextEncoder().encode(content.sdp ?? "v=0 sandbox-offer"), purpose: content.purpose ?? "AUDIO_CALL" } };
     case "deviceAdded":
       return { tag: "deviceAdded", value: { statementAccountId: content.device.statementAccountId, encryptionPublicKey: content.device.encryptionPublicKey } };
+    case "deviceRemoved":
+      return { tag: "deviceRemoved", value: { statementAccountId: content.statementAccountId } };
     default:
       throw new Error(`cannot send content type ${content.type}`);
   }
@@ -89,6 +95,8 @@ export const fromWire = (content) => {
       return { kind: "message", content: { type: "contactAdded" } };
     case "dataChannelOffer":
       return { kind: "callOffer" };
+    case "dataChannelClosed":
+      return { kind: "callClosed", offerMessageId: content.value.offerMessageId };
     case "deviceAdded":
       return { kind: "deviceAdded", statementAccountId: content.value.statementAccountId, encryptionPublicKey: content.value.encryptionPublicKey };
     case "deviceRemoved":
@@ -97,7 +105,6 @@ export const fromWire = (content) => {
     // identity channel owns those) carry nothing to show.
     case "dataChannelAnswer":
     case "dataChannelIceCandidate":
-    case "dataChannelClosed":
     case "token":
     case "chatAccepted":
     case "deviceChatAccepted":
@@ -127,6 +134,8 @@ export const previewOf = (content) => {
       return "Left the chat";
     case "callDeclined":
       return "Call declined";
+    case "callOffer":
+      return "Call";
     case "unsupported":
       return `Unsupported message (${content.tag})`;
     default:
@@ -289,6 +298,16 @@ export const createPeerSession = (params) => {
   });
 
   return {
+    /**
+     * Bytes into the batch as they are, no codec: how a test puts a message
+     * this build cannot read (a newer content kind, a corrupt attachment)
+     * next to good ones. Resolves with the SDK's token for the batch.
+     */
+    sendRaw: async (bytes) => {
+      const submitted = await session.submitRequestMessage({ enc: (b) => b, dec: () => { throw new Error("raw"); } }, bytes);
+      if (submitted.isErr()) throw submitted.error;
+      return submitted.value.requestId;
+    },
     /** Resolves once the session queued the message; rejects when it can never go out. */
     send: async (content, ids) => {
       const payload = { messageId: ids.messageId, timestamp: BigInt(ids.timestamp), versioned: { tag: "v1", value: content } };
@@ -354,6 +373,12 @@ const createSessionRegistry = (deps) => {
       if (!entry) throw new Error(`no session with ${peer}`);
       await entry.session.send(content, ids);
     },
+    sendRaw: async (peer, bytes) => {
+      const entry = sessions.get(peer);
+      if (!entry) throw new Error(`no session with ${peer}`);
+      return entry.session.sendRaw(bytes);
+    },
+    peers: () => [...sessions.keys()],
     stopAll: () => {
       for (const { session } of sessions.values()) session.dispose();
       sessions.clear();
@@ -411,6 +436,15 @@ export const createChatEngine = ({ identity, deviceKeys, deviceIndex, state, sta
           await sessions.send(peer, toWire({ type: "callDecline", offerMessageId: message.messageId }), { messageId: randomId(), timestamp: Date.now() });
         }
         return;
+      case "callClosed": {
+        // The peer hung up or declined one of our offers: a system row under
+        // the offer. A close for an offer we never made is noise.
+        const offer = state.messages.get(effect.offerMessageId);
+        if (offer?.direction === "outgoing" && offer.content.type === "callOffer") {
+          state.messages.add(systemRow(peer, `call-closed:${effect.offerMessageId}`, message.timestamp, { type: "callDeclined", offerMessageId: effect.offerMessageId }));
+        }
+        return;
+      }
       case "deviceAdded":
         addPeerDevice(peer, { statementAccountId: effect.statementAccountId, encryptionPublicKey: effect.encryptionPublicKey });
         return;
@@ -646,6 +680,31 @@ export const createChatEngine = ({ identity, deviceKeys, deviceIndex, state, sta
         throw error;
       });
       return ids;
+    },
+
+    /** A call offer row; the peer's dataChannelClosed becomes a system row under it. */
+    call: async (peer) => {
+      const ids = { messageId: randomId(), timestamp: Date.now() };
+      state.messages.add({ messageId: ids.messageId, peer, timestamp: ids.timestamp, direction: "outgoing", status: "sending", content: { type: "callOffer" }, device: deviceIndex });
+      await submit(peer, { type: "callOffer" }, ids).catch((error) => {
+        state.messages.setStatus(ids.messageId, "failed");
+        throw error;
+      });
+      return ids;
+    },
+
+    /** Raw message bytes into the peer's batch, no row: for undecodable-message tests. */
+    sendRaw: async (peer, bytes) => {
+      if (!sessions.has(peer)) throw new Error("no chat session with this contact");
+      return sessions.sendRaw(peer, bytes);
+    },
+
+    /** Tell every contact one of our devices is gone (the phone's fan-out, mirrored). */
+    announceDeviceRemoved: async (statementAccountId) => {
+      for (const peer of sessions.peers()) {
+        await sessions.send(peer, toWire({ type: "deviceRemoved", statementAccountId }), { messageId: randomId(), timestamp: Date.now() });
+      }
+      emit("device_removed", { statementAccountId: bytesToHex(statementAccountId), peers: sessions.peers().length });
     },
 
     react: async (peer, messageId, emoji, add) => {

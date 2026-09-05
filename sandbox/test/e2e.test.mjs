@@ -26,6 +26,7 @@ test("alice (1 device) and bob (2 devices): request, accept, text, reply from de
   const api = daemon.url;
   const get = (route) => call(api, "GET", route);
   const post = (route, body) => call(api, "POST", route, body);
+  const del = (route) => call(api, "DELETE", route);
 
   assert.equal((fs.statSync(dir).mode & 0o777), 0o700, "state dir is private");
   const node = await get("/node");
@@ -147,6 +148,26 @@ test("alice (1 device) and bob (2 devices): request, accept, text, reply from de
   await reader.cancel();
   const text = new TextDecoder().decode(value);
   assert.ok(text.includes("event: persona") && text.includes("event: message") && text.includes("event: wire"));
+
+  // A call offer from alice: bob declines it (no media stack), alice sees the decline under her offer.
+  const offer = await post("/personas/alice/rooms/bob/messages", { call: true });
+  assert.equal(offer.content.type, "callOffer");
+  await waitFor(async () => (await get("/personas/alice/rooms/bob")).messages.some((m) => m.messageId === `call-closed:${offer.messageId}`));
+  assert.ok((await get("/personas/bob/rooms/alice")).messages.some((m) => m.messageId === `call-declined:${offer.messageId}`));
+  // Raw bytes ride the batch without a row.
+  const raw = await post("/personas/alice/rooms/bob/messages", { raw: "0x0102" });
+  assert.deepEqual([raw.raw, raw.bytes], [true, 2]);
+  await assert.rejects(post("/personas/alice/rooms/bob/messages", { raw: "junk" }), /raw must be/);
+  // bob removes device 2: it goes offline for good, alice's roster shrinks, device 1 keeps its number.
+  const gone = await del("/personas/bob/devices/2");
+  assert.deepEqual([gone.index, gone.removed, gone.online], [2, true, false]);
+  await waitFor(async () => (await get("/personas/alice")).contacts[0].devices.length === 1);
+  assert.equal((await get("/personas/alice")).contacts[0].devices[0].statementAccountId, bob.devices[0].account);
+  await assert.rejects(post("/personas/bob/rooms/alice/messages", { text: "x", device: 2 }), /was removed/);
+  await assert.rejects(del("/personas/alice/devices/1"), /last device/);
+  const afterRemoval = await post("/personas/alice/rooms/bob/messages", { text: "one device left" });
+  await waitFor(async () => (await get("/personas/alice/rooms/bob")).messages.find((m) => m.messageId === afterRemoval.messageId).status === "delivered");
+  assert.deepEqual((await get("/personas/bob/rooms/alice")).messages.find((m) => m.messageId === afterRemoval.messageId).receivedBy, [1]);
 
   // A third persona cannot message an unknown name, and declining is local.
   await post("/personas", { name: "carol", devices: 1 });
