@@ -29,6 +29,10 @@ export async function run({ sandbox, openChat, log, sleep }) {
     await chat.send(q);
     await sandbox.waitFor(() => chat.events("BOT_SENT_TEXT").length === i + 1, { label: `answer ${i + 1} submitted` });
   }
+  // The grace window counts from the current statement's submission (the
+  // last extension), not from the moment something queues behind it; the
+  // bot's own log stamp is the reference, not the scenario's clock.
+  const currentAt = Date.parse(chat.events("BOT_SENT_TEXT").at(-1).time);
   const extensions = chat.events("BOT_OUTBOUND_EXTENDED");
   assert.equal(extensions.length, MAX_EXTENSIONS, "every answer after the first extended the un-ACKed statement");
   assert.equal(extensions.at(-1).messages, MAX_EXTENSIONS + 1);
@@ -47,15 +51,14 @@ export async function run({ sandbox, openChat, log, sleep }) {
 
   // The budget is spent: the next answer queues behind the slot. Its
   // BOT_SENT_TEXT only fires once it is on the node, i.e. after the takeover.
-  const queuedAt = Date.now();
   await chat.send("q10");
   await bot.waitFor((e) => e.event === "BOT_RECEIVED_TEXT" && e.chars === 3, { label: "q10 received" });
   await sleep(500);
   assert.equal(chat.events("BOT_SENT_TEXT").length, MAX_EXTENSIONS + 1, "the 10th answer is queued, not submitted");
   assert.equal((await chat.slot(REQUEST)).decoded.messages.length, MAX_EXTENSIONS + 1, "the slot is unchanged while the answer queues");
   const takeover = await bot.waitFor((e) => e.event === "BOT_OUTBOUND_TAKEOVER", { label: "BOT_OUTBOUND_TAKEOVER", timeoutMs: GRACE_MS + 10_000 });
-  const waited = Date.now() - queuedAt;
-  assert.ok(waited >= GRACE_MS - 200, `the takeover came after ${waited}ms, before the ${GRACE_MS}ms grace`);
+  const waited = Date.parse(takeover.time) - currentAt;
+  assert.ok(waited >= GRACE_MS, `the takeover came ${waited}ms after the current statement, before the ${GRACE_MS}ms grace`);
   assert.deepEqual([takeover.dropped, takeover.queued], [MAX_EXTENSIONS + 1, 1]);
   await sandbox.waitFor(() => chat.events("BOT_SENT_TEXT").length === MAX_EXTENSIONS + 2, { label: "the queued answer submitted" });
   slot = await chat.slot(REQUEST);
