@@ -176,7 +176,9 @@ test("initial dumps are paged with a correct remaining count; live pushes carry 
     assert.equal(push.result.data.statements.length, 1);
     assert.equal("remaining" in push.result.data, false, "live pushes have no remaining, like the real node");
 
-    // Nothing matching: still one empty page, so pollers waiting on a page complete.
+    // Nothing matching: one empty page (Store::subscribe_statement sends
+    // `NewStatements { statements: [], remaining: Some(0) }` itself), which
+    // is what the SDK's getStatements and session init() wait for.
     const other = await open();
     await other.subscribe({ matchAll: [hex32("ff")] });
     const [empty] = await other.waitPages(1);

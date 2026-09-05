@@ -29,7 +29,11 @@
 //     lower expiry; otherwise `accountFull { submitted_expiry, min_expiry }`.
 //   - Initial dumps are paged; each page carries `remaining` = how many
 //     matching statements follow, the last page has `remaining: 0`. Live
-//     pushes carry no `remaining` (the real node sends `None`).
+//     pushes carry no `remaining` (the real node sends `None`). A dump with
+//     nothing matching is ONE empty page with `remaining: 0`: the RPC's
+//     `send_in_chunks` sends nothing, but `Store::subscribe_statement`
+//     (statement-store/src/lib.rs) already put that page on the same stream.
+//     See docs/decisions.md.
 //   - The proof signature is checked (`invalid/badProof`) over the same bytes
 //     the real node signs: the SCALE encoding of every field except the proof,
 //     without the collection length prefix (`sp_statement_store::Statement::
@@ -175,10 +179,9 @@ export function startStoreNode({
   });
 
   // Initial dump: everything currently matching, in pages of `pageSize`.
-  // A store with nothing matching still answers one empty page. The real
-  // node (send_in_chunks) sends nothing at all in that case, but the SDK's
-  // getStatements — and so bot-core's poll sweep — only resolves on a page,
-  // so an empty page keeps them from hanging. Open question in docs/questions.md.
+  // Nothing matching still answers one empty page (`remaining: 0`), exactly
+  // as `Store::subscribe_statement` does; the SDK's getStatements and the
+  // SDK sessions' init() both wait for that page to learn "empty".
   const sendDump = (ws, subId, filter) => {
     pruneExpired();
     const dump = statements.filter((s) => matchesFilter(s, filter)).map((s) => s.hex);

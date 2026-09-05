@@ -113,3 +113,20 @@ PLAN.md pcs transcript was replayed against a live daemon: text reached both
 bob devices with ACKs from both, alice's row went to `delivered`, the wire
 view labels both channels, no secret appears in the daemon log, and the state
 dir is 0700 with daemon.json 0600.
+
+## S2
+
+1. **S0 answer 2 was wrong: the node sends an empty page.** The RPC's
+   `send_in_chunks` does send nothing on an empty dump, but
+   `Store::subscribe_statement` in `substrate/client/statement-store/src/lib.rs`
+   sends `NewStatements { statements: [], remaining: Some(0) }` on the same
+   stream first (polkadot-sdk `99c8ed2a2fea`; the block dates to PR #11139,
+   2026-02-24, the change that introduced the event format itself). Making
+   the sandbox node silent stalled every SDK session at `init()` (it awaits
+   `queryStatements` on its own, still empty, outgoing topic) — so a silent
+   node would break Polkadot Desktop too, which is further evidence the page
+   is real. S2 therefore keeps the S0 behaviour and changes nothing in
+   bot-core; the evidence and the fix bot-core would need if a deployed node
+   ever differed are in `docs/decisions.md` (D1). Is any deployed node older
+   than PR #11139? If so it also lacks the `newStatements` event shape the
+   SDK and bot-core decode, so it could not serve either client anyway.
