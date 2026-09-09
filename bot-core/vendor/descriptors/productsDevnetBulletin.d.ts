@@ -1,5 +1,5 @@
 import { StorageDescriptor, PlainDescriptor, TxDescriptor, RuntimeDescriptor, Enum, ApisFromDef, QueryFromPalletsDef, TxFromPalletsDef, EventsFromPalletsDef, ErrorsFromPalletsDef, ConstFromPalletsDef, ViewFnsFromPalletsDef, SS58String, SizedHex, FixedSizeArray } from "polkadot-api";
-import type { I5sesotjlssv2d, Iffmde3ekjedi9, I4mddgoa69c0a2, Iao3ss988o1fvj, I95g6i7ilua7lq, Ieniouoqkq4icf, Phase, Ibgl04rn6nbfm6, I4q39t5hn830vp, I8re9183nrhr3n, I1v7jbnil3tjns, I8jgj1nhcr2dg8, Ifn6q3equiq9qi, Ia3sb0vgvovhtg, Iav8k1edbj86k7, Itom7fk49o0c9, I4i91h98n3cv1b, I4iumukclgj8ej, Iqnbvitf7a7l3, I48i407regf59r, I6r5cbv8ttrb09, Inofn0qqbjtb9, Iepbsvlk3qceij, I1q8tnt1cluu5j, I8ds64oj6581v0, Ia7pdug7cdsg8g, Iafsev9pf8ur2h, I9bin2jc70qt6q, TransactionPaymentReleases, I3krkfpbuclmak, Icd998p53cb80u, Iecn3tfn6gr5ce, Icbo88ruqlb3gb, I9jd27rnpm8ttv, I9i4rhi4dg5bdo, I6378f2ieh7hhh, Ia2lhg7l2hilo3, Ifi4da1gej1fri, Ifvgo9568rpmqc, I82jm9g7pufuel, Ic5m5lp1oioo8r, I6cs1itejju2vv, Icgljjb6j82uhn, I9pvau8qut93lg, I5g2vv0ckl2m8b, Ifup3lg9ro8a0f, I5qfubnuvrnqn6, I8t3u2dv73ahbd, I7vlvrrl2pnbgk, Ie0rpl5bahldfk, XcmPalletVersionMigrationStage, I7e5oaj2qi4kl1, Ie849h3gncgvok, Iat62vud7hlod2, Ict03eedr8de9s, Ibkm2gcn4pji30, XcmVersionedLocation, Idh2ug6ou4a8og, Iejeo53sea6n4q, I53esa2ms463bk, Ib4jhb8tt3uung, In7a38730s6qs, Ibtil0ss5munbk, I9s0ave7t0vnrk, I4fo08joqmcqnm, XcmV5Junctions, Iasb8k6ash5mjn, I8ofcg5rbj0g2c, I4adgbll7gku4i, I6pjjpfvhvcfru, I9pj91mj79qekl, I39uah9nss64h9, Ik64dknsq7k08, Ib51vk42m1po4n, Ial23jn8hp0aen, Ifpj261e8s63m3, Idcr6u6361oad9, If378023tlda0t, I2o691899uj80g, Ib9m87pqct7as2, Iflhgb0ea27aua, Ib92qakm3f755v, Ibou4u1engb441, Id6nbvqoqdj4o2, I95iqep3b8snn9, I4ktuaksf5i1gk, I9bqtpv2ii35mp, I9j7pagd6d4bda, I2h9pmio37r7fb, Ibmr18suc9ikh9, I9iq22t0burs89, I5u8olqbbvfnvf, I5utcetro501ir, Itrlf5b2o2l8q, Icegg8a2cqf1gu, I7d71c6b0ekmt9, I2i8iea6e4ne1j, I4jotama61aldv, I4cbvqmqadhrea, I3rfugj0vt1ug5, Ifq8h9n7vmgpf0, Ifa480ahjcunq, Ic4jjdr1cl5bit, Ifccifqltb5obi, Iadtsfv699cq8b, Ialpmgmhr3gk5r, I3sdol54kg5jaq, I8fougodaj6di6, I81vt5eq60l4b6, I3vh014cqgmrfd, Ia5cotcvi888ln, I21jsa919m88fd, Iegif7m3upfe1k, I9kt8c221c83ln, Ic76kfh5ebqkpl, Icscpmubum33bq, I21d2olof7eb60, Ibgm4rnf22lal1, Ie68np0vpihith, I9bnv6lu0crf1q, Iauhjqifrdklq7, Ie1uso9m8rt5cf, I40pqum1mu8qg3, I1r4c2ghbtvjuc, I7s4rt9nf3sfnr, I8k3rnvpeeh4hv, I9m2d3sqh5dirs, Ia82mnkmeo2rhc, I5o3smvo7gkt9d, I1jm8m1rh9e20v, Icbccs0ug47ilf, I855j4i3kr8ko1, I7lrufahb64usv, Idd7hd99u0ho0n, Iafscmv8tjf0ou, I100l07kaehdlp, I6gnbnvip5vvdi, Iclpjn2as45tpn, I1blv5vt8086o2, Icf3c8o4mer337, I1n8ismao8deae, If1co0pilmi7oq, I666bl2fqjkejo, Iae74gjak1qibn, I3escdojpj0551, Icv68aq8841478, Ic262ibdoec56a, Iflcfm9b6nlmdd, Ijrsf4mnp3eka, Id5fm4p8lj5qgi, I8tjvj9uq4b7hi, I3qt1hgg4djhgb, I4fooe9dun9o0t, I8mvf14goplnni, Ie09mpthond7d6, I1ispultrc7caq, Iph9c4rn81ub2, Ier2cke86dqbr2, Ibi0s841005et5, I395h9meqpi2hf, I66jdpl6lile9j, Ifa84va5usjhbs, I7qnibt85843h4, Iecest14o0pmc2, I5i6clrj1m1v3f, Ife9a8l1jn5dhf, I1srmrc4hmsm4, I39t01nnod9109, I6v8sm60vvkmk7, I1qmtmbe5so8r3, Ih99m6ehpcar7, Idgorhsbgdq2ap, I9ubb2kqevnu6t, I2hq50pu2kdjpo, I9acqruh7322g2, I137t1cld92pod, I61d51nv4cou88, If8u5kl4h8070m, Ibmuil6p3vl83l, I7lul91g50ae87, Icl7nl1rfeog3i, Iasr6pj6shs0fl, I2uqmls7kcdnii, Idg69klialbkb8, I7r6b7145022pp, I30pg328m00nr3, Icmrn7bogp28cs, I7m9b5plj4h5ot, I9onhk772nfs4f, I3l6bnksrmt56r, Idh09k0l2pmdcg, I7uoiphbm0tj4r, I512p1n7qt24l8, I6s1nbislhk619, I3gghqnh2mj0is, I6iv852roh6t3h, I9oc2o6itbiopq, Ibslgga81p36aa, I1rvj4ubaplho0, Ia3uu7lqcc1q1i, I7crucfnonitkn, I7tmrp94r9sq4n, Ibed9kp93286e, I5rtkmhm2dng4u, I5r8t4iaend96p, I9vodnt2k1kha, I4ao1le27fcisl, Ih4ursllob8fg, Iaqet9jc3ihboe, Ic952bubvq4k7d, I2v50gu3s1aqk6, Iabpgqcjikia83, I49ln1dlnvn5mm, If7uv525tdvv7a, I2an1fs2eiebjp, TransactionValidityTransactionSource, I9ask1o4tfvcvs, I4ph3d1eepnmr1, Icerf8h8pdu8ss, I6spmpef2c7svf, Iei2mvq0mjvt81, I5h0sno917s28c, Iftvbctbo05fu4, XcmVersionedXcm, Ic0c3req3mlc1l, XcmVersionedAssetId, I7ocn4njqde3v5, Iek7ha36da9mf5, I9cqlcs1cfiqgk, Ivl81oef14rgt, I3t5bsspkebnln, Ieh6nis3hdbtgi, XcmVersionedAsset, Icujp6hmv35vbn, I4tjame31218k9, I5gif8vomct5i8, Ic1d4u2opv3fst, If4oj302humfb5, I8p068g003vpi6, I3fo6882e5tjh8, If5dekqlo7be3f, I3oi105i165rd5, Ie9sr1iqcg3cgm, I1mqgk2tmnn9i2, I6lr8sctk0bi4e, I2no2ge71kivps } from "./common-types";
+import type { I5sesotjlssv2d, Iffmde3ekjedi9, I4mddgoa69c0a2, Ibkvrqg3rqhj06, I95g6i7ilua7lq, Ieniouoqkq4icf, Phase, Ibgl04rn6nbfm6, I4q39t5hn830vp, I8re9183nrhr3n, I1v7jbnil3tjns, I8jgj1nhcr2dg8, Ifn6q3equiq9qi, Ia3sb0vgvovhtg, Iav8k1edbj86k7, Itom7fk49o0c9, I4i91h98n3cv1b, I4iumukclgj8ej, Iqnbvitf7a7l3, I48i407regf59r, I6r5cbv8ttrb09, Inofn0qqbjtb9, Iepbsvlk3qceij, I1q8tnt1cluu5j, I8ds64oj6581v0, Ia7pdug7cdsg8g, Iafsev9pf8ur2h, I9bin2jc70qt6q, TransactionPaymentReleases, Ifmlh2ccap0uke, Icd998p53cb80u, Iecn3tfn6gr5ce, Icm182d6u507gc, I9jd27rnpm8ttv, I9i4rhi4dg5bdo, I7mhb4q0v4cblf, Ia2lhg7l2hilo3, Ifi4da1gej1fri, Ifvgo9568rpmqc, I82jm9g7pufuel, Ic5m5lp1oioo8r, I6cs1itejju2vv, Icgljjb6j82uhn, I5mpbmq1ooiq9i, I5g2vv0ckl2m8b, Ifup3lg9ro8a0f, I5qfubnuvrnqn6, I8t3u2dv73ahbd, I7vlvrrl2pnbgk, Ie0rpl5bahldfk, XcmPalletVersionMigrationStage, I7e5oaj2qi4kl1, Ie849h3gncgvok, Iat62vud7hlod2, Ict03eedr8de9s, Ibkm2gcn4pji30, XcmVersionedLocation, Idh2ug6ou4a8og, Iejeo53sea6n4q, I53esa2ms463bk, Ib4jhb8tt3uung, In7a38730s6qs, Ibtil0ss5munbk, I9s0ave7t0vnrk, I4fo08joqmcqnm, I9s2ue1goudgqc, XcmV5Junctions, Iasb8k6ash5mjn, I8ofcg5rbj0g2c, I4adgbll7gku4i, I6pjjpfvhvcfru, I9pj91mj79qekl, I39uah9nss64h9, Ik64dknsq7k08, Ib51vk42m1po4n, Ial23jn8hp0aen, Ifpj261e8s63m3, Idcr6u6361oad9, I9nqp66v0721n1, Idk1ivh3nldv2l, Ib3877m4t1f6f4, I3a0ttnbnho23s, Ia06u24rop478l, Ibou4u1engb441, Id6nbvqoqdj4o2, I95iqep3b8snn9, I4ktuaksf5i1gk, I9bqtpv2ii35mp, I9j7pagd6d4bda, I2h9pmio37r7fb, Ibmr18suc9ikh9, I9iq22t0burs89, I5u8olqbbvfnvf, I5utcetro501ir, Itrlf5b2o2l8q, Icegg8a2cqf1gu, I2i8iea6e4ne1j, I4jotama61aldv, I4cbvqmqadhrea, I3rfugj0vt1ug5, Ifq8h9n7vmgpf0, Ifa480ahjcunq, Ic4jjdr1cl5bit, I9j03oeh6p8l87, I7d71c6b0ekmt9, Ifccifqltb5obi, Iadtsfv699cq8b, Ialpmgmhr3gk5r, I3sdol54kg5jaq, I8fougodaj6di6, I81vt5eq60l4b6, I3vh014cqgmrfd, Ia5cotcvi888ln, I21jsa919m88fd, Iegif7m3upfe1k, I9kt8c221c83ln, Ic76kfh5ebqkpl, Icscpmubum33bq, I21d2olof7eb60, Ibgm4rnf22lal1, Ie68np0vpihith, I9bnv6lu0crf1q, Iauhjqifrdklq7, Ie1uso9m8rt5cf, I40pqum1mu8qg3, I1r4c2ghbtvjuc, Ic10m30chc0lcl, I8k3rnvpeeh4hv, I8a5t0g4sf473u, Ia82mnkmeo2rhc, Ic9nd01o41rpld, I1jm8m1rh9e20v, Icbccs0ug47ilf, I855j4i3kr8ko1, I74iaf1m5gd367, Idd7hd99u0ho0n, Iafscmv8tjf0ou, I100l07kaehdlp, I6gnbnvip5vvdi, Ia2l0jp3eo4een, Ie8ljddc762t8h, I3m1ba97d0pnd1, Ifu08h95ov02o9, If1co0pilmi7oq, I666bl2fqjkejo, Iae74gjak1qibn, I3escdojpj0551, Icv68aq8841478, Ic262ibdoec56a, Iflcfm9b6nlmdd, Ijrsf4mnp3eka, Id5fm4p8lj5qgi, I8tjvj9uq4b7hi, I3qt1hgg4djhgb, I4fooe9dun9o0t, I8mvf14goplnni, Ie09mpthond7d6, I1ispultrc7caq, Iph9c4rn81ub2, Ier2cke86dqbr2, Ibi0s841005et5, I395h9meqpi2hf, I66jdpl6lile9j, Ifa84va5usjhbs, I7qnibt85843h4, Iecest14o0pmc2, I5i6clrj1m1v3f, Ife9a8l1jn5dhf, I1srmrc4hmsm4, I39t01nnod9109, I6v8sm60vvkmk7, I1qmtmbe5so8r3, Ih99m6ehpcar7, Idgorhsbgdq2ap, I9ubb2kqevnu6t, I2hq50pu2kdjpo, I9acqruh7322g2, I137t1cld92pod, I61d51nv4cou88, If8u5kl4h8070m, Ibmuil6p3vl83l, I7lul91g50ae87, Icl7nl1rfeog3i, Iasr6pj6shs0fl, I2uqmls7kcdnii, Idg69klialbkb8, I7r6b7145022pp, I30pg328m00nr3, Icmrn7bogp28cs, I7m9b5plj4h5ot, I9onhk772nfs4f, I3l6bnksrmt56r, Idh09k0l2pmdcg, I7uoiphbm0tj4r, I512p1n7qt24l8, I6s1nbislhk619, I3gghqnh2mj0is, I6iv852roh6t3h, I9oc2o6itbiopq, Ibslgga81p36aa, I1rvj4ubaplho0, Ia3uu7lqcc1q1i, I7crucfnonitkn, I7tmrp94r9sq4n, I776bdj5qm6ld3, I5rtkmhm2dng4u, I5r8t4iaend96p, I9vodnt2k1kha, I4ao1le27fcisl, Ih4ursllob8fg, Iaqet9jc3ihboe, Ic952bubvq4k7d, I2v50gu3s1aqk6, Iabpgqcjikia83, I4ch97923evid8, If7uv525tdvv7a, I2an1fs2eiebjp, TransactionValidityTransactionSource, I9ask1o4tfvcvs, I4ph3d1eepnmr1, Icerf8h8pdu8ss, I6spmpef2c7svf, Iei2mvq0mjvt81, I88472ck6vehhv, Iftvbctbo05fu4, XcmVersionedXcm, Ic0c3req3mlc1l, XcmVersionedAssetId, I7ocn4njqde3v5, Iek7ha36da9mf5, I9cqlcs1cfiqgk, Iavcjlern8lpkb, I7q29odn6kt7nd, Ieh6nis3hdbtgi, XcmVersionedAsset, Icujp6hmv35vbn, I4tjame31218k9, I5gif8vomct5i8, Ic1d4u2opv3fst, If4oj302humfb5, I8p068g003vpi6, I3fo6882e5tjh8, If5dekqlo7be3f, I3oi105i165rd5, Ie9sr1iqcg3cgm, I1mqgk2tmnn9i2, I6lr8sctk0bi4e, Iam4td08afnm42 } from "./common-types";
 type AnonymousEnum<T extends {}> = T & {
     __anonymous: true;
 };
@@ -63,7 +63,7 @@ type IStorage = {
          * Events have a large in-memory size. Box the events to not go out-of-memory
          * just in case someone still reads them from within the runtime.
          */
-        Events: StorageDescriptor<[], Anonymize<Iao3ss988o1fvj>, false, never>;
+        Events: StorageDescriptor<[], Anonymize<Ibkvrqg3rqhj06>, false, never>;
         /**
          * The number of events in the `Events<T>` list.
          */
@@ -431,9 +431,11 @@ type IStorage = {
     };
     TransactionStorage: {
         /**
-         * Authorizations, keyed by scope.
+         * Authorizations, keyed by scope. `pub` for cross-pallet read access from
+         * `pallet-bulletin-data-renewal`'s tests (consumed via `check_authorization`
+         * in production).
          */
-        Authorizations: StorageDescriptor<[Key: Anonymize<Icd998p53cb80u>], Anonymize<I3krkfpbuclmak>, true, never>;
+        Authorizations: StorageDescriptor<[Key: Anonymize<Icd998p53cb80u>], Anonymize<Ifmlh2ccap0uke>, true, never>;
         /**
          * List of accounts allowed to give authorizations.
          */
@@ -441,7 +443,7 @@ type IStorage = {
         /**
          * Collection of transaction metadata by block number.
          */
-        Transactions: StorageDescriptor<[Key: number], Anonymize<Icbo88ruqlb3gb>, true, never>;
+        Transactions: StorageDescriptor<[Key: number], Anonymize<Icm182d6u507gc>, true, never>;
         /**
          * Storage fee per byte.
          */
@@ -461,33 +463,40 @@ type IStorage = {
         /**
 
          */
-        BlockTransactions: StorageDescriptor<[], Anonymize<Icbo88ruqlb3gb>, false, never>;
+        BlockTransactions: StorageDescriptor<[], Anonymize<Icm182d6u507gc>, false, never>;
         /**
          * Maps content hash to its most recent (block_number, tx_index) location.
+         *
+         * `pub` for cross-pallet writes from `pallet-bulletin-data-renewal` (each
+         * renewal updates the mapping to the new `(block, index)`). Reads outside this pallet should
+         * go through [`Pallet::lookup_by_content_hash`].
          */
         TransactionByContentHash: StorageDescriptor<[Key: SizedHex<32>], Anonymize<I9jd27rnpm8ttv>, true, never>;
-        /**
-         * Maps content hash to the account that registered it for auto-renewal.
-         */
-        AutoRenewals: StorageDescriptor<[Key: SizedHex<32>], Anonymize<I9i4rhi4dg5bdo>, true, never>;
-        /**
-         * Transactions that must be auto-renewed in the current block.
-         *
-         * Populated by `on_initialize` when a block's data is about to expire.
-         * Cleared by the `apply_block_inherents` mandatory inherent executed in the same block.
-         */
-        PendingAutoRenewals: StorageDescriptor<[], Anonymize<I6378f2ieh7hhh>, false, never>;
         /**
          * Was the proof checked in this block?
          */
         ProofChecked: StorageDescriptor<[], boolean, false, never>;
+    };
+    DataRenewal: {
+        /**
+         * Renewal registrations by content hash.
+         */
+        Renewals: StorageDescriptor<[Key: SizedHex<32>], Anonymize<I9i4rhi4dg5bdo>, true, never>;
+        /**
+         * Transactions to renew in the current block.
+         *
+         * Filled by [`OnObsoleteTransactions::handle_obsolete`] at the retention boundary,
+         * drained by the [`Pallet::process_pending_renewals`] inherent in the same block.
+         */
+        PendingRenewals: StorageDescriptor<[], Anonymize<I7mhb4q0v4cblf>, false, never>;
         /**
          * Chain-wide total of currently-on-chain renewed bytes. Source of truth for the
          * chain-wide hard cap: a `renew` of `size` bytes is rejected when
          * `PermanentStorageUsed + size > MaxPermanentStorageSize`.
          *
-         * Bumped on each successful `renew`. Decremented by `on_initialize` when an obsolete
-         * `Transactions[block]` is removed: each entry with `kind == Renew` contributes its
+         * Bumped on each successful renew consume. Decremented by
+         * [`OnObsoleteTransactions::handle_obsolete`] when an obsolete
+         * `Transactions[block]` is removed: each `meta == Renew` entry contributes its
          * `size` to the decrement.
          */
         PermanentStorageUsed: StorageDescriptor<[], bigint, false, never>;
@@ -620,7 +629,7 @@ type IStorage = {
          * case of the need to send a high-priority signal message this block.
          * The bool is true if there is a signal message waiting to be sent.
          */
-        OutboundXcmpStatus: StorageDescriptor<[], Anonymize<I9pvau8qut93lg>, false, never>;
+        OutboundXcmpStatus: StorageDescriptor<[], Anonymize<I5mpbmq1ooiq9i>, false, never>;
         /**
          * The messages outbound in a given XCMP channel.
          */
@@ -881,7 +890,7 @@ type ICalls = {
          * and the error of the failed call. If all were successful, then the `BatchCompleted`
          * event is deposited.
          */
-        batch: TxDescriptor<Anonymize<If378023tlda0t>>;
+        batch: TxDescriptor<Anonymize<I9nqp66v0721n1>>;
         /**
          * Send a call through an indexed pseudonym of the sender.
          *
@@ -897,7 +906,7 @@ type ICalls = {
          *
          * The dispatch origin for this call must be _Signed_.
          */
-        as_derivative: TxDescriptor<Anonymize<I2o691899uj80g>>;
+        as_derivative: TxDescriptor<Anonymize<Idk1ivh3nldv2l>>;
         /**
          * Send a batch of dispatch calls and atomically execute them.
          * The whole transaction will rollback and fail if any of the calls failed.
@@ -913,7 +922,7 @@ type ICalls = {
          * ## Complexity
          * - O(C) where C is the number of calls to be batched.
          */
-        batch_all: TxDescriptor<Anonymize<If378023tlda0t>>;
+        batch_all: TxDescriptor<Anonymize<I9nqp66v0721n1>>;
         /**
          * Dispatches a function call with a provided origin.
          *
@@ -922,7 +931,7 @@ type ICalls = {
          * ## Complexity
          * - O(1).
          */
-        dispatch_as: TxDescriptor<Anonymize<Ib9m87pqct7as2>>;
+        dispatch_as: TxDescriptor<Anonymize<Ib3877m4t1f6f4>>;
         /**
          * Send a batch of dispatch calls.
          * Unlike `batch`, it allows errors and won't interrupt.
@@ -938,7 +947,7 @@ type ICalls = {
          * ## Complexity
          * - O(C) where C is the number of calls to be batched.
          */
-        force_batch: TxDescriptor<Anonymize<If378023tlda0t>>;
+        force_batch: TxDescriptor<Anonymize<I9nqp66v0721n1>>;
         /**
          * Dispatch a function call with a specified weight.
          *
@@ -947,7 +956,7 @@ type ICalls = {
          *
          * The dispatch origin for this call must be _Root_.
          */
-        with_weight: TxDescriptor<Anonymize<Iflhgb0ea27aua>>;
+        with_weight: TxDescriptor<Anonymize<I3a0ttnbnho23s>>;
         /**
          * Dispatch a fallback call in the event the main call fails to execute.
          * May be called from any origin except `None`.
@@ -973,7 +982,7 @@ type ICalls = {
          * - Some use cases might involve submitting a `batch` type call in either main, fallback
          * or both.
          */
-        if_else: TxDescriptor<Anonymize<Ib92qakm3f755v>>;
+        if_else: TxDescriptor<Anonymize<Ia06u24rop478l>>;
         /**
          * Dispatches a function call with a provided origin.
          *
@@ -981,7 +990,7 @@ type ICalls = {
          *
          * The dispatch origin for this call must be _Root_.
          */
-        dispatch_as_fallible: TxDescriptor<Anonymize<Ib9m87pqct7as2>>;
+        dispatch_as_fallible: TxDescriptor<Anonymize<Ib3877m4t1f6f4>>;
     };
     MultiBlockMigrations: {
         /**
@@ -1130,36 +1139,6 @@ type ICalls = {
          */
         store_with_cid_config: TxDescriptor<Anonymize<Icegg8a2cqf1gu>>;
         /**
-         * Schedule a **one-shot** auto-renewal of previously stored data. The renewal fires
-         * exactly once, when the data reaches its `RetentionPeriod` boundary, and then the
-         * registration is removed. For continuous renewal, use
-         * [`enable_auto_renew`](Self::enable_auto_renew) instead.
-         *
-         * `entry` identifies the data either by `(block, index)` or by content hash.
-         *
-         * Feeless. Registration cost (one transaction unit) is charged in `check_signed`;
-         * the eventual renewal cycle charges bytes against `bytes_permanent` and the
-         * chain-wide cap.
-         *
-         * Rejects with [`AutoRenewalAlreadyEnabled`](Error::AutoRenewalAlreadyEnabled) if a
-         * scheduled renewal already exists for this content hash.
-         *
-         * Emits [`RenewalEnabled`](Event::RenewalEnabled) `{ recurring: false }`.
-         *
-         * For synchronous renewal at dispatch time, see [`force_renew`](Self::force_renew).
-         */
-        renew: TxDescriptor<Anonymize<I7d71c6b0ekmt9>>;
-        /**
-         * Immediately renew previously stored data, synchronous at dispatch time.
-         *
-         * Authorization is required (as with [`store`](Self::store)). Charges `info.size`
-         * against `bytes_permanent` (per-account renew cap) and `PermanentStorageUsed`
-         * (chain-wide cap).
-         *
-         * Emits [`Renewed`](Event::Renewed) when successful.
-         */
-        force_renew: TxDescriptor<Anonymize<I7d71c6b0ekmt9>>;
-        /**
          * Authorize an account to store up to `bytes` of arbitrary data in `transactions`
          * boost-tier transactions. The authorization will expire after a configured number
          * of blocks.
@@ -1263,68 +1242,11 @@ type ICalls = {
          */
         refresh_preimage_authorization: TxDescriptor<Anonymize<I3rfugj0vt1ug5>>;
         /**
-         * Enable automatic renewal for a previously stored piece of data.
-         *
-         * **Recurring scheduler with pre-paid first cycle.** The extension's
-         * `check_signed` charges `bytes_permanent`, `PermanentStorageUsed`, and
-         * one tx slot at registration (same hard-cap accounting as `force_renew`
-         * / one-shot `renew`). The registration is inserted as
-         * [`RenewalData`] `{ recurring: true, paid: true }`. The first renewal
-         * cycle fires at the next `RetentionPeriod` boundary **without**
-         * re-charging — the slot is already paid for; the cycle then flips
-         * `paid` to `false`. From that point on, every subsequent cycle charges
-         * the owner's authorization in [`Self::do_process_auto_renewals`],
-         * dropping the registration with [`Event::AutoRenewalFailed`] if the
-         * quota is exhausted at cycle time.
-         *
-         * Feeless: no token fee. Spam is bounded structurally by the up-front
-         * hard-cap charge — the caller cannot over-schedule past their
-         * `bytes_allowance` or the chain-wide `MaxPermanentStorageSize`.
-         * [`Self::disable_auto_renew`] additionally rejects the owner while
-         * `paid` is `true`, so the prepayment cannot be reclaimed before the
-         * first cycle fires.
-         *
-         * Emits [`RenewalEnabled`](Event::RenewalEnabled) `{ recurring: true }`
-         * for the registration; the first actual renewal is emitted as
-         * [`DataAutoRenewed`](Event::DataAutoRenewed) at cycle time.
-         */
-        enable_auto_renew: TxDescriptor<Anonymize<I3rfugj0vt1ug5>>;
-        /**
-         * Disable automatic renewal for a piece of data.
-         *
-         * Signed: the caller must be the account that originally enabled the renewal,
-         * and the registration must not be in its prepaid window — see
-         * [`Error::CannotDisablePrepaidAutoRenewal`]. Both registrations from
-         * [`Pallet::renew`] and [`Pallet::enable_auto_renew`] start with `paid: true`;
-         * the owner has to wait for the first cycle to consume the prepayment before
-         * they can disable.
-         *
-         * Root: bypasses the owner check and the prepaid-window check
-         * (governance/cleanup).
-         *
-         * Feeless: no token fee and no authorization is consumed. Signed admission is
-         * gated in [`check_signed`](Self::check_signed) on ownership and the prepaid
-         * flag, so a caller can issue at most one successful `disable_auto_renew` per
-         * registration it owns — and only after the first cycle has fired.
-         *
-         * Emits [`AutoRenewalDisabled`](Event::AutoRenewalDisabled) when successful.
-         */
-        disable_auto_renew: TxDescriptor<Anonymize<I3rfugj0vt1ug5>>;
-        /**
-         * Composite block-level inherent: optionally validates a transaction storage proof and
-         * always drains [`PendingAutoRenewals`].
-         *
-         * `ProvideInherent::create_inherent` only returns a single `Call`, but this pallet
-         * has two block-end concerns — verifying the storage proof for the block at
-         * `n - RetentionPeriod`, and renewing entries flagged via [`AutoRenewals`] before
-         * they expire at `n - RetentionPeriod - 1`. Both effects collapse into this single
-         * mandatory inherent so that block authors emit one extrinsic that satisfies both
-         * `on_finalize` invariants (`ProofChecked` and "PendingAutoRenewals empty").
+         * Block-level mandatory inherent for the transaction-storage proof.
          *
          * `proof` is `Some` when the inherent data provider supplied one; otherwise the
-         * proof step is skipped (early or empty blocks). The auto-renewal drain runs
-         * unconditionally — emitting an inherent at all implies that `on_initialize` may
-         * have populated `PendingAutoRenewals`.
+         * proof step is skipped (early or empty blocks). The companion drain of pending
+         * auto-renewals lives in `pallet-bulletin-data-renewal`'s own inherent.
          */
         apply_block_inherents: TxDescriptor<Anonymize<Ifq8h9n7vmgpf0>>;
         /**
@@ -1379,6 +1301,47 @@ type ICalls = {
 
          */
         promote: TxDescriptor<Anonymize<Ic4jjdr1cl5bit>>;
+        /**
+         * V2 variant of [`Self::promote`]: identical body, but the authorize hook
+         * requires the user's signature to additionally cover the chain genesis
+         * hash and a hash of the recipients list (see [`signing_payload_v2`]).
+         */
+        promote_v2: TxDescriptor<Anonymize<I9j03oeh6p8l87>>;
+    };
+    DataRenewal: {
+        /**
+         * Schedule a one-shot auto-renewal. Fires once at the
+         * `RetentionPeriod` boundary, then the registration is removed.
+         * Prepaid at registration; see [`force_renew`](Self::force_renew) for
+         * synchronous renewal or [`enable_auto_renew`](Self::enable_auto_renew)
+         * for recurring.
+         */
+        renew: TxDescriptor<Anonymize<I7d71c6b0ekmt9>>;
+        /**
+         * Renew previously stored data synchronously. Charges `info.size` against
+         * the caller's `bytes_permanent` and the chain-wide `PermanentStorageUsed`.
+         */
+        force_renew: TxDescriptor<Anonymize<I7d71c6b0ekmt9>>;
+        /**
+         * Register recurring auto-renewal for `content_hash`. First cycle is
+         * prepaid at registration (`paid = true`); subsequent cycles charge
+         * the owner's authorization in `do_process_pending_renewals` and
+         * drop the registration on quota exhaustion with
+         * [`Event::RenewalFailed`].
+         */
+        enable_auto_renew: TxDescriptor<Anonymize<I3rfugj0vt1ug5>>;
+        /**
+         * Disable auto-renewal. Signed callers must own the registration AND
+         * wait for the prepaid first cycle to have fired (else
+         * [`Error::CannotDisablePrepaidAutoRenewal`]). Root bypasses both
+         * checks.
+         */
+        disable_auto_renew: TxDescriptor<Anonymize<I3rfugj0vt1ug5>>;
+        /**
+         * Mandatory inherent: drain [`PendingRenewals`] for the current
+         * block. Refunds to the actually-drained count via `PostDispatchInfo`.
+         */
+        process_pending_renewals: TxDescriptor<undefined>;
     };
     CollatorSelection: {
         /**
@@ -1739,6 +1702,8 @@ type ICalls = {
          * - `assets`: The exact assets that were trapped. Use the version to specify what version
          * was the latest when they were trapped.
          * - `beneficiary`: The location/account where the claimed assets will be deposited.
+         *
+         * The weight of this call is linear in the number of assets claimed.
          */
         claim_assets: TxDescriptor<Anonymize<Ie68np0vpihith>>;
         /**
@@ -1843,7 +1808,7 @@ type ICalls = {
         /**
          * Authenticates the sudo key and dispatches a function call with `Root` origin.
          */
-        sudo: TxDescriptor<Anonymize<I7s4rt9nf3sfnr>>;
+        sudo: TxDescriptor<Anonymize<Ic10m30chc0lcl>>;
         /**
          * Authenticates the sudo key and dispatches a function call with `Root` origin.
          * This function does not check the weight of the call, and instead allows the
@@ -1851,7 +1816,7 @@ type ICalls = {
          *
          * The dispatch origin for this call must be _Signed_.
          */
-        sudo_unchecked_weight: TxDescriptor<Anonymize<Iflhgb0ea27aua>>;
+        sudo_unchecked_weight: TxDescriptor<Anonymize<I3a0ttnbnho23s>>;
         /**
          * Authenticates the current sudo key and sets the given AccountId (`new`) as the new sudo
          * key.
@@ -1863,7 +1828,7 @@ type ICalls = {
          *
          * The dispatch origin for this call must be _Signed_.
          */
-        sudo_as: TxDescriptor<Anonymize<I9m2d3sqh5dirs>>;
+        sudo_as: TxDescriptor<Anonymize<I8a5t0g4sf473u>>;
         /**
          * Permanently removes the sudo key.
          *
@@ -1881,7 +1846,7 @@ type IEvent = {
         /**
          * An extrinsic failed.
          */
-        ExtrinsicFailed: PlainDescriptor<Anonymize<I5o3smvo7gkt9d>>;
+        ExtrinsicFailed: PlainDescriptor<Anonymize<Ic9nd01o41rpld>>;
         /**
          * `:code` was updated to the code with the given hash.
          */
@@ -1905,7 +1870,7 @@ type IEvent = {
         /**
          * An invalid authorized upgrade was rejected while trying to apply it.
          */
-        RejectedInvalidAuthorizedUpgrade: PlainDescriptor<Anonymize<I7lrufahb64usv>>;
+        RejectedInvalidAuthorizedUpgrade: PlainDescriptor<Anonymize<I74iaf1m5gd367>>;
     };
     ParachainSystem: {
         /**
@@ -1938,7 +1903,7 @@ type IEvent = {
          * Batch of dispatches did not complete fully. Index of first failing dispatch given, as
          * well as the error.
          */
-        BatchInterrupted: PlainDescriptor<Anonymize<Iclpjn2as45tpn>>;
+        BatchInterrupted: PlainDescriptor<Anonymize<Ia2l0jp3eo4een>>;
         /**
          * Batch of dispatches completed fully with no error.
          */
@@ -1954,11 +1919,11 @@ type IEvent = {
         /**
          * A single item within a Batch of dispatches has completed with error.
          */
-        ItemFailed: PlainDescriptor<Anonymize<I1blv5vt8086o2>>;
+        ItemFailed: PlainDescriptor<Anonymize<Ie8ljddc762t8h>>;
         /**
          * A call was dispatched.
          */
-        DispatchedAs: PlainDescriptor<Anonymize<Icf3c8o4mer337>>;
+        DispatchedAs: PlainDescriptor<Anonymize<I3m1ba97d0pnd1>>;
         /**
          * Main call was dispatched.
          */
@@ -1966,7 +1931,7 @@ type IEvent = {
         /**
          * The fallback call was dispatched.
          */
-        IfElseFallbackCalled: PlainDescriptor<Anonymize<I1n8ismao8deae>>;
+        IfElseFallbackCalled: PlainDescriptor<Anonymize<Ifu08h95ov02o9>>;
     };
     MultiBlockMigrations: {
         /**
@@ -2153,10 +2118,6 @@ type IEvent = {
          */
         Stored: PlainDescriptor<Anonymize<I395h9meqpi2hf>>;
         /**
-         * Renewed data under specified index.
-         */
-        Renewed: PlainDescriptor<Anonymize<I66jdpl6lile9j>>;
-        /**
          * Storage proof was successfully checked.
          */
         ProofChecked: PlainDescriptor<undefined>;
@@ -2198,6 +2159,12 @@ type IEvent = {
          * An authorizer was removed from the allowed list due to budget exhaustion.
          */
         ExhaustedAuthorizerRemoved: PlainDescriptor<Anonymize<I4cbvqmqadhrea>>;
+    };
+    DataRenewal: {
+        /**
+         * Renewed data under specified index.
+         */
+        Renewed: PlainDescriptor<Anonymize<I66jdpl6lile9j>>;
         /**
          * A renewal was enabled for `content_hash` by `who`.
          */
@@ -2208,15 +2175,16 @@ type IEvent = {
          */
         AutoRenewalDisabled: PlainDescriptor<Anonymize<I7qnibt85843h4>>;
         /**
-         * Data was automatically renewed at `index` with `content_hash` for `account`.
+         * A registered renewal fired, re-storing the data at `index`.
          */
-        DataAutoRenewed: PlainDescriptor<Anonymize<Iecest14o0pmc2>>;
+        DataRenewed: PlainDescriptor<Anonymize<Iecest14o0pmc2>>;
         /**
-         * Auto-renewal failed for `content_hash` (insufficient authorization for `account`).
+         * A registered renewal failed on `account`'s authorization; the registration is
+         * dropped and the data expires.
          */
-        AutoRenewalFailed: PlainDescriptor<Anonymize<I5i6clrj1m1v3f>>;
+        RenewalFailed: PlainDescriptor<Anonymize<I5i6clrj1m1v3f>>;
         /**
-         * `PermanentStorageUsed` changed (a `renew` bumped it, or the lazy drain
+         * `PermanentStorageUsed` changed (a `renew` bumped it, or the obsolete sweep
          * decremented it). Off-chain capacity-planning consumers can drive their dashboards
          * from these.
          */
@@ -2487,7 +2455,7 @@ type IEvent = {
         /**
          * A sudo call just took place.
          */
-        Sudid: PlainDescriptor<Anonymize<Ibed9kp93286e>>;
+        Sudid: PlainDescriptor<Anonymize<I776bdj5qm6ld3>>;
         /**
          * The sudo key has been updated.
          */
@@ -2499,7 +2467,7 @@ type IEvent = {
         /**
          * A [sudo_as](Pallet::sudo_as) call just took place.
          */
-        SudoAsDone: PlainDescriptor<Anonymize<Ibed9kp93286e>>;
+        SudoAsDone: PlainDescriptor<Anonymize<I776bdj5qm6ld3>>;
     };
 };
 type IError = {
@@ -2688,16 +2656,6 @@ type IError = {
          */
         AuthorizationNotExpired: PlainDescriptor<undefined>;
         /**
-         * Renew rejected: would push the signer's `bytes_permanent` past their
-         * `bytes_allowance` (per-account hard cap).
-         */
-        PermanentAllowanceExceeded: PlainDescriptor<undefined>;
-        /**
-         * Renew rejected: would push `PermanentStorageUsed` past
-         * `MaxPermanentStorageSize` (chain-wide hard cap).
-         */
-        ChainPermanentCapReached: PlainDescriptor<undefined>;
-        /**
          * Content hash was not calculated.
          */
         InvalidContentHash: PlainDescriptor<undefined>;
@@ -2711,24 +2669,6 @@ type IError = {
          */
         AuthorizerBudgetNotExhausted: PlainDescriptor<undefined>;
         /**
-         * Auto-renewal is already enabled for this content hash.
-         */
-        AutoRenewalAlreadyEnabled: PlainDescriptor<undefined>;
-        /**
-         * Auto-renewal is not enabled for this content hash.
-         */
-        AutoRenewalNotEnabled: PlainDescriptor<undefined>;
-        /**
-         * Caller is not the owner of the auto-renewal registration.
-         */
-        NotAutoRenewalOwner: PlainDescriptor<undefined>;
-        /**
-         * `disable_auto_renew` rejected: the registration has been prepaid for its next
-         * cycle. The owner must wait until that cycle consumes the prepayment before
-         * disabling. Root can disable regardless.
-         */
-        CannotDisablePrepaidAutoRenewal: PlainDescriptor<undefined>;
-        /**
          * `valid_until` supplied to `add_authorizer` is in the past (`<= now`, would
          * expire immediately). Pass `None` for no expiration.
          */
@@ -2739,6 +2679,43 @@ type IError = {
          * `transactions` / `bytes` (or `max_size`).
          */
         InsufficientAuthorizerBudget: PlainDescriptor<undefined>;
+    };
+    DataRenewal: {
+        /**
+         * Attempted to call `force_renew` outside of block execution.
+         */
+        BadContext: PlainDescriptor<undefined>;
+        /**
+         * Renewed extrinsic is not found.
+         */
+        RenewedNotFound: PlainDescriptor<undefined>;
+        /**
+         * Block already contains the maximum number of transactions.
+         */
+        TooManyTransactions: PlainDescriptor<undefined>;
+        /**
+         * A renewal is already registered for this content hash.
+         */
+        RenewalAlreadyEnabled: PlainDescriptor<undefined>;
+        /**
+         * Auto-renewal is not enabled for this content hash.
+         */
+        AutoRenewalNotEnabled: PlainDescriptor<undefined>;
+        /**
+         * Caller is not the owner of the auto-renewal registration.
+         */
+        NotAutoRenewalOwner: PlainDescriptor<undefined>;
+        /**
+         * `disable_auto_renew` rejected: the registration has been prepaid for its next
+         * cycle and cannot be disabled by the owner until the cycle fires and consumes
+         * the prepayment. Root can still disable for governance cleanup.
+         */
+        CannotDisablePrepaidAutoRenewal: PlainDescriptor<undefined>;
+        /**
+         * Data size of the renewed entry is not in the allowed range. Appended last: the
+         * earlier indices are wire-visible.
+         */
+        BadDataSize: PlainDescriptor<undefined>;
     };
     CollatorSelection: {
         /**
@@ -3159,30 +3136,32 @@ type IConstants = {
          */
         MaxTransactionSize: PlainDescriptor<number>;
         /**
-         * Cap, in bytes, on total permanent storage (via `renew`) committed across
-         * all authorizations. Tracks chain-wide capacity for permanent data.
-         */
-        MaxPermanentStorageSize: PlainDescriptor<bigint>;
-        /**
          * Authorizations expire after this many blocks.
          */
         AuthorizationPeriod: PlainDescriptor<number>;
         /**
-         * Priority of store/renew transactions.
+         * Pool params for signed and preimage-authorized `store`. One prefix is safe: they
+         * tag on `(who, content_hash)` and `content_hash` respectively.
          */
-        StoreRenewPriority: PlainDescriptor<bigint>;
+        StoreTxParams: PlainDescriptor<Anonymize<I9s2ue1goudgqc>>;
         /**
-         * Longevity of store/renew transactions.
+         * Pool params for `authorize_*` and `refresh_*`, which validate untagged.
          */
-        StoreRenewLongevity: PlainDescriptor<bigint>;
+        AuthorizeTxParams: PlainDescriptor<Anonymize<I9s2ue1goudgqc>>;
         /**
-         * Priority of unsigned transactions to remove expired authorizations.
+         * Pool params for `remove_expired_account_authorization`. The three cleanup calls get
+         * their own items because two provide `who` and a `ContentHash` encodes like an
+         * `AccountId32`, so they need distinct prefixes despite shared pricing.
          */
-        RemoveExpiredAuthorizationPriority: PlainDescriptor<bigint>;
+        RemoveExpiredAccountAuthorizationTxParams: PlainDescriptor<Anonymize<I9s2ue1goudgqc>>;
         /**
-         * Longevity of unsigned transactions to remove expired authorizations.
+         * Pool params for `remove_expired_preimage_authorization`.
          */
-        RemoveExpiredAuthorizationLongevity: PlainDescriptor<bigint>;
+        RemoveExpiredPreimageAuthorizationTxParams: PlainDescriptor<Anonymize<I9s2ue1goudgqc>>;
+        /**
+         * Pool params for `remove_exhausted_authorizer`.
+         */
+        RemoveExhaustedAuthorizerTxParams: PlainDescriptor<Anonymize<I9s2ue1goudgqc>>;
     };
     HopPromotion: {
         /**
@@ -3190,6 +3169,24 @@ type IConstants = {
          * submit timestamp and the on-chain time when validating a promotion.
          */
         SubmitTimestampTolerance: PlainDescriptor<bigint>;
+        /**
+         * Pool params for `promote`. `integrity_test` enforces its priority below `store`'s.
+         */
+        PromoteTxParams: PlainDescriptor<Anonymize<I9s2ue1goudgqc>>;
+    };
+    DataRenewal: {
+        /**
+         * Cap, in bytes, on total permanent storage (via `renew`) committed across
+         * all authorizations.
+         */
+        MaxPermanentStorageSize: PlainDescriptor<bigint>;
+        /**
+         * Pool params for every renewal call. One prefix, so at most one of `renew`,
+         * `force_renew` and `enable_auto_renew` per account and content hash is queued at
+         * a time. Preimage `force_renew` tags on the content hash alone, so it dedups
+         * separately.
+         */
+        RenewTxParams: PlainDescriptor<Anonymize<I9s2ue1goudgqc>>;
     };
     CollatorSelection: {
         /**
@@ -3361,16 +3358,66 @@ type IRuntimeCalls = {
         authorities: RuntimeDescriptor<[], Anonymize<Ic5m5lp1oioo8r>>;
     };
     /**
-     * API to tell the node side how the relay parent should be chosen.
+     * API to tell the node side how the relay parent should be chosen and how claim queue
+     * offsets are determined.
      *
-     * A larger offset indicates that the relay parent should not be the tip of the relay chain,
-     * but `N` blocks behind the tip. This offset is then enforced by the runtime.
+     * A larger relay parent offset indicates that the relay parent should not be the tip of
+     * the relay chain, but `N` blocks behind the tip. This offset is then enforced by the
+     * runtime.
+     *
+     * The max claim queue offset determines how far "into the future" collators target when
+     * selecting cores from the claim queue. This provides async backing flexibility while
+     * preventing collators from skipping slots.
+     * See: <https://github.com/paritytech/polkadot-sdk/issues/8893>
+     *
+     * Version history:
+     * - Version 1: Initial version with `relay_parent_offset` only
+     * - Version 2: Added `max_claim_queue_offset` method
      */
     RelayParentOffsetApi: {
         /**
-         * Fetch the slot offset that is expected from the relay chain.
+         * Fetch the relay parent offset that is expected from the relay chain.
+         *
+         * This determines how many blocks behind the relay chain tip the relay parent should be.
          */
         relay_parent_offset: RuntimeDescriptor<[], number>;
+        /**
+         * Maximum claim queue offset for async backing flexibility.
+         *
+         * Bounds how far "into the future" a candidate may look in the claim queue when
+         * selecting a core. The effective claim queue depth depends on the candidate version:
+         *
+         * - **V1/V2 candidates**: the claim queue is looked up at the candidate's `relay_parent`,
+         * which is `relay_parent_offset` blocks behind the relay-chain tip. The effective
+         * depth is `relay_parent_offset + max_claim_queue_offset`.
+         *
+         * - **V3 candidates**: the claim queue is looked up at the candidate's
+         * `scheduling_parent` — the relay-chain block of the *last finished* slot, decoupled
+         * from the execution-context `relay_parent`. The effective depth is just
+         * `max_claim_queue_offset`.
+         *
+         * Collators select a core via an offset in `[0, max_claim_queue_offset]`.
+         *
+         * - **V2 candidates**: `max_claim_queue_offset = 1` is sufficient. The claim queue is
+         * looked up at `relay_parent`, which sits behind the tip. Offset 0 covers synchronous
+         * backing in the next relay block; offset 1 covers asynchronous backing in the relay
+         * block after that.
+         *
+         * - **V3 candidates**: offset 0 is not reachable — the `scheduling_parent`
+         * is usually the leaf when picked, but its child is already being built, so there is
+         * no opportunity to land in the next relay block. Offset 1 is reachable under
+         * synchronous-backing semantics. For elastic scaling the last block in the bundle is
+         * built near the end of the current slot, which makes offset 1 too tight —
+         * `max_claim_queue_offset = 2` is the minimum cap that keeps elastic scaling viable.
+         *
+         * Note: this method was added in `api_version = 2`. Collators calling on runtimes that
+         * only implement `api_version = 1` of [`RelayParentOffsetApi`] will receive an error
+         * and should fall back to a sensible default (current collator defaults: `1` on the
+         * V3 path, `0` on the V1/V2 path).
+         *
+         * See: <https://github.com/paritytech/polkadot-sdk/issues/8893>
+         */
+        max_claim_queue_offset: RuntimeDescriptor<[], number>;
     };
     /**
      * This runtime API is used to inform potential block authors whether they will
@@ -3451,7 +3498,7 @@ type IRuntimeCalls = {
          * Returns an inclusion outcome which specifies if this extrinsic is included in
          * this block or not.
          */
-        apply_extrinsic: RuntimeDescriptor<[extrinsic: Uint8Array], Anonymize<I49ln1dlnvn5mm>>;
+        apply_extrinsic: RuntimeDescriptor<[extrinsic: Uint8Array], Anonymize<I4ch97923evid8>>;
         /**
          * Finish the current block.
          */
@@ -3549,11 +3596,11 @@ type IRuntimeCalls = {
         /**
          * Query information of a dispatch class, weight, and fee of a given encoded `Call`.
          */
-        query_call_info: RuntimeDescriptor<[call: Anonymize<I5h0sno917s28c>, len: number], Anonymize<I6spmpef2c7svf>>;
+        query_call_info: RuntimeDescriptor<[call: Anonymize<I88472ck6vehhv>, len: number], Anonymize<I6spmpef2c7svf>>;
         /**
          * Query fee details of a given encoded `Call`.
          */
-        query_call_fee_details: RuntimeDescriptor<[call: Anonymize<I5h0sno917s28c>, len: number], Anonymize<Iei2mvq0mjvt81>>;
+        query_call_fee_details: RuntimeDescriptor<[call: Anonymize<I88472ck6vehhv>, len: number], Anonymize<Iei2mvq0mjvt81>>;
         /**
          * Query the output of the current `WeightToFee` given some input.
          */
@@ -3631,11 +3678,11 @@ type IRuntimeCalls = {
         /**
          * Dry run call V2.
          */
-        dry_run_call: RuntimeDescriptor<[origin: Anonymize<I9cqlcs1cfiqgk>, call: Anonymize<I5h0sno917s28c>, result_xcms_version: number], Anonymize<Ivl81oef14rgt>>;
+        dry_run_call: RuntimeDescriptor<[origin: Anonymize<I9cqlcs1cfiqgk>, call: Anonymize<I88472ck6vehhv>, result_xcms_version: number], Anonymize<Iavcjlern8lpkb>>;
         /**
          * Dry run XCM program
          */
-        dry_run_xcm: RuntimeDescriptor<[origin_location: XcmVersionedLocation, xcm: XcmVersionedXcm], Anonymize<I3t5bsspkebnln>>;
+        dry_run_xcm: RuntimeDescriptor<[origin_location: XcmVersionedLocation, xcm: XcmVersionedXcm], Anonymize<I7q29odn6kt7nd>>;
     };
     /**
      * API for useful conversions between XCM `Location` and `AccountId`.
@@ -3720,24 +3767,36 @@ type IRuntimeCalls = {
      */
     HopRuntimeApi: {
         /**
+         * Maximum blob size (in bytes) the runtime will accept for promotion.
+         *
+         * Authoritative — the node rejects oversized submissions at the RPC
+         * boundary using this value, before any per-account authorization lookup
+         * or signature verification.
+         */
+        max_promotion_size: RuntimeDescriptor<[], number>;
+        /**
          * Whether `who` may submit a HOP blob of `data_len` bytes for promotion.
          *
-         * Returns `false` for any "not allowed" reason — unknown account, exhausted
-         * quota, oversized payload, etc.
+         * Returns `false` for any per-account "not allowed" reason — unknown
+         * account, exhausted quota, size outside a per-account tier, etc. The
+         * absolute per-submission size cap is the responsibility of
+         * [`Self::max_promotion_size`]; this hook is for per-account policy.
          */
         can_account_promote: RuntimeDescriptor<[who: SS58String, data_len: number], boolean>;
         /**
          * Construct an unsigned promotion extrinsic carrying the user's submit-time
          * (in milliseconds from the Unix epoch), signer, signature, and timestamp
          * so the runtime pallet can verify consent on-chain.
-         * `submit_timestamp` is bound into the signed payload and bounds
-         * the signature's validity window, preventing replay long after the fact.
+         *
+         * `submit_timestamp` is bound into the signed payload. Implementing
+         * runtimes **must** reject promotions whose timestamp is outside a
+         * tolerance window around the current on-chain clock — otherwise the
+         * same `(data, signer, signature)` tuple can be replayed indefinitely
+         * from the collator's persisted metadata. The width of the window is a
+         * runtime policy decision (clock skew + max acceptable promotion
+         * latency); a few hours is a reasonable upper bound.
          */
         create_promotion_extrinsic: RuntimeDescriptor<[data: Uint8Array, signer: Anonymize<I8p068g003vpi6>, signature: Anonymize<I3fo6882e5tjh8>, submit_timestamp: bigint], Uint8Array>;
-        /**
-         * Maximum data size per promotion extrinsic.
-         */
-        max_promotion_size: RuntimeDescriptor<[], number>;
         /**
          * Whether the content with `hash` is already stored on-chain.
          *
@@ -3818,7 +3877,7 @@ type IRuntimeCalls = {
         parachain_id: RuntimeDescriptor<[], number>;
     };
 };
-export type ProductsDevnetBulletinDispatchError = Anonymize<I2no2ge71kivps>;
+export type ProductsDevnetBulletinDispatchError = Anonymize<Iam4td08afnm42>;
 type IAsset = PlainDescriptor<void>;
 export type ProductsDevnetBulletinExtensions = {};
 type PalletsTypedef = {
@@ -3849,7 +3908,7 @@ export type ProductsDevnetBulletinEvents = EventsFromPalletsDef<PalletsTypedef>;
 export type ProductsDevnetBulletinErrors = ErrorsFromPalletsDef<PalletsTypedef>;
 export type ProductsDevnetBulletinConstants = ConstFromPalletsDef<PalletsTypedef>;
 export type ProductsDevnetBulletinViewFns = ViewFnsFromPalletsDef<PalletsTypedef>;
-export type ProductsDevnetBulletinCallData = Anonymize<I5h0sno917s28c> & {
+export type ProductsDevnetBulletinCallData = Anonymize<I88472ck6vehhv> & {
     value: {
         type: string;
     };
@@ -3863,7 +3922,8 @@ type AllInteractions = {
         MultiBlockMigrations: ['Cursor', 'Historic'];
         Balances: ['TotalIssuance', 'InactiveIssuance', 'Account', 'Locks', 'Reserves', 'Holds', 'Freezes'];
         TransactionPayment: ['NextFeeMultiplier', 'StorageVersion', 'TxPaymentCredit'];
-        TransactionStorage: ['Authorizations', 'AllowedAuthorizers', 'Transactions', 'ByteFee', 'EntryFee', 'RetentionPeriod', 'BlockTransactions', 'TransactionByContentHash', 'AutoRenewals', 'PendingAutoRenewals', 'ProofChecked', 'PermanentStorageUsed'];
+        TransactionStorage: ['Authorizations', 'AllowedAuthorizers', 'Transactions', 'ByteFee', 'EntryFee', 'RetentionPeriod', 'BlockTransactions', 'TransactionByContentHash', 'ProofChecked'];
+        DataRenewal: ['Renewals', 'PendingRenewals', 'PermanentStorageUsed'];
         Authorship: ['Author'];
         CollatorSelection: ['Invulnerables', 'CandidateList', 'LastAuthoredBlock', 'DesiredCandidates', 'CandidacyBond'];
         Session: ['Validators', 'CurrentIndex', 'QueuedChanged', 'QueuedKeys', 'DisabledValidators', 'NextKeys', 'KeyOwner', 'ExternallySetKeys'];
@@ -3881,8 +3941,9 @@ type AllInteractions = {
         Utility: ['batch', 'as_derivative', 'batch_all', 'dispatch_as', 'force_batch', 'with_weight', 'if_else', 'dispatch_as_fallible'];
         MultiBlockMigrations: ['force_set_cursor', 'force_set_active_cursor', 'force_onboard_mbms', 'clear_historic'];
         Balances: ['transfer_allow_death', 'force_transfer', 'transfer_keep_alive', 'transfer_all', 'force_unreserve', 'upgrade_accounts', 'force_set_balance', 'force_adjust_total_issuance', 'burn'];
-        TransactionStorage: ['store', 'store_with_cid_config', 'renew', 'force_renew', 'authorize_account', 'authorize_preimage', 'remove_expired_account_authorization', 'remove_expired_preimage_authorization', 'refresh_account_authorization', 'refresh_preimage_authorization', 'enable_auto_renew', 'disable_auto_renew', 'apply_block_inherents', 'add_authorizer', 'remove_authorizer', 'remove_exhausted_authorizer'];
-        HopPromotion: ['promote'];
+        TransactionStorage: ['store', 'store_with_cid_config', 'authorize_account', 'authorize_preimage', 'remove_expired_account_authorization', 'remove_expired_preimage_authorization', 'refresh_account_authorization', 'refresh_preimage_authorization', 'apply_block_inherents', 'add_authorizer', 'remove_authorizer', 'remove_exhausted_authorizer'];
+        HopPromotion: ['promote', 'promote_v2'];
+        DataRenewal: ['renew', 'force_renew', 'enable_auto_renew', 'disable_auto_renew', 'process_pending_renewals'];
         CollatorSelection: ['set_invulnerables', 'set_desired_candidates', 'set_candidacy_bond', 'register_as_candidate', 'leave_intent', 'add_invulnerable', 'remove_invulnerable', 'update_bond', 'take_candidate_slot'];
         Session: ['set_keys', 'purge_keys'];
         XcmpQueue: ['suspend_xcm_execution', 'resume_xcm_execution', 'update_suspend_threshold', 'update_drop_threshold', 'update_resume_threshold'];
@@ -3898,7 +3959,8 @@ type AllInteractions = {
         Balances: ['Endowed', 'DustLost', 'Transfer', 'BalanceSet', 'Reserved', 'Unreserved', 'ReserveRepatriated', 'Deposit', 'Withdraw', 'Slashed', 'Minted', 'MintedCredit', 'Burned', 'BurnedDebt', 'Suspended', 'Restored', 'Upgraded', 'Issued', 'Rescinded', 'Locked', 'Unlocked', 'Frozen', 'Thawed', 'TotalIssuanceForced', 'Held', 'BurnedHeld', 'TransferOnHold', 'TransferAndHold', 'Released', 'Unexpected'];
         TransactionPayment: ['TransactionFeePaid'];
         SkipFeelessPayment: ['FeeSkipped'];
-        TransactionStorage: ['Stored', 'Renewed', 'ProofChecked', 'AccountAuthorized', 'AccountAuthorizationRefreshed', 'PreimageAuthorized', 'PreimageAuthorizationRefreshed', 'ExpiredAccountAuthorizationRemoved', 'ExpiredPreimageAuthorizationRemoved', 'AuthorizerAdded', 'AuthorizerRemoved', 'ExhaustedAuthorizerRemoved', 'RenewalEnabled', 'AutoRenewalDisabled', 'DataAutoRenewed', 'AutoRenewalFailed', 'PermanentStorageUsedUpdated', 'PermanentStorageNearCap'];
+        TransactionStorage: ['Stored', 'ProofChecked', 'AccountAuthorized', 'AccountAuthorizationRefreshed', 'PreimageAuthorized', 'PreimageAuthorizationRefreshed', 'ExpiredAccountAuthorizationRemoved', 'ExpiredPreimageAuthorizationRemoved', 'AuthorizerAdded', 'AuthorizerRemoved', 'ExhaustedAuthorizerRemoved'];
+        DataRenewal: ['Renewed', 'RenewalEnabled', 'AutoRenewalDisabled', 'DataRenewed', 'RenewalFailed', 'PermanentStorageUsedUpdated', 'PermanentStorageNearCap'];
         CollatorSelection: ['NewInvulnerables', 'InvulnerableAdded', 'InvulnerableRemoved', 'NewDesiredCandidates', 'NewCandidacyBond', 'CandidateAdded', 'CandidateBondUpdated', 'CandidateRemoved', 'CandidateReplaced', 'InvalidInvulnerableSkipped'];
         Session: ['NewSession', 'NewQueued', 'ValidatorDisabled', 'ValidatorReenabled'];
         XcmpQueue: ['XcmpMessageSent'];
@@ -3913,7 +3975,8 @@ type AllInteractions = {
         Utility: ['TooManyCalls'];
         MultiBlockMigrations: ['Ongoing'];
         Balances: ['VestingBalance', 'LiquidityRestrictions', 'InsufficientBalance', 'ExistentialDeposit', 'Expendability', 'ExistingVestingSchedule', 'DeadAccount', 'TooManyReserves', 'TooManyHolds', 'TooManyFreezes', 'IssuanceDeactivated', 'DeltaZero'];
-        TransactionStorage: ['BadContext', 'BadDataSize', 'TooManyTransactions', 'NotConfigured', 'RenewedNotFound', 'UnexpectedProof', 'InvalidProof', 'MissingProof', 'MissingStateData', 'DoubleCheck', 'ProofNotChecked', 'AuthorizationNotFound', 'AuthorizationNotExpired', 'PermanentAllowanceExceeded', 'ChainPermanentCapReached', 'InvalidContentHash', 'AuthorizerNotFound', 'AuthorizerBudgetNotExhausted', 'AutoRenewalAlreadyEnabled', 'AutoRenewalNotEnabled', 'NotAutoRenewalOwner', 'CannotDisablePrepaidAutoRenewal', 'InvalidValidUntil', 'InsufficientAuthorizerBudget'];
+        TransactionStorage: ['BadContext', 'BadDataSize', 'TooManyTransactions', 'NotConfigured', 'RenewedNotFound', 'UnexpectedProof', 'InvalidProof', 'MissingProof', 'MissingStateData', 'DoubleCheck', 'ProofNotChecked', 'AuthorizationNotFound', 'AuthorizationNotExpired', 'InvalidContentHash', 'AuthorizerNotFound', 'AuthorizerBudgetNotExhausted', 'InvalidValidUntil', 'InsufficientAuthorizerBudget'];
+        DataRenewal: ['BadContext', 'RenewedNotFound', 'TooManyTransactions', 'RenewalAlreadyEnabled', 'AutoRenewalNotEnabled', 'NotAutoRenewalOwner', 'CannotDisablePrepaidAutoRenewal', 'BadDataSize'];
         CollatorSelection: ['TooManyCandidates', 'TooFewEligibleCollators', 'AlreadyCandidate', 'NotCandidate', 'TooManyInvulnerables', 'AlreadyInvulnerable', 'NotInvulnerable', 'NoAssociatedValidatorId', 'ValidatorNotRegistered', 'InsertToCandidateListFailed', 'RemoveFromCandidateListFailed', 'DepositTooLow', 'UpdateCandidateListFailed', 'InsufficientBond', 'TargetIsNotCandidate', 'IdenticalDeposit', 'InvalidUnreserve'];
         Session: ['InvalidProof', 'NoAssociatedValidatorId', 'DuplicatedKey', 'NoKeys', 'NoAccount'];
         XcmpQueue: ['BadQueueConfig', 'AlreadySuspended', 'AlreadyResumed', 'TooManyActiveOutboundChannels', 'TooBig'];
@@ -3929,8 +3992,9 @@ type AllInteractions = {
         MultiBlockMigrations: ['CursorMaxLen', 'IdentifierMaxLen'];
         Balances: ['ExistentialDeposit', 'MaxLocks', 'MaxReserves', 'MaxFreezes'];
         TransactionPayment: ['OperationalFeeMultiplier'];
-        TransactionStorage: ['MaxBlockTransactions', 'MaxTransactionSize', 'MaxPermanentStorageSize', 'AuthorizationPeriod', 'StoreRenewPriority', 'StoreRenewLongevity', 'RemoveExpiredAuthorizationPriority', 'RemoveExpiredAuthorizationLongevity'];
-        HopPromotion: ['SubmitTimestampTolerance'];
+        TransactionStorage: ['MaxBlockTransactions', 'MaxTransactionSize', 'AuthorizationPeriod', 'StoreTxParams', 'AuthorizeTxParams', 'RemoveExpiredAccountAuthorizationTxParams', 'RemoveExpiredPreimageAuthorizationTxParams', 'RemoveExhaustedAuthorizerTxParams'];
+        HopPromotion: ['SubmitTimestampTolerance', 'PromoteTxParams'];
+        DataRenewal: ['MaxPermanentStorageSize', 'RenewTxParams'];
         CollatorSelection: ['PotId', 'MaxCandidates', 'MinEligibleCollators', 'MaxInvulnerables', 'KickThreshold', 'pot_account'];
         Session: ['KeyDeposit'];
         Aura: ['SlotDuration'];
@@ -3943,7 +4007,7 @@ type AllInteractions = {
     };
     apis: {
         AuraApi: ['slot_duration', 'authorities'];
-        RelayParentOffsetApi: ['relay_parent_offset'];
+        RelayParentOffsetApi: ['relay_parent_offset', 'max_claim_queue_offset'];
         AuraUnincludedSegmentApi: ['can_build_upon'];
         Core: ['version', 'execute_block', 'initialize_block'];
         Metadata: ['metadata', 'metadata_at_version', 'metadata_versions'];
@@ -3961,7 +4025,7 @@ type AllInteractions = {
         AuthorizedAliasersApi: ['authorized_aliasers', 'is_authorized_alias'];
         CollectCollationInfo: ['collect_collation_info'];
         TransactionStorageApi: ['retention_period', 'indexed_transactions'];
-        HopRuntimeApi: ['can_account_promote', 'create_promotion_extrinsic', 'max_promotion_size', 'is_promoted_on_chain'];
+        HopRuntimeApi: ['max_promotion_size', 'can_account_promote', 'create_promotion_extrinsic', 'is_promoted_on_chain'];
         BulletinTransactionStorageApi: ['account_authorization', 'can_store', 'can_renew'];
         GenesisBuilder: ['build_state', 'get_preset', 'preset_names'];
         GetParachainInfo: ['parachain_id'];
