@@ -198,6 +198,12 @@ test("checkRegistration reads the key and the username back from the chain and n
   assert.deepEqual([claimed.registration.status, typeof claimed.registration.attestedAt], ["attested", "string"]);
   const minted = mintPersonaRecord("bob", { genesis: GENESIS });
   assert.equal(applyCheck(minted, { onChain: false, reason: "no key" }), false, "nothing was claimed yet: nothing to re-register");
+  // A claim the chain does not hold yet is pending, not forgotten (devnet's attester took 51 s for one persona and
+  // stalled for the next, 2026-09-15): marking it would make `pcs user register` claim a second username.
+  const pending = mintPersonaRecord("carol", { genesis: GENESIS });
+  pending.registration.status = "claimed";
+  assert.equal(applyCheck(pending, { onChain: false, reason: "no key" }), false, "a pending claim is left alone");
+  assert.deepEqual([registrationView(pending).status, registrationView(pending).reason], ["claimed", null]);
   assert.equal(applyCheck(claimed, { onChain: false, reason: "wiped" }), true);
   assert.deepEqual([claimed.registration.needsReregistration, claimed.registration.reason], [true, "wiped"]);
   assert.equal(applyCheck(claimed, { onChain: true }), true);

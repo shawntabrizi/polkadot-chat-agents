@@ -153,6 +153,13 @@ If `pca storage` fails with `Incompatible runtime entry` after a migration,
 the chain descriptors are stale: run `npm run prepare` in `bot-core` and commit
 the regenerated `vendor/descriptors`.
 
+The first chain read after a runtime upgrade downloads the network's metadata
+(`pca` prints "Downloading the network's metadata…"; the public nodes take up
+to a minute). It is cached under `~/.pca/cache/metadata/` by the runtime's
+code hash — `PCA_METADATA_CACHE_DIR` moves it — so later runs read the chain
+in about a second. The cache holds public data only and can be deleted at any
+time.
+
 ## Use Paseo
 
 Select it explicitly for every new Paseo bot:

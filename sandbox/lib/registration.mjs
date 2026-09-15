@@ -111,7 +111,14 @@ export async function checkRegistration(directory, { account, username = null, i
 }
 const normalizeKey = (hex) => String(hex).replace(/^0x/i, "").toLowerCase();
 
-/** Apply a check to a persisted record: mark it (with the reason) or clear an old mark. Returns true when the record changed. */
+/**
+ * Apply a check to a persisted record: mark it (with the reason) or clear an
+ * old mark. Only a registration the chain once attested can be forgotten; a
+ * claim the chain does not hold yet is still pending (the attester can take
+ * minutes — or stall), and marking it would make `pcs user register` claim a
+ * second username while the first is still queued. Returns true when the
+ * record changed.
+ */
 export function applyCheck(record, check) {
   const reg = record.registration;
   const before = [reg.needsReregistration, reg.reason ?? null, reg.status].join("|");
@@ -119,7 +126,7 @@ export function applyCheck(record, check) {
     reg.needsReregistration = false;
     reg.reason = null;
     if (reg.status === "claimed") { reg.status = "attested"; reg.attestedAt ??= new Date().toISOString(); }
-  } else if (reg.status !== "minted") {
+  } else if (reg.status === "attested") {
     reg.needsReregistration = true;
     reg.reason = check.reason;
   }
