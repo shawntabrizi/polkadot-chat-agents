@@ -1888,3 +1888,185 @@ No bot, daemon or dev server was left behind: the echo bot (pid 90515) and
 the devnet daemon (port 7799) were stopped at the end; `sandboxecho-dev`
 remains in `~/.pca/bots` as a registered devnet bot (`sandboxechodev.90`),
 locked to alice; the owner's own mock daemon on 7788 was left untouched.
+
+## S6c — After the devnet migration: the chain is read back (2026-09-15)
+
+The point of S6c: Products Devnet migrated on 2026-09-08 and wiped every
+lite-person registration without a genesis change (decision D7). The
+sandbox and `pca` now read registrations back from the chain; `pcs user
+register` and `pca register --again` register again what the chain forgot.
+This run exercised those paths against the live network, on a scratch
+state dir (port 7799; the owner's mock daemon on 7788 was left untouched).
+
+### What was verified (offline, CI)
+
+`cd sandbox && npm test`: 107 tests (new: `checkRegistration` /
+`applyCheck`, the pending-claim case below). `cd bot-core && npm test`:
+433 tests, 428 pass, 5 skipped (the T3ams SDK cases; `@t3ams/bcts` is not
+installed here; new: `chain-client.test.mjs`). `cd sandbox/ui && npm run
+check`: tsc, vitest, vite build.
+
+### (a) `pca status` on every devnet bot said "can't reach the network"
+
+```
+$ pca status sandboxecho-dev            # also heybot, shawnbot.01
+  registration: can't reach the network right now (try again)
+```
+
+The three People Paseo endpoints all answered a websocket upgrade and a
+`chain_getFinalizedHead` in 1–5 s; the runtime is `people-paseo 2005002`
+(2005001 on 09-09). What took the time was the metadata:
+
+| endpoint | `Metadata_metadata_at_version` v15 (505 KB) | v16 (524 KB) |
+|---|---|---|
+| rpc.interweb-it.com | 17.8 s | 59.5 s |
+| people-paseo.rotko.net | 28.6 s | 64.5 s |
+| people-paseo.gatotech.network | (`state_getRuntimeVersion` alone timed out at 20 s) | — |
+
+papi asks for v16 first, and its first storage read waits for it — inside
+the 12 s "network check" of `pca status` and the 15 s per-read deadline
+of both directories. The typed descriptors are compatible (`Consumers`
+read fine once the metadata was in). Fix `c991aac`, `lib/chain-client.mjs`:
+papi's `getMetadata`/`setMetadata` cache on disk by code hash, and
+`awaitRuntime` (connect 12 s, then metadata 90 s) before the first read.
+Measured through the helper on `rpc.interweb-it.com`:
+
+```
+People   cold: cache miss at 1.2 s, runtime ready at 10.9 s (31.7 s on the first try), 114 Consumers read 1 s later
+People   warm: runtime ready 1.2 s, read 1 s
+Bulletin cold: miss at 1.4 s, ready 5.2 s (bulletin-paseo 2004000);  warm: 1.2 s
+$ pca status sandboxecho-dev
+  Downloading the network's metadata (one time after a network update, up to a minute)…
+  registration: gone from the chain — the network forgot this registration (a migration or reset). Re-register:  pca register sandboxecho-dev --again
+$ pca status heybot ; pca status shawnbot.01     # cache hit: no download line, same verdict, ~3 s each
+$ ls ~/.pca/cache/metadata/   → d0f3191c…36df.bin (524446 B)
+```
+
+### (b) `pcs up --network devnet`, `pcs bot attach`, `pcs user add`
+
+```
+$ pcs up --network devnet --dir <scratch>/devnet-state --port 7799
+{"event":"SANDBOX_UP","network":"devnet","genesis":"0xe6c30d6e…","chainReset":null,"forgotten":{"personas":[],"bots":[]},…}
+$ pcs bot attach sandboxecho-dev
+{ "name": "sandboxecho-dev", "username": "sandboxechodev.90", "account": "0x9e60b889…", "identifierKey": "0x00a87ff0…",
+  "credibility": null, "onChain": false, "needsReregistration": true,
+  "reason": "the chain has no identifier key for 0x9e60b889…", … }
+$ pcs user add alice --wait 240                        # 55 s
+{ "name": "alice", "account": "0x9e1a866c…", "username": "sandboxalice.54",
+  "registration": { "status": "attested", "reason": null, "claimedAt": "2026-09-15T18:02:03.648Z",
+                    "attestedAt": "2026-09-15T18:02:54.363Z", "bulletin": "authorized" }, … }
+$ pcs user register alice
+✗ persona alice is registered as sandboxalice.54 and on the chain; nothing to do
+$ pcs user list      → alice  sandboxalice.54  attested (reason null)          # read back from the chain
+$ pcs bot list       → sandboxecho-dev  sandboxechodev.90  onChain false, reason "the chain has no identifier key for 0x9e60b889…"
+$ pcs user find sandboxalice
+[ { "username": "sandboxalice.54", "account": "0x9e1a866c…", "status": "ASSIGNED", "onChain": true } ]
+```
+
+A fresh persona registers on the post-update chain through the same
+client-proof claim as before the migration: attested 51 s after the
+claim, the RFC-0004 container on chain, the Bulletin allowance granted.
+
+### (c) `pca register sandboxecho-dev --again` — the old number, then a new one
+
+```
+$ pca register sandboxecho-dev --again --wait 240                    # 18:10Z
+→ Checking the chain for sandboxechodev.90…
+✓ Claimed sandboxechodev.90 again.                                   # the backend answered 200 to the OLD number
+→ Waiting for the network to confirm (up to 240s)…
+⚠ Not confirmed yet — this can take a few minutes. Check or retry:  pca register sandboxecho-dev
+✓ Polkadot Products Devnet file allowance is already ready.          # the allowance survived the wipe
+$ pca register sandboxecho-dev --wait 420                            # resumes: not confirmed
+$ pcs user find sandboxechodev   → []                                # the backend's search lists ASSIGNED only
+$ pca register sandboxecho-dev --again --wait 20                     # 18:19Z
+  The backend refused the old number (409 Conflict: {"error":"Preferred digits 90 already taken for username sandboxechodev"}) and assigned a new one.
+⚠ The backend assigned sandboxechodev.69; sandboxechodev.90 is no longer this bot's name. Tell its contacts.
+$ pca register sandboxecho-dev --wait 300                            # not confirmed by 18:37Z
+$ pca status sandboxecho-dev
+  registration: username claimed, confirmation pending — check again or run: pca register sandboxecho-dev
+```
+
+Both branches of `reregisterIdentity` ran live: the chain first, the old
+number asked for, the backend's pick after a 409. What differs from
+Paseo Next (S6): devnet's backend accepted the old number the first
+time (200), and refused it only on the second attempt — as taken by its
+own pending claim.
+
+### (d) Nothing attested after 18:03Z — the attester stalled
+
+To separate the account from the code path, two fresh identities were
+claimed through the two other paths:
+
+```
+$ pca create sandboxecho-new --brain echo --network devnet --owner 0x9e1a866c… --username sandboxechonew --wait 240   # 18:22Z
+✓ Registered as sandboxechonew.77
+⚠ Not confirmed yet — this can take a few minutes.
+$ pcs user add bob --wait 240                                                                                       # 18:27:55Z
+{ "username": "sandboxbob.22", "registration": { "status": "claimed", "attestedAt": null } }
+```
+
+Chain-wide, `Resources.Consumers` went from 114 entries (17:55Z) to 115
+(18:33Z, block 6812995): alice. Four claims from three paths
+(`sandboxechodev.90`, `.69`, `sandboxechonew.77`, `sandboxbob.22`) were
+accepted by the backend and not attested in 15–27 minutes, while alice's
+took 51 s at 18:02Z. The identity backend's attester, not the sandbox or
+`pca`, is what stopped; recorded as questions.md S6c.2.
+
+### (e) The defect the stall exposed, and the restart
+
+`pcs user list` after bob's claim showed `sandboxbob.22 needs
+re-registration (the chain has no identifier key for 0x3207e3f4…)`:
+`applyCheck` marked every record the chain did not hold unless it was
+still minted — a pending claim included. Had `pcs user register bob`
+been run, it would have claimed a second username while the first was
+queued (and the backend would have refused `.22` as taken, by the
+pending claim itself). Fixed in `7fd4fb0`: only an attested registration
+can be forgotten. bob's scratch record was edited by hand to clear the
+wrong mark, then the daemon was stopped and started again on the same
+state dir with the fix:
+
+```
+$ pcs up --network devnet --dir <scratch>/devnet-state --port 7799
+{"event":"SANDBOX_NEEDS_REREGISTRATION","personas":[],"bots":[{"name":"sandboxecho-dev","username":"sandboxechodev.90","reason":"the chain has no identifier key for 0x9e60b889…"}]}
+$ pcs user list   → alice sandboxalice.54 attested · bob sandboxbob.22 claimed (pending), reason null
+```
+
+The bot's sandbox entry still names `sandboxechodev.90`: the daemon takes
+the new name from the chain, and the chain has neither yet.
+
+### Deviations from the task, and why
+
+- **The persona ↔ bot round trip did not run**: no bot attested after the
+  wipe while the attester was stalled. The steps are S6b (c), on
+  `sandboxecho-new` (owned by alice) once `pca status sandboxecho-new`
+  says live.
+- **`pcs user register` on a forgotten persona ran only offline**: no
+  pre-wipe persona survived on this machine (the S6b scratch dir was
+  gone); live, the command was exercised through its guard, and its
+  re-claim path is bot-core's `reregisterIdentity`, exercised live by
+  `pca register --again` in (c).
+- **Scope added mid-task**: the metadata cache (a), without which none of
+  the chain reads on this branch ran live today.
+
+### What is verified
+
+- The chain read-back on `pcs up`, `pcs bot attach`, `pcs user list` and
+  `pcs bot list` against the live devnet, with the chain's reason; the
+  restore path after a restart.
+- A fresh registration on the post-update chain, through the sandbox and
+  through `pca create`, and the `--again` flow's two branches.
+- The metadata cache: cold and warm timings on both chains, `pca status`
+  reading the chain again.
+
+### What is not verified
+
+- A message exchange on the post-update devnet (blocked by the attester).
+- The attestation of a re-claimed bot, and `pcs user register` on a
+  persona the chain forgot, live.
+
+The devnet daemon (port 7799) was stopped at the end. Left in
+`~/.pca/bots`: `sandboxecho-dev` (claimed `sandboxechodev.69`, pending)
+and `sandboxecho-new` (claimed `sandboxechonew.77`, pending; its Bulletin
+faucet grant is awaiting confirmation — `pca storage sandboxecho-new
+status`, then `recover`). The scratch state dir holds alice (attested)
+and bob (pending).

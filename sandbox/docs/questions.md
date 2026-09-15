@@ -542,3 +542,17 @@ the sandbox reports them as "not messageable" like the owner's old
    backend refuse a claim whose `identifierKey` does not start `0x00` (the
    community `main` already filters them out of search), so a user with the
    old build is told to update instead of getting an unreachable identity?
+
+2. **The attester stalls, and a pending claim is invisible.** On
+   2026-09-15 the backend attested `sandboxalice.54` 51 s after its claim
+   (18:02Z) and then nothing for 35+ minutes: four claims it accepted
+   with 200 (`sandboxechodev.90`, then `.69` after a 409 on the second
+   try, `sandboxechonew.77`, `sandboxbob.22`) stayed off the chain while
+   `Resources.Consumers` grew by one entry chain-wide. The search route
+   lists ASSIGNED usernames only, so a pending claim cannot be seen from
+   outside. Two asks: (a) is there, or can there be, a read of a claim's
+   status (pending / attested / failed, with the failure) so `pca` and the
+   sandbox can say more than "not confirmed yet"; (b) a re-claim of a
+   wiped bot's old number was accepted with 200 the first time and refused
+   as "already taken" the second — by the pending claim itself. Is a 200
+   for the old number intended, and does the attester ever drain it?
