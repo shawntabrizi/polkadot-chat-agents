@@ -109,7 +109,8 @@ pcs user add alice                       # mints a mnemonic, claims sandboxalice
                                          # (alice is too short for a username), waits for the attestation;
                                          # "pending" if it does not land in time — run it again to keep waiting
 pcs user add alice --username alicetest --wait 300
-pcs user list                            # username, attested | pending attestation | needs re-registration
+pcs user list                            # read back from the chain: attested | pending attestation | needs re-registration (reason)
+pcs user register alice                  # register again a persona the chain forgot (old number first, then a new one)
 pcs user find shawntabrizi               # the backend's search, each hit checked against the chain (onChain)
 pca create sandboxecho --brain echo --network devnet --owner <alice's account>
 pcs bot attach sandboxecho               # verified on chain; then  pca run sandboxecho
@@ -132,17 +133,41 @@ What differs from the mock, and why:
 - Persona seeds live in the state dir (`~/.pca/sandbox/default/personas/
   <name>/identity.json`, mode 0600) because the chain outlives the daemon.
   On restart the personas come back with their registration state.
-- **Chain resets.** The daemon records the genesis it registered each
-  persona on (and `daemon.json` carries the current one). When it starts
-  on a different genesis it marks every persona and attached bot `needs
-  re-registration` and says so; `pcs user add <name>` then claims a new
-  username (the backend refuses to reuse the old number), and
-  `pca register <bot> --again` does the same for a bot.
+- **The chain is read back.** On `pcs up`, `pcs user list` and `pcs bot
+  list` every persona and attached bot is checked against the chain
+  (`Consumers` for the identifier key, `UsernameOwnerOf` for the name); one
+  the chain does not hold is marked `needs re-registration` with the
+  chain's reason. The genesis is recorded only to explain a reset; see
+  [After a devnet migration](#after-a-devnet-migration).
 - Faults, the clock, node restarts and the HOP pool view are refused with
   `409` (`pcs` prints the reason): the sandbox holds no node to break.
   The UI shows a network badge and hides those controls.
 - Scenarios that need none of those run on both networks behind
   `--network`; the rest are mock-only and say so.
+
+### After a devnet migration
+
+A testnet migration can wipe every lite-person registration and keep the
+genesis (Products Devnet, 2026-09-08 — see
+[Use Products Devnet](/guide/devnet#after-a-devnet-migration)). The sandbox
+and `pca` read the chain, never the genesis:
+
+```bash
+pcs up --network devnet                  # ⚠ persona alice (sandboxalice.80) needs re-registration: the chain has no
+                                         #   identifier key for 0x0862f804…  →  pcs user register alice
+                                         # ⚠ bot sandboxecho-dev (sandboxechodev.90) needs re-registration: …  →  pca register sandboxecho-dev --again
+pcs user register alice                  # the same keys; the old number first, a new one when the backend refuses it
+pca status sandboxecho-dev               # "registration: gone from the chain …"
+pca register sandboxecho-dev --again     # then  pcs bot attach sandboxecho-dev  to pick up the new username
+pcs request alice sandboxecho-dev        # the chat state did not survive either: open the chat again
+```
+
+What is wiped: identifier keys and usernames on the People chain. What
+survives: the persona and bot keys and accounts (their allowlists still
+match), the Bulletin allowances, and the identity backend's old records
+(it may refuse the old number). If the daemon or `pca storage` fails on a
+storage read after a migration, regenerate the descriptors (`npm run
+prepare` in `bot-core`).
 
 ### The web UI
 

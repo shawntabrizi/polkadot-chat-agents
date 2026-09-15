@@ -516,3 +516,29 @@ Next is blocked by the backend, not by the sandbox.
    sandbox, bot-core, the current app) can message it. The phone step (e)
    needs a re-registration first; is that the plan for the owner's phone
    on devnet?
+
+## S6c
+
+The `0x04` identifier keys on the post-update chain. On 2026-09-09
+(finalized block 6572578) `Resources.Consumers` held 13 entries: 7 with the
+RFC-0004 marker `0x00` and zero padding, 6 starting `0x04` with non-zero
+tails (`istvan.01`, `robbyke.01`, `dokker.01`, `danisanchez.01`,
+`northvane.01`, `zhoujian.01`). The app's
+`AccountEcdhKeyScale` (`common/.../utils/scale/AccountEcdhKeyScale.kt`)
+decodes one marker only — `TYPE_X25519 = 0x00`; every other first byte is
+`Unknown(raw)`, kept for byte-identical re-encoding and never used for
+chat — and its doc comment says the 65-byte width "is what an uncompressed
+P-256 point used to occupy". Each of the six `0x04` values parses as a
+valid SEC1 uncompressed P-256 point (`p256.Point.fromBytes` in
+`@noble/curves`, the sandbox probe), which a random 64-byte tail would not.
+**Finding: they are stragglers — registrations made after the wipe by a
+pre-RFC-0004 client (an old app build still installed) — not RFC-0004
+containers with another marker.** Nothing in this repo can message them;
+the sandbox reports them as "not messageable" like the owner's old
+`shawntabrizi.01` in S6b.
+
+1. **Old app builds still register P-256 keys after the update.** Six of
+   the first thirteen post-update registrations are P-256. Can the identity
+   backend refuse a claim whose `identifierKey` does not start `0x00` (the
+   community `main` already filters them out of search), so a user with the
+   old build is told to update instead of getting an unreachable identity?

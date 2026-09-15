@@ -160,3 +160,35 @@ rate limit, the proof-of-compute puzzle, the chain's padded form of a
 name); the sandbox's chain directory calls it rather than keeping a second
 implementation of the same route — the backend is not the chat protocol
 under test, so the "two implementations" rule does not apply to it.
+
+## D7 — Registration presence is the chain's answer, never the genesis (2026-09-09)
+
+**Context.** Products Devnet migrated on 2026-09-08 (X25519 chat keys,
+refreshed pseudonym contexts; People runtime 2004003 → 2005001) and wiped
+every lite-person registration **without a genesis change**:
+`Resources.Consumers` went from 278 entries to a dozen, every pre-update
+username is gone from `UsernameOwnerOf`. S6's reset detection keyed on the
+genesis hash (`markChainReset`) and saw nothing; alice and
+`sandboxechodev.90` stayed "attested" in the state dir while the chain
+held nothing for them. Bulletin's authorization extent gained `extra`
+(descriptors regenerated in `98a17a4`).
+
+**Decision.** The genesis is recorded only to explain a reset. Whether a
+registration exists is read back from the chain — `Consumers(account)` for
+the identifier key, `UsernameOwnerOf(username)` for the name
+(`lib/registration.mjs` `checkRegistration`) — on `pcs up`, on every `pcs
+user list` and `pcs bot list`, and on `pcs bot attach`. A record the chain
+does not hold is marked with the chain's reason; a claim the chain attested
+meanwhile is promoted. Registering again goes through bot-core's
+`reregisterIdentity` (the chain first, the old number first, the backend's
+pick when it refuses), so `pcs user register <name>` and `pca register
+<bot> --again` behave the same. bot-core's `pca info` and `pca status` make
+the same one read (`registrationOnChain`) on a named profile.
+
+`Consumers` now carries `credibility`; the directory exposes it (`pcs bot
+list`, `/api/consumers/:account`, the wire labels' cache). Paseo Next's
+value has the same shape (verified live), so one decoder serves both.
+
+The community apps moved to the GitHub org
+`Polkadot-Community-Foundation` (`polkadot-android-community`,
+`polkadot-desktop-community`; the `paritytech` repositories are upstream).

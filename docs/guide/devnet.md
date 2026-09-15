@@ -105,6 +105,54 @@ pca run devagent --greet
 `pca info` shows the selected network and registered identity. Private Devnet
 bots also use the Devnet-specific test file-delivery allowance.
 
+## After a devnet migration
+
+Products Devnet was migrated on 2026-09-08
+([announcement](https://docs.polkadotcommunity.foundation/updates/2026-09-devnet-update/)):
+chat keys moved to X25519, the personhood pseudonym contexts were refreshed,
+and every lite-person registration was wiped — with no genesis change. So a
+bot's local records (`registered: true`, its username) can be stale while the
+chain holds nothing for it. Expect the same after any devnet or Paseo Next
+migration or reset.
+
+What is wiped: the bot's `Resources.Consumers` entry (its identifier key) and
+its username (`UsernameOwnerOf`). What survives: the bot's keys and account
+(nothing in `~/.pca/bots` changes), its Bulletin file allowance (a separate
+chain), and the identity backend's own record of the old username, which the
+backend may refuse to hand out again.
+
+How to detect it — `pca` reads the chain, never the genesis:
+
+```bash
+pca status devagent     # "registration: gone from the chain — the network forgot this registration"
+pca info devagent       # same status line; exit code 0 (info is read-only)
+```
+
+How to recover:
+
+```bash
+pca register devagent --again
+```
+
+The chain is read first (nothing happens if the bot is still on it), then the
+username is claimed again with the same keys: the old number is asked for
+first, and when the backend refuses it (`409 Preferred digits NN already
+taken`) the backend assigns a new one — `pca` prints the new name and asks you
+to tell the bot's contacts. On Devnet the claim carries the same client-proof
+session as a first registration. Sandbox personas have the same command:
+`pcs user register <name>` (see [Testing](/guide/testing#after-a-devnet-migration)).
+
+Users of the app must reinstall it and register a fresh username; pre-update
+identities (P-256 keys, `0x04…` on chain) cannot be messaged. The community
+apps are now released from the GitHub org
+[Polkadot-Community-Foundation](https://github.com/Polkadot-Community-Foundation)
+(`polkadot-android-community`, `polkadot-desktop-community`; iOS through
+TestFlight); the `paritytech` repositories are upstream.
+
+If `pca storage` fails with `Incompatible runtime entry` after a migration,
+the chain descriptors are stale: run `npm run prepare` in `bot-core` and commit
+the regenerated `vendor/descriptors`.
+
 ## Use Paseo
 
 Select it explicitly for every new Paseo bot:
