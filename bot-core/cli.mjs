@@ -23,8 +23,6 @@ import {
   ss58Address,
   ss58Decode,
 } from "@polkadot-labs/hdkd-helpers";
-import { createClient as createPapiClient } from "polkadot-api";
-import { getWsProvider } from "polkadot-api/ws";
 import { paseoPeopleNext, productsDevnetPeople } from "./lib/descriptors.mjs";
 import {
   DEFAULT_NETWORK_PROFILE,
@@ -34,6 +32,7 @@ import {
   configuredNetworkProfile,
   peopleEndpointsFor,
 } from "./lib/network-config.mjs";
+import { awaitRuntime, createChainClient } from "./lib/chain-client.mjs";
 import { createChainDirectory, createSandboxDirectory, registrationOnChain } from "./lib/people-directory.mjs";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
 import {
@@ -116,10 +115,15 @@ async function withDirectory(config, fn) {
   // sandbox's control API, so no unit test touches a live chain.
   if (process.env.PCA_PEOPLE_DIRECTORY_URL?.trim()) return fn(createSandboxDirectory(process.env.PCA_PEOPLE_DIRECTORY_URL.trim()));
   const endpoints = peopleEndpointsFor(config.endpoint, config.networkProfile);
-  const client = createPapiClient(getWsProvider(endpoints));
+  // The runtime is loaded before the first read, so a read's own deadline
+  // never covers the metadata download (a minute from the public nodes,
+  // once per runtime upgrade — cached after that).
+  const client = createChainClient(endpoints, { onMetadataMiss: () => note("Downloading the network's metadata (one time after a network update, up to a minute)…") });
   const descriptor = config.networkProfile === PASEO.id ? paseoPeopleNext : productsDevnetPeople;
-  try { return await fn(createChainDirectory(client.getTypedApi(descriptor))); }
-  finally { client.destroy(); }
+  try {
+    await awaitRuntime(client);
+    return await fn(createChainDirectory(client.getTypedApi(descriptor)));
+  } finally { client.destroy(); }
 }
 
 // Bots live in a stable per-user location so `pca list` finds them regardless of
@@ -1557,7 +1561,7 @@ async function chainRegistration(name, cfg) {
   if (configuredTransport(cfg) === "t3ams" || (!named && cfg.registered)) return { state: cfg.registered ? "live" : "pending", username: cfg.username };
   let found;
   try {
-    found = await withDirectory(cfg, (directory) => withTimeout(registrationOnChain(directory, { account: cfg.account, username: cfg.username }), 12_000, "network check"));
+    found = await withDirectory(cfg, (directory) => registrationOnChain(directory, { account: cfg.account, username: cfg.username }));
   } catch { return { state: "unreachable", username: cfg.username }; }
   if (!found.onChain) return { state: cfg.registered ? "gone" : "pending", username: cfg.username };
   if (!cfg.registered) { cfg.registered = true; saveConfig(name, cfg); }

@@ -97,6 +97,7 @@ import {
   configuredNetworkProfile,
   peopleEndpointsFor,
 } from "./lib/network-config.mjs";
+import { metadataCache } from "./lib/chain-client.mjs";
 import { createChainDirectory, createSandboxDirectory } from "./lib/people-directory.mjs";
 import { createLazyClient, createPapiStatementStoreAdapter } from "@novasamatech/statement-store";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
@@ -646,7 +647,7 @@ const papiProvider = getWsProvider(endpoints);
 const socketConnected = (p) => p.getStatus?.().type === WsEvent.CONNECTED;
 const chainConnected = () => socketConnected(wsProvider) && socketConnected(papiProvider);
 const requestRpc = lazyClient.getRequestFn();
-const papiClient = createPapiClient(papiProvider);
+const papiClient = createPapiClient(papiProvider, metadataCache());
 // The People-chain state the bot reads (identifier keys) comes through one
 // seam, lib/people-directory.mjs: the chain via papi, or the sandbox's
 // control API when the bot runs against the local sandbox. Nothing below

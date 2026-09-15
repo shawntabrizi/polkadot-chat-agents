@@ -10,6 +10,7 @@ import { DEV_PHRASE, mnemonicToMiniSecret } from "@polkadot-labs/hdkd-helpers";
 import { createClient, Enum } from "polkadot-api";
 import { getPolkadotSigner } from "polkadot-api/signer";
 import { getWsProvider } from "polkadot-api/ws";
+import { metadataCache } from "./chain-client.mjs";
 import { bulletinPaseoNextV2, productsDevnetBulletin } from "./descriptors.mjs";
 import {
   DEFAULT_NETWORK_PROFILE,
@@ -130,7 +131,7 @@ export function createTestnetFaucetSigner() {
 }
 
 export function createTestnetBulletinClient(networkProfile = DEFAULT_NETWORK_PROFILE) {
-  return createClient(getWsProvider(testnetFileAllowanceNetwork(networkProfile).rpcEndpoint));
+  return createClient(getWsProvider(testnetFileAllowanceNetwork(networkProfile).rpcEndpoint), metadataCache());
 }
 
 function normalizedAllowanceAddress(address) {

@@ -18,8 +18,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createLazyClient, createPapiStatementStoreAdapter } from "@novasamatech/statement-store";
-import { createClient } from "polkadot-api";
 import { getWsProvider } from "polkadot-api/ws";
+
+import { awaitRuntime, createChainClient } from "../bot-core/lib/chain-client.mjs";
 
 import { createApi } from "./lib/api.mjs";
 import { hexToBytes, log, normHex } from "./lib/bytes.mjs";
@@ -97,10 +98,14 @@ async function startTestnet({ profile, fetchImpl }) {
   // One papi client for chain reads (the directory) and the genesis; the
   // personas' statement traffic rides their own lazy clients, mirrored into
   // the seen-store so `pcs wire` shows what their subscriptions saw.
-  const chain = createClient(getWsProvider([...profile.peopleEndpoints]));
+  // The runtime is loaded before the first read (bot-core's chain client:
+  // metadata cached per code hash, a minute from the public nodes on a miss),
+  // so no directory read carries the download inside its own deadline.
+  const chain = createChainClient(profile.peopleEndpoints, { onMetadataMiss: (codeHash) => log("SANDBOX_CHAIN_METADATA_DOWNLOAD", { network: profile.id, codeHash }) });
   let genesis;
   try {
     genesis = normHex((await withTimeout(chain.getChainSpecData(), CHAIN_TIMEOUT_MS, `${profile.name} connect`)).genesisHash);
+    await awaitRuntime(chain);
   } catch (error) {
     chain.destroy();
     throw new Error(`cannot reach ${profile.name} at ${profile.peopleEndpoints[0]}: ${error.message}`);
