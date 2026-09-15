@@ -6,7 +6,7 @@ export type HexString = `0x${string}`;
 
 export type Device = { index: number; account: HexString; encryptionPublicKey: HexString; online: boolean; removed: boolean };
 // Where a persona's registration stands on a real network (null on the mock, where the name is the username).
-export type Registration = { username: string | null; status: 'minted' | 'claimed' | 'attested' | 'needs-reregistration'; genesis: HexString | null; claimedAt: string | null; attestedAt: string | null; bulletin: string };
+export type Registration = { username: string | null; status: 'minted' | 'claimed' | 'attested' | 'needs-reregistration'; reason: string | null; genesis: HexString | null; claimedAt: string | null; attestedAt: string | null; bulletin: string };
 export type Persona = { name: string; account: HexString; username: string; chatPublicKey: HexString; bulletinAccount: HexString; registration: Registration | null; devices: Device[] };
 export type ContactDevice = { statementAccountId: HexString; encryptionPublicKey: HexString };
 export type Contact = { account: HexString; username: string; devices: ContactDevice[]; createdAt: number; updatedAt: number };
@@ -70,7 +70,7 @@ export type RoomView = { persona: string; device: number | null; peer: HexString
 
 export type Fault = { id: number; kind: 'drop' | 'delay' | 'holdDump'; signer: HexString[] | null; channel: HexString | null; topic: HexString | null; ms?: number; count: number | null; hits: number; held: number };
 // The network the daemon runs on: the mock (every control available) or a real chain (its genesis; faults, clock and node controls refused).
-export type ChainReset = { previous: HexString; current: HexString; since: string | null; personas: string[]; bots: string[] };
+export type ChainReset = { previous: HexString; current: HexString; since: string | null };
 export type NodeInfo = {
   network: string;
   name: string;

@@ -24,7 +24,7 @@ import { generateMnemonic } from "@polkadot-labs/hdkd-helpers";
 import { x25519 } from "@noble/curves/ed25519.js";
 import { randomBytes } from "@noble/hashes/utils.js";
 
-import { acquireIdentitySession, deriveIdentityKeys, normalizeUsername, registerIdentity, waitForAttestation } from "../../bot-core/lib/register.mjs";
+import { acquireIdentitySession, deriveIdentityKeys, normalizeUsername, registerIdentity, reregisterIdentity, waitForAttestation } from "../../bot-core/lib/register.mjs";
 import { ensureTestnetFileAllowance, getTestnetFileAllowanceStatus, hasSufficientTestnetFileAllowance } from "../../bot-core/lib/testnet-file-allowance.mjs";
 import { bytesToHex, hexToBytes, log } from "./bytes.mjs";
 import { wrapIdentifierKey } from "./directory.mjs";
@@ -57,7 +57,7 @@ export function mintPersonaRecord(name, { username = null, genesis = null } = {}
     bulletinSeed: bytesToHex(randomBytes(32)),
     usernameBase: base,
     username: null,
-    registration: { status: "minted", genesis, claimedAt: null, attestedAt: null, needsReregistration: false },
+    registration: { status: "minted", genesis, claimedAt: null, attestedAt: null, needsReregistration: false, reason: null },
     bulletin: { status: "none", detail: null },
     createdAt: new Date().toISOString(),
   };
@@ -81,11 +81,50 @@ export function keysOf(record) {
 export const registrationView = (record) => ({
   username: record.username,
   status: record.registration.needsReregistration ? "needs-reregistration" : record.registration.status,
+  /** Why it needs re-registration (what the chain said), else null. */
+  reason: record.registration.needsReregistration ? record.registration.reason ?? null : null,
   genesis: record.registration.genesis,
   claimedAt: record.registration.claimedAt,
   attestedAt: record.registration.attestedAt,
   bulletin: record.bulletin?.status ?? "none",
 });
+
+/**
+ * Is a registration on the chain now? Two reads: `Consumers(account)` for
+ * the identifier key and `UsernameOwnerOf(username)` for the name. The
+ * chain is the only authority — a migration can wipe every registration and
+ * keep the genesis (Products Devnet, 2026-09-08). Returns
+ *   { onChain: true, consumer }              key present, username (when known) owned by the account
+ *   { onChain: false, reason }               with what the chain said instead
+ * A transport failure throws: "unreachable" is not "gone".
+ */
+export async function checkRegistration(directory, { account, username = null, identifierKey = null }) {
+  const consumer = await directory.consumer(account);
+  if (!consumer) return { onChain: false, reason: `the chain has no identifier key for ${account.slice(0, 10)}…` };
+  if (identifierKey && normalizeKey(consumer.identifierKey) !== normalizeKey(identifierKey)) return { onChain: false, reason: "the chain holds a different identifier key for this account" };
+  if (username) {
+    const owner = await directory.usernameOwner(username);
+    if (owner == null) return { onChain: false, reason: `the chain has no username ${username}` };
+    if (owner !== account) return { onChain: false, reason: `${username} belongs to another account on the chain` };
+  }
+  return { onChain: true, consumer };
+}
+const normalizeKey = (hex) => String(hex).replace(/^0x/i, "").toLowerCase();
+
+/** Apply a check to a persisted record: mark it (with the reason) or clear an old mark. Returns true when the record changed. */
+export function applyCheck(record, check) {
+  const reg = record.registration;
+  const before = [reg.needsReregistration, reg.reason ?? null, reg.status].join("|");
+  if (check.onChain) {
+    reg.needsReregistration = false;
+    reg.reason = null;
+    if (reg.status === "claimed") { reg.status = "attested"; reg.attestedAt ??= new Date().toISOString(); }
+  } else if (reg.status !== "minted") {
+    reg.needsReregistration = true;
+    reg.reason = check.reason;
+  }
+  return before !== [reg.needsReregistration, reg.reason ?? null, reg.status].join("|");
+}
 
 const isAuthRejection = (error) => error?.status === 401 || error?.status === 403;
 
@@ -127,9 +166,10 @@ async function identityTokenFor(record, { backendUrl, identityAuth, env, save, f
 /**
  * Claim the username (once) and wait for the attestation. Idempotent and
  * resumable: a claimed record only waits, an attested one returns at once,
- * one marked by a chain reset claims again — without its old number, which
- * the backend refuses to reuse (bot-core's `pca register --again` found the
- * same). Resolves with the record's registration view; never throws for a
+ * one the chain forgot (checkRegistration) claims again through bot-core's
+ * `reregisterIdentity` — the chain is read first, the old number is asked
+ * for, and a new one is taken when the backend refuses it (as Paseo Next
+ * does). Resolves with the record's registration view; never throws for a
  * slow attestation (status stays "claimed" = pending).
  */
 export async function registerPersona(record, {
@@ -139,16 +179,31 @@ export async function registerPersona(record, {
   const reg = record.registration;
   const { account } = keysOf(record);
   if (reg.status === "attested" && !reg.needsReregistration) return registrationView(record);
-  if (reg.status === "minted" || reg.needsReregistration) {
-    const again = reg.needsReregistration;
-    onProgress(again ? `claiming a new username for ${record.name} (the chain was reset)…` : `claiming ${record.usernameBase} for ${record.name}…`);
+  if (reg.needsReregistration && record.username) {
+    onProgress(`registering ${record.name} again (${reg.reason ?? "the chain forgot it"})…`);
+    const identityToken = await identityTokenFor(record, { backendUrl, identityAuth, env, save, fetchImpl });
+    const result = await reregisterIdentity({ mnemonic: record.mnemonic, username: record.username, backendUrl, directory, bandersnatchBin, identityToken, fetchImpl });
+    if (result.outcome === "refused") throw new Error(`the identity backend refused to register ${record.username} again: ${result.detail}`);
+    const previous = record.username;
+    if (result.outcome === "on-chain") {
+      // The chain holds it after all (attested meanwhile): nothing to claim.
+      record.registration = { ...reg, status: "attested", attestedAt: reg.attestedAt ?? new Date().toISOString(), needsReregistration: false, reason: null };
+    } else {
+      record.username = result.username;
+      record.registration = { status: "claimed", genesis, claimedAt: new Date().toISOString(), attestedAt: null, needsReregistration: false, reason: null };
+    }
+    delete record.identityRegistrationSession;
+    await save(record);
+    log("SANDBOX_PERSONA_CLAIMED", { name: record.name, username: record.username, account, again: true, previous, renamed: record.username !== previous, refusedDigits: result.refusedDigits ?? null });
+  } else if (reg.status === "minted" || reg.needsReregistration) {
+    onProgress(`claiming ${record.usernameBase} for ${record.name}…`);
     const identityToken = await identityTokenFor(record, { backendUrl, identityAuth, env, save, fetchImpl });
     const result = await registerIdentity({ mnemonic: record.mnemonic, username: record.usernameBase, digits: null, backendUrl, bandersnatchBin, identityToken, fetchImpl });
     record.username = result.username;
-    record.registration = { status: "claimed", genesis, claimedAt: new Date().toISOString(), attestedAt: null, needsReregistration: false };
+    record.registration = { status: "claimed", genesis, claimedAt: new Date().toISOString(), attestedAt: null, needsReregistration: false, reason: null };
     delete record.identityRegistrationSession;
     await save(record);
-    log("SANDBOX_PERSONA_CLAIMED", { name: record.name, username: record.username, account, again });
+    log("SANDBOX_PERSONA_CLAIMED", { name: record.name, username: record.username, account, again: false });
   }
   onProgress(`waiting for the network to attest ${record.username} (up to ${Math.round(waitMs / 1000)}s)…`);
   const attested = await waitForAttestation(directory, account, { timeoutMs: waitMs, pollMs: 5_000 });

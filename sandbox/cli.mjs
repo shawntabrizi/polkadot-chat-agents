@@ -69,7 +69,8 @@ const usage = `pcs — Polkadot chat sandbox
                                            # mock (default): every part on this machine; paseo, devnet: a real testnet
   pcs user add <name> [--devices N]        # on a testnet: single-device, registered through the identity backend;
                                            #   [--username <6+ letters>] [--wait <secs>]; run again to keep waiting
-  pcs user list
+  pcs user register <name> [--wait <secs>] # testnet: register again a persona the chain forgot (or keep waiting)
+  pcs user list                            # testnet: each registration read back from the chain
   pcs user find <prefix>                   # usernames: the directory's, or the identity backend's checked against the chain
   pcs request <from> <to> [--welcome "text"] [--device N]
   pcs requests <name>
@@ -95,7 +96,7 @@ const usage = `pcs — Polkadot chat sandbox
   pcs hop clear [<id>]
   pcs bot attach <pca-bot-name>            # mock: register a pca bot's account (and its Bulletin signer) in the directory;
                                            # testnet: check the chain holds the bot, so the sandbox can name it
-  pcs bot list
+  pcs bot list                             # testnet: each bot read back from the chain
   pcs scenario run <file> [--network paseo|devnet]   # run a scripted scenario on a fresh daemon
   pcs events
 
@@ -168,18 +169,16 @@ switch (cmd) {
     let daemon;
     try { daemon = await startDaemon({ dir, port: Number(flags.port ?? DEFAULT_PORT), network }); }
     catch (e) { fail(e.message); }
-    if (json) out({ url: daemon.url, network: daemon.network, genesis: daemon.genesis, storeUrl: daemon.storeUrl, hopUrl: daemon.hopUrl, dir, chainReset: daemon.chainReset, personas: [...daemon.personas.keys()], bots: [...daemon.bots.keys()] });
+    if (json) out({ url: daemon.url, network: daemon.network, genesis: daemon.genesis, storeUrl: daemon.storeUrl, hopUrl: daemon.hopUrl, dir, chainReset: daemon.chainReset, forgotten: daemon.forgotten, personas: [...daemon.personas.keys()], bots: [...daemon.bots.keys()] });
     else {
       ok(`sandbox up at ${daemon.url} on ${daemon.network}`);
       note(`statement store ${daemon.storeUrl}`);
       note(`HOP node (attachments) ${daemon.hopUrl}`);
       if (daemon.genesis) note(`chain genesis ${daemon.genesis}`);
       note(`state dir ${dir}`);
-      if (daemon.chainReset) {
-        warn(`the chain was reset: genesis ${short(daemon.chainReset.previous)} → ${short(daemon.chainReset.current)}${daemon.chainReset.since ? ` (last seen ${daemon.chainReset.since})` : ""}`);
-        if (daemon.chainReset.personas.length) note(`personas needing re-registration: ${daemon.chainReset.personas.join(", ")}  (pcs user add <name> claims a new username)`);
-        if (daemon.chainReset.bots.length) note(`bots needing re-registration: ${daemon.chainReset.bots.join(", ")}  (pca register <bot> --again)`);
-      }
+      if (daemon.chainReset) warn(`the chain was reset: genesis ${short(daemon.chainReset.previous)} → ${short(daemon.chainReset.current)}${daemon.chainReset.since ? ` (last seen ${daemon.chainReset.since})` : ""}`);
+      for (const p of daemon.forgotten.personas) warn(`persona ${p.name} (${p.username}) needs re-registration: ${p.reason}  →  pcs user register ${p.name}`);
+      for (const b of daemon.forgotten.bots) warn(`bot ${b.name} (${b.username}) needs re-registration: ${b.reason}  →  pca register ${b.name} --again`);
       for (const p of daemon.personas.values()) {
         const r = p.registration;
         if (r) note(`persona ${p.name}: ${r.username ?? "(no username yet)"} ${r.status}`);
@@ -193,20 +192,30 @@ switch (cmd) {
   }
   case "user": {
     const [sub, name] = rest;
-    const registrationLine = (r) => `${r.username ?? "(no username yet)"} ${r.status === "attested" ? "attested" : r.status === "claimed" ? "pending attestation" : r.status === "needs-reregistration" ? "needs re-registration (the chain was reset)" : r.status}${r.bulletin && r.bulletin !== "none" ? `, Bulletin allowance ${r.bulletin}` : ""}`;
+    const registrationLine = (r) => `${r.username ?? "(no username yet)"} ${r.status === "attested" ? "attested" : r.status === "claimed" ? "pending attestation" : r.status === "needs-reregistration" ? `needs re-registration (${r.reason ?? "the chain forgot it"})` : r.status}${r.bulletin && r.bulletin !== "none" ? `, Bulletin allowance ${r.bulletin}` : ""}`;
+    const printRegistered = (persona, verb) => {
+      const r = persona.registration;
+      if (r.status === "attested") ok(`${persona.name} ${verb} as ${r.username} (${short(persona.account)}), attested on chain`);
+      else if (r.status === "claimed") warn(`${persona.name} claimed ${r.username} (${short(persona.account)}); attestation pending — run  pcs user register ${persona.name}  again to keep waiting`);
+      else warn(`${persona.name}: ${registrationLine(r)}`);
+      if (r.bulletin === "failed") warn("no Bulletin allowance: the persona can chat but not send attachments (see the daemon log)");
+      for (const d of persona.devices) note(`device ${d.index}: ${short(d.account)}`);
+    };
+    if (sub === "register") {
+      if (!name) fail("usage: pcs user register <name> [--wait <secs>]");
+      if (!json) step(`Registering ${name} again…`);
+      const persona = await api("POST", `/personas/${name}/register`, { wait: flags.wait ?? null });
+      if (json) out(persona);
+      else printRegistered(persona, "registered again");
+      break;
+    }
     if (sub === "add") {
       if (!name) fail("usage: pcs user add <name> [--devices N] [--username <letters>] [--wait <secs>]");
       if (!json) step(`Adding ${name}…`);
       const persona = await api("POST", "/personas", { name, devices: Number(flags.devices ?? 1), username: flags.username ?? null, wait: flags.wait ?? null });
       if (json) out(persona);
-      else if (persona.registration) {
-        const r = persona.registration;
-        if (r.status === "attested") ok(`${persona.name} registered as ${r.username} (${short(persona.account)}), attested on chain`);
-        else if (r.status === "claimed") warn(`${persona.name} claimed ${r.username} (${short(persona.account)}); attestation pending — run  pcs user add ${name}  again to keep waiting`);
-        else warn(`${persona.name}: ${registrationLine(r)}`);
-        if (r.bulletin === "failed") warn("no Bulletin allowance: the persona can chat but not send attachments (see the daemon log)");
-        for (const d of persona.devices) note(`device ${d.index}: ${short(d.account)}`);
-      } else {
+      else if (persona.registration) printRegistered(persona, "registered");
+      else {
         ok(`${persona.name} registered as ${short(persona.account)} with ${persona.devices.length} device(s)`);
         for (const d of persona.devices) note(`device ${d.index}: ${short(d.account)}`);
       }
@@ -220,7 +229,7 @@ switch (cmd) {
       if (json) out(hits);
       else if (hits.length === 0) note(`no username starts with ${name}`);
       else for (const h of hits) step(`${h.username}  ${short(h.account)}  ${h.status ?? ""}${h.onChain ? "" : "  (not on this chain: registered before a reset, or not attested yet)"}`);
-    } else fail("usage: pcs user add <name> | pcs user list | pcs user find <prefix>");
+    } else fail("usage: pcs user add <name> | pcs user register <name> | pcs user list | pcs user find <prefix>");
     break;
   }
   case "request": {
@@ -426,7 +435,7 @@ switch (cmd) {
       const list = await api("GET", "/bots");
       if (json) out(list);
       else if (list.length === 0) note("no bots attached");
-      else for (const b of list) step(`${b.name}  ${b.username ?? "?"}  ${short(b.account)}${b.onChain === false ? "  not on this chain — pca register " + b.name + " --again" : ""}`);
+      else for (const b of list) step(`${b.name}  ${b.username ?? "?"}  ${short(b.account)}${b.onChain === false ? `  needs re-registration (${b.reason ?? "not on this chain"}) — pca register ${b.name} --again` : b.credibility ? `  ${b.credibility}` : ""}`);
       break;
     }
     if (sub !== "attach" || !name) fail("usage: pcs bot attach <pca-bot-name> | pcs bot list");
@@ -444,7 +453,7 @@ switch (cmd) {
     if (json) out(entry);
     else {
       const expected = info.mock ? "sandbox" : info.network;
-      if (entry.onChain === false) warn(`${name} (${entry.username ?? name}, ${short(entry.account)}) is not on this chain: the chain has no identifier key for it. Re-register it:  pca register ${name} --again`);
+      if (entry.onChain === false) warn(`${name} (${entry.username ?? name}, ${short(entry.account)}) is not on this chain: ${entry.reason}. Re-register it:  pca register ${name} --again`);
       else ok(`${name} attached as ${entry.username} (${short(entry.account)})${entry.bulletinAccount ? ", file delivery allowed" : ""}`);
       if (cfg.networkProfile !== expected) warn(`${name} targets ${cfg.networkProfile ?? cfg.endpoint}, not this sandbox's network (${expected}). To run it here:  pca create ${name} --network ${expected}`);
       else note(`run it:  pca run ${name}`);

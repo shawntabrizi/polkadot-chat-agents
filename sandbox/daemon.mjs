@@ -28,8 +28,8 @@ import { createDirectory } from "./lib/directory.mjs";
 import { startHopNode } from "./lib/hop-node.mjs";
 import { DEFAULT_NETWORK, networkProfile } from "./lib/network.mjs";
 import { createPersona } from "./lib/persona.mjs";
-import { createPersonaStore, markChainReset } from "./lib/persona-store.mjs";
-import { DEFAULT_WAIT_MS, keysOf, mintPersonaRecord, provisionBulletin, registerPersona, registrationView } from "./lib/registration.mjs";
+import { createPersonaStore } from "./lib/persona-store.mjs";
+import { DEFAULT_WAIT_MS, applyCheck, checkRegistration, keysOf, mintPersonaRecord, provisionBulletin, registerPersona, registrationView } from "./lib/registration.mjs";
 import { createSeenStore, observeLazyClient } from "./lib/seen-store.mjs";
 import { startStoreNode } from "./lib/store-node.mjs";
 
@@ -139,7 +139,7 @@ export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, hos
   const { node, hop, directory, genesis } = net;
   const personas = new Map();
   const records = new Map(); // name -> persisted record (testnets only)
-  const bots = new Map(); // name -> attached bot { name, account, username, identifierKey, bulletinAccount, genesis, onChain, needsReregistration }
+  const bots = new Map(); // name -> attached bot { name, account, username, identifierKey, bulletinAccount, genesis, onChain, needsReregistration, reason }
   const events = createEvents();
   const store = profile.mock ? null : createPersonaStore(dir);
 
@@ -192,28 +192,29 @@ export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, hos
     return persona;
   };
   const registrationDeps = { backendUrl: profile.identityBackendUrl, identityAuth: profile.identityRegistrationAuth, env, directory, genesis, save, waitMs, fetchImpl, onProgress: (text) => events.emit("persona", { persona: null, progress: text }) };
-  const registerOrResume = async (record) => {
-    const view = await registerPersona(record, { ...registrationDeps, waitMs });
+  // Resume a registration: keep waiting for a pending attestation, or claim
+  // again when the chain forgot the persona (`pcs user register`, or `pcs
+  // user add` on an existing name). Never re-mints. A pending or failed
+  // Bulletin allowance is re-read (and granted only if still missing)
+  // alongside the wait.
+  const resumeRegistration = async (name, { wait = null } = {}) => {
+    const record = records.get(name);
+    if (!record) throw new Error(`no persona ${name}`);
+    const waitFor = wait == null ? waitMs : Number(wait) * 1000;
+    const view = registrationView(record);
+    if (view.status === "attested") throw new Error(`persona ${name} is registered as ${record.username} and on the chain; nothing to do`);
+    log("SANDBOX_PERSONA_RESUME", { name, status: view.status, reason: view.reason, bulletin: view.bulletin });
+    await Promise.all([
+      registerPersona(record, { ...registrationDeps, waitMs: waitFor }),
+      record.bulletin?.status === "authorized" ? null : provisionBulletin(record, { botProfile: profile.botProfile, save }),
+    ]);
     if (record.username) directory.remember({ account: keysOf(record).account, username: record.username });
-    return view;
+    return personas.get(name);
   };
   const addTestnetPersona = async (name, devices, { username = null, wait = null } = {}) => {
     if (devices !== 1) throw new Error(`a persona on ${profile.name} is single-device (the identity account is its device; only the phone can mint a second one)`);
     const waitFor = wait == null ? waitMs : Number(wait) * 1000;
-    const existing = records.get(name);
-    if (existing) {
-      // Resume: keep waiting for a pending attestation, or claim again after a reset. Never re-mint.
-      const view = registrationView(existing);
-      if (view.status === "attested") throw new Error(`persona ${name} exists (registered as ${existing.username})`);
-      log("SANDBOX_PERSONA_RESUME", { name, status: view.status, bulletin: view.bulletin });
-      // A pending or failed allowance is re-read (and granted only if still missing) alongside the wait.
-      await Promise.all([
-        registerPersona(existing, { ...registrationDeps, waitMs: waitFor }),
-        existing.bulletin?.status === "authorized" ? null : provisionBulletin(existing, { botProfile: profile.botProfile, save }),
-      ]);
-      if (existing.username) directory.remember({ account: keysOf(existing).account, username: existing.username });
-      return personas.get(name);
-    }
+    if (records.has(name)) return resumeRegistration(name, { wait });
     const record = mintPersonaRecord(name, { username, genesis });
     store.savePersona(record);
     const persona = restorePersona(record);
@@ -241,9 +242,10 @@ export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, hos
     }
     // On a real network the bot registered itself through the backend; the
     // sandbox only checks that the chain holds it (a reset forgets it).
-    const consumer = await directory.consumer(acct);
-    const onChain = consumer != null;
-    const entry = { name, account: acct, username: consumer?.username ?? username, identifierKey: consumer?.identifierKey ?? normHex(identifierKey), bulletinAccount: bulletinAccount ? normHex(bulletinAccount) : null, genesis: onChain ? genesis : null, onChain, needsReregistration: !onChain, networkProfile: botNetwork, attachedAt: new Date().toISOString() };
+    const check = await checkRegistration(directory, { account: acct, identifierKey });
+    const consumer = check.consumer ?? null;
+    const onChain = check.onChain;
+    const entry = { name, account: acct, username: consumer?.username ?? username, identifierKey: normHex(identifierKey), credibility: consumer?.credibility ?? null, bulletinAccount: bulletinAccount ? normHex(bulletinAccount) : null, genesis: onChain ? genesis : null, onChain, needsReregistration: !onChain, reason: check.reason ?? null, networkProfile: botNetwork, attachedAt: new Date().toISOString() };
     directory.remember(entry);
     bots.set(name, entry);
     persistBots();
@@ -265,33 +267,47 @@ export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, hos
     return null;
   };
 
-  // ── Restore (testnets): persisted personas and bots, and the chain reset check ──
+  // ── The registration check (testnets): what the chain holds now ──
+  // Every persona with a username and every attached bot is read back from
+  // the chain — `Consumers` for the identifier key, `UsernameOwnerOf` for
+  // the name — on start and on every `pcs user list` / `pcs bot list`. A
+  // record the chain forgot is marked with the chain's reason; a claim the
+  // chain attested meanwhile is promoted. The genesis is not consulted: a
+  // migration can wipe the registrations and keep it (devnet, 2026-09-08).
+  // An unreachable chain leaves every mark as it was.
+  const verifyRegistrations = async () => {
+    const forgotten = { personas: [], bots: [] };
+    for (const record of records.values()) {
+      if (!record.username) continue;
+      const { account } = keysOf(record);
+      const check = await checkRegistration(directory, { account, username: record.username, identifierKey: keysOf(record).identifierKey });
+      if (applyCheck(record, check)) { await save(record); log(check.onChain ? "SANDBOX_PERSONA_ATTESTED" : "SANDBOX_PERSONA_FORGOTTEN", { name: record.name, username: record.username, account, reason: check.reason ?? null }); }
+      if (record.registration.needsReregistration) forgotten.personas.push({ name: record.name, username: record.username, reason: record.registration.reason });
+    }
+    for (const bot of bots.values()) {
+      const check = await checkRegistration(directory, { account: bot.account, username: bot.username, identifierKey: bot.identifierKey });
+      const changed = bot.onChain !== check.onChain || (bot.reason ?? null) !== (check.reason ?? null);
+      Object.assign(bot, { onChain: check.onChain, needsReregistration: !check.onChain, reason: check.reason ?? null, username: check.consumer?.username ?? bot.username, credibility: check.consumer?.credibility ?? bot.credibility ?? null });
+      if (changed) { persistBots(); log(check.onChain ? "SANDBOX_BOT_ON_CHAIN" : "SANDBOX_BOT_FORGOTTEN", { name: bot.name, username: bot.username, account: bot.account, reason: bot.reason }); }
+      if (!check.onChain) forgotten.bots.push({ name: bot.name, username: bot.username, reason: bot.reason });
+    }
+    return forgotten;
+  };
+
+  // ── Restore (testnets): persisted personas and bots, then the check ──
   let chainReset = null;
+  let forgotten = { personas: [], bots: [] };
   if (store) {
     const previous = store.loadNetwork();
-    const loaded = [...store.loadPersonas().values()];
-    const attached = store.loadBots();
-    const markedPersonas = markChainReset(loaded, genesis);
-    const markedBots = markChainReset(attached, genesis);
     if (previous?.genesis && previous.genesis !== genesis) {
-      chainReset = { previous: previous.genesis, current: genesis, since: previous.seenAt ?? null, personas: markedPersonas, bots: markedBots };
+      chainReset = { previous: previous.genesis, current: genesis, since: previous.seenAt ?? null };
       log("SANDBOX_CHAIN_RESET", chainReset);
     }
-    for (const record of loaded) { if (markedPersonas.includes(record.name)) store.savePersona(record); }
-    for (const bot of attached) { bots.set(bot.name, { ...bot, onChain: !bot.needsReregistration && bot.onChain }); directory.remember(bot); }
-    if (markedBots.length) persistBots();
-    for (const record of loaded) restorePersona(record);
+    for (const bot of store.loadBots()) { bots.set(bot.name, bot); directory.remember(bot); }
+    for (const record of store.loadPersonas().values()) restorePersona(record);
     store.saveNetwork({ network: profile.id, genesis, seenAt: new Date().toISOString() });
-    // A claim made before the last stop may have been attested meanwhile: one check, off the start path.
-    for (const record of loaded) {
-      if (record.registration.status !== "claimed" || record.registration.needsReregistration) continue;
-      void directory.identifierKeyFor(keysOf(record).account).then((key) => {
-        if (key == null) return;
-        record.registration.status = "attested";
-        record.registration.attestedAt = new Date().toISOString();
-        return save(record);
-      }).catch(() => undefined);
-    }
+    forgotten = await verifyRegistrations();
+    if (forgotten.personas.length || forgotten.bots.length) log("SANDBOX_NEEDS_REREGISTRATION", forgotten);
   }
 
   // Disposed sessions send their unsubscribes over the socket; destroying the
@@ -325,6 +341,8 @@ export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, hos
   const networkInfo = () => ({ network: profile.id, name: profile.name, mock: profile.mock, genesis, identityBackendUrl: profile.identityBackendUrl, chainReset });
   const api = createApi({
     node, hop, directory, personas, bots, events, addPersona, attachBot, resolvePeer, storeUrl: net.storeUrl, hopUrl: net.hopUrl, setClock, networkInfo,
+    verifyRegistrations: store ? verifyRegistrations : null,
+    resumeRegistration: store ? resumeRegistration : null,
     restartNode: () => rewire(() => node.restart()),
     resetNode: () => rewire(() => node.reset()),
     staticDir,
@@ -339,6 +357,8 @@ export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, hos
     network: profile.id,
     genesis,
     chainReset,
+    /** Personas and attached bots the chain does not hold (testnets): `{ personas: [{ name, username, reason }], bots: [...] }`. */
+    forgotten,
     storeUrl: net.storeUrl,
     hopUrl: net.hopUrl,
     dir,
@@ -351,8 +371,9 @@ export async function startDaemon({ dir = defaultDir(), port = DEFAULT_PORT, hos
     addPersona,
     attachBot,
     resolvePeer,
-    /** Resume a pending or reset registration (testnets). */
-    register: (name) => registerOrResume(records.get(name) ?? (() => { throw new Error(`no persona ${name}`); })()),
+    /** Resume a pending registration, or register again a persona the chain forgot (testnets). */
+    register: (name, options) => resumeRegistration(name, options),
+    verifyRegistrations,
     async stop() {
       for (const p of personas.values()) p.stop();
       await dropClients();

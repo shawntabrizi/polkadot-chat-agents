@@ -41,7 +41,7 @@ test("consumer, identityOf and usernameOwner read Resources through papi and rem
   });
   const directory = createChainDirectory({ client, backendUrl: "https://backend.example.test" });
   assert.equal(directory.kind, "chain");
-  assert.deepEqual(await directory.consumer(hex(bob)), { account: hex(bob), username: "bobbot.07", identifierKey: container });
+  assert.deepEqual(await directory.consumer(hex(bob)), { account: hex(bob), username: "bobbot.07", identifierKey: container, credibility: "Lite" }, "the 2026-09 shape: key, lite username, credibility");
   assert.deepEqual(client.queries[0], ["Consumers", address(bob)], "the account is asked for as SS58, as papi wants it");
   assert.equal(await directory.identifierKeyFor(hex(bob)), container, "bot-core's read contract");
   const identity = await directory.identityOf(hex(bob));
@@ -50,7 +50,7 @@ test("consumer, identityOf and usernameOwner read Resources through papi and rem
   assert.equal(await directory.usernameOwner("nobody.99"), null);
   assert.equal(await directory.consumer(hex(acct(0x11))), null, "an account the chain does not hold");
   assert.equal(await directory.identityOf(hex(acct(0x11))), null);
-  assert.deepEqual(directory.list().map((e) => [e.account, e.username, e.identifierKey]), [[hex(bob), "bobbot.07", container]], "one remembered entry for the labels");
+  assert.deepEqual(directory.list().map((e) => [e.account, e.username, e.identifierKey, e.credibility]), [[hex(bob), "bobbot.07", container, "Lite"]], "one remembered entry for the labels");
   // A legacy P-256 key is on the chain but not usable for X25519 chat.
   const legacy = acct(0x22);
   client.getUnsafeApi = () => ({ query: { Resources: { Consumers: { getValue: async () => ({ identifier_key: `0x04${"33".repeat(64)}`, lite_username: text("oldbot.01") }) }, UsernameOwnerOf: { getValue: async () => undefined } } } });
@@ -92,6 +92,6 @@ test("remember keeps the public half of a persona or an attached bot for the lab
   const directory = createChainDirectory({ client: fakeClient(), backendUrl: "https://backend.example.test" });
   directory.remember({ account: hex(acct(1)), username: "sandboxalice.03", identifierKey: hex(wrapIdentifierKey(acct(2))), bulletinAccount: hex(acct(3)) });
   directory.remember({ account: hex(acct(1)), username: "sandboxalice.03" });
-  assert.deepEqual(directory.list(), [{ account: hex(acct(1)), username: "sandboxalice.03", identifierKey: hex(wrapIdentifierKey(acct(2))), bulletinAccount: hex(acct(3)), allowance: true, hopAllowance: true }]);
+  assert.deepEqual(directory.list(), [{ account: hex(acct(1)), username: "sandboxalice.03", identifierKey: hex(wrapIdentifierKey(acct(2))), credibility: null, bulletinAccount: hex(acct(3)), allowance: true, hopAllowance: true }]);
   assert.throws(() => createChainDirectory({ client: {}, backendUrl: "x" }), /needs a papi client/);
 });

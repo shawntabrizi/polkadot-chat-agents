@@ -4,7 +4,7 @@
 // usernameOwner, list — with every chain read async, and the two reads
 // bot-core's registration helper needs (identifierKeyFor, usernameOwner).
 //
-//   Resources.Consumers(account)    -> { identifier_key: [u8;65], lite_username, ... }
+//   Resources.Consumers(account)    -> { identifier_key: [u8;65], full_username?, lite_username, credibility: Lite | Person }
 //   Resources.UsernameOwnerOf(name) -> AccountId32
 //   GET {backend}/api/v1/usernames/search?prefix=<p> -> { usernames: [{ accountId, username, status }], nextCursor }
 //
@@ -43,13 +43,13 @@ const fromSs58 = (address) => bytesToHex(ss58.enc(address));
 export function createChainDirectory({ client, backendUrl, fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS }) {
   if (typeof client?.getUnsafeApi !== "function") throw new Error("createChainDirectory needs a papi client");
   const api = client.getUnsafeApi();
-  const known = new Map(); // account hex -> { account, username, identifierKey, bulletinAccount }
+  const known = new Map(); // account hex -> { account, username, identifierKey, credibility, bulletinAccount }
   const chain = (promise, what) => withTimeout(promise, timeoutMs, what);
 
   const remember = (entry) => {
     const account = normHex(entry.account);
     const previous = known.get(account) ?? {};
-    known.set(account, { ...previous, ...entry, account, identifierKey: entry.identifierKey ? normHex(entry.identifierKey) : previous.identifierKey ?? null, bulletinAccount: entry.bulletinAccount ? normHex(entry.bulletinAccount) : previous.bulletinAccount ?? null });
+    known.set(account, { ...previous, ...entry, account, identifierKey: entry.identifierKey ? normHex(entry.identifierKey) : previous.identifierKey ?? null, credibility: entry.credibility ?? previous.credibility ?? null, bulletinAccount: entry.bulletinAccount ? normHex(entry.bulletinAccount) : previous.bulletinAccount ?? null });
     return known.get(account);
   };
 
@@ -58,7 +58,9 @@ export function createChainDirectory({ client, backendUrl, fetchImpl = fetch, ti
     if (value == null) return null;
     const identifierKey = asHex(value.identifier_key);
     const username = asText(value.full_username) ?? asText(value.lite_username) ?? null;
-    return { account: normHex(accountHex), username, identifierKey };
+    // The pallet's credibility enum ("Lite", "Person"); on chain since the 2026-09 runtimes.
+    const credibility = typeof value.credibility?.type === "string" ? value.credibility.type : null;
+    return { account: normHex(accountHex), username, identifierKey, credibility };
   };
 
   const directory = {
@@ -68,7 +70,7 @@ export function createChainDirectory({ client, backendUrl, fetchImpl = fetch, ti
     /** What `pcs wire` and the pool view label with: every account this sandbox has seen a username for. */
     list: () => [...known.values()].map((e) => ({ ...e, allowance: e.identifierKey != null, hopAllowance: e.bulletinAccount != null })),
 
-    /** `Resources::Consumers(account)` as bot-core reads it: the 65-byte container, or null. */
+    /** `Resources::Consumers(account)` as bot-core reads it: the 65-byte container, the username, the credibility; or null. */
     async consumer(account) {
       const entry = await readConsumer(account);
       if (!entry?.identifierKey) return null;
