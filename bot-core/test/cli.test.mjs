@@ -7,6 +7,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { entrypointForTransport } from "../lib/transport-entrypoint.mjs";
+import { generateMnemonic, ss58Decode } from "@polkadot-labs/hdkd-helpers";
+import { deriveIdentityKeys } from "../lib/register.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CLI = path.join(HERE, "..", "cli.mjs");
@@ -1097,6 +1099,115 @@ test("create --network sandbox registers through the sandbox directory and runs 
     result = await runCliAsync(botsDir, ["create", "misflag", "--brain", "echo", "--sandbox-url", sandboxUrl, "--no-register"]);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /--sandbox-url only applies with --network sandbox/);
+  } finally {
+    server.close();
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
+});
+
+// A bot on a named testnet profile is checked against the chain, not its
+// local `registered` flag: Products Devnet wiped every lite-person
+// registration on 2026-09-08 without a genesis change. The chain reads go
+// to a local directory here (PCA_PEOPLE_DIRECTORY_URL, the sandbox's control
+// API shape); the identity backend is a local mock.
+test("info, status and register --again read the chain on a devnet bot the network forgot", async () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
+  const helper = path.join(botsDir, "proof-helper.mjs");
+  fs.writeFileSync(helper, `#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ memberKey: "0x${"22".repeat(32)}", proofOfOwnership: "0xproof" }));\n`, { mode: 0o700 });
+  const consumers = new Map(); // account -> what the chain holds
+  const claims = [];
+  let refuseOldNumber = true;
+  const server = http.createServer((req, res) => {
+    const reply = (status, body) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
+    const url = new URL(req.url, "http://127.0.0.1");
+    const consumer = /^\/api\/consumers\/(0x[0-9a-f]{64})$/.exec(url.pathname);
+    if (req.method === "GET" && consumer) return consumers.has(consumer[1]) ? reply(200, consumers.get(consumer[1])) : reply(404, { error: "no consumer" });
+    if (req.method === "GET" && url.pathname === "/api/v1/attester") return reply(200, { attester: `0x${"33".repeat(32)}` });
+    if (req.method === "POST" && url.pathname === "/api/v1/usernames") {
+      let raw = "";
+      req.on("data", (d) => { raw += d; });
+      req.on("end", () => {
+        const body = JSON.parse(raw);
+        claims.push({ body, authorization: req.headers.authorization ?? null });
+        if (body.preferredDigits && refuseOldNumber) return reply(409, { error: `Preferred digits ${body.preferredDigits} already taken for username ${body.username}` });
+        const username = `${body.username}.${body.preferredDigits ?? "31"}`;
+        // The backend attests: the chain holds the account again, under the new name.
+        consumers.set(bytesToAccount(body.candidateAccountId), { username, identifierKey: body.identifierKey, credibility: "Lite" });
+        reply(202, { username });
+      });
+      return undefined;
+    }
+    return reply(404, { error: `no route ${req.method} ${req.url}` });
+  });
+  const bytesToAccount = (ss58) => `0x${Buffer.from(ss58Decode(ss58)[0]).toString("hex")}`;
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const local = `http://127.0.0.1:${server.address().port}`;
+  const env = { PCA_PEOPLE_DIRECTORY_URL: local, PCA_BANDERSNATCH_CLI: helper, PCA_NO_UPDATE_CHECK: "1" };
+  try {
+    // A registered devnet bot whose seed is a mnemonic (as pca create writes it).
+    const mnemonic = generateMnemonic(128);
+    const keys = deriveIdentityKeys(mnemonic);
+    const account = keys.account;
+    const identifierKey = `0x${Buffer.from(keys.identifierKey).toString("hex")}`;
+    writeBot(botsDir, "devbot", { networkProfile: "devnet", backendUrl: local, endpoint: "wss://people-paseo.rotko.net", username: "devbot.90", registered: true, account, identifierKey, bridgePort: 8931 });
+    fs.writeFileSync(path.join(botsDir, "devbot", "secret.json"), JSON.stringify({ seedHex: `0x${Buffer.from(keys.walletPrivateKey.slice(0, 32)).toString("hex")}`, mnemonic }));
+
+    // The chain holds it: live.
+    consumers.set(account, { username: "devbot.90", identifierKey, credibility: "Lite" });
+    let result = await runCliAsync(botsDir, ["info", "devbot"], env);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /live — people can message it/);
+    result = await runCliAsync(botsDir, ["status", "devbot"], env);
+    assert.equal(result.status, 1, "not running locally");
+    assert.match(result.stdout, /isn't running here/);
+    assert.match(result.stdout, /registration: live — people can message it/);
+
+    // The chain forgot it (the genesis did not change): both commands say so and name the fix.
+    consumers.clear();
+    result = await runCliAsync(botsDir, ["info", "devbot"], env);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /gone from the chain — the network forgot this registration/);
+    assert.match(result.stdout, /pca register devbot --again/);
+    assert.equal(readBot(botsDir, "devbot").registered, true, "info is read-only");
+    result = await runCliAsync(botsDir, ["status", "devbot"], env);
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /registration: gone from the chain/);
+    assert.match(result.stdout, /pca register devbot --again/);
+
+    // --again: the old number is refused, the backend assigns a new one, the claim carries the bearer, the chain confirms.
+    result = await runCliAsync(botsDir, ["register", "devbot", "--again", "--wait", "5"], { ...env, PCA_IDENTITY_TOKEN: "issued.jwt.token" });
+    assert.equal(result.status, 0, result.stderr + result.stdout);
+    assert.match(result.stdout, /Checking the chain for devbot\.90/);
+    assert.match(result.stdout, /refused the old number/);
+    assert.match(result.stdout, /The backend assigned devbot\.31; devbot\.90 is no longer this bot's name/);
+    assert.match(result.stdout, /Confirmed — your bot is live/);
+    assert.deepEqual(claims.map((c) => [c.body.username, c.body.preferredDigits ?? null, c.authorization]), [["devbot", "90", "Bearer issued.jwt.token"], ["devbot", null, "Bearer issued.jwt.token"]]);
+    assert.equal(claims[0].body.identifierKey, identifierKey, "the same identity is claimed again");
+    assert.deepEqual([readBot(botsDir, "devbot").username, readBot(botsDir, "devbot").registered], ["devbot.31", true]);
+    assert.ok(!result.stdout.includes(mnemonic.split(" ")[0]) && !result.stdout.includes("issued.jwt.token"), "no secret in the output");
+    result = await runCliAsync(botsDir, ["info", "devbot"], env);
+    assert.match(result.stdout, /devbot \(devbot\.31\)/);
+    assert.match(result.stdout, /live — people can message it/);
+
+    // Still on the chain: --again does nothing.
+    result = await runCliAsync(botsDir, ["register", "devbot", "--again"], env);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /devbot\.31 is on the chain — nothing to register again/);
+    assert.equal(claims.length, 2);
+
+    // Forgotten again, and the backend takes the old number this time.
+    consumers.clear();
+    refuseOldNumber = false;
+    result = await runCliAsync(botsDir, ["register", "devbot", "--again", "--wait", "5"], env);
+    assert.equal(result.status, 0, result.stderr + result.stdout);
+    assert.match(result.stdout, /Claimed devbot\.31 again/);
+    assert.equal(claims.at(-1).authorization, null, "no bearer without a session on a mock backend");
+    assert.equal(readBot(botsDir, "devbot").username, "devbot.31");
+
+    // The network unreachable is reported as such, never as "gone".
+    result = await runCliAsync(botsDir, ["info", "devbot"], { ...env, PCA_PEOPLE_DIRECTORY_URL: "http://127.0.0.1:9" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /can't reach the network right now/);
   } finally {
     server.close();
     fs.rmSync(botsDir, { recursive: true, force: true });

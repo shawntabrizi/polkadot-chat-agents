@@ -23,8 +23,6 @@ import {
   ss58Address,
   ss58Decode,
 } from "@polkadot-labs/hdkd-helpers";
-import { createClient as createPapiClient } from "polkadot-api";
-import { getWsProvider } from "polkadot-api/ws";
 import { paseoPeopleNext, productsDevnetPeople } from "./lib/descriptors.mjs";
 import {
   DEFAULT_NETWORK_PROFILE,
@@ -34,7 +32,8 @@ import {
   configuredNetworkProfile,
   peopleEndpointsFor,
 } from "./lib/network-config.mjs";
-import { createChainDirectory, createSandboxDirectory } from "./lib/people-directory.mjs";
+import { awaitRuntime, createChainClient } from "./lib/chain-client.mjs";
+import { createChainDirectory, createSandboxDirectory, registrationOnChain } from "./lib/people-directory.mjs";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
 import {
   deriveX25519PrivateKey,
@@ -112,11 +111,19 @@ const BANDERSNATCH_BIN = process.env.PCA_BANDERSNATCH_CLI ?? null;
 // papi client, or the sandbox directory for a bot that lives there.
 async function withDirectory(config, fn) {
   if (config.networkProfile === SANDBOX.id) return fn(createSandboxDirectory(config.backendUrl));
+  // Tests point the chain reads at a local directory that speaks the
+  // sandbox's control API, so no unit test touches a live chain.
+  if (process.env.PCA_PEOPLE_DIRECTORY_URL?.trim()) return fn(createSandboxDirectory(process.env.PCA_PEOPLE_DIRECTORY_URL.trim()));
   const endpoints = peopleEndpointsFor(config.endpoint, config.networkProfile);
-  const client = createPapiClient(getWsProvider(endpoints));
+  // The runtime is loaded before the first read, so a read's own deadline
+  // never covers the metadata download (a minute from the public nodes,
+  // once per runtime upgrade — cached after that).
+  const client = createChainClient(endpoints, { onMetadataMiss: () => note("Downloading the network's metadata (one time after a network update, up to a minute)…") });
   const descriptor = config.networkProfile === PASEO.id ? paseoPeopleNext : productsDevnetPeople;
-  try { return await fn(createChainDirectory(client.getTypedApi(descriptor))); }
-  finally { client.destroy(); }
+  try {
+    await awaitRuntime(client);
+    return await fn(createChainDirectory(client.getTypedApi(descriptor)));
+  } finally { client.destroy(); }
 }
 
 // Bots live in a stable per-user location so `pca list` finds them regardless of
@@ -1198,25 +1205,7 @@ async function runRegistration(name, config, { secret, wantUsername, digits, wai
     step("Registering your bot on the network…");
     let result;
     try {
-      let identitySession = null;
-      if (usesAutomaticIdentityRegistration(config)) {
-        identitySession = await acquireIdentitySession({
-          backendUrl: config.backendUrl,
-          mnemonic: secret.mnemonic,
-          accessToken: process.env.PCA_IDENTITY_TOKEN,
-          enrollmentVoucher: process.env.PCA_IDENTITY_VOUCHER,
-          savedSession: secret.identityRegistrationSession,
-          persistSession: (session) => {
-            secret.identityRegistrationSession = session;
-            saveSecret(name, secret);
-          },
-        });
-      } else if (process.env.PCA_IDENTITY_TOKEN?.trim()) {
-        identitySession = await acquireIdentitySession({
-          backendUrl: config.backendUrl,
-          accessToken: process.env.PCA_IDENTITY_TOKEN,
-        });
-      }
+      const identitySession = await identitySessionFor(name, config, secret);
       result = await registerIdentity({
         mnemonic: secret.mnemonic,
         username: wantUsername,
@@ -1249,6 +1238,31 @@ async function runRegistration(name, config, { secret, wantUsername, digits, wai
   return waitForConfirmation(name, config, wait);
 }
 
+// The bearer a username claim carries: on a client-proof profile (Products
+// Devnet) a session minted with the bot's own wallet key — or the issued
+// PCA_IDENTITY_TOKEN, or the saved session, or the PCA_IDENTITY_VOUCHER
+// after a refusal (lib/register.mjs) — persisted in secret.json until the
+// claim is in; elsewhere only an issued token, when given.
+async function identitySessionFor(name, config, secret) {
+  if (usesAutomaticIdentityRegistration(config)) {
+    return acquireIdentitySession({
+      backendUrl: config.backendUrl,
+      mnemonic: secret.mnemonic,
+      accessToken: process.env.PCA_IDENTITY_TOKEN,
+      enrollmentVoucher: process.env.PCA_IDENTITY_VOUCHER,
+      savedSession: secret.identityRegistrationSession,
+      persistSession: (session) => {
+        secret.identityRegistrationSession = session;
+        saveSecret(name, secret);
+      },
+    });
+  }
+  if (process.env.PCA_IDENTITY_TOKEN?.trim()) {
+    return acquireIdentitySession({ backendUrl: config.backendUrl, accessToken: process.env.PCA_IDENTITY_TOKEN });
+  }
+  return null;
+}
+
 // The tail of every registration: poll the directory until the identifier
 // key is on the chain (or in the sandbox), then mark the bot registered.
 async function waitForConfirmation(name, config, wait) {
@@ -1266,10 +1280,13 @@ async function waitForConfirmation(name, config, wait) {
 }
 
 // `pca register <bot> --again`: the bot's records say "registered", the chain
-// does not (a testnet reset). The sandbox forgets on restart and takes the
-// same registration again; on a real network the identity backend still
-// holds the username as ASSIGNED, so what a second claim does is the
-// backend's decision — reported as it happened, never assumed.
+// does not (a testnet reset, or a migration that wiped the registrations
+// and kept the genesis — the chain is read, never the genesis). The sandbox
+// forgets on restart and takes the same registration again; on a real
+// network the identity backend may still hold the username as ASSIGNED, so
+// what a second claim does is the backend's decision — reported as it
+// happened, never assumed. The claim carries the same bearer a first
+// registration does (identitySessionFor).
 async function runReregistration(name, config, { secret, digits, newNumber, wait }) {
   if (!config.username) {
     warn(`"${name}" was never registered, so there is nothing to register again. Register it:  pca register ${name}`);
@@ -1294,6 +1311,7 @@ async function runReregistration(name, config, { secret, digits, newNumber, wait
   step(`Checking the chain for ${config.username}…`);
   let result;
   try {
+    const identitySession = await identitySessionFor(name, config, secret);
     result = await withDirectory(config, (directory) => reregisterIdentity({
       mnemonic: secret.mnemonic,
       username: config.username,
@@ -1302,7 +1320,7 @@ async function runReregistration(name, config, { secret, digits, newNumber, wait
       backendUrl: config.backendUrl,
       directory,
       bandersnatchBin: BANDERSNATCH_BIN,
-      identityToken: process.env.PCA_IDENTITY_TOKEN?.trim() || null,
+      identityToken: identitySession?.token ?? null,
     }));
   } catch (e) {
     warn(`Couldn't re-register: ${e instanceof Error ? e.message : String(e)}`);
@@ -1316,16 +1334,20 @@ async function runReregistration(name, config, { secret, digits, newNumber, wait
     return "registered";
   }
   if (result.outcome === "refused") {
-    warn(`The identity backend refused a second claim of ${config.username}: ${result.detail}`);
-    note("The backend still lists the username as assigned on the old chain, and the chain has no record of this bot.");
-    note(`Let the backend assign a new number:  pca register ${name} --again --new-number   (or pick one: --digits <NN>)`);
-    note("The bot's account and keys stay the same; only the number after the dot changes. Tell its contacts.");
+    warn(`The identity backend refused to register ${config.username} again: ${result.detail}`);
+    note("The chain has no record of this bot, and the backend did not take a new claim for it.");
+    note(`Retry later, or pick a number:  pca register ${name} --again --digits <NN>`);
     return "failed";
   }
   const previous = config.username;
   config.username = result.username;
   config.registered = false;
   saveConfig(name, config);
+  if (secret.identityRegistrationSession != null) {
+    delete secret.identityRegistrationSession;
+    saveSecret(name, secret);
+  }
+  if (result.refusedDigits) note(`The backend refused the old number (${result.refusedDigits}) and assigned a new one.`);
   if (result.renamed) warn(`The backend assigned ${result.username}; ${previous} is no longer this bot's name. Tell its contacts.`);
   else ok(`Claimed ${result.username} again.`);
   return waitForConfirmation(name, config, wait);
@@ -1525,24 +1547,41 @@ function cmdList() {
   note(`Stored in ${BOTS_DIR} — back that folder up; it holds each bot's keys.`);
 }
 
+// One chain read for `pca info` and `pca status`: is the bot's registration
+// on the chain now? The local `registered` flag is what the network said
+// once; a testnet migration can wipe the registration without a genesis
+// change (Products Devnet, 2026-09-08), so a bot on a named profile is
+// checked every time. A bot on a custom endpoint is checked only while its
+// claim is unconfirmed (its endpoint may hold no People chain at all); a
+// T3ams bot's username lives in DotNS, not here.
+//   { state: "live" | "gone" | "unreachable" | "unregistered" | "pending", username }
+async function chainRegistration(name, cfg) {
+  if (!cfg.username) return { state: "unregistered" };
+  const named = configuredNetworkProfile(cfg.networkProfile) != null;
+  if (configuredTransport(cfg) === "t3ams" || (!named && cfg.registered)) return { state: cfg.registered ? "live" : "pending", username: cfg.username };
+  let found;
+  try {
+    found = await withDirectory(cfg, (directory) => registrationOnChain(directory, { account: cfg.account, username: cfg.username }));
+  } catch { return { state: "unreachable", username: cfg.username }; }
+  if (!found.onChain) return { state: cfg.registered ? "gone" : "pending", username: cfg.username };
+  if (!cfg.registered) { cfg.registered = true; saveConfig(name, cfg); }
+  return { state: "live", username: found.username ?? cfg.username, renamed: found.renamed };
+}
+
+const chainStatusLine = (name, chain) => (
+  chain.state === "live" ? c("live — people can message it", "32")
+  : chain.state === "gone" ? c(`gone from the chain — the network forgot this registration (a migration or reset). Re-register:  pca register ${name} --again`, "31")
+  : chain.state === "unreachable" ? c("can't reach the network right now (try again)", "31")
+  : chain.state === "unregistered" ? c(`not registered — run: pca register ${name}`, "33")
+  : c(`username claimed, confirmation pending — check again or run: pca register ${name}`, "33"));
+
 async function cmdInfo(name) {
   const cfg = readConfig(name);
   const transport = configuredTransport(cfg);
-  // Live re-check: has the network confirmed (attested) the bot yet?
-  let messageable = cfg.registered;
-  let reachedNetwork = true;
-  if (cfg.username && !cfg.registered) {
-    try {
-      messageable = await withDirectory(cfg, async (directory) =>
-        withTimeout(directory.identifierKeyFor(cfg.account), 12_000, "network check").then((key) => key != null));
-      if (messageable) { cfg.registered = true; saveConfig(name, cfg); }
-    } catch { reachedNetwork = false; }
-  }
-  // Distinguish never-registered from claimed-but-pending from confirmed.
-  const status = messageable ? c("live — people can message it", "32")
-    : !reachedNetwork ? c("can't reach the network right now (try again)", "31")
-    : !cfg.username ? c(`not registered — run: pca register ${name}`, "33")
-    : c(`username claimed, confirmation pending — check again or run: pca register ${name}`, "33");
+  const chain = await chainRegistration(name, cfg);
+  const messageable = chain.state === "live";
+  if (chain.renamed) warn(`The chain lists this account as ${chain.username}; your records say ${cfg.username}.`);
+  const status = chainStatusLine(name, chain);
   console.log(`${c(name, "1")}${cfg.username ? ` (${cfg.username})` : ""}`);
   console.log(`  brain:    ${cfg.brain}`);
   console.log(`  transport: ${transport}`);
@@ -2355,6 +2394,12 @@ const warnForRuntimeVersion = (health) => {
 async function cmdStatus(name, flags) {
   const cfg = readConfig(name);
   await noteNewerRelease();
+  const chain = await chainRegistration(name, cfg);
+  const chainLine = () => {
+    if (chain.state === "unregistered") return;
+    note(`registration: ${chainStatusLine(name, chain)}`);
+    if (chain.state === "gone") process.exitCode = 1;
+  };
   const hostValue = flags.host ? flags.host : cfg.deploy?.host;
   const host = hostValue ? sshTarget(hostValue) : null;
   const port = bridgePortFor(cfg);
@@ -2371,6 +2416,7 @@ async function cmdStatus(name, flags) {
     if (!h) {
       warn(`"${name}" isn't running here (nothing on port ${port}).`);
       note(`Start it:  pca run ${name}   ·  or deploy it: pca deploy ${name} --host <ssh>`);
+      chainLine();
       process.exitCode = 1;
       return;
     }
@@ -2387,6 +2433,7 @@ async function cmdStatus(name, flags) {
     ok(`"${name}" is running locally.`);
     note(healthLine(h));
     warnForRuntimeVersion(h);
+    chainLine();
     return;
   }
   const cn = containerName(cfg.deploy?.container ?? `pca-${name.replace(/\./g, "-")}`);
@@ -2399,7 +2446,7 @@ async function cmdStatus(name, flags) {
     `docker exec ${shellQuote(cn)} node -e ${shellQuote(healthProbe)} 2>/dev/null; echo; ` +
     `docker logs --tail 1 ${cn} 2>&1 | grep -oE '"event":"[A-Z_]+"' | tail -1`], { capture: true });
   const [statusLine = "", health = "", lastEvent = ""] = (r.stdout || "").trim().split("\n");
-  if (!statusLine) { warn(`Container ${cn} is not running on ${host}.`); return; }
+  if (!statusLine) { warn(`Container ${cn} is not running on ${host}.`); chainLine(); return; }
   ok(`${cn}: ${statusLine}`);
   if (health.startsWith("{")) {
     try {
@@ -2412,6 +2459,7 @@ async function cmdStatus(name, flags) {
     } catch { /* ignore */ }
   } else if (health) note(`health: ${health}`);
   if (lastEvent) note(`last event: ${lastEvent}`);
+  chainLine();
 }
 
 function cmdStop(name, flags) {
@@ -2755,13 +2803,13 @@ function usage() {
   console.log(`pca — Polkadot Chat Agents
 
   pca create <botname> [--brain echo|claude|codex|opencode|kimi|bridge] [--transport polkadot-app|t3ams] [--owner <your username or address>] [--public] [--network devnet] [--username name]
-  pca register <name> [--again]        finish/retry registration; --again re-registers after a chain reset
-                                       (--new-number when the backend refuses the old number)
+  pca register <name> [--again]        finish/retry registration; --again re-registers a bot the chain forgot
+                                       (a reset or a migration; the old number is tried first, then a new one)
   pca run <name> [--model <m>] [--allowed-tools <read,write,bash,web,subagents|all>] [--tool-scope workspace|container] [--greet]
                                        start the bot locally (foreground)
   pca deploy <name> --host <ssh>       ship it to a server and run it in Docker
   pca logs <name> [-f] [--tail N]      tail a bot's logs (local bot.log, or the deployed container)
-  pca status <name>                    is the bot running + healthy? (local or deployed)
+  pca status <name>                    is the bot running + healthy, and still registered on the chain?
   pca stop <name>                      stop a deployed bot
   pca delete <name> --yes              delete a local bot (destroys its key — irreversible)
   pca list                             list your bots

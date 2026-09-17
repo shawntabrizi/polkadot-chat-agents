@@ -511,33 +511,46 @@ export async function registerIdentity({
   };
 }
 
-// Registration after a chain reset. The identity backend keeps its own
-// record of a username (ASSIGNED, with the block of the old chain), the reset
-// chain has none, so the bot is unreachable although every local record says
-// "registered". This claims the same username again and reports what the
-// backend did instead of guessing:
-//   { outcome: "on-chain" }                the chain still holds the account: nothing to do
-//   { outcome: "claimed", username, renamed } the backend accepted the claim (with the old
-//                                          digits, or new ones: `digits`, or its own pick
-//                                          with `newNumber`)
-//   { outcome: "refused", status, detail }  the backend answered the claim with an error
+// Registration after the chain forgot the bot: a chain reset, or a
+// migration that wiped the registrations without a genesis change
+// (Products Devnet, 2026-09-08). The identity backend may still keep its
+// own record of the username (ASSIGNED, with the block of the old chain)
+// while the chain has none, so the bot is unreachable although every local
+// record says "registered". This reads the chain first, then claims again
+// and reports what the backend did instead of guessing:
+//   { outcome: "on-chain", username }          the chain holds the account: nothing to do
+//   { outcome: "claimed", username, renamed, refusedDigits }
+//                                              the backend accepted the claim — with the old
+//                                              digits, or with new ones when it refused the old
+//                                              (`refusedDigits` carries that refusal), with
+//                                              `digits`, or with its own pick (`newNumber`)
+//   { outcome: "refused", status, detail }     the backend answered every claim with an error
 // A transport failure (no answer at all) throws, like registerIdentity.
 // Observed on Paseo Next (2026-09-05): the backend refuses the old digits
 // ("Preferred digits NN already taken for username …", 409) even for the
-// account that owns them, so a bot comes back only under a new number.
+// account that owns them, so the old number is tried once and a new one is
+// taken when it is refused — unless the operator pinned `digits`.
 export async function reregisterIdentity({ mnemonic, username, digits = null, newNumber = false, backendUrl, directory, bandersnatchBin = null, identityToken = null, fetchImpl = fetch }) {
   const { account } = deriveIdentityKeys(mnemonic);
   const onChain = await directory.identifierKeyFor(account);
   if (onChain != null) return { outcome: "on-chain", account, username };
   const { base, digits: current } = normalizeUsername(username);
-  const wanted = newNumber ? null : digits ?? current;
-  try {
-    const result = await registerIdentity({ mnemonic, username: base, digits: wanted, backendUrl, bandersnatchBin, identityToken, fetchImpl });
-    return { outcome: "claimed", account, username: result.username, renamed: result.username !== username };
-  } catch (error) {
-    if (error?.status == null) throw error;
-    return { outcome: "refused", account, username, status: error.status, detail: error.message };
+  const claim = async (wanted) => {
+    try {
+      const result = await registerIdentity({ mnemonic, username: base, digits: wanted, backendUrl, bandersnatchBin, identityToken, fetchImpl });
+      return { outcome: "claimed", account, username: result.username, renamed: result.username !== username, refusedDigits: null };
+    } catch (error) {
+      if (error?.status == null) throw error;
+      return { outcome: "refused", account, username, status: error.status, detail: error.message };
+    }
+  };
+  const first = await claim(newNumber ? null : digits ?? current);
+  // The old number was refused (409) and nothing pinned it: let the backend assign one.
+  if (first.outcome === "refused" && first.status === 409 && digits == null && !newNumber && current != null) {
+    const second = await claim(null);
+    return second.outcome === "claimed" ? { ...second, refusedDigits: first.detail } : second;
   }
+  return first;
 }
 
 // Poll the directory (lib/people-directory.mjs) until the bot's identifier key

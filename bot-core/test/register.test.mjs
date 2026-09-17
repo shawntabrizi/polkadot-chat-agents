@@ -328,7 +328,7 @@ test("deriveIdentityKeys is the identity a claim publishes: same account, same i
 
 // After a chain reset the backend still holds the username; the chain does
 // not. Each outcome of a second claim is reported as the backend gave it.
-test("reregisterIdentity: on-chain, claimed with the old digits, renamed by the backend, refused", async () => {
+test("reregisterIdentity: on-chain, claimed with the old digits, renamed by the backend, the old number refused then a new one, refused", async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pca-reregister-test-"));
   const helper = fakeProofHelper(temp);
   const mnemonic = generateMnemonic(128);
@@ -349,21 +349,39 @@ test("reregisterIdentity: on-chain, claimed with the old digits, renamed by the 
 
     // The chain forgot it; the backend accepts the same number again.
     const same = await reregisterIdentity({ mnemonic, username: "macbot.78", backendUrl, directory: directoryHolding(null), bandersnatchBin: helper, fetchImpl: backend(() => new Response(JSON.stringify({ username: "macbot.78" }), { status: 202 })) });
-    assert.deepEqual(same, { outcome: "claimed", account, username: "macbot.78", renamed: false });
+    assert.deepEqual(same, { outcome: "claimed", account, username: "macbot.78", renamed: false, refusedDigits: null });
     assert.deepEqual([claims[0].username, claims[0].preferredDigits], ["macbot", "78"], "the old digits are asked for");
 
     // The backend will not reuse the number and assigns another.
     const renamed = await reregisterIdentity({ mnemonic, username: "macbot.78", backendUrl, directory: directoryHolding(null), bandersnatchBin: helper, fetchImpl: backend(() => new Response(JSON.stringify({ username: "macbot.91" }), { status: 202 })) });
-    assert.deepEqual(renamed, { outcome: "claimed", account, username: "macbot.91", renamed: true });
+    assert.deepEqual(renamed, { outcome: "claimed", account, username: "macbot.91", renamed: true, refusedDigits: null });
     // A number chosen by the operator overrides the old one.
     await reregisterIdentity({ mnemonic, username: "macbot.78", digits: "12", backendUrl, directory: directoryHolding(null), bandersnatchBin: helper, fetchImpl: backend(() => new Response(JSON.stringify({ username: "macbot.12" }), { status: 202 })) });
     assert.equal(claims.at(-1).preferredDigits, "12");
 
-    // The backend refuses: the answer is reported, not retried.
+    // The backend refuses the old number (409, as Paseo Next does): a second
+    // claim lets it assign one, and the refusal is carried along.
+    claims.length = 0;
+    const answers = [() => new Response(JSON.stringify({ error: "Preferred digits 78 already taken for username macbot" }), { status: 409, statusText: "Conflict" }), () => new Response(JSON.stringify({ username: "macbot.19" }), { status: 202 })];
+    const fallback = await reregisterIdentity({ mnemonic, username: "macbot.78", backendUrl, directory: directoryHolding(null), bandersnatchBin: helper, fetchImpl: backend(() => answers.shift()()) });
+    assert.deepEqual([fallback.outcome, fallback.username, fallback.renamed], ["claimed", "macbot.19", true]);
+    assert.match(fallback.refusedDigits, /Preferred digits 78 already taken/);
+    assert.deepEqual(claims.map((c) => c.preferredDigits), ["78", undefined], "the old number first, then the backend's pick");
+    // A pinned number is not given up on.
+    claims.length = 0;
+    const pinned = await reregisterIdentity({ mnemonic, username: "macbot.78", digits: "12", backendUrl, directory: directoryHolding(null), bandersnatchBin: helper, fetchImpl: backend(() => new Response(JSON.stringify({ error: "taken" }), { status: 409, statusText: "Conflict" })) });
+    assert.deepEqual([pinned.outcome, claims.length], ["refused", 1]);
+
+    // The backend refuses both: the last answer is reported, not retried further.
+    claims.length = 0;
     const refused = await reregisterIdentity({ mnemonic, username: "macbot.78", backendUrl, directory: directoryHolding(null), bandersnatchBin: helper, fetchImpl: backend(() => new Response(JSON.stringify({ error: "Username already assigned" }), { status: 409, statusText: "Conflict" })) });
-    assert.deepEqual([refused.outcome, refused.status, refused.username], ["refused", 409, "macbot.78"]);
+    assert.deepEqual([refused.outcome, refused.status, refused.username, claims.length], ["refused", 409, "macbot.78", 2]);
     assert.match(refused.detail, /409 Conflict/);
     assert.match(refused.detail, /Username already assigned/);
+    // A refusal that is not about the number is final.
+    claims.length = 0;
+    const gated = await reregisterIdentity({ mnemonic, username: "macbot.78", backendUrl, directory: directoryHolding(null), bandersnatchBin: helper, fetchImpl: backend(() => new Response(JSON.stringify({ error: "platform attestation required" }), { status: 401, statusText: "Unauthorized" })) });
+    assert.deepEqual([gated.outcome, gated.status, claims.length], ["refused", 401, 1]);
 
     // No answer at all is not a backend decision.
     await assert.rejects(reregisterIdentity({ mnemonic, username: "macbot.78", backendUrl, directory: directoryHolding(null), bandersnatchBin: helper, fetchImpl: backend(() => { throw new Error("ECONNRESET"); }) }), /ECONNRESET/);

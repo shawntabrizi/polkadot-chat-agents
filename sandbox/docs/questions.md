@@ -516,3 +516,69 @@ Next is blocked by the backend, not by the sandbox.
    sandbox, bot-core, the current app) can message it. The phone step (e)
    needs a re-registration first; is that the plan for the owner's phone
    on devnet?
+
+## S6c
+
+The `0x04` identifier keys on the post-update chain. On 2026-09-09
+(finalized block 6572578) `Resources.Consumers` held 13 entries: 7 with the
+RFC-0004 marker `0x00` and zero padding, 6 starting `0x04` with non-zero
+tails (`istvan.01`, `robbyke.01`, `dokker.01`, `danisanchez.01`,
+`northvane.01`, `zhoujian.01`). The app's
+`AccountEcdhKeyScale` (`common/.../utils/scale/AccountEcdhKeyScale.kt`)
+decodes one marker only — `TYPE_X25519 = 0x00`; every other first byte is
+`Unknown(raw)`, kept for byte-identical re-encoding and never used for
+chat — and its doc comment says the 65-byte width "is what an uncompressed
+P-256 point used to occupy". Each of the six `0x04` values parses as a
+valid SEC1 uncompressed P-256 point (`p256.Point.fromBytes` in
+`@noble/curves`, the sandbox probe), which a random 64-byte tail would not.
+**Finding: they are stragglers — registrations made after the wipe by a
+pre-RFC-0004 client (an old app build still installed) — not RFC-0004
+containers with another marker.** Nothing in this repo can message them;
+the sandbox reports them as "not messageable" like the owner's old
+`shawntabrizi.01` in S6b.
+
+1. **Old app builds still register P-256 keys after the update.** Six of
+   the first thirteen post-update registrations are P-256. Can the identity
+   backend refuse a claim whose `identifierKey` does not start `0x00` (the
+   community `main` already filters them out of search), so a user with the
+   old build is told to update instead of getting an unreachable identity?
+
+2. **The attester stalls, and a pending claim is invisible.** On
+   2026-09-15 the backend attested `sandboxalice.54` 51 s after its claim
+   (18:02Z) and then nothing for 35+ minutes: four claims it accepted
+   with 200 (`sandboxechodev.90`, then `.69` after a 409 on the second
+   try, `sandboxechonew.77`, `sandboxbob.22`) stayed off the chain while
+   `Resources.Consumers` grew by one entry chain-wide. The search route
+   lists ASSIGNED usernames only, so a pending claim cannot be seen from
+   outside. Two asks: (a) is there, or can there be, a read of a claim's
+   status (pending / attested / failed, with the failure) so `pca` and the
+   sandbox can say more than "not confirmed yet"; (b) a re-claim of a
+   wiped bot's old number was accepted with 200 the first time and refused
+   as "already taken" the second — by the pending claim itself. Is a 200
+   for the old number intended, and does the attester ever drain it?
+
+### S6c.2 resolved (2026-09-17)
+
+Not a patch and not a bot-targeted gate. Two days on, the device-auth-free
+path works end to end: the client-proof-only token mint still returns a
+JWT (`POST /api/v1/auth/token`, no platform-attestation headers, `sub` =
+the bot account), and a **fresh** account claiming a never-used username
+through it (`botprobeginx.77`, account `0xbc82bcf4…`) **attested on chain
+in 35 s**. Chain-wide `Resources.Consumers` grew 115 → 119 over the two
+days, so the attester serves others too.
+
+So 09-15 was a **transient attester outage** (~18:03Z onward), not a
+policy change; it hit fresh claims too (`sandboxechonew.77`,
+`sandboxbob.22`), not only the wedged ones. It has recovered.
+
+Re-submitting the wiped bots now: `sandboxecho-new` re-claimed after a 409
+on `.77` and **attested as `sandboxechonew.69`** — an account that claimed
+during the outage recovers on a fresh submission. `sandboxecho-dev` did
+**not**: after `.90` (09-15), `.69` (09-15) and now `.50`, its account
+(`0x9e60b889…`) has three outstanding pending claims for the
+`sandboxechodev` base and stayed pending 6+ min while others attested.
+An account that accumulated several claims across the outage looks wedged
+on the backend side; the clean fix is a fresh identity, not more
+re-claims. Open ask for the backend team: can a stuck candidate's prior
+pending claims be cleared (or the account re-queued) without minting a new
+account, and does answer (a) above — a claim-status read — still stand?

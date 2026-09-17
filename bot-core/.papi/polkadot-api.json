@@ -18,13 +18,13 @@
       "wsUrl": "wss://people-paseo.rotko.net",
       "metadata": ".papi/metadata/productsDevnetPeople.scale",
       "genesis": "0xe6c30d6e148f250b887105237bcaa5cb9f16dd203bf7b5b9d4f1da7387cb86ec",
-      "codeHash": "0x82a343ddb8c1faf6d88721f6188dabb393b3d5b4fd54aae6d621bc3b0452ebbb"
+      "codeHash": "0xfa5e746b7259049246ff38de55591690115df6e38522464c497027cdf562f41f"
     },
     "productsDevnetBulletin": {
       "wsUrl": "wss://bullet.sik.rocks",
       "metadata": ".papi/metadata/productsDevnetBulletin.scale",
       "genesis": "0xe101f0fa4627d29a257645e02be86d80378fea1a2bf8fa6a918d150ebc760a59",
-      "codeHash": "0x919b08470811f08edef7c2d15d387182adf5b501c2a2c8486c5b829a2c78018b"
+      "codeHash": "0xcfc45b6f601f6e2971053639331432857feea30c7668279df079b33eed7e01dc"
     }
   }
 }

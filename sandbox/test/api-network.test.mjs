@@ -12,7 +12,10 @@ const GENESIS = `0x${"4a".repeat(32)}`;
 async function serve(overrides = {}) {
   const seen = createSeenStore();
   const bots = new Map();
+  const verified = [];
   const api = createApi({
+    verifyRegistrations: async () => { verified.push(1); },
+    resumeRegistration: async (name, { wait }) => ({ toJSON: () => ({ name, wait, registration: { status: "claimed", username: `sandbox${name}.31` } }) }),
     node: seen, hop: null, directory: { list: () => [], consumer: async () => null, identityOf: async () => null, usernameOwner: async () => null, search: async (prefix) => [{ username: `${prefix}.01`, account: `0x${"aa".repeat(32)}`, status: "ASSIGNED", onChain: true }] },
     personas: new Map(), bots, events: { since: () => [], subscribe: () => () => {} },
     addPersona: async () => { throw new Error("not in this test"); },
@@ -27,7 +30,7 @@ async function serve(overrides = {}) {
     const res = await fetch(`http://127.0.0.1:${port}/api${route}`, { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
     return { status: res.status, body: await res.json() };
   };
-  return { api, call, seen, bots };
+  return { api, call, seen, bots, verified };
 }
 
 test("on paseo: faults, clock, node restart/reset, the pool and local registration answer 409 naming the network", async (t) => {
@@ -47,7 +50,8 @@ test("on paseo: faults, clock, node restart/reset, the pool and local registrati
 });
 
 test("on paseo: the node info carries the network and genesis; the wire is what the personas saw; bots attach with their chain state", async (t) => {
-  const { api, call, seen, bots } = await serve();
+  const personas = new Map();
+  const { api, call, seen, bots, verified } = await serve({ personas });
   t.after(() => api.close());
   const node = await call("GET", "/node");
   assert.equal(node.status, 200);
@@ -59,6 +63,14 @@ test("on paseo: the node info carries the network and genesis; the wire is what 
   assert.deepEqual([attached.body.onChain, attached.body.needsReregistration], [false, true]);
   assert.equal((await call("GET", "/bots")).body.length, 1);
   assert.equal(bots.get("echobot").username, "echobot.19");
+  // Listing personas or bots reads the chain first; registering again is a route of its own.
+  assert.equal(verified.length, 1, "GET /bots verified against the chain");
+  personas.set("alice", { toJSON: () => ({ name: "alice", registration: { status: "needs-reregistration", reason: "wiped" } }) });
+  assert.deepEqual((await call("GET", "/personas")).body, [{ name: "alice", registration: { status: "needs-reregistration", reason: "wiped" } }]);
+  assert.equal(verified.length, 2, "GET /personas verified against the chain");
+  const again = await call("POST", "/personas/alice/register", { wait: 5 });
+  assert.deepEqual([again.status, again.body.wait, again.body.registration.username], [200, 5, "sandboxalice.31"]);
+  assert.equal((await call("POST", "/personas/nobody/register", {})).status, 404);
   assert.equal((await call("POST", "/bots/attach", { name: "x" })).status, 400);
   assert.deepEqual((await call("GET", "/usernames?prefix=mac")).body, [{ username: "mac.01", account: `0x${"aa".repeat(32)}`, status: "ASSIGNED", onChain: true }]);
 });
@@ -66,12 +78,14 @@ test("on paseo: the node info carries the network and genesis; the wire is what 
 test("on the mock, the same routes stay open (the refusal is the network's, not the route's)", async (t) => {
   const faults = [];
   const { api, call } = await serve({
+    verifyRegistrations: null, resumeRegistration: null,
     node: { statements: [], allowances: new Set(), limits: {}, clock: { offsetMs: 0 }, faults: { list: () => faults, clear: () => { const n = faults.length; faults.length = 0; return n; }, drop: () => { faults.push({ id: 1, kind: "drop", held: [], hits: 0 }); return { id: 1 }; } }, list: () => [], history: () => [], watch: () => () => {} },
     setClock: (offsetMs) => ({ offsetMs }),
     networkInfo: () => ({ network: "mock", name: "Local mock network", mock: true, genesis: null, identityBackendUrl: null, chainReset: null }),
   });
   t.after(() => api.close());
   assert.equal((await call("POST", "/clock", { offsetMs: 5 })).status, 200);
+  assert.equal((await call("POST", "/personas/alice/register", {})).status, 409, "the mock forgets nothing: nothing to register again");
   assert.equal((await call("POST", "/faults", { kind: "drop" })).status, 200);
   assert.deepEqual((await call("DELETE", "/faults/all")).body, { cleared: 1 });
   const node = await call("GET", "/node");

@@ -59,7 +59,7 @@ const intParam = (value, fallback) => {
 
 const conflict = (m) => new ApiError(409, m);
 
-export function createApi({ node, hop, directory, personas, bots = new Map(), events, addPersona, attachBot, resolvePeer, storeUrl, hopUrl, setClock, networkInfo, restartNode, resetNode, staticDir = null }) {
+export function createApi({ node, hop, directory, personas, bots = new Map(), events, addPersona, attachBot, resolvePeer, storeUrl, hopUrl, setClock, networkInfo, restartNode, resetNode, verifyRegistrations = null, resumeRegistration = null, staticDir = null }) {
   // Faults, the clock, node restarts and the pool view exist in the mock
   // network only; on a real network the sandbox holds no node to break.
   const mockOnly = (what) => {
@@ -274,14 +274,25 @@ export function createApi({ node, hop, directory, personas, bots = new Map(), ev
       return { username: p.name, ...(await directory.consumer(account)) };
     }],
     // Attached pca bots: their public half, and on a real network whether
-    // the chain still holds them (a reset forgets every registration).
-    ["GET", "/bots", () => [...bots.values()]],
+    // the chain holds them now (read back on every list: a migration can
+    // wipe the registrations without a genesis change).
+    ["GET", "/bots", async () => { await verifyRegistrations?.(); return [...bots.values()]; }],
     ["POST", "/bots/attach", async (_p, _q, body) => {
       try { return await attachBot(botEntry(body)); }
       catch (e) { if (e instanceof ApiError) throw e; throw conflict(e.message); }
     }],
 
-    ["GET", "/personas", () => [...personas.values()].map((p) => p.toJSON())],
+    // On a real network every persona's registration is read back from the
+    // chain first, so `pcs user list` says what the chain holds now.
+    ["GET", "/personas", async () => { await verifyRegistrations?.(); return [...personas.values()].map((p) => p.toJSON()); }],
+    // `pcs user register <name>`: resume a pending attestation, or register
+    // again a persona the chain forgot. Testnets only (the mock forgets nothing).
+    ["POST", "/personas/:name/register", async (p, _q, body) => {
+      if (!resumeRegistration) throw conflict(`registering again is for a real network; ${networkInfo().name} (${networkInfo().network}) forgets nothing`);
+      persona(p.name);
+      try { return (await resumeRegistration(p.name, { wait: body?.wait ?? null })).toJSON(); }
+      catch (e) { throw conflict(e.message); }
+    }],
     // On a real network an existing name resumes its registration (a
     // pending attestation, a claim after a chain reset) instead of minting
     // again; the daemon refuses a name that is attested and current.

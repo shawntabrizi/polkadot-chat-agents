@@ -4,7 +4,11 @@
 // daemon, so its keys, its username and where its registration stands are
 // persisted under the state dir (0700), one 0600 file per persona holding
 // the mnemonic. Attached bots and the chain identity are recorded beside
-// them. Nothing here logs a secret.
+// them. Whether a registration is still on the chain is the chain's answer
+// (lib/registration.mjs checkRegistration), never the genesis hash: a
+// migration can wipe every registration and keep the genesis (Products
+// Devnet, 2026-09-08). The genesis is recorded only to explain a reset.
+// Nothing here logs a secret.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -45,20 +49,4 @@ export function createPersonaStore(dir) {
     loadNetwork: () => readJson(networkFile),
     saveNetwork: (info) => writeJson(networkFile, info),
   };
-}
-
-/**
- * Mark what a chain reset invalidated: a registration made on another
- * genesis is gone from this chain. Returns the names it marked.
- */
-export function markChainReset(records, genesis) {
-  const marked = [];
-  for (const record of records) {
-    const registered = record.registration?.genesis ?? record.genesis ?? null;
-    if (registered == null || registered === genesis) continue;
-    if (record.registration) record.registration.needsReregistration = true;
-    else record.needsReregistration = true;
-    marked.push(record.name);
-  }
-  return marked;
 }

@@ -260,6 +260,7 @@ variables are supported; neither is passed to a running or deployed bot:
 |---|---|---|
 | `PCA_IDENTITY_VOUCHER` | — | Optional single-use, base64-encoded 32-byte Products Devnet enrollment voucher, used only as a fallback when automatic client-proof enrollment is rejected by a hard attestation gate. `pca` never saves it. |
 | `PCA_IDENTITY_TOKEN` | — | Existing identity-backend bearer token for controlled automation; overrides automatic session acquisition. |
+| `PCA_METADATA_CACHE_DIR` | `~/.pca/cache/metadata` | Where `pca`, the bot runtime and the sandbox cache each chain's runtime metadata (public, keyed by code hash). The public nodes take up to a minute to serve it; with the cache only the first run after a runtime upgrade pays. |
 
 If Devnet registration has not completed, `secret.json` temporarily stores the
 automatically issued access and refresh tokens so `pca register <name>` can

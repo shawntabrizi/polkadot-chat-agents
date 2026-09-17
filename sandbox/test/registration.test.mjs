@@ -2,8 +2,10 @@
 // backend and a mocked chain: the record is minted and persisted before the
 // claim, the claim goes to the backend with the persona's own keys, the
 // wait ends "attested" or stays "claimed" (pending) and resumes without a
-// second claim, a chain reset marks the record and the next run claims a
-// new username, and the Bulletin allowance failure is recorded, not thrown.
+// second claim, the chain check (not the genesis) marks a record the chain
+// forgot and the next run registers it again — the old number first, a new
+// one when the backend refuses it — and the Bulletin allowance failure is
+// recorded, not thrown.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -13,13 +15,12 @@ import { x25519 } from "@noble/curves/ed25519.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { deriveSr25519PublicKey } from "@novasamatech/statement-store";
 import { verify as verifySr25519 } from "@scure/sr25519";
-import { createPersonaStore, markChainReset } from "../lib/persona-store.mjs";
-import { defaultUsername, keysOf, mintPersonaRecord, provisionBulletin, registerPersona, registrationView } from "../lib/registration.mjs";
+import { createPersonaStore } from "../lib/persona-store.mjs";
+import { applyCheck, checkRegistration, defaultUsername, keysOf, mintPersonaRecord, provisionBulletin, registerPersona, registrationView } from "../lib/registration.mjs";
 import { unwrapIdentifierKey } from "../lib/directory.mjs";
 
 const GENESIS = `0x${"4a".repeat(32)}`;
 const concatBytes = (...parts) => { const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; } return out; };
-const RESET = `0x${"5b".repeat(32)}`;
 
 function fakeProofHelper(dir) {
   const helper = path.join(dir, "proof-helper.mjs");
@@ -39,8 +40,16 @@ function fakeBackend(assign) {
     },
   };
 }
-/** The chain: accounts it holds an identifier key for. */
-const fakeChain = (attested = new Set()) => ({ attested, identifierKeyFor: async (account) => (attested.has(account) ? `0x00${"44".repeat(32)}${"00".repeat(32)}` : null) });
+/** The chain: accounts it holds an identifier key for (with the username each was attested under). */
+const CONTAINER = `0x00${"44".repeat(32)}${"00".repeat(32)}`;
+const fakeChain = (attested = new Set(), names = new Map(), keys = new Map()) => ({
+  attested,
+  names,
+  keys,
+  identifierKeyFor: async (account) => (attested.has(account) ? keys.get(account) ?? CONTAINER : null),
+  consumer: async (account) => (attested.has(account) ? { account, username: names.get(account) ?? null, identifierKey: keys.get(account) ?? CONTAINER, credibility: "Lite" } : null),
+  usernameOwner: async (name) => [...names.entries()].find(([account, n]) => n === name && attested.has(account))?.[0] ?? null,
+});
 
 test("the default username is the name when the backend takes it, else a padded one, else nothing", () => {
   assert.equal(defaultUsername("alicesmith"), "alicesmith");
@@ -67,7 +76,7 @@ test("a minted record holds the keys a single-device identity needs, and keysOf 
   assert.equal(keys.bulletin.account.length, 66);
 });
 
-test("claim, wait, pending, resume, attested — one claim in total; a reset claims a new username", async (t) => {
+test("claim, wait, pending, resume, attested — one claim in total; the chain forgot it: registered again, old number first", async (t) => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pcs-registration-"));
   t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
   const bandersnatchBin = fakeProofHelper(temp);
@@ -104,20 +113,46 @@ test("claim, wait, pending, resume, attested — one claim in total; a reset cla
   assert.equal(backend.claims.length, 1);
   assert.deepEqual(saves, ["claimed", "attested"]);
 
-  // The chain is reset: the record is marked, and the next run claims again — a new username, the same keys.
+  // The chain forgot the registration (a migration; the genesis is unchanged):
+  // the check marks the record with the chain's reason, and the next run
+  // registers again — the old number first, then the backend's pick when it
+  // refuses — with the same keys.
   const reloaded = store.loadPersonas().get("alice");
   assert.equal(reloaded.mnemonic, record.mnemonic);
-  assert.deepEqual(markChainReset([reloaded], RESET), ["alice"]);
-  assert.equal(registrationView(reloaded).status, "needs-reregistration");
-  assert.deepEqual(markChainReset([reloaded], RESET), ["alice"], "marking is idempotent");
-  const fresh = fakeChain();
+  const wiped = fakeChain();
+  const check = await checkRegistration(wiped, { account, username: "sandboxalice.07", identifierKey });
+  assert.deepEqual(check, { onChain: false, reason: `the chain has no identifier key for ${account.slice(0, 10)}…` });
+  assert.equal(applyCheck(reloaded, check), true);
+  assert.deepEqual([registrationView(reloaded).status, registrationView(reloaded).reason], ["needs-reregistration", check.reason]);
+  assert.equal(applyCheck(reloaded, check), false, "marking is idempotent");
   const again = fakeBackend((body) => `${body.username}.31`);
-  const view = await registerPersona(reloaded, { ...deps, directory: fresh, genesis: RESET, fetchImpl: again.fetchImpl });
-  assert.deepEqual([view.status, view.username, view.genesis], ["claimed", "sandboxalice.31", RESET]);
-  assert.equal(again.claims[0].preferredDigits, undefined, "the old number is not asked for: the backend refuses to reuse it");
+  const answers = [];
+  const refusing = async (url, options) => {
+    if (String(url).endsWith("/usernames") && JSON.parse(options.body).preferredDigits) { answers.push("409"); return new Response(JSON.stringify({ error: "Preferred digits 07 already taken for username sandboxalice" }), { status: 409, statusText: "Conflict" }); }
+    return again.fetchImpl(url, options);
+  };
+  const view = await registerPersona(reloaded, { ...deps, directory: wiped, genesis: GENESIS, fetchImpl: refusing });
+  assert.deepEqual([view.status, view.username, view.reason], ["claimed", "sandboxalice.31", null]);
+  assert.deepEqual([answers, again.claims.map((c) => c.preferredDigits)], [["409"], [undefined]], "the old number was asked for and refused; the backend then chose");
   assert.equal(keysOf(reloaded).account, account, "the account did not change");
-  assert.equal(markChainReset([reloaded], RESET).length, 0, "registered on this genesis now");
+  // Attested again under the new name: the check clears the mark.
+  wiped.attested.add(account); wiped.names.set(account, "sandboxalice.31"); wiped.keys.set(account, identifierKey);
+  assert.equal(applyCheck(reloaded, await checkRegistration(wiped, { account, username: "sandboxalice.31", identifierKey })), true, "the check promotes a claimed record the chain attested");
+  assert.deepEqual([registrationView(reloaded).status, registrationView(reloaded).reason], ["attested", null]);
   assert.ok(!JSON.stringify([pending, done, view]).includes(record.mnemonic.split(" ")[0]), "no view carries the mnemonic");
+
+  // A record the chain holds after all (attested while marked): no claim, attested.
+  const held = store.loadPersonas().get("alice");
+  applyCheck(held, { onChain: false, reason: "stale mark" });
+  const untouched = fakeBackend(() => { throw new Error("must not claim"); });
+  const kept = await registerPersona(held, { ...deps, directory: wiped, fetchImpl: untouched.fetchImpl });
+  assert.deepEqual([kept.status, kept.username, untouched.claims.length], ["attested", "sandboxalice.31", 0]);
+  // The backend refuses every claim: the record stays marked and the error carries the backend's words.
+  const marked = store.loadPersonas().get("alice");
+  applyCheck(marked, { onChain: false, reason: "wiped" });
+  const gated = async (url) => (String(url).endsWith("/attester") ? new Response(JSON.stringify({ attester: `0x${"33".repeat(32)}` }), { status: 200 }) : new Response(JSON.stringify({ error: "attestation required" }), { status: 401, statusText: "Unauthorized" }));
+  await assert.rejects(registerPersona(marked, { ...deps, directory: fakeChain(), fetchImpl: gated }), /refused to register sandboxalice\.31 again: 401 Unauthorized/);
+  assert.equal(registrationView(marked).status, "needs-reregistration");
 });
 
 test("the Bulletin allowance is provisioned through bot-core's testnet helper; failure is recorded, not thrown", async () => {
@@ -144,10 +179,35 @@ test("the Bulletin allowance is provisioned through bot-core's testnet helper; f
   assert.deepEqual(saved, ["authorized", "insufficient", "failed", "authorized", "pending"]);
 });
 
-test("markChainReset leaves records registered on this genesis alone and marks attached bots too", () => {
-  const bots = [{ name: "echobot", genesis: GENESIS }, { name: "oldbot", genesis: RESET }, { name: "unknown", genesis: null }];
-  assert.deepEqual(markChainReset(bots, GENESIS), ["oldbot"]);
-  assert.deepEqual(bots.map((b) => b.needsReregistration ?? false), [false, true, false]);
+test("checkRegistration reads the key and the username back from the chain and names what is wrong; applyCheck promotes or marks", async () => {
+  const account = `0x${"a1".repeat(32)}`;
+  const other = `0x${"a2".repeat(32)}`;
+  const chain = fakeChain(new Set([account, other]), new Map([[account, "echobot.19"], [other, "macbot.78"]]));
+  assert.deepEqual(await checkRegistration(chain, { account, username: "echobot.19", identifierKey: CONTAINER }), { onChain: true, consumer: { account, username: "echobot.19", identifierKey: CONTAINER, credibility: "Lite" } });
+  assert.deepEqual(await checkRegistration(chain, { account }), { onChain: true, consumer: { account, username: "echobot.19", identifierKey: CONTAINER, credibility: "Lite" } }, "no username known: the key is enough");
+  assert.deepEqual(await checkRegistration(chain, { account: `0x${"a3".repeat(32)}`, username: "gone.01" }), { onChain: false, reason: `the chain has no identifier key for 0x${"a3".repeat(4)}…` });
+  assert.deepEqual(await checkRegistration(chain, { account, username: "echobot.20" }), { onChain: false, reason: "the chain has no username echobot.20" });
+  assert.deepEqual(await checkRegistration(chain, { account, username: "macbot.78" }), { onChain: false, reason: "macbot.78 belongs to another account on the chain" });
+  assert.deepEqual(await checkRegistration(chain, { account, identifierKey: `0x00${"55".repeat(32)}${"00".repeat(32)}` }), { onChain: false, reason: "the chain holds a different identifier key for this account" });
+  await assert.rejects(checkRegistration({ consumer: async () => { throw new Error("socket closed"); } }, { account }), /socket closed/, "unreachable is not gone");
+
+  // applyCheck: a claimed record the chain holds becomes attested; a minted one is never marked; a marked one is cleared.
+  const claimed = mintPersonaRecord("alice", { genesis: GENESIS });
+  claimed.registration.status = "claimed";
+  assert.equal(applyCheck(claimed, { onChain: true }), true);
+  assert.deepEqual([claimed.registration.status, typeof claimed.registration.attestedAt], ["attested", "string"]);
+  const minted = mintPersonaRecord("bob", { genesis: GENESIS });
+  assert.equal(applyCheck(minted, { onChain: false, reason: "no key" }), false, "nothing was claimed yet: nothing to re-register");
+  // A claim the chain does not hold yet is pending, not forgotten (devnet's attester took 51 s for one persona and
+  // stalled for the next, 2026-09-15): marking it would make `pcs user register` claim a second username.
+  const pending = mintPersonaRecord("carol", { genesis: GENESIS });
+  pending.registration.status = "claimed";
+  assert.equal(applyCheck(pending, { onChain: false, reason: "no key" }), false, "a pending claim is left alone");
+  assert.deepEqual([registrationView(pending).status, registrationView(pending).reason], ["claimed", null]);
+  assert.equal(applyCheck(claimed, { onChain: false, reason: "wiped" }), true);
+  assert.deepEqual([claimed.registration.needsReregistration, claimed.registration.reason], [true, "wiped"]);
+  assert.equal(applyCheck(claimed, { onChain: true }), true);
+  assert.deepEqual([claimed.registration.needsReregistration, claimed.registration.reason, claimed.registration.status], [false, null, "attested"]);
 });
 
 // The identity backend of a client-proof profile (Products Devnet): the

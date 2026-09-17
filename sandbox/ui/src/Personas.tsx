@@ -82,7 +82,7 @@ export const Personas = ({ session, personas, onSelect, onAdded }: Props) => {
               {active.registration ? (
                 <span data-testid="registration">
                   {active.registration.username ?? '(no username yet)'} ·{' '}
-                  {active.registration.status === 'attested' ? 'attested' : active.registration.status === 'claimed' ? 'attestation pending' : active.registration.status === 'needs-reregistration' ? 'needs re-registration (the chain was reset)' : active.registration.status}
+                  {active.registration.status === 'attested' ? 'attested' : active.registration.status === 'claimed' ? 'attestation pending' : active.registration.status === 'needs-reregistration' ? `needs re-registration (${active.registration.reason ?? 'the chain forgot it'})` : active.registration.status}
                   {active.registration.bulletin !== 'none' ? ` · Bulletin allowance ${active.registration.bulletin}` : ''}
                 </span>
               ) : (
