@@ -2107,3 +2107,30 @@ after, and stayed pending while others attested — a per-account/username
 wedge on the backend, not a network refusal. Left pending; the clean fix
 is a new identity (which changes its address and allowlist references) or
 a backend-side queue clear. Recorded as questions.md S6c.2.
+
+### S6c round trip — persona ↔ bot on the post-update devnet (2026-09-17)
+
+The message path that 09-15 could not reach (no bot attested during the
+outage) ran here, `sandboxecho-new` (`sandboxechonew.69`) now live, alice
+(`sandboxalice.54`) driving it from the scratch state dir, both on the
+real devnet (daemon port 7799, bot bridge 8835).
+
+```
+$ pcs bot attach sandboxecho-new   → onChain true, sandboxechonew.69
+$ pca run sandboxecho-new          → BOT_LISTENING, BOT_SUBSCRIBED
+$ pcs request alice sandboxecho-new --welcome "round trip on the post-update devnet"
+$ pcs requests alice               → accepted
+$ pcs send alice sandboxecho-new "text round trip on devnet 2026-09-17"
+$ pcs inbox alice
+outgoing delivered  round trip on the post-update devnet
+system   received   contactAdded
+incoming received   Echo: round trip on the post-update devnet
+outgoing delivered  text round trip on devnet 2026-09-17
+incoming received   Echo: text round trip on devnet 2026-09-17
+```
+
+Bot side: `BOT_RECEIVED_OPENER`, `BOT_RECEIVED_TEXT`, `BOT_SENT_TEXT` ×2.
+Both outbound messages reached `delivered` (the bot ACKed each), both
+echoes came back. A persona and a bot-core bot exchange messages over the
+post-update Products Devnet end to end. The daemon and bot were stopped
+after; no stray processes.
