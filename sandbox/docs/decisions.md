@@ -231,4 +231,8 @@ callback content kind on the wire first. Chat-list previews and reply
 quotes show `plain()`: the text without its markup, a spoiler kept shut.
 
 `test/markdown.test.mjs` pins the HTML of every construct and of what must
-not get through. Those cases are the acceptance list for the apps.
+not get through. An app has no HTML, so `test/fixtures/markdown-profile.json`
+says the same as a neutral tree (`{ type, … }` nodes, text as strings), read
+off the pipeline's output by `test/markdown-profile.mjs`. That file is the
+acceptance list for the apps; its test fails when the pipeline and the list
+disagree.

@@ -1,0 +1,562 @@
+{
+  "about": "Acceptance list for the chat message markdown profile. Each case: the message text, and the tree a client must render. Text is a plain string; every other node is { type, ... }. Generated from the reference pipeline (sandbox/lib/markdown.mjs); see sandbox/docs/decisions.md D8.",
+  "cases": [
+    {
+      "name": "inline formatting",
+      "input": "**bold** *italic* ~~strike~~ `code` ==mark== ||spoiler **bold**||",
+      "structure": [
+        {
+          "type": "paragraph",
+          "children": [
+            {
+              "type": "bold",
+              "children": [
+                "bold"
+              ]
+            },
+            " ",
+            {
+              "type": "italic",
+              "children": [
+                "italic"
+              ]
+            },
+            " ",
+            {
+              "type": "strike",
+              "children": [
+                "strike"
+              ]
+            },
+            " ",
+            {
+              "type": "code",
+              "children": [
+                "code"
+              ]
+            },
+            " ",
+            {
+              "type": "mark",
+              "children": [
+                "mark"
+              ]
+            },
+            " ",
+            {
+              "type": "spoiler",
+              "children": [
+                "spoiler ",
+                {
+                  "type": "bold",
+                  "children": [
+                    "bold"
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "the named inline tags",
+      "input": "<u>u</u> <ins>i</ins> H<sub>2</sub>O x<sup>2</sup> <mark>m</mark> <tg-spoiler>s</tg-spoiler>",
+      "structure": [
+        {
+          "type": "paragraph",
+          "children": [
+            {
+              "type": "underline",
+              "children": [
+                "u"
+              ]
+            },
+            " ",
+            {
+              "type": "underline",
+              "children": [
+                "i"
+              ]
+            },
+            " H",
+            {
+              "type": "subscript",
+              "children": [
+                "2"
+              ]
+            },
+            "O x",
+            {
+              "type": "superscript",
+              "children": [
+                "2"
+              ]
+            },
+            " ",
+            {
+              "type": "mark",
+              "children": [
+                "m"
+              ]
+            },
+            " ",
+            {
+              "type": "spoiler",
+              "children": [
+                "s"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "any other tag is text",
+      "input": "use Vec<T> and <b>bold</b> and <u onclick=\"x()\">y</u>",
+      "structure": [
+        {
+          "type": "paragraph",
+          "children": [
+            "use Vec<T> and <b>bold</b> and <u onclick=\"x()\">y</u>"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "code-shaped prose is not formatting",
+      "input": "if a == b and c == d or a || b || c",
+      "structure": [
+        {
+          "type": "paragraph",
+          "children": [
+            "if a == b and c == d or a || b || c"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "unclosed syntax is text",
+      "input": "streamed ==mark and ||spoiler and $math and <u>under",
+      "structure": [
+        {
+          "type": "paragraph",
+          "children": [
+            "streamed ==mark and ||spoiler and $math and <u>under"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "links: markdown, raw URL, image as a link",
+      "input": "[l](https://x.y) https://example.com/a?b=1 ![alt](https://x.y/a.png)",
+      "structure": [
+        {
+          "type": "paragraph",
+          "children": [
+            {
+              "type": "link",
+              "href": "https://x.y",
+              "children": [
+                "l"
+              ]
+            },
+            " ",
+            {
+              "type": "link",
+              "href": "https://example.com/a?b=1",
+              "children": [
+                "https://example.com/a?b=1"
+              ]
+            },
+            " ",
+            {
+              "type": "link",
+              "href": "https://x.y/a.png",
+              "children": [
+                "alt"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a javascript: link is text",
+      "input": "[x](javascript:alert(1))",
+      "structure": [
+        {
+          "type": "paragraph",
+          "children": [
+            "[x](javascript:alert(1))"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "headings and a line break",
+      "input": "# Title\n\n### Sub\n\ntext\nnext",
+      "structure": [
+        {
+          "type": "heading",
+          "level": 1,
+          "children": [
+            "Title"
+          ]
+        },
+        {
+          "type": "heading",
+          "level": 3,
+          "children": [
+            "Sub"
+          ]
+        },
+        {
+          "type": "paragraph",
+          "children": [
+            "text",
+            {
+              "type": "break"
+            },
+            "next"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "lists: nested, ordered, tasks",
+      "input": "- one\n  - two\n- three\n\n1. first\n2. second\n\n- [x] done\n- [ ] todo\n- [x]nospace",
+      "structure": [
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            {
+              "type": "item",
+              "children": [
+                "one",
+                {
+                  "type": "list",
+                  "ordered": false,
+                  "items": [
+                    {
+                      "type": "item",
+                      "children": [
+                        "two"
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "item",
+              "children": [
+                "three"
+              ]
+            }
+          ]
+        },
+        {
+          "type": "list",
+          "ordered": true,
+          "items": [
+            {
+              "type": "item",
+              "children": [
+                "first"
+              ]
+            },
+            {
+              "type": "item",
+              "children": [
+                "second"
+              ]
+            }
+          ]
+        },
+        {
+          "type": "list",
+          "ordered": false,
+          "items": [
+            {
+              "type": "item",
+              "task": true,
+              "children": [
+                "done"
+              ]
+            },
+            {
+              "type": "item",
+              "task": false,
+              "children": [
+                "todo"
+              ]
+            },
+            {
+              "type": "item",
+              "children": [
+                "[x]nospace"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a quote and a rule",
+      "input": "> quoted **b**\n\n---",
+      "structure": [
+        {
+          "type": "quote",
+          "children": [
+            {
+              "type": "paragraph",
+              "children": [
+                "quoted ",
+                {
+                  "type": "bold",
+                  "children": [
+                    "b"
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "rule"
+        }
+      ]
+    },
+    {
+      "name": "a table with alignment and inline content",
+      "input": "| a | b | c |\n|:--|:-:|--:|\n| **1** | `2` | <tg-spoiler>3</tg-spoiler> |",
+      "structure": [
+        {
+          "type": "table",
+          "align": [
+            "left",
+            "center",
+            "right"
+          ],
+          "header": [
+            [
+              "a"
+            ],
+            [
+              "b"
+            ],
+            [
+              "c"
+            ]
+          ],
+          "rows": [
+            [
+              [
+                {
+                  "type": "bold",
+                  "children": [
+                    "1"
+                  ]
+                }
+              ],
+              [
+                {
+                  "type": "code",
+                  "children": [
+                    "2"
+                  ]
+                }
+              ],
+              [
+                {
+                  "type": "spoiler",
+                  "children": [
+                    "3"
+                  ]
+                }
+              ]
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "code blocks: language, none, unknown language",
+      "input": "```js\nconst x = 1 < 2;\n```\n\n```\nx < y\n```\n\n```nolang\nz\n```",
+      "structure": [
+        {
+          "type": "code_block",
+          "language": "js",
+          "text": "const x = 1 < 2;\n"
+        },
+        {
+          "type": "code_block",
+          "language": null,
+          "text": "x < y\n"
+        },
+        {
+          "type": "code_block",
+          "language": "nolang",
+          "text": "z\n"
+        }
+      ]
+    },
+    {
+      "name": "math: inline, a price is not math, block, fenced",
+      "input": "$x^2$ costs $5 or $10\n\n$$E = mc^2$$\n\n```math\na^2\n```",
+      "structure": [
+        {
+          "type": "paragraph",
+          "children": [
+            {
+              "type": "math",
+              "display": false,
+              "tex": "x^2"
+            },
+            " costs $5 or $10"
+          ]
+        },
+        {
+          "type": "math",
+          "display": true,
+          "tex": "E = mc^2"
+        },
+        {
+          "type": "math",
+          "display": true,
+          "tex": "a^2"
+        }
+      ]
+    },
+    {
+      "name": "a footnote",
+      "input": "a claim[^1]\n\n[^1]: the source",
+      "structure": [
+        {
+          "type": "paragraph",
+          "children": [
+            "a claim",
+            {
+              "type": "footnote_ref",
+              "label": "1"
+            }
+          ]
+        },
+        {
+          "type": "footnotes",
+          "items": [
+            {
+              "label": "1",
+              "children": [
+                {
+                  "type": "paragraph",
+                  "children": [
+                    "the source"
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a details block, open, with markdown inside",
+      "input": "<details open><summary>T **b**</summary>\n\n- one\n\n</details>\n\nafter",
+      "structure": [
+        {
+          "type": "details",
+          "open": true,
+          "summary": [
+            "T ",
+            {
+              "type": "bold",
+              "children": [
+                "b"
+              ]
+            }
+          ],
+          "children": [
+            {
+              "type": "list",
+              "ordered": false,
+              "items": [
+                {
+                  "type": "item",
+                  "children": [
+                    "one"
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "children": [
+            "after"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a details block still streaming closes at the end",
+      "input": "<details><summary>T</summary>\n\nstill streaming",
+      "structure": [
+        {
+          "type": "details",
+          "open": false,
+          "summary": [
+            "T"
+          ],
+          "children": [
+            {
+              "type": "paragraph",
+              "children": [
+                "still streaming"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "commands: a command is tappable; a path, a URL and code are not",
+      "input": "send /reset or (/help), not /usr/bin or a/b or https://x.y/start or `/code`",
+      "structure": [
+        {
+          "type": "paragraph",
+          "children": [
+            "send ",
+            {
+              "type": "command",
+              "name": "/reset"
+            },
+            " or (",
+            {
+              "type": "command",
+              "name": "/help"
+            },
+            "), not /usr/bin or a/b or ",
+            {
+              "type": "link",
+              "href": "https://x.y/start",
+              "children": [
+                "https://x.y/start"
+              ]
+            },
+            " or ",
+            {
+              "type": "code",
+              "children": [
+                "/code"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
