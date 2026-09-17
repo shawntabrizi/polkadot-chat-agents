@@ -38,8 +38,8 @@ pcs hop fault refuse|cut|delay|drop|corrupt [--hash <entry>] [--count N]
 ```
 
 `pca create --network sandbox` finds the daemon through `--sandbox-url`,
-`PCA_SANDBOX_URL`, or the `daemon.json` that `pcs up` writes. `pcs bot attach
-<name>` registers a bot's account by hand (it reads only `config.json`,
+`PCA_SANDBOX_URL`, or the `daemon.json` that `pcs up` writes.
+`pcs bot attach <name>` registers a bot's account by hand (it reads only `config.json`,
 including the public half of the bot's upload signer, which the sandbox
 grants its Bulletin allowance).
 
@@ -130,8 +130,8 @@ What differs from the mock, and why:
   statement account and its device key is a persisted random X25519 key —
   exactly what a bot is. A second device needs the `AsResources` ring-proof
   origin only the phone can mint. `--devices 2` is refused.
-- Persona seeds live in the state dir (`~/.pca/sandbox/default/personas/
-  <name>/identity.json`, mode 0600) because the chain outlives the daemon.
+- Persona seeds live in the state dir
+  (`~/.pca/sandbox/default/personas/<name>/identity.json`, mode 0600) because the chain outlives the daemon.
   On restart the personas come back with their registration state.
 - **The chain is read back.** On `pcs up`, `pcs user list` and `pcs bot
   list` every persona and attached bot is checked against the chain
