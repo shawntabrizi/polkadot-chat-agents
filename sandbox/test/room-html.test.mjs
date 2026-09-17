@@ -55,7 +55,7 @@ test("the html room route renders a table and a code block through the shared pi
   assert.equal(article.dataset.direction, "incoming");
   assert.equal(article.querySelector("table td").textContent, "alice");
   assert.equal(article.querySelector("pre code.language-js").textContent, "const x = 1 < 2;\n");
-  const expected = createMarkdown(new JSDOM("").window).render(TEXT);
+  const expected = createMarkdown(new JSDOM("").window).render(TEXT, { id: row.messageId });
   assert.equal(article.querySelector(".md").innerHTML, expected, "the body is the shared pipeline's output");
   assert.ok(expected.includes("<table>") && expected.includes("<pre><code class=\"language-js\">"));
   // The welcome is a message row too, and nothing on the page is raw markup from the message.

@@ -2,17 +2,31 @@
 // `?format=html` room route render through this same module, so what an
 // agent asserts on over HTTP is what a person sees in the Room view.
 //
+// The profile is what an AI agent writes unprompted, and what Telegram's Rich
+// Markdown renders: CommonMark, GFM tables and strikethrough, task lists,
+// footnotes, LaTeX math, highlighted code, ==mark==, ||spoiler||, a few named
+// inline tags, <details> blocks and tappable /commands (`markdown-rules.mjs`).
+//
 // markdown-it with raw HTML off (a message is data, not markup), linkify on
 // (a bare URL becomes a link, as the phone shows it), breaks on (a newline in
-// a chat message is a line break). Every link opens in a new tab and carries
-// rel="noopener noreferrer". The output then goes through DOMPurify against
-// the given `window` (the browser's, or a jsdom window on the daemon) so a
-// message can never inject markup or a javascript: URL into the page.
+// a chat message is a line break). Every link out opens in a new tab and
+// carries rel="noopener noreferrer". The output then goes through DOMPurify
+// against the given `window` (the browser's, or a jsdom window on the daemon)
+// so a message can never inject markup or a javascript: URL into the page.
+//
+// The HTML is inert. What a tap does is the view's business, keyed on two
+// attributes: `data-copy` (a code block's Copy button) and `data-command`
+// (a /command). A spoiler opens on focus, in CSS alone.
 //
 // Plain ESM with no Node-only import, because Vite bundles it for the browser.
 
 import DOMPurify from "dompurify";
+import hljs from "highlight.js/lib/common";
+import katex from "katex";
 import MarkdownIt from "markdown-it";
+import footnote from "markdown-it-footnote";
+
+import { richRules } from "./markdown-rules.mjs";
 
 const NOOPENER = "noopener noreferrer";
 
@@ -25,38 +39,82 @@ export const EMPTY_PLACEHOLDER = "(empty message)";
  */
 export function createMarkdown(window) {
   const md = new MarkdownIt({ html: false, linkify: true, breaks: true, typographer: false });
+  md.use(footnote).use(richRules);
+  const escape = md.utils.escapeHtml;
+
   // No images: a message must not make the viewer fetch an arbitrary URL.
   // `![alt](url)` becomes a link to the URL, opened on purpose or not at all.
   md.renderer.rules.image = (tokens, idx) => {
     const token = tokens[idx];
     const src = token.attrGet("src") ?? "";
     const alt = token.content || src;
-    return `<a href="${md.utils.escapeHtml(src)}" target="_blank" rel="${NOOPENER}">${md.utils.escapeHtml(alt)}</a>`;
+    return `<a href="${escape(src)}" target="_blank" rel="${NOOPENER}">${escape(alt)}</a>`;
   };
   // Links leave the sandbox UI; a new tab keeps the room open and noopener
-  // keeps the opened page away from it.
+  // keeps the opened page away from it. A `#` link (a footnote) stays here.
   const renderLink = md.renderer.rules.link_open ?? ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
   md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
-    tokens[idx].attrSet("target", "_blank");
-    tokens[idx].attrSet("rel", NOOPENER);
+    if (!(tokens[idx].attrGet("href") ?? "").startsWith("#")) {
+      tokens[idx].attrSet("target", "_blank");
+      tokens[idx].attrSet("rel", NOOPENER);
+    }
     return renderLink(tokens, idx, options, env, self);
   };
+  // A table scrolls sideways inside its own box; the bubble never grows.
+  md.renderer.rules.table_open = () => `<div class="md-table"><table>\n`;
+  md.renderer.rules.table_close = () => `</table></div>\n`;
+  // MathML only: the browser draws it, so there is no KaTeX stylesheet or
+  // font to ship, and the daemon's page gets the same markup.
+  const math = (tex, displayMode) => katex.renderToString(tex, { output: "mathml", displayMode, throwOnError: false, strict: "ignore" });
+  md.renderer.rules.math_inline = (tokens, idx) => math(tokens[idx].content, false);
+  md.renderer.rules.math_block = (tokens, idx) => `<div class="md-math">${math(tokens[idx].content, true)}</div>\n`;
+  md.renderer.rules.command = (tokens, idx) => `<button type="button" class="md-command" data-command="${escape(tokens[idx].content)}">${escape(tokens[idx].content)}</button>`;
+  // A code block: its language and a Copy button above the (highlighted) code.
+  md.renderer.rules.fence = (tokens, idx) => {
+    const token = tokens[idx];
+    const lang = token.info.trim().split(/\s+/)[0] ?? "";
+    if (lang === "math") return `<div class="md-math">${math(token.content.trim(), true)}</div>\n`;
+    const known = lang !== "" && hljs.getLanguage(lang) != null;
+    const code = known ? hljs.highlight(token.content, { language: lang, ignoreIllegals: true }).value : escape(token.content);
+    return `<div class="md-code"><div class="md-code-head"><span>${escape(lang || "code")}</span><button type="button" data-copy="">Copy</button></div>`
+      + `<pre><code${lang ? ` class="language-${escape(lang)}"` : ""}>${code}</code></pre></div>\n`;
+  };
+
   const purify = DOMPurify(window);
   // DOMPurify drops `target` unless asked; it keeps `rel`. javascript: and
   // data: hrefs never survive its URI check, and markdown-it refuses them
   // before that (they render as text).
-  const sanitize = (html) => purify.sanitize(html, { USE_PROFILES: { html: true }, ADD_ATTR: ["target"] });
+  const sanitize = (html) => purify.sanitize(html, { USE_PROFILES: { html: true, mathMl: true }, ADD_TAGS: ["semantics", "annotation"], ADD_ATTR: ["target", "encoding"] });
+
+  /**
+   * Sanitized HTML for one message text. Empty or whitespace-only text
+   * renders the placeholder so a row is never blank. `id` (the message id)
+   * keeps footnote anchors unique when many messages share a page.
+   * @param {string | null | undefined} text
+   * @param {{ id?: string }} [options]
+   * @returns {string}
+   */
+  const render = (text, { id } = {}) => {
+    if (typeof text !== "string" || text.trim() === "") return `<p class="md-empty">${EMPTY_PLACEHOLDER}</p>`;
+    return sanitize(md.render(text, id ? { docId: id } : {}));
+  };
 
   return {
+    render,
     /**
-     * Sanitized HTML for one message text. Empty or whitespace-only text
-     * renders the placeholder so a row is never blank.
+     * The message as one line of plain text, for a chat-list preview or a
+     * reply quote: what the markup says, without the markup.
      * @param {string | null | undefined} text
      * @returns {string}
      */
-    render(text) {
-      if (typeof text !== "string" || text.trim() === "") return `<p class="md-empty">${EMPTY_PLACEHOLDER}</p>`;
-      return sanitize(md.render(text));
+    plain(text) {
+      if (typeof text !== "string") return "";
+      const box = window.document.createElement("div");
+      box.innerHTML = render(text);
+      for (const el of box.querySelectorAll("annotation, .md-code-head, .footnotes, .footnote-ref")) el.remove();
+      // A preview must not give away what the message hides.
+      for (const el of box.querySelectorAll(".md-spoiler")) el.textContent = "▒▒▒▒";
+      return (box.textContent ?? "").replace(/\s+/g, " ").trim();
     },
   };
 }

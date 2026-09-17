@@ -5,6 +5,7 @@ import { type HexString, api } from './api';
 import { useEvents } from './events';
 import { formatTime } from './format';
 import { useLoader } from './hooks';
+import { plainText } from './MarkdownCell';
 import { Room } from './Room';
 
 type Props = { session: Session };
@@ -40,7 +41,7 @@ export const Chats = ({ session }: Props) => {
                 {room ? <span className="caption">{formatTime(room.lastMessageAt)}</span> : null}
               </span>
               <span className="preview caption" style={{ display: 'block' }}>
-                {room?.lastPreview || 'No messages yet'}
+                {plainText(room?.lastPreview) || 'No messages yet'}
               </span>
             </span>
             {room && room.unreadCount > 0 ? <span className="unread">{room.unreadCount}</span> : null}

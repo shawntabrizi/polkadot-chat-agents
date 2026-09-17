@@ -192,3 +192,43 @@ value has the same shape (verified live), so one decoder serves both.
 The community apps moved to the GitHub org
 `Polkadot-Community-Foundation` (`polkadot-android-community`,
 `polkadot-desktop-community`; the `paritytech` repositories are upstream).
+
+## D8 — The message profile is Telegram's Rich Markdown, and tags are named, not parsed (2026-09-17)
+
+**Context.** D2's pipeline rendered CommonMark and tables. An AI agent
+writes more than that unprompted (task lists, LaTeX, footnotes, `<details>`,
+`<sub>`), and the reference for a good bot chat, Telegram's Rich Markdown
+(Bot API 10.1, `#rich-message-formatting-options`), renders all of it. A
+wide table also stretched the bubble and pushed the pane off the screen.
+
+**Decision.** `lib/markdown-rules.mjs` adds, on top of D2: `==mark==`,
+`||spoiler||`, the inline tags `<u> <ins> <sub> <sup> <mark> <tg-spoiler>`,
+`$…$` / `$$…$$` / ` ```math ` (KaTeX, MathML output only: no stylesheet or
+font to ship, and the daemon's page gets the same markup), task lists,
+footnotes (`markdown-it-footnote`, anchors prefixed with the message id),
+`<details><summary>` blocks with markdown inside, highlighted code under a
+language label and a Copy button (`highlight.js` common set), and `/command`
+as a button the room sends on a tap. Four choices behind that:
+
+- **Raw HTML stays off.** Telegram parses arbitrary HTML and keeps the tags
+  it knows. Here each supported tag is recognised by name and everything
+  else is text, because a parse-then-sanitize pipeline drops the `<T>` of
+  `Vec<T>`, and agents write generics in prose all the time. D2's rule
+  holds: a message is data, never markup.
+- **Unclosed syntax is text; an unclosed `<details>` closes at the end.** A
+  streamed answer is rendered many times before its last line exists.
+- **The HTML is inert.** Copy and /command are attributes (`data-copy`,
+  `data-command`) that the Room view acts on; the `?format=html` page shows
+  the same markup with nothing wired. A spoiler opens on focus, in CSS.
+- **A table scrolls in its own box** (`.md-table`, cells keep words whole
+  and wrap at 32ch), the grid tracks are `minmax(0, …)`, and the
+  Conversation panes are fixed at 390 × 844 so a message is judged at phone
+  width. A box with more to its right fades at that edge.
+
+Images stay links (D2). Not taken from Telegram: media blocks, collages,
+maps, custom emoji, date-time entities and `<tg-button>` — buttons need a
+callback content kind on the wire first. Chat-list previews and reply
+quotes show `plain()`: the text without its markup, a spoiler kept shut.
+
+`test/markdown.test.mjs` pins the HTML of every construct and of what must
+not get through. Those cases are the acceptance list for the apps.

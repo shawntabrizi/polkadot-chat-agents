@@ -70,6 +70,11 @@ export const Room = ({ persona, device, peer, peerName, readOnly = false, active
       setComposer(current);
     }
   };
+  // A tapped /command goes out at once, as the phone sends it; the draft stays.
+  const sendCommand = (command: string) => {
+    setError(null);
+    api.send(persona.name, peer, { text: command, replyTo: null, device }).then(view.reload, cause => setError(errorText(cause, 'Could not send.')));
+  };
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
@@ -136,7 +141,7 @@ export const Room = ({ persona, device, peer, peerName, readOnly = false, active
     return (
       <>
         {m.content.type === 'reply' ? <blockquote className="quote">{quoteOf(byId.get(m.content.messageId))}</blockquote> : null}
-        {isText ? <MarkdownCell text={text} /> : attachments.length > 0 ? null : <span className="tertiary">{labelOf(m.content) ?? 'Unknown message'}</span>}
+        {isText ? <MarkdownCell text={text} id={m.messageId} onCommand={readOnly ? undefined : sendCommand} /> : attachments.length > 0 ? null : <span className="tertiary">{labelOf(m.content) ?? 'Unknown message'}</span>}
         {attachments.map(attachment)}
       </>
     );

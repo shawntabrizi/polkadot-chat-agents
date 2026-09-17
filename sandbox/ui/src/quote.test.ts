@@ -6,8 +6,9 @@ import { describe, expect, it } from 'vitest';
 import { MISSING_QUOTE, QUOTE_MAX, quoteOf } from './quote';
 
 describe('quoteOf', () => {
-  it('flattens the target text to one line', () => {
-    expect(quoteOf({ content: { type: 'text', text: 'a\n\n| t |\n|---|\n| b |' } })).toBe('a | t | |---| | b |');
+  it('flattens the target text to one line, without its markup', () => {
+    expect(quoteOf({ content: { type: 'text', text: 'a\n\n| t |\n|---|\n| b |' } })).toBe('a t b');
+    expect(quoteOf({ content: { type: 'text', text: '## Report\n\n**done** ||secret||' } })).toBe('Report done ▒▒▒▒');
     expect(quoteOf({ content: { type: 'reply', messageId: 'x', text: '  re  ' } })).toBe('re');
   });
   it('truncates a long target with an ellipsis', () => {

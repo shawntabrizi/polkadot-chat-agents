@@ -60,7 +60,7 @@ a:hover { color: var(--fg-link-hover); }
 .nested { background: var(--bg-surface-nested); border-radius: var(--radius-nested); padding: 10px 12px; }
 .row { display: flex; align-items: center; gap: 10px; }
 .stack { display: flex; flex-direction: column; gap: 8px; }
-.split { display: grid; grid-template-columns: 280px 1fr; gap: var(--gap); flex: 1; min-height: 0; }
+.split { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: var(--gap); flex: 1; min-height: 0; }
 .scroll { overflow: auto; min-height: 0; }
 .empty { color: var(--fg-tertiary); padding: 8px 0; }
 
@@ -126,17 +126,16 @@ table.grid tr[aria-selected="true"] td { background: var(--bg-selection-containe
 .room-panel { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
 .room { display: flex; flex-direction: column; min-height: 0; flex: 1; }
 .messages { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 6px; padding: 4px 0; }
-.msg { max-width: 78%; padding: 8px 12px; border-radius: var(--radius-nested); background: var(--bg-surface-nested); }
+.msg { position: relative; max-width: 85%; min-width: 0; padding: 8px 12px; border-radius: var(--radius-nested); background: var(--bg-surface-nested); }
 .msg[data-direction="outgoing"] { align-self: flex-end; background: var(--bg-surface-container-inverted); color: var(--fg-primary-inverted); }
 .msg[data-direction="outgoing"] .caption, .msg[data-direction="outgoing"] .tertiary { color: var(--fg-secondary-inverted); }
 .msg[data-direction="outgoing"] a { color: var(--fg-primary-inverted); text-decoration: underline; }
-.msg[data-direction="outgoing"] .btn.ghost { color: var(--fg-secondary-inverted); }
-.msg[data-direction="outgoing"] .btn.ghost:hover { background: var(--bg-action-tertiary-inverted-hover); color: var(--fg-primary-inverted); }
 .msg[data-direction="system"] { align-self: center; background: transparent; color: var(--fg-tertiary); font-size: 12px; }
-.msg .meta { display: flex; align-items: center; gap: 8px; margin-top: 4px; font-size: 12px; line-height: 18px; }
-.msg .meta > .caption:first-child { white-space: nowrap; }
-.msg .actions { display: flex; gap: 2px; opacity: 0; transition: opacity .12s; }
-.msg:hover .actions, .msg:focus-within .actions { opacity: 1; }
+.msg .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0 8px; margin-top: 4px; font-size: 12px; line-height: 18px; }
+.msg .meta > .caption { white-space: nowrap; }
+/* A toolbar over the bubble's top edge: at phone width the meta row has no room for it. */
+.msg .actions { position: absolute; top: -14px; right: 8px; display: flex; gap: 2px; padding: 2px; border-radius: var(--radius-small); background: var(--bg-surface-container); box-shadow: var(--shadow-1); opacity: 0; pointer-events: none; transition: opacity .12s; }
+.msg:hover .actions, .msg:focus-within .actions { opacity: 1; pointer-events: auto; }
 .msg .quote { margin: 0 0 6px; padding: 2px 0 2px 8px; border-left: 2px solid var(--stroke-tertiary); color: var(--fg-secondary); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .msg[data-direction="outgoing"] .quote { color: var(--fg-secondary-inverted); border-color: var(--stroke-primary-inverted); }
 .msg .reactions { display: flex; gap: 4px; }
@@ -150,26 +149,66 @@ table.grid tr[aria-selected="true"] td { background: var(--bg-selection-containe
 .composer-mode { display: flex; align-items: center; gap: 8px; margin-top: var(--gap); }
 
 /* ── Conversation (both sides of one chat) ───────────────────────────── */
-.conversation { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); flex: 1; min-height: 0; }
+/* Each pane is one phone: 390 × 844 (a current iPhone in points), so a
+   message is judged at the width a person reads it at. */
+.conversation { display: grid; grid-template-columns: repeat(2, 390px); justify-content: center; gap: var(--gap); flex: 1; min-height: 0; overflow-x: auto; }
+.conversation > .panel { max-height: 844px; min-width: 0; }
 
 /* ── Markdown (the body of every text message) ─────────────────────── */
 .md { overflow-wrap: anywhere; }
 .md > :first-child { margin-top: 0; }
 .md > :last-child { margin-bottom: 0; }
-.md p, .md ul, .md ol, .md blockquote, .md pre, .md table { margin: 6px 0; }
+.md p, .md ul, .md ol, .md blockquote { margin: 6px 0; }
 .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 8px 0 4px; font-weight: 600; line-height: 1.3; }
 .md h1 { font-size: 18px; } .md h2 { font-size: 16px; } .md h3, .md h4, .md h5, .md h6 { font-size: 14px; }
 .md ul { list-style: disc; padding-left: 20px; } .md ol { list-style: decimal; padding-left: 20px; }
 .md li { margin: 2px 0; }
 .md code { font-family: var(--font-mono); font-size: 12px; padding: 1px 4px; border-radius: var(--radius-small); background: var(--bg-surface-container); }
 .msg[data-direction="outgoing"] .md code { background: var(--bg-surface-nested-inverted); }
-.md pre { padding: 8px 10px; border-radius: var(--radius-small); background: var(--bg-surface-container); overflow-x: auto; }
-.msg[data-direction="outgoing"] .md pre { background: var(--bg-surface-nested-inverted); }
+.md pre { margin: 0; padding: 8px 10px; overflow-x: auto; }
 .md pre code { padding: 0; background: none; }
-.md table { border-collapse: collapse; display: block; overflow-x: auto; max-width: 100%; }
-.md th, .md td { padding: 4px 8px; border-bottom: 1px solid var(--stroke-primary); text-align: left; }
+.md > pre, .md-code { margin: 6px 0; border-radius: var(--radius-small); background: var(--bg-surface-container); overflow: hidden; }
+.msg[data-direction="outgoing"] .md > pre, .msg[data-direction="outgoing"] .md-code { background: var(--bg-surface-nested-inverted); }
+.md-code-head { display: flex; align-items: center; justify-content: space-between; padding: 4px 4px 0 10px; font-size: 11px; color: var(--fg-tertiary); }
+.md-code-head button { border: 0; background: none; padding: 2px 6px; border-radius: var(--radius-small); font: inherit; color: inherit; cursor: pointer; }
+.md-code-head button:hover { color: var(--fg-primary); background: var(--bg-action-tertiary); }
+.hljs-comment, .hljs-quote { color: var(--fg-tertiary); font-style: italic; }
+.hljs-keyword, .hljs-selector-tag, .hljs-built_in, .hljs-type, .hljs-meta { color: var(--fg-link); }
+.hljs-string, .hljs-regexp, .hljs-addition, .hljs-attr { color: var(--fg-success); }
+.hljs-number, .hljs-literal, .hljs-symbol, .hljs-variable { color: var(--fg-warning); }
+.hljs-deletion { color: var(--fg-error); }
+.hljs-title, .hljs-section { font-weight: 600; }
+.msg[data-direction="outgoing"] .md [class^="hljs-"] { color: inherit; }
+/* A table keeps its words whole and scrolls sideways in its own box; the
+   bubble never grows. A cell wraps at 32 characters, so one long note does
+   not make a table ten screens wide. */
+.md-table { margin: 6px 0; overflow-x: auto; max-width: 100%; }
+/* More to the right: the edge fades until the box is scrolled to its end (MarkdownCell sets the flag). */
+.md [data-more] { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); }
+.md table { border-collapse: collapse; width: max-content; margin: 0; }
+.md th, .md td { padding: 4px 8px; border-bottom: 1px solid var(--stroke-primary); text-align: left; vertical-align: top; max-width: 32ch; overflow-wrap: normal; word-break: normal; }
 .msg[data-direction="outgoing"] .md th, .msg[data-direction="outgoing"] .md td { border-color: var(--stroke-primary-inverted); }
-.md th { font-weight: 500; }
+.md th { font-weight: 500; white-space: nowrap; }
+.md mark { padding: 0 2px; border-radius: 2px; background: var(--bg-status-warning); color: inherit; }
+/* A spoiler opens on a tap (focus) and closes when the tap goes elsewhere. */
+.md-spoiler { border-radius: 3px; background: var(--fg-tertiary); color: transparent; cursor: pointer; user-select: none; }
+.md-spoiler * { visibility: hidden; }
+.md-spoiler:focus { background: var(--bg-surface-container); color: inherit; user-select: auto; outline: none; }
+.md-spoiler:focus * { visibility: visible; }
+.md-command { border: 0; background: none; padding: 0; font: inherit; color: var(--fg-link); cursor: pointer; }
+.md-command:hover { text-decoration: underline; }
+.msg[data-direction="outgoing"] .md-command { color: inherit; text-decoration: underline; }
+.md li.md-task { list-style: none; margin-left: -18px; }
+.md li.md-task input { margin: 0 4px 0 0; vertical-align: -1px; }
+.md details { margin: 6px 0; padding: 6px 10px; border-radius: var(--radius-small); background: var(--bg-surface-container); }
+.msg[data-direction="outgoing"] .md details { background: var(--bg-surface-nested-inverted); }
+.md summary { cursor: pointer; font-weight: 500; }
+.md details[open] > summary { margin-bottom: 6px; }
+.md-math { margin: 6px 0; overflow-x: auto; }
+.md .katex-error { font-family: var(--font-mono); font-size: 12px; }
+.md .footnotes { font-size: 12px; color: var(--fg-secondary); }
+.md .footnotes-sep { margin: 8px 0 4px; }
+.md .footnote-ref a, .md .footnote-backref { text-decoration: none; }
 .md blockquote { margin-left: 0; padding-left: 8px; border-left: 2px solid var(--stroke-tertiary); color: var(--fg-secondary); }
 .md hr { border: 0; border-top: 1px solid var(--stroke-primary); }
 .md-empty { color: var(--fg-tertiary); font-style: italic; }
