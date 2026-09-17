@@ -30,15 +30,16 @@ The source of truth is this repo, branch `feat/sandbox-rich-markdown`:
 
 | File | What it is |
 |---|---|
-| `sandbox/lib/markdown.mjs` | The pipeline: markdown-it (raw HTML off, linkify, breaks), renderers for tables, code, math, commands; DOMPurify; `render(text, { id })` and `plain(text)` |
+| `sandbox/lib/markdown.mjs` | The pipeline: markdown-it (raw HTML off, linkify, breaks), renderers for tables, code, math, commands; DOMPurify; `render(text)` and `plain(text)` |
 | `sandbox/lib/markdown-rules.mjs` | The added syntax: `==mark==`, `\|\|spoiler\|\|`, the named inline tags, `$math$`, `$$block$$`, task lists, `<details>`, `/commands` |
 | `sandbox/ui/src/MarkdownCell.tsx` | The React cell: click delegation for Copy and `/command`, the fade flag on boxes that scroll |
 | `sandbox/ui/src/styles.css` (`.md…`) | The styles. Desktop uses Tailwind 4 and `tr-ui` tokens, so translate them; do not copy the file |
 | `sandbox/test/markdown.test.mjs` | The acceptance list: each construct, and what must not get through |
+| `sandbox/ui/src/MarkdownCell.test.tsx` | The cell's behaviour: a tapped `/command` reaches the room |
+| `sandbox/test/fixtures/markdown-profile.json` | The same list as a neutral tree, for a client with no HTML |
 
 Both files in `lib/` are plain ESM with no Node-only import. Packages, exact
-versions: `markdown-it` 15.0.1, `markdown-it-footnote` 4.0.0, `dompurify`
-3.4.14, `katex` 0.18.7 (MathML output only, so no stylesheet or font),
+versions: `markdown-it` 15.0.1, `dompurify` 3.4.14, `katex` 0.18.7 (MathML output only, so no stylesheet or font),
 `highlight.js` 11.12.0 (`lib/common`).
 
 ## Decisions that must survive the port
@@ -50,12 +51,13 @@ versions: `markdown-it` 15.0.1, `markdown-it-footnote` 4.0.0, `dompurify`
    behaviour. A tapped `/command` is sent at once.
 4. An image is a link. The viewer never fetches a URL that a message names.
 5. A table scrolls sideways in its own box. The bubble never grows.
-6. A footnote anchor carries the message id.
-7. A preview or a quote shows `plain()`, with a spoiler kept shut.
+6. A preview or a quote shows `plain()`, with a spoiler kept shut.
 
 ## Not in scope
 
-Buttons (`<tg-button>`), media blocks, custom emoji and date entities. Buttons
+Footnotes: removed from the profile on 2026-09-17 for simplicity and because
+an in-page `#` link conflicts with Desktop's hash router (decision D8); to be
+addressed later. Buttons (`<tg-button>`), media blocks, custom emoji and date entities. Buttons
 need a callback message kind on the wire, which needs a chat-spec RFC.
 No fallback design for other clients: the stack is pre-production.
 

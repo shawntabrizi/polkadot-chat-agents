@@ -4,7 +4,7 @@
 //
 // The profile is what an AI agent writes unprompted, and what Telegram's Rich
 // Markdown renders: CommonMark, GFM tables and strikethrough, task lists,
-// footnotes, LaTeX math, highlighted code, ==mark==, ||spoiler||, a few named
+// LaTeX math, highlighted code, ==mark==, ||spoiler||, a few named
 // inline tags, <details> blocks and tappable /commands (`markdown-rules.mjs`).
 //
 // markdown-it with raw HTML off (a message is data, not markup), linkify on
@@ -24,7 +24,6 @@ import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/common";
 import katex from "katex";
 import MarkdownIt from "markdown-it";
-import footnote from "markdown-it-footnote";
 
 import { richRules } from "./markdown-rules.mjs";
 
@@ -39,7 +38,7 @@ export const EMPTY_PLACEHOLDER = "(empty message)";
  */
 export function createMarkdown(window) {
   const md = new MarkdownIt({ html: false, linkify: true, breaks: true, typographer: false });
-  md.use(footnote).use(richRules);
+  md.use(richRules);
   const escape = md.utils.escapeHtml;
 
   // No images: a message must not make the viewer fetch an arbitrary URL.
@@ -51,13 +50,11 @@ export function createMarkdown(window) {
     return `<a href="${escape(src)}" target="_blank" rel="${NOOPENER}">${escape(alt)}</a>`;
   };
   // Links leave the sandbox UI; a new tab keeps the room open and noopener
-  // keeps the opened page away from it. A `#` link (a footnote) stays here.
+  // keeps the opened page away from it.
   const renderLink = md.renderer.rules.link_open ?? ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
   md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
-    if (!(tokens[idx].attrGet("href") ?? "").startsWith("#")) {
-      tokens[idx].attrSet("target", "_blank");
-      tokens[idx].attrSet("rel", NOOPENER);
-    }
+    tokens[idx].attrSet("target", "_blank");
+    tokens[idx].attrSet("rel", NOOPENER);
     return renderLink(tokens, idx, options, env, self);
   };
   // A table scrolls sideways inside its own box; the bubble never grows.
@@ -88,15 +85,13 @@ export function createMarkdown(window) {
 
   /**
    * Sanitized HTML for one message text. Empty or whitespace-only text
-   * renders the placeholder so a row is never blank. `id` (the message id)
-   * keeps footnote anchors unique when many messages share a page.
+   * renders the placeholder so a row is never blank.
    * @param {string | null | undefined} text
-   * @param {{ id?: string }} [options]
    * @returns {string}
    */
-  const render = (text, { id } = {}) => {
+  const render = (text) => {
     if (typeof text !== "string" || text.trim() === "") return `<p class="md-empty">${EMPTY_PLACEHOLDER}</p>`;
-    return sanitize(md.render(text, id ? { docId: id } : {}));
+    return sanitize(md.render(text));
   };
 
   return {
@@ -111,7 +106,7 @@ export function createMarkdown(window) {
       if (typeof text !== "string") return "";
       const box = window.document.createElement("div");
       box.innerHTML = render(text);
-      for (const el of box.querySelectorAll("annotation, .md-code-head, .footnotes, .footnote-ref")) el.remove();
+      for (const el of box.querySelectorAll("annotation, .md-code-head")) el.remove();
       // A preview must not give away what the message hides.
       for (const el of box.querySelectorAll(".md-spoiler")) el.textContent = "▒▒▒▒";
       return (box.textContent ?? "").replace(/\s+/g, " ").trim();

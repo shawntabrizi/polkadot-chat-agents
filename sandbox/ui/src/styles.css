@@ -206,9 +206,6 @@ table.grid tr[aria-selected="true"] td { background: var(--bg-selection-containe
 .md details[open] > summary { margin-bottom: 6px; }
 .md-math { margin: 6px 0; overflow-x: auto; }
 .md .katex-error { font-family: var(--font-mono); font-size: 12px; }
-.md .footnotes { font-size: 12px; color: var(--fg-secondary); }
-.md .footnotes-sep { margin: 8px 0 4px; }
-.md .footnote-ref a, .md .footnote-backref { text-decoration: none; }
 .md blockquote { margin-left: 0; padding-left: 8px; border-left: 2px solid var(--stroke-tertiary); color: var(--fg-secondary); }
 .md hr { border: 0; border-top: 1px solid var(--stroke-primary); }
 .md-empty { color: var(--fg-tertiary); font-style: italic; }

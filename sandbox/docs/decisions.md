@@ -205,7 +205,6 @@ wide table also stretched the bubble and pushed the pane off the screen.
 `||spoiler||`, the inline tags `<u> <ins> <sub> <sup> <mark> <tg-spoiler>`,
 `$…$` / `$$…$$` / ` ```math ` (KaTeX, MathML output only: no stylesheet or
 font to ship, and the daemon's page gets the same markup), task lists,
-footnotes (`markdown-it-footnote`, anchors prefixed with the message id),
 `<details><summary>` blocks with markdown inside, highlighted code under a
 language label and a Copy button (`highlight.js` common set), and `/command`
 as a button the room sends on a tap. Four choices behind that:
@@ -224,6 +223,18 @@ as a button the room sends on a tap. Four choices behind that:
   and wrap at 32ch), the grid tracks are `minmax(0, …)`, and the
   Conversation panes are fixed at 390 × 844 so a message is judged at phone
   width. A box with more to its right fades at that edge.
+
+**Footnotes are out, for now** (removed 2026-09-17, to be addressed later).
+Telegram's Rich Markdown has them (`[^id]`), and the first cut of this
+profile rendered them with `markdown-it-footnote`. They were removed for
+simplicity and for a conflict: a footnote is an in-page `#` link, and
+Polkadot Desktop routes with hash history, so that link navigates the app
+away from the chat. They also made `render()` take a message id (anchors
+must be unique when many messages share a page), which every caller then had
+to thread through. No client decided how a footnote should look on a phone
+either (a list at the end, or a popup on the mark). Until then the syntax is
+text; a definition that is only a URL is a CommonMark link reference, so its
+mark becomes a link to that URL.
 
 Images stay links (D2). Not taken from Telegram: media blocks, collages,
 maps, custom emoji, date-time entities and `<tg-button>` — buttons need a

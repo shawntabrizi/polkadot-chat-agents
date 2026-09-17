@@ -431,33 +431,19 @@
       ]
     },
     {
-      "name": "a footnote",
+      "name": "footnote syntax is text (footnotes are not in the profile yet)",
       "input": "a claim[^1]\n\n[^1]: the source",
       "structure": [
         {
           "type": "paragraph",
           "children": [
-            "a claim",
-            {
-              "type": "footnote_ref",
-              "label": "1"
-            }
+            "a claim[^1]"
           ]
         },
         {
-          "type": "footnotes",
-          "items": [
-            {
-              "label": "1",
-              "children": [
-                {
-                  "type": "paragraph",
-                  "children": [
-                    "the source"
-                  ]
-                }
-              ]
-            }
+          "type": "paragraph",
+          "children": [
+            "[^1]: the source"
           ]
         }
       ]

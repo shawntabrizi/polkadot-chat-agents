@@ -24,7 +24,7 @@ header { font-size: 12px; color: #6b7280; display: flex; gap: 8px; }
 .md-code { margin: 6px 0; } .md-code-head { font-size: 11px; color: #6b7280; } .md-code-head button { display: none; }
 .md-spoiler { background: #6b7280; color: transparent; border-radius: 3px; } .md-spoiler:focus { background: #f0f1f3; color: inherit; }
 .md-command { border: 0; background: none; padding: 0; font: inherit; color: #2563eb; } .md li.md-task { list-style: none; margin-left: -18px; }
-.md details { background: #f0f1f3; padding: 6px 10px; border-radius: 8px; } .md-math { overflow-x: auto; } .md .footnotes { font-size: 12px; color: #6b7280; }
+.md details { background: #f0f1f3; padding: 6px 10px; border-radius: 8px; } .md-math { overflow-x: auto; }
 .quote { margin: 0 0 6px; padding-left: 8px; border-left: 2px solid #d9dbe0; color: #6b7280; }
 figure.attachment { margin: 6px 0 0; } figure.attachment img { display: block; max-width: 100%; height: auto; border-radius: 8px; } figcaption, .attachment { font-size: 12px; color: #6b7280; }
 .placeholder { padding: 8px; border: 1px dashed #d9dbe0; border-radius: 8px; }
@@ -66,7 +66,7 @@ export function createRoomRenderer() {
     const text = textOf(m.content);
     const attachments = (m.content.attachments ?? []).map(attachment(view.device ?? null)).join("\n");
     const body = text != null || m.content.type === "text" || m.content.type === "reply"
-      ? `<div class="md">${md.render(text, { id: m.messageId })}</div>`
+      ? `<div class="md">${md.render(text)}</div>`
       : attachments ? "" : `<div class="label">${escape(labelOf(m.content))}</div>`;
     const reply = m.content.type === "reply" ? quote(all.get(m.content.messageId)) : "";
     const reactions = m.reactions.length ? `<span class="reactions">${m.reactions.map((r) => `${escape(r.emoji)}${r.by === "me" ? "" : "·peer"}`).join(" ")}</span>` : "";

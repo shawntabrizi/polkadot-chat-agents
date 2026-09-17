@@ -12,7 +12,7 @@ const has = (el, name) => el.classList?.contains(name);
 function nodeOf(el) {
   const tag = el.tagName.toLowerCase();
   const kids = () => childrenOf(el);
-  if (INLINE[tag] && !has(el, "footnote-ref")) return { type: INLINE[tag], children: kids() };
+  if (INLINE[tag]) return { type: INLINE[tag], children: kids() };
   if (/^h[1-6]$/.test(tag)) return { type: "heading", level: Number(tag[1]), children: kids() };
   if (has(el, "md-spoiler")) return { type: "spoiler", children: kids() };
   if (has(el, "md-command")) return { type: "command", name: el.dataset.command };
@@ -33,19 +33,17 @@ function nodeOf(el) {
       rows: [...el.querySelectorAll("tbody tr")].map(cells),
     };
   }
-  if (has(el, "footnote-ref")) return { type: "footnote_ref", label: el.textContent.replace(/[[\]]/g, "") };
-  if (has(el, "footnotes")) return { type: "footnotes", items: [...el.querySelectorAll("li.footnote-item")].map((li, i) => ({ label: String(i + 1), children: childrenOf(li) })) };
   switch (tag) {
     case "p": return { type: "paragraph", children: kids() };
     case "br": return { type: "break" };
-    case "hr": return has(el, "footnotes-sep") ? null : { type: "rule" };
+    case "hr": return { type: "rule" };
     case "blockquote": return { type: "quote", children: kids() };
     case "ul": case "ol": return { type: "list", ordered: tag === "ol", items: [...el.children].map(nodeOf) };
     case "li": {
       const box = has(el, "md-task") ? el.querySelector(":scope > input") : null;
       return { type: "item", ...(box ? { task: box.checked } : {}), children: kids() };
     }
-    case "a": return has(el, "footnote-backref") ? null : { type: "link", href: el.getAttribute("href"), children: kids() };
+    case "a": return { type: "link", href: el.getAttribute("href"), children: kids() };
     case "pre": return { type: "code_block", language: null, text: el.textContent };
     case "details": {
       const summary = el.querySelector(":scope > summary");
@@ -65,7 +63,6 @@ function childrenOf(el) {
     if (child.nodeType === 3) {
       let text = child.textContent.replace(/\n/g, "");
       if (child.previousSibling?.nodeName === "INPUT") text = text.trimStart();
-      if (has(child.nextSibling ?? {}, "footnote-backref")) text = text.trimEnd();
       if (text === "") continue;
       if (typeof out[out.length - 1] === "string") out[out.length - 1] += text;
       else out.push(text);
@@ -79,12 +76,12 @@ function childrenOf(el) {
 
 /**
  * The neutral tree of one message text.
- * @param {{ render(text: string, options?: { id?: string }): string }} md a `createMarkdown(window)` renderer
+ * @param {{ render(text: string): string }} md a `createMarkdown(window)` renderer
  * @param {Window} window the DOM `md` was bound to
  * @param {string} text
  */
 export function structureOf(md, window, text) {
   const box = window.document.createElement("div");
-  box.innerHTML = md.render(text, { id: "m1" });
+  box.innerHTML = md.render(text);
   return childrenOf(box);
 }

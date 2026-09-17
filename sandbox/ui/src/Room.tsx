@@ -141,7 +141,7 @@ export const Room = ({ persona, device, peer, peerName, readOnly = false, active
     return (
       <>
         {m.content.type === 'reply' ? <blockquote className="quote">{quoteOf(byId.get(m.content.messageId))}</blockquote> : null}
-        {isText ? <MarkdownCell text={text} id={m.messageId} onCommand={readOnly ? undefined : sendCommand} /> : attachments.length > 0 ? null : <span className="tertiary">{labelOf(m.content) ?? 'Unknown message'}</span>}
+        {isText ? <MarkdownCell text={text} onCommand={readOnly ? undefined : sendCommand} /> : attachments.length > 0 ? null : <span className="tertiary">{labelOf(m.content) ?? 'Unknown message'}</span>}
         {attachments.map(attachment)}
       </>
     );

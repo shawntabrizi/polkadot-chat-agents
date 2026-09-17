@@ -55,10 +55,12 @@ const cases = [
     "<div class=\"md-math\"><span class=\"katex\"><math xmlns=\"http://www.w3.org/1998/Math/MathML\" display=\"block\"><semantics><mrow><mi>E</mi><mo>=</mo><mi>m</mi><msup><mi>c</mi><mn>2</mn></msup></mrow><annotation encoding=\"application/x-tex\">E = mc^2</annotation></semantics></math></span></div>\n"],
   ["KaTeX commands that make links stay off", "$\\href{javascript:alert(1)}{x}$",
     "<p><span class=\"katex\"><math xmlns=\"http://www.w3.org/1998/Math/MathML\"><semantics><mrow><mstyle mathcolor=\"#cc0000\"><mtext>\\href</mtext></mstyle></mrow><annotation encoding=\"application/x-tex\">\\href{javascript:alert(1)}{x}</annotation></semantics></math></span></p>\n"],
-  ["a footnote's anchors carry the message id, so two messages on one page do not collide", "a[^1]\n\n[^1]: note",
-    "<p>a<sup class=\"footnote-ref\"><a href=\"#fn-m1-1\" id=\"fnref-m1-1\">[1]</a></sup></p>\n<hr class=\"footnotes-sep\">\n<section class=\"footnotes\">\n<ol class=\"footnotes-list\">\n<li id=\"fn-m1-1\" class=\"footnote-item\"><p>note <a href=\"#fnref-m1-1\" class=\"footnote-backref\">↩︎</a></p>\n</li>\n</ol>\n</section>\n"],
-  ["a link inside the page stays in this tab", "[top](#fn-m1-1)",
-    "<p><a href=\"#fn-m1-1\">top</a></p>\n"],
+  // Footnotes are out of the profile for now (D8). The syntax must stay readable, and lose no text.
+  ["footnote syntax is text", "a claim[^1]\n\n[^1]: the source text",
+    "<p>a claim[^1]</p>\n<p>[^1]: the source text</p>\n"],
+  // CommonMark reads a definition that is only a URL as a link reference, so the mark becomes a link to the source.
+  ["a footnote whose definition is only a URL becomes a link to it", "x[^2]\n\n[^2]: https://example.com",
+    "<p>x<a href=\"https://example.com\" target=\"_blank\" rel=\"noopener noreferrer\">^2</a></p>\n"],
   ["a details block: inline markdown in the summary, blocks in the body", "<details open><summary>T **b**</summary>\n\n- one\n\n</details>\n\nafter",
     "<details open=\"\">\n<summary>T <strong>b</strong></summary>\n<ul>\n<li>one</li>\n</ul>\n</details>\n<p>after</p>\n"],
   ["a details block still streaming closes at the end of the message", "<details><summary>T</summary>\n\nstill streaming",
@@ -68,7 +70,7 @@ const cases = [
 ];
 
 for (const [name, input, expected] of cases) {
-  test(`markdown: ${name}`, () => { assert.equal(md.render(input, { id: "m1" }), expected); });
+  test(`markdown: ${name}`, () => { assert.equal(md.render(input), expected); });
 }
 
 test("markdown: empty, whitespace-only and missing text render the placeholder", () => {
