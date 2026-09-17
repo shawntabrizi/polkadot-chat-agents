@@ -6,8 +6,11 @@
 // Split preference, in order: paragraph boundary (blank line), line boundary,
 // hard byte split inside a single overlong line (never inside a UTF-8 code
 // point). A split inside a fenced code block closes the fence at the cut and
-// re-opens it (same marker + info string) at the top of the next part, so
-// every part renders as valid markdown on its own. Pure function; unit-tested.
+// re-opens it (same marker + info string) at the top of the next part. A
+// split inside a table repeats the header and delimiter rows at the top of
+// the next part: rows without them are not a table, they render as lines of
+// pipes. So every part renders as valid markdown on its own. Pure function;
+// unit-tested.
 
 const byteLen = (s) => Buffer.byteLength(s, "utf8");
 
@@ -15,6 +18,10 @@ const byteLen = (s) => Buffer.byteLength(s, "utf8");
 // info string on open. A closing line uses the same character, at least as
 // long, and nothing but whitespace after.
 const FENCE_RE = /^(\s{0,3})(`{3,}|~{3,})(.*)$/;
+
+// A GFM table's second line: `|---|:--:|`. With a `|` line right above it, a
+// table starts; it runs until a blank line or a line without a `|`.
+const TABLE_DELIM_RE = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
 
 // Hard-split one overlong line at UTF-8-safe boundaries (never inside a code
 // point; surrogate pairs stay together).
@@ -40,6 +47,7 @@ export const splitMessageText = (text, maxBytes) => {
   let cur = []; // lines of the part being built
   let curBytes = 0;
   let fence = null; // { close: "```", reopen: "```lang" } while inside a fence
+  let table = null; // { reopen: [header, delimiter] } while inside a table
   let lastBlank = -1; // index in cur of the last blank line outside any fence
 
   const pushLine = (line, lineBytes) => {
@@ -57,7 +65,9 @@ export const splitMessageText = (text, maxBytes) => {
   };
 
   // Cut the current part. Prefer the last paragraph boundary (only when not
-  // inside a fence — a fence cut must close/re-open instead).
+  // inside a fence — a fence cut must close/re-open instead). A table that
+  // started after that boundary moves whole; one with no boundary to fall
+  // back on is cut between rows and re-opened.
   const cut = () => {
     if (fence == null && lastBlank > 0) {
       emit(cur.slice(0, lastBlank));
@@ -65,6 +75,9 @@ export const splitMessageText = (text, maxBytes) => {
     } else if (fence != null) {
       emit([...cur, fence.close]);
       cur = [fence.reopen];
+    } else if (table != null && cur.length > table.reopen.length) {
+      emit(cur);
+      cur = [...table.reopen];
     } else {
       emit(cur);
       cur = [];
@@ -79,10 +92,18 @@ export const splitMessageText = (text, maxBytes) => {
       if (fence == null) fence = { close: m[1] + m[2], reopen: line };
       else if (m[2][0] === fence.close.trim()[0] && m[2].length >= fence.close.trim().length && m[3].trim() === "") fence = null;
     }
+    if (table != null && (line.trim() === "" || !line.includes("|"))) table = null;
+    const opensTable = fence == null && table == null && cur.length > 0 && cur[cur.length - 1].includes("|") && line.includes("|") && TABLE_DELIM_RE.test(line);
     // Reserve room for a fence-close line so a mid-fence cut still fits.
     const reserve = fence != null ? byteLen(fence.close) + 1 : 0;
     let lineBytes = byteLen(line);
-    if (cur.length > 0 && curBytes + 1 + lineBytes + reserve > cap) cut();
+    if (cur.length > 0 && curBytes + 1 + lineBytes + reserve > cap) {
+      // A cut between a header and its delimiter row: the header goes along.
+      const header = opensTable ? cur.pop() : null;
+      if (cur.length > 0) cut();
+      if (header != null) pushLine(header, byteLen(header));
+    }
+    if (opensTable) table = { reopen: [cur[cur.length - 1], line] };
     // A single line beyond the cap: hard-split it (fence reserve kept so the
     // close/re-open lines fit around the pieces).
     if (lineBytes + reserve > cap) {

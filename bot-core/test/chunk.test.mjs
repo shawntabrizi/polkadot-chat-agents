@@ -60,3 +60,46 @@ test("enforces a sane minimum cap", () => {
   const parts = splitMessageText("abc def ghi", 1); // cap clamps to 256
   assert.deepEqual(parts, ["abc def ghi"]);
 });
+
+// A part is its own chat message. Rows without their header and delimiter
+// rows are not a table: the peer sees lines of pipes.
+const tableRows = (part) => part.split("\n").filter((l) => l.startsWith("|"));
+const HEADER = "| crate | status |";
+const DELIM = "|:------|-------:|";
+
+test("a table cut between rows re-opens with its header, and no row is lost or repeated", () => {
+  const rows = Array.from({ length: 40 }, (_, i) => `| crate-${i} ${"z".repeat(20)} | ok |`);
+  const parts = splitMessageText([HEADER, DELIM, ...rows].join("\n"), 400);
+  assert.ok(parts.length > 1);
+  for (const p of parts) {
+    assert.ok(byteLen(p) <= 400, `part exceeds cap: ${byteLen(p)}`);
+    assert.deepEqual(tableRows(p).slice(0, 2), [HEADER, DELIM], `part does not open as a table: ${p}`);
+  }
+  assert.deepEqual(parts.flatMap((p) => tableRows(p).slice(2)), rows);
+});
+
+test("a table that fits in one part moves whole instead of being cut", () => {
+  const intro = Array.from({ length: 6 }, (_, i) => `intro line ${i} ${"w".repeat(40)}`).join("\n");
+  const table = [HEADER, DELIM, "| a | ok |", "| b | ok |"].join("\n");
+  const parts = splitMessageText(`${intro}\n\n${table}\n\noutro`, 360);
+  assert.equal(parts.filter((p) => p.includes("|")).length, 1, "the table is in exactly one part");
+  assert.ok(parts.some((p) => p.includes(table)));
+});
+
+test("a cut that lands between a header and its delimiter row takes the header along", () => {
+  const filler = Array.from({ length: 5 }, (_, i) => `filler ${i} ${"v".repeat(40)}`);
+  // No blank line before the table, so there is no paragraph boundary to fall back on.
+  const text = [...filler, HEADER, DELIM, "| a | ok |"].join("\n");
+  const cap = byteLen([...filler, HEADER].join("\n")) + 2;
+  const parts = splitMessageText(text, Math.max(256, cap));
+  const withTable = parts.filter((p) => p.includes("|"));
+  assert.equal(withTable.length, 1);
+  assert.deepEqual(tableRows(withTable[0]), [HEADER, DELIM, "| a | ok |"]);
+});
+
+test("pipes in prose and a horizontal rule do not start a table", () => {
+  const lines = Array.from({ length: 30 }, (_, i) => `a | b line ${i} ${"u".repeat(40)}`);
+  const text = [...lines.slice(0, 15), "---", ...lines.slice(15)].join("\n");
+  const parts = splitMessageText(text, 300);
+  assert.deepEqual(parts.flatMap((p) => p.split("\n")), text.split("\n"));
+});
