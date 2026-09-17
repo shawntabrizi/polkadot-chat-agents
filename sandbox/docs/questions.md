@@ -556,3 +556,29 @@ the sandbox reports them as "not messageable" like the owner's old
    wiped bot's old number was accepted with 200 the first time and refused
    as "already taken" the second — by the pending claim itself. Is a 200
    for the old number intended, and does the attester ever drain it?
+
+### S6c.2 resolved (2026-09-17)
+
+Not a patch and not a bot-targeted gate. Two days on, the device-auth-free
+path works end to end: the client-proof-only token mint still returns a
+JWT (`POST /api/v1/auth/token`, no platform-attestation headers, `sub` =
+the bot account), and a **fresh** account claiming a never-used username
+through it (`botprobeginx.77`, account `0xbc82bcf4…`) **attested on chain
+in 35 s**. Chain-wide `Resources.Consumers` grew 115 → 119 over the two
+days, so the attester serves others too.
+
+So 09-15 was a **transient attester outage** (~18:03Z onward), not a
+policy change; it hit fresh claims too (`sandboxechonew.77`,
+`sandboxbob.22`), not only the wedged ones. It has recovered.
+
+Re-submitting the wiped bots now: `sandboxecho-new` re-claimed after a 409
+on `.77` and **attested as `sandboxechonew.69`** — an account that claimed
+during the outage recovers on a fresh submission. `sandboxecho-dev` did
+**not**: after `.90` (09-15), `.69` (09-15) and now `.50`, its account
+(`0x9e60b889…`) has three outstanding pending claims for the
+`sandboxechodev` base and stayed pending 6+ min while others attested.
+An account that accumulated several claims across the outage looks wedged
+on the backend side; the clean fix is a fresh identity, not more
+re-claims. Open ask for the backend team: can a stuck candidate's prior
+pending claims be cleared (or the account re-queued) without minting a new
+account, and does answer (a) above — a claim-status read — still stand?

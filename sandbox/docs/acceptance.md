@@ -2070,3 +2070,40 @@ and `sandboxecho-new` (claimed `sandboxechonew.77`, pending; its Bulletin
 faucet grant is awaiting confirmation — `pca storage sandboxecho-new
 status`, then `recover`). The scratch state dir holds alice (attested)
 and bob (pending).
+
+### S6c follow-up — the 09-15 stall was a transient outage, not a patch (2026-09-17)
+
+The 09-15 run left the question open (S6c.2): had the operators closed the
+device-auth-free bot registration path? Confirmed no.
+
+- **The bearer trick still works.** `POST /api/v1/auth/challenges` →
+  `POST /api/v1/auth/token` with only `Auth-ClientId` / `Auth-ClientProof`
+  / `Auth-Challenge` (no platform-attestation headers) returned a JWT for
+  the bot's own account, exp +1 day. `ENFORCE_AUTH` is still effectively
+  off.
+- **End to end, device-auth-free.** A fresh account claiming a never-used
+  username through that token — `botprobeginx.77`, account `0xbc82bcf4…` —
+  attested on chain in **35 s**. (This left a live throwaway lite-person
+  registration on devnet; there is no unregister flow, so it stays.)
+- **The attester serves others.** Chain-wide `Resources.Consumers` grew
+  115 (09-15) → 119 (09-17).
+
+So 09-15 was a transient attester outage from ~18:03Z, not a rule against
+bots: it also stranded fresh claims made in that window
+(`sandboxechonew.77` at 18:22Z, `sandboxbob.22` at 18:27Z), while
+`sandboxalice.54` at 18:02Z made it. `pca status` only reads the chain, so
+the stranded claims sat un-resubmitted until now.
+
+**Re-registering the two wiped bots (2026-09-17):**
+
+| bot | account | re-claim | outcome |
+|---|---|---|---|
+| sandboxecho-new | `0x7aec0fbb…` | `.77` → 409 → `.69` | **attested, live** |
+| sandboxecho-dev | `0x9e60b889…` | `.69` → 409 → `.50` | still pending 6+ min |
+
+`sandboxecho-new` recovered on a fresh submission. `sandboxecho-dev` did
+not: its account has now claimed `.90`, `.69`, `.50` across the outage and
+after, and stayed pending while others attested — a per-account/username
+wedge on the backend, not a network refusal. Left pending; the clean fix
+is a new identity (which changes its address and allowlist references) or
+a backend-side queue clear. Recorded as questions.md S6c.2.
