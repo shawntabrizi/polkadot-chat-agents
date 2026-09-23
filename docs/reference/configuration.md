@@ -448,7 +448,7 @@ Both features are off unless their variables are set. See
 | `BOT_METER_CHAIN` | unset | wss endpoint(s) of the chain that holds the contract, comma-separated (fallbacks after the first), e.g. `wss://asset-hub-paseo-rpc.n.dwellir.com,wss://sys.turboflakes.io/asset-hub-paseo`. |
 | `BOT_METER_PRICE` | `1000000000` | Price of one reply in plancks (default 0.1 PAS). |
 | `BOT_FAUCET_KEY` | unset | Turns on `/drip`. A derivation path of the **public** Substrate dev phrase (`bottom drive obey lake curtain smoke basket hold race lonely fit walk`), e.g. `//Alice`. Only dev-phrase accounts are acceptable: the value can never be a phrase or a seed, because anyone can ask a public faucet for funds. |
-| `BOT_FAUCET_AMOUNT` | `10000000000` | Plancks sent per drip (default 1 PAS). |
+| `BOT_FAUCET_AMOUNT` (and `BOT_FAUCET_COOLDOWN_MS`, default 0 = no per-account cooldown) | `10000000000` | Plancks sent per drip (default 1 PAS). |
 | `BOT_FAUCET_CHAIN` | devnet Asset Hub | wss endpoint(s) for the faucet transfers, comma-separated. |
 
 The meter and faucet use the chain's metadata directly (papi's unsafe API),

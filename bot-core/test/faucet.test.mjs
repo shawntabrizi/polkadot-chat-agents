@@ -25,7 +25,7 @@ const setup = ({ fail = null } = {}) => {
     },
   };
   const faucet = createFaucet({
-    chain, pair, now: () => clock,
+    chain, pair, now: () => clock, cooldownMs: 10 * 60_000, // the test keeps the optional cooldown on
     send: {
       text: async (peer, text) => { sent.push({ type: "text", text }); },
       reference: async (peer, ref) => { sent.push({ type: "reference", ref }); },

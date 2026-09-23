@@ -13,7 +13,9 @@ import { deriveSr25519PairFromMnemonic } from "../vendor/lib/wallet-keys.mjs";
 
 export const DEV_PHRASE = "bottom drive obey lake curtain smoke basket hold race lonely fit walk";
 export const DEFAULT_FAUCET_AMOUNT = PLANCKS_PER_PAS;
-export const FAUCET_COOLDOWN_MS = 10 * 60_000;
+// Off by default (owner, 2026-09-23): a devnet faucet a rate limit only slows tests down.
+// BOT_FAUCET_COOLDOWN_MS turns it on.
+export const FAUCET_COOLDOWN_MS = 0;
 const DRIP_RE = /^\s*\/drip(?:\s+(\S+))?\s*$/i;
 
 /** BOT_FAUCET_KEY -> the sr25519 pair; only a derivation path of the dev phrase is accepted. */
@@ -49,7 +51,7 @@ export function createFaucet({ chain, pair, amount = DEFAULT_FAUCET_AMOUNT, cool
       }
       const key = Buffer.from(account).toString("hex");
       const last = lastDrip.get(key);
-      if (last != null && now() - last < cooldownMs) {
+      if (cooldownMs > 0 && last != null && now() - last < cooldownMs) {
         const minutes = Math.ceil((cooldownMs - (now() - last)) / 60_000);
         await send.text(peerHex, `That account got a drip recently. Try again in ${minutes} min.`);
         log("BOT_FAUCET_REFUSED", { peer: peerHex, reason: "rate limit", to: `0x${key}` });

@@ -1278,6 +1278,7 @@ if (env.BOT_FAUCET_KEY) {
       chain: createReviveChain({ endpoints: endpoints.length ? endpoints : DEFAULT_ASSET_HUB_ENDPOINTS }),
       pair: faucetPair,
       amount: parsePlancks(env.BOT_FAUCET_AMOUNT, DEFAULT_FAUCET_AMOUNT),
+      cooldownMs: Number(env.BOT_FAUCET_COOLDOWN_MS ?? 0) || 0,
       send: txSend,
       log,
     });
