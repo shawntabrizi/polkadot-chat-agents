@@ -16,7 +16,10 @@ import { BOT_INFO_LIMITS, encodeOpaqueBotInfoMessage } from "../vendor/app-chat-
 
 export const BOT_INFO_FILE = "botinfo.json";
 export const BOT_INFO_STATE_FILE = "botinfo.state.json";
-const FIELDS = ["kind", "name", "description", "greeting", "commands"];
+const FIELDS = ["kind", "name", "description", "greeting", "commands", "balance"];
+// Spec 0008 v2 balance hint, as the file holds it: bytes as 0x hex, perReply
+// as a decimal string (a u128 does not fit a JSON number) or null.
+const BALANCE_FIELDS = ["chainId", "contract", "selector", "decimals", "unit", "perReply", "label"];
 const MAX_FILE_BYTES = 64 * 1024;
 
 // The echo brain is a plain automated bot; every other brain puts a model
@@ -44,11 +47,37 @@ export const botInfoFromFile = (raw, defaults) => {
   const info = { ...defaults, ...raw };
   if (!Array.isArray(info.commands)) throw new Error(`${BOT_INFO_FILE} commands must be a list`);
   info.commands = info.commands.map((c) => ({ name: c?.name, description: c?.description ?? "" }));
+  if (info.balance == null) delete info.balance;
+  else info.balance = balanceFromFile(info.balance);
   encodeOpaqueBotInfoMessage({ ...info, version: 0 }); // throws on any limit
   return info;
 };
 
-const hashOf = (info) => crypto.createHash("sha256").update(JSON.stringify(FIELDS.map((key) => info[key]))).digest("hex");
+const balanceFromFile = (raw) => {
+  if (typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${BOT_INFO_FILE} balance must be an object`);
+  const unknown = Object.keys(raw).filter((key) => !BALANCE_FIELDS.includes(key));
+  if (unknown.length) throw new Error(`${BOT_INFO_FILE} balance has unknown field(s): ${unknown.join(", ")} (known: ${BALANCE_FIELDS.join(", ")})`);
+  const hex = (key, bytes) => {
+    const value = String(raw[key] ?? "").toLowerCase();
+    if (!new RegExp(`^0x[0-9a-f]{${bytes * 2}}$`).test(value)) throw new Error(`${BOT_INFO_FILE} balance.${key} must be 0x + ${bytes * 2} hex digits`);
+    return value;
+  };
+  const perReply = raw.perReply ?? null;
+  if (perReply != null && !(typeof perReply === "string" && /^\d+$/.test(perReply))) throw new Error(`${BOT_INFO_FILE} balance.perReply must be a decimal integer string or null`);
+  return {
+    chainId: hex("chainId", 32), // the genesis hash
+    contract: hex("contract", 20),
+    selector: hex("selector", 4),
+    decimals: raw.decimals,
+    unit: raw.unit,
+    perReply,
+    label: raw.label,
+  };
+};
+
+// A document without a balance hint hashes as it did before v2, so adding
+// the field did not bump every bot's version.
+const hashOf = (info) => crypto.createHash("sha256").update(JSON.stringify(FIELDS.filter((key) => key !== "balance" || info.balance != null).map((key) => info[key]))).digest("hex");
 
 const readJson = (file) => {
   const stat = fs.statSync(file);

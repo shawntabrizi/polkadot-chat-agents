@@ -93,6 +93,7 @@ import { createKeyedDispatcher } from "./lib/keyed-dispatcher.mjs";
 import { createReviveChain } from "./lib/revive-chain.mjs";
 import { createMeter, DEFAULT_METER_PRICE, parsePlancks } from "./lib/meter.mjs";
 import { createFaucet, DEFAULT_FAUCET_AMOUNT, faucetPairFromPath } from "./lib/faucet.mjs";
+import { createFlip } from "./lib/flip.mjs";
 import { createClient as createPapiClient } from "polkadot-api";
 import { getWsProvider, WsEvent } from "polkadot-api/ws";
 import { paseoPeopleNext, productsDevnetPeople } from "./lib/descriptors.mjs";
@@ -1144,6 +1145,7 @@ const encodeBotInfo = (peerHex, info) => encodeOpaqueBotInfoMessage({
   greeting: info.greeting,
   commands: info.commands,
   version: info.version,
+  balance: info.balance ?? null,
 });
 // Spec 0008 catch-up: called in the same tick as a reply's enqueue, so the
 // botInfo rides the reply's statement, ahead of it. Marked before the send,
@@ -1165,7 +1167,7 @@ const START_RE = /^\s*\/start\s*$/i;
 {
   // Surface an invalid botinfo.json at startup, not at the first chat.
   const info = currentBotInfo();
-  if (info) log("BOT_BOTINFO", { kind: info.kind, version: info.version, commands: info.commands.length });
+  if (info) log("BOT_BOTINFO", { kind: info.kind, version: info.version, commands: info.commands.length, ...(info.balance ? { balance: `${info.balance.contract}.${info.balance.selector}` } : {}) });
 }
 
 // ---------- send a reply to a peer ----------
@@ -1284,6 +1286,25 @@ if (env.BOT_FAUCET_KEY) {
     });
     log("BOT_FAUCET_ENABLED", { key: env.BOT_FAUCET_KEY.trim(), account: `0x${bytesToHex(faucetPair.publicKey)}`, amountPlancks: String(parsePlancks(env.BOT_FAUCET_AMOUNT, DEFAULT_FAUCET_AMOUNT)), chain: (endpoints.length ? endpoints : DEFAULT_ASSET_HUB_ENDPOINTS)[0] });
   } catch (error) { featureConfigError("BOT_FAUCET_*", error); }
+}
+
+// Coin flip (lib/flip.mjs): BOT_FLIP_CONTRACT turns it on. Every message
+// is answered with the stake button (no brain turn); settlements seen at the
+// best block go to both players as references. The watcher starts with the
+// ingress (below), after the session state restored the known peers.
+let flip = null;
+if (env.BOT_FLIP_CONTRACT) {
+  try {
+    const endpoints = endpointList(env.BOT_FLIP_CHAIN);
+    flip = createFlip({
+      chain: createReviveChain({ endpoints: endpoints.length ? endpoints : DEFAULT_ASSET_HUB_ENDPOINTS }),
+      contract: env.BOT_FLIP_CONTRACT.trim(),
+      send: txSend,
+      usernameOf: async (peerHex) => (await directory.consumerOf(peerHex))?.username ?? null,
+      log,
+    });
+    log("BOT_FLIP_ENABLED", { contract: env.BOT_FLIP_CONTRACT.trim(), chain: (endpoints.length ? endpoints : DEFAULT_ASSET_HUB_ENDPOINTS)[0] });
+  } catch (error) { featureConfigError("BOT_FLIP_*", error); }
 }
 
 // HOP accepts the dedicated Bulletin allowance signer, not the bot's chat
@@ -1594,6 +1615,12 @@ const handleInbound = async (peerHex, msg, owedId = null, { reservedBridge = fal
   // Spec 0007 faucet: /drip is answered here, never by the brain.
   if (faucet && await faucet.handle(peerHex, msg).catch((e) => { log("BOT_FAUCET_FAILED", { peer: peerHex, error: String(e?.message ?? e) }); return true; })) {
     // As for /start: no harness sees it, so a bridge owed entry is settled here.
+    if (reservedBridge) releaseBridgeReservation();
+    if (usesBridgeQueue && owedId) settleOwed(owedId);
+    return;
+  }
+  // Coin flip: every message gets the stake button, never a brain turn.
+  if (flip && await flip.handle(peerHex, msg)) {
     if (reservedBridge) releaseBridgeReservation();
     if (usesBridgeQueue && owedId) settleOwed(owedId);
     return;
@@ -2314,6 +2341,7 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
       trimMap(peerTxRefs, SEEN_CAP);
       log("BOT_RECEIVED_TX_REFERENCE", { from: peerHex, status: m.status, block: m.block, hash: ref.hash, note: m.note, ...(m.intentMessageId ? { intentMessageId: m.intentMessageId } : {}) });
       if (meter) meter.onReference(k, ref);
+      if (flip) flip.onReference(k, ref);
     } else if (m.kind === "unsupported") {
       log("BOT_UNSUPPORTED_CONTENT", { from: peerHex, contentKind: m.contentKind });
     }
@@ -3058,6 +3086,7 @@ for (const p of restored?.peers ?? []) {
     sentButtons.restore(norm(p.peerHex), p.bp);
     peerBotInfo.restore(norm(p.peerHex), p.bi);
     botInfoSent.restore(norm(p.peerHex), p.bs);
+    flip?.remember(p.peerHex);
     restoredPeers += 1;
   } catch (e) { log("BOT_STATE_PEER_SKIPPED", { peer: p?.peerHex, error: String(e?.message ?? e) }); }
 }
@@ -3175,6 +3204,7 @@ if ((env.BOT_SUBSCRIBE ?? "1") !== "0") {
   supervisor.start();
   resubscribe(true);
   ingress = { supervisor, resubscribe };
+  flip?.start();
   log("BOT_SUBSCRIBED", { heartbeatMs: numberEnv("BOT_HEARTBEAT_MS", 30_000, { min: 1000, max: 86_400_000 }) });
 }
 

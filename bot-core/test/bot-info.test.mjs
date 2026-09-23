@@ -60,6 +60,50 @@ test("file -> document: unknown fields and spec limits are errors", () => {
   assert.throws(() => botInfoFromFile({ commands: "help" }, defaults), /must be a list/);
 });
 
+// Spec 0008 v2: the operator declares where a client reads "your balance
+// with this bot". The file holds bytes as hex and the u128 price as a
+// string; a malformed hint must fail at startup, not in a client header.
+const meterHint = {
+  chainId: "0xd6eec26135305a8ad257a20d003357284c8aa03d0bdb2b357ab0a22371e11ef2",
+  contract: "0x30b0c001431a1addb8c11a060ada4d6a7033cf21",
+  selector: "0x70a08231",
+  decimals: 18,
+  unit: "PAS",
+  perReply: "100000000000000000",
+  label: "with Meter",
+};
+test("file -> document: the balance hint is validated and reaches the wire", () => {
+  const defaults = defaultBotInfo({ name: "pcdmeter", brain: "echo" });
+  const info = botInfoFromFile({ balance: meterHint }, defaults);
+  assert.deepEqual(info.balance, meterHint);
+  const m = decodeOpaqueMessageAt(encodeOpaqueBotInfoMessage({ ...info, version: 1 }), 0).value;
+  assert.equal(m.balance.perReply, 100_000_000_000_000_000n);
+  assert.equal(m.balance.label, "with Meter");
+  assert.equal(botInfoFromFile({ balance: { ...meterHint, perReply: null } }, defaults).balance.perReply, null);
+  assert.equal("balance" in botInfoFromFile({}, defaults), false, "no hint: no field, so v1 bytes");
+  assert.throws(() => botInfoFromFile({ balance: { ...meterHint, contract: "0x30b0" } }, defaults), /balance.contract/);
+  assert.throws(() => botInfoFromFile({ balance: { ...meterHint, selector: "balanceOf" } }, defaults), /balance.selector/);
+  assert.throws(() => botInfoFromFile({ balance: { ...meterHint, chainId: "paseo" } }, defaults), /balance.chainId/);
+  assert.throws(() => botInfoFromFile({ balance: { ...meterHint, perReply: 1e17 } }, defaults), /perReply/, "a JSON number loses u128 precision");
+  assert.throws(() => botInfoFromFile({ balance: { ...meterHint, lable: "x" } }, defaults), /unknown field\(s\): lable/);
+  assert.throws(() => botInfoFromFile({ balance: { ...meterHint, label: "" } }, defaults), /label/);
+});
+
+// Adding the hint is a change clients must see (+1); a document without a
+// hint keeps the hash it had before v2 (no version bump on upgrade).
+test("version: adding a balance hint bumps the version", () => {
+  const dir = tmp();
+  try {
+    const defaults = defaultBotInfo({ name: "pcdmeter", brain: "echo" });
+    write(dir, { description: "Pay per reply" });
+    assert.equal(loadBotInfo({ dir, defaults }).version, 1);
+    write(dir, { description: "Pay per reply", balance: meterHint });
+    const withHint = loadBotInfo({ dir, defaults });
+    assert.deepEqual([withHint.version, withHint.changed, withHint.balance.label], [2, true, "with Meter"]);
+    assert.equal(loadBotInfo({ dir, defaults }).changed, false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 // Clients keep the highest version they have seen, so an edit that does
 // not raise the version would never reach them.
 test("version: 1 at first, the same while the content is the same, +1 on each change", () => {

@@ -1233,15 +1233,25 @@ export function encodeOpaqueSeenMessage({
 // Provisional kind from the desktop spec set (kinds.md, range 240-249):
 //   botInfo(BotInfo) -> 244
 // BotInfo { kind: u8, name: String, description: String, greeting: String,
-//           commands: Vec<Command>, version: u16 LE }
+//           commands: Vec<Command>, version: u16 LE,
+//           balance: Option<BalanceHint> }            (v2, appended)
 // Command { name: String (no slash), description: String }
+// BalanceHint { chainId: String, contract: Bytes (20), selector: Bytes (4),
+//               decimals: u8, unit: String, perReply: Option<u128 LE>,
+//               label: String (<= 40) }
 // kind: 0 bot (automated), 1 agent (AI acting for a person), 2 person-operated.
 // Limits are in characters, as the spec states them.
+// v2 compatibility: a v1 encoder ends after `version`, so the decoder reads
+// the end of the message there as balance = None. This encoder writes
+// nothing after `version` when there is no hint, so a document without one
+// keeps its v1 bytes (vectors-0008 still holds); with a hint it writes
+// Some (0x01) + the hint. A 0x00 byte there also decodes as None.
 export const BOT_INFO_CONTENT_KIND = 244;
 export const BOT_INFO_KINDS = Object.freeze({ bot: 0, agent: 1, service: 2 });
-export const BOT_INFO_LIMITS = Object.freeze({ name: 40, description: 280, greeting: 280, commands: 32, commandName: 32, commandDescription: 80 });
+export const BOT_INFO_LIMITS = Object.freeze({ name: 40, description: 280, greeting: 280, commands: 32, commandName: 32, commandDescription: 80, balanceLabel: 40, balanceUnit: 16 });
 // Decode bounds in bytes: a character is at most 4 UTF-8 bytes.
 const BOT_INFO_MAX_BYTES = Object.fromEntries(Object.entries(BOT_INFO_LIMITS).map(([k, v]) => [k, v * 4]));
+const BALANCE_CHAIN_ID_MAX_BYTES = 256;
 
 const botInfoString = (value, max, name, { empty = true } = {}) => {
   if (typeof value !== "string" || (!empty && value.length === 0) || [...value].length > max) {
@@ -1259,6 +1269,7 @@ export function encodeOpaqueBotInfoMessage({
   greeting = "",
   commands = [],
   version,
+  balance = null,
 }) {
   if (!Object.values(BOT_INFO_KINDS).includes(kind)) throw new Error("bot info kind must be 0 (bot), 1 (agent) or 2 (service)");
   if (!Number.isInteger(version) || version < 0 || version > 0xffff) throw new Error("bot info version must be a u16");
@@ -1285,8 +1296,52 @@ export function encodeOpaqueBotInfoMessage({
       botInfoString(greeting, L.greeting, "greeting"),
       scaleEncodeArray(encodedCommands),
       Uint8Array.of(version & 0xff, version >> 8),
+      balance == null ? new Uint8Array(0) : scaleEncodeOption(encodeBalanceHint(balance)),
     ),
   });
+}
+
+function encodeBalanceHint({ chainId, contract, selector, decimals, unit, perReply = null, label }) {
+  const L = BOT_INFO_LIMITS;
+  const contractBytes = toBytes(contract, "bot info balance contract");
+  if (contractBytes.length !== 20) throw new Error("bot info balance contract must be 20 bytes");
+  const selectorBytes = toBytes(selector, "bot info balance selector");
+  if (selectorBytes.length !== 4) throw new Error("bot info balance selector must be 4 bytes");
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 255) throw new Error("bot info balance decimals must be a u8");
+  return concatBytes(
+    botInfoString(chainId, BALANCE_CHAIN_ID_MAX_BYTES, "balance chainId", { empty: false }),
+    scaleEncodeBytes(contractBytes),
+    scaleEncodeBytes(selectorBytes),
+    Uint8Array.of(decimals),
+    botInfoString(unit, L.balanceUnit, "balance unit", { empty: false }),
+    scaleEncodeOption(perReply == null ? null : scaleEncodeUInt128(assertU128(perReply, "bot info balance perReply"))),
+    botInfoString(label, L.balanceLabel, "balance label", { empty: false }),
+  );
+}
+
+function decodeBalanceHintAt(bytes, offset) {
+  const B = BOT_INFO_MAX_BYTES;
+  const chainId = scaleDecodeStringAt(bytes, offset, BALANCE_CHAIN_ID_MAX_BYTES, "bot info balance chainId");
+  const contract = scaleDecodeBytesAt(bytes, chainId.offset, 20, "bot info balance contract");
+  if (contract.value.length !== 20) throw new Error("bot info balance contract must be 20 bytes");
+  const selector = scaleDecodeBytesAt(bytes, contract.offset, 4, "bot info balance selector");
+  if (selector.value.length !== 4) throw new Error("bot info balance selector must be 4 bytes");
+  const decimals = fixedBytesAt(bytes, selector.offset, 1, "bot info balance decimals");
+  const unit = scaleDecodeStringAt(bytes, decimals.offset, B.balanceUnit, "bot info balance unit");
+  const perReply = scaleDecodeOptionAt(bytes, unit.offset, scaleDecodeUInt128At);
+  const label = scaleDecodeStringAt(bytes, perReply.offset, B.balanceLabel, "bot info balance label");
+  return {
+    value: {
+      chainId: chainId.value,
+      contract: contract.value,
+      selector: selector.value,
+      decimals: decimals.value[0],
+      unit: unit.value,
+      perReply: perReply.value,
+      label: label.value,
+    },
+    offset: label.offset,
+  };
 }
 
 // Spec 0007 transactions (polkadot-chat-desktop docs/spec/0007-transactions.md).
@@ -2028,6 +2083,10 @@ function decodeRemoteMessage(bytes, budget) {
       return { value: { name: commandName.value, description: commandDescription.value }, offset: commandDescription.offset };
     }, BOT_INFO_LIMITS.commands, "bot info commands", budget);
     const version = fixedBytesAt(bytes, commands.offset, 2, "bot info version");
+    // v2: a v1 document ends here (balance = None).
+    const balance = version.offset === bytes.length
+      ? { value: null, offset: version.offset }
+      : scaleDecodeOptionAt(bytes, version.offset, decodeBalanceHintAt);
     return {
       messageId: messageId.value,
       timestamp: Number(timestamp.value),
@@ -2038,7 +2097,8 @@ function decodeRemoteMessage(bytes, budget) {
       greeting: greeting.value,
       commands: commands.value,
       version: version.value[0] | (version.value[1] << 8),
-      offset: version.offset,
+      balance: balance.value,
+      offset: balance.offset,
     };
   }
   if (contentKind === TYPING_CONTENT_KIND) {

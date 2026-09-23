@@ -423,6 +423,7 @@ The seeded file for a direct-engine or bridge bot named `guide`:
 | `description` | `A bot on Polkadot` | up to 280 characters; clients show it under the name |
 | `greeting` | `Hello!` | up to 280 characters; clients show it once; the bot also sends it as a text on `/start` |
 | `commands` | the chat command catalog (the `/help` list); `[]` for `echo` | up to 32 of `{ "name", "description" }`; a name has 1 to 32 characters, no `/`, no spaces; a description up to 80 characters. Add the bot's own commands here. |
+| `balance` | none | optional (spec 0008 v2): where a client reads "your balance with this bot". An object `{ "chainId", "contract", "selector", "decimals", "unit", "perReply", "label" }`: `chainId` is the genesis hash (0x + 64 hex), `contract` 0x + 40 hex, `selector` 0x + 8 hex (a view that takes the caller's address, such as `balanceOf(address)` = `0x70a08231`), `decimals` 0 to 255, `unit` 1 to 16 characters, `perReply` a decimal string in the same units as the returned value or `null`, `label` 1 to 40 characters. An unknown key is an error. |
 
 - A missing field takes its default; a missing file means all defaults.
 - An unknown field (a typo such as `greting`) or a value over a limit makes
@@ -437,7 +438,7 @@ The seeded file for a direct-engine or bridge bot named `guide`:
 - A direct engine with the `write` tool can edit files in its workspace,
   `botinfo.json` included.
 
-### Transactions: meter and faucet (spec 0007)
+### Transactions: meter, faucet and coin flip (spec 0007)
 
 Both features are off unless their variables are set. See
 [protocol: Transactions](../explanation/protocol.md#transactions-spec-0007).
@@ -450,10 +451,27 @@ Both features are off unless their variables are set. See
 | `BOT_FAUCET_KEY` | unset | Turns on `/drip`. A derivation path of the **public** Substrate dev phrase (`bottom drive obey lake curtain smoke basket hold race lonely fit walk`), e.g. `//Alice`. Only dev-phrase accounts are acceptable: the value can never be a phrase or a seed, because anyone can ask a public faucet for funds. |
 | `BOT_FAUCET_AMOUNT` (and `BOT_FAUCET_COOLDOWN_MS`, default 0 = no per-account cooldown) | `10000000000` | Plancks sent per drip (default 1 PAS). |
 | `BOT_FAUCET_CHAIN` | devnet Asset Hub | wss endpoint(s) for the faucet transfers, comma-separated. |
+| `BOT_FLIP_CONTRACT` | unset | 0x address (20 bytes) of a deployed Flip contract (`contracts/flip/`). Turns on the coin flip: every message is answered with a "Stake 0.5 PAS" `tx` button, and settlements are posted to both players as references. Use the `echo` brain; no brain turn runs. The bot signs nothing, so its wallet needs no funds. |
+| `BOT_FLIP_CHAIN` | devnet Asset Hub | wss endpoint(s) of the chain that holds the Flip contract, comma-separated. |
 
-The meter and faucet use the chain's metadata directly (papi's unsafe API),
-so no descriptors are generated for the chain. The meter's Top up button
-expires 10 minutes after it is sent.
+The meter, faucet and coin flip use the chain's metadata directly (papi's
+unsafe API), so no descriptors are generated for the chain. The meter's Top
+up button and the coin flip's Stake button expire 10 minutes after they are
+sent.
+
+The `pcdmeter` hint, for example:
+
+```json
+"balance": {
+  "chainId": "0xd6eec26135305a8ad257a20d003357284c8aa03d0bdb2b357ab0a22371e11ef2",
+  "contract": "0x30b0c001431a1addb8c11a060ada4d6a7033cf21",
+  "selector": "0x70a08231",
+  "decimals": 18,
+  "unit": "PAS",
+  "perReply": "100000000000000000",
+  "label": "with Meter"
+}
+```
 
 ### Replies & live replies
 

@@ -423,6 +423,91 @@ test("botInfo encoder enforces the spec 0008 limits", () => {
   assert.throws(() => encodeOpaqueBotInfoMessage({ ...base, version: 65536 }), /u16/);
 });
 
+// Spec 0008 v2: the optional balance hint. This vector is published to the
+// desktop client in polkadot-chat-desktop docs/spec/vectors-0008b.md: the
+// client reads `contract.selector(caller)` from these bytes to show "your
+// balance with this bot", so a change here is a wire break.
+const BOT_INFO_BALANCE_VECTOR = "010414424f542d310030fd779001000000f40114477569646558506f6c6b61646f7420737570706f7274206775696465684869212041736b206d652061626f757420506f6c6b61646f742e081c7374616b696e67385374616b696e672062617369637328676f7665726e616e636544486f77204f70656e476f7620776f726b7301000109013078643665656332363133353330356138616432353761323064303033333537323834633861613033643062646232623335376162306132323337316531316566325030b0c001431a1addb8c11a060ada4d6a7033cf211070a08231120c5041530100008a5d7845630100000000000000002877697468204d65746572";
+const vectorBalance = {
+  chainId: "0xd6eec26135305a8ad257a20d003357284c8aa03d0bdb2b357ab0a22371e11ef2",
+  contract: "0x30b0c001431a1addb8c11a060ada4d6a7033cf21",
+  selector: "0x70a08231", // keccak("balanceOf(address)")[0..4]
+  decimals: 18,
+  unit: "PAS",
+  perReply: 100_000_000_000_000_000n, // 0.1 PAS in the contract's 1e18 scale
+  label: "with Meter",
+};
+
+test("botInfo v2: pinned balance-hint vector matches the spec 0008 v2 SCALE layout", () => {
+  const opaque = encodeOpaqueBotInfoMessage({ messageId: "BOT-1", timestamp: 1_720_000_000_000, ...vectorBotInfo, balance: vectorBalance });
+  assert.equal(hexOf(opaque), BOT_INFO_BALANCE_VECTOR);
+  // By hand: the v1 content, then Some(BalanceHint).
+  const u128le = (v) => Uint8Array.from({ length: 16 }, (_, i) => Number((v >> BigInt(8 * i)) & 0xffn));
+  const content = concat(
+    Uint8Array.of(1),
+    str("Guide"), str("Polkadot support guide"), str("Hi! Ask me about Polkadot."),
+    compact(2), str("staking"), str("Staking basics"), str("governance"), str("How OpenGov works"),
+    Uint8Array.of(1, 0),
+    Uint8Array.of(1), // Some
+    str(vectorBalance.chainId),
+    compact(20), hex(vectorBalance.contract.slice(2)),
+    compact(4), hex(vectorBalance.selector.slice(2)),
+    Uint8Array.of(18),
+    str("PAS"),
+    Uint8Array.of(1), u128le(vectorBalance.perReply),
+    str("with Meter"),
+  );
+  assert.equal(hexOf(opaque), hexOf(opaqueMessage("BOT-1", 244, content)));
+  const m = decodeOne(hex(BOT_INFO_BALANCE_VECTOR));
+  assert.equal(m.kind, "botInfo");
+  assert.equal(m.version, 1);
+  assert.deepEqual(
+    { ...m.balance, contract: `0x${hexOf(m.balance.contract)}`, selector: `0x${hexOf(m.balance.selector)}` },
+    vectorBalance,
+  );
+});
+
+// The compatibility rule of v2: bytes from a v1 encoder (they end after
+// `version`) decode with balance = null, and a document without a hint keeps
+// its v1 bytes, so vectors-0008 still holds for a v2 encoder.
+test("botInfo v2: v1 bytes decode with balance null; no hint keeps the v1 bytes", () => {
+  assert.equal(decodeOne(hex(BOT_INFO_VECTOR)).balance, null);
+  const withoutHint = encodeOpaqueBotInfoMessage({ messageId: "BOT-1", timestamp: 1_720_000_000_000, ...vectorBotInfo, balance: null });
+  assert.equal(hexOf(withoutHint), BOT_INFO_VECTOR);
+  // An explicit None byte (a canonical-SCALE encoder) is also balance = null.
+  const content = concat(Uint8Array.of(0), str("B"), str(""), str(""), compact(0), Uint8Array.of(1, 0), Uint8Array.of(0));
+  const m = decodeOne(opaqueMessage("BOT-N", 244, content));
+  assert.equal(m.kind, "botInfo");
+  assert.equal(m.balance, null);
+});
+
+test("round-trip: botInfo balance hint without perReply (a stake, not a price)", () => {
+  const balance = { ...vectorBalance, selector: "0x42623360", perReply: null, label: "your stake" };
+  const m = decodeOne(encodeOpaqueBotInfoMessage({ kind: 0, name: "Coin Flip", version: 3, balance }));
+  assert.equal(m.version, 3);
+  assert.equal(m.balance.perReply, null);
+  assert.equal(m.balance.label, "your stake");
+  assert.equal(hexOf(m.balance.selector), "42623360");
+});
+
+// A hint the client could not use (wrong address or selector size, no
+// label) is refused at the source, not rendered as a broken header.
+test("botInfo encoder enforces the balance hint shape", () => {
+  const base = { kind: 0, name: "Bot", version: 1 };
+  const bad = (patch) => () => encodeOpaqueBotInfoMessage({ ...base, balance: { ...vectorBalance, ...patch } });
+  assert.throws(bad({ contract: "0x1234" }), /20 bytes/);
+  assert.throws(bad({ selector: "0x70a0823100" }), /4 bytes/);
+  assert.throws(bad({ decimals: 256 }), /u8/);
+  assert.throws(bad({ label: "" }), /label/);
+  assert.throws(bad({ label: "x".repeat(41) }), /label/);
+  assert.throws(bad({ unit: "" }), /unit/);
+  assert.throws(bad({ chainId: "" }), /chainId/);
+  assert.throws(bad({ perReply: -1n }), /u128/);
+  // A malformed option tag after the version is undecodable, alone in its batch.
+  const content = concat(Uint8Array.of(0), str("B"), str(""), str(""), compact(0), Uint8Array.of(1, 0), Uint8Array.of(7));
+  assert.equal(decodeOne(opaqueMessage("BOT-X", 244, content)).kind, "undecodable");
+});
+
 // A decoder bound: 33 commands on the wire is undecodable, and must not
 // break the next message in the batch (the batch-decoding invariant).
 test("botInfo decoder rejects more than 32 commands", () => {

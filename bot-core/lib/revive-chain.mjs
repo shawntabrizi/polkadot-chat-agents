@@ -3,10 +3,11 @@
 // metadata-driven (unsafe) API. No descriptors are generated for Asset Hub:
 // the few calls used here are checked against the live metadata by papi.
 //
-// Used by the meter and faucet features (lib/meter.mjs, lib/faucet.mjs) and
-// by contracts/meter/deploy.mjs. Features take the object returned by
+// Used by the meter, faucet and flip features (lib/meter.mjs, lib/faucet.mjs,
+// lib/flip.mjs) and by contracts/*/deploy.mjs. Features take the object returned by
 // createReviveChain, so tests pass a fake with the same methods.
 
+import { blake2b } from "@noble/hashes/blake2.js";
 import { keccak_256 } from "@noble/hashes/sha3.js";
 import { AccountId, Binary, createClient } from "polkadot-api";
 import { getPolkadotSigner } from "polkadot-api/signer";
@@ -30,6 +31,7 @@ const fromHex = (hex) => {
 };
 const ss58 = AccountId(42);
 // papi decodes Vec<u8> as Uint8Array or as a Binary, by version.
+const asHex = (value) => (typeof value === "string" ? value : value instanceof Uint8Array ? toHex(value) : typeof value?.asHex === "function" ? value.asHex() : String(value));
 const asBytes = (value) => (value instanceof Uint8Array ? value : typeof value?.asBytes === "function" ? value.asBytes() : fromHex(value));
 
 /**
@@ -54,7 +56,7 @@ export function parseAccountId(input) {
   } catch { return null; }
 }
 
-// ---------- Solidity ABI: just what the meter contract needs ----------
+// ---------- Solidity ABI: just what the meter and flip contracts need ----------
 export const selector = (signature) => toHex(keccak_256(new TextEncoder().encode(signature)).subarray(0, 4));
 const word = (big) => BigInt(big).toString(16).padStart(64, "0");
 export const abiAddress = (h160) => {
@@ -86,6 +88,15 @@ export const meterCalldata = {
   charge: (user, amount) => `${selector("charge(address,uint256)")}${abiAddress(user)}${abiUint256(amount)}`,
   constructor: (operator) => `0x${abiAddress(operator)}`,
 };
+
+// Flip (contracts/flip): stake() payable; stakeOf/pending views; events.
+export const flipCalldata = {
+  stake: () => selector("stake()"),
+  stakeOf: (player) => `${selector("stakeOf(address)")}${abiAddress(player)}`,
+  pending: () => selector("pending()"),
+  constructor: () => "0x",
+};
+export const eventTopic = (signature) => toHex(keccak_256(new TextEncoder().encode(signature)));
 
 const withMargin = (value) => value + (value * MARGIN_PERCENT) / 100n;
 const chargeOf = (deposit) => (deposit?.type === "Charge" ? BigInt(deposit.value) : 0n);
@@ -214,6 +225,66 @@ export function createReviveChain({ endpoints, cacheDir, inclusionTimeoutMs = IN
       const result = await submit(tx, pair);
       const instantiated = result.events?.find((e) => e.type === "Revive" && e.value?.type === "Instantiated");
       return { ...result, address: instantiated?.value?.value?.contract ?? dry.result.value.addr };
+    },
+    /**
+     * Calls onBlock({ number, hash, events }) for each new best block, in
+     * order, with the `Revive.ContractEmitted` events of `contract`:
+     * { topics: [0x hex], data: Uint8Array, extrinsicIndex, extrinsicHash }.
+     * Blocks the best chain skipped over (up to the finalized one) are read
+     * too; a reorg can deliver a block at a height already seen, so the
+     * caller dedupes by content. Returns a stop function.
+     */
+    watchContractEvents(contract, onBlock, { onError = () => {} } = {}) {
+      const want = String(contract).toLowerCase();
+      const done = new Set();
+      const DONE_CAP = 1024;
+      let chain = Promise.resolve();
+      const readBlock = async ({ hash, number }) => {
+        const records = await api.query.System.Events.getValue({ at: hash });
+        const events = [];
+        let body = null;
+        for (const record of records) {
+          const { event, phase } = record;
+          if (event?.type !== "Revive" || event.value?.type !== "ContractEmitted") continue;
+          const emitted = event.value.value;
+          if (String(asHex(emitted.contract)).toLowerCase() !== want) continue;
+          const extrinsicIndex = phase?.type === "ApplyExtrinsic" ? phase.value : null;
+          let extrinsicHash = null;
+          if (extrinsicIndex != null) {
+            body ??= await client.getBlockBody(hash);
+            const xt = body[extrinsicIndex];
+            if (xt) extrinsicHash = toHex(blake2b(asBytes(xt), { dkLen: 32 }));
+          }
+          events.push({ topics: emitted.topics.map((t) => String(asHex(t)).toLowerCase()), data: asBytes(emitted.data), extrinsicIndex, extrinsicHash });
+        }
+        return { number, hash, events };
+      };
+      let sub = null;
+      let stopped = false;
+      // The stream ends when papi loses block continuity (a reconnect):
+      // subscribe again, so the watcher outlives a dropped socket.
+      const restart = (error) => {
+        onError(error ?? new Error("best-block stream ended"));
+        if (!stopped) setTimeout(subscribe, 5_000).unref?.();
+      };
+      const subscribe = () => {
+        if (stopped) return;
+        sub = client.bestBlocks$.subscribe({
+          next: (blocks) => {
+            // blocks: best first, finalized last. Oldest unseen first.
+            const fresh = blocks.filter((b) => !done.has(b.hash)).reverse();
+            for (const b of fresh) {
+              done.add(b.hash);
+              while (done.size > DONE_CAP) done.delete(done.values().next().value);
+              chain = chain.then(() => readBlock(b)).then((block) => onBlock(block)).catch(onError);
+            }
+          },
+          error: restart,
+          complete: () => restart(null),
+        });
+      };
+      subscribe();
+      return () => { stopped = true; sub?.unsubscribe(); };
     },
     /** `Balances.transfer_keep_alive` of `amount` plancks to a 32-byte account. */
     async transfer(pair, { to, amount }) {

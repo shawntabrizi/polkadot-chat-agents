@@ -419,6 +419,38 @@ version stops at 65535; it never wraps to a lower number. The logic is
   `BOT_BOTINFO_VERSION { version }` each time the version goes up.
 - `BOT_PROTOCOL_EXTENSIONS` without `botinfo` turns all of this off.
 
+**Bot-declared balance (spec 0008 v2).** `BotInfo` ends with an optional
+field, appended after `version`:
+
+```
+balance: Option<BalanceHint>
+BalanceHint = { chainId: String /* genesis hash, 0x hex */, contract: Bytes /* 20 */,
+                selector: Bytes /* 4 */, decimals: u8, unit: String,
+                perReply: Option<u128 LE>, label: String /* <= 40 */ }
+```
+
+It tells a client where to read "your balance with this bot": the client
+calls `contract.selector(caller H160)` at the best block on each new block
+and shows `label: <value / 10^decimals> <unit>`, plus `~N replies` when
+`perReply` is set (`perReply` is in the same units as the returned value).
+Compatibility: a v1 encoder ends after `version`, so the decoder reads the end
+of the message there as `balance = null`. The `pca` encoder writes nothing
+after `version` when there is no hint, so a document without one keeps its v1
+bytes (`vectors-0008.md` still holds). With a hint it writes `0x01` and the
+hint. A `0x00` byte after `version` also decodes as `null`. The encoder
+refuses a contract that is not 20 bytes, a selector that is not 4 bytes, an
+empty or over-long `label` (40) or `unit` (16), and an empty `chainId`. The
+pinned vector (the BOT-1 document plus the Meter hint) is in
+`polkadot-chat-desktop/docs/spec/vectors-0008b.md` and `test/codec.test.mjs`.
+The hint comes from an optional `balance` object in `botinfo.json` (hex
+strings for bytes, `perReply` as a decimal string or `null`). Adding,
+changing or removing it raises the version. A file without it hashes as it
+did before v2, so the upgrade did not bump any version. `BOT_BOTINFO` logs
+`balance: "<contract>.<selector>"` when a hint is set. `pcdmeter` declares
+`balanceOf(address)` of its Meter with `perReply` 10^17 (0.1 PAS);
+`pcdflip` declares `stakeOf(address)` of its Flip contract, labelled
+"your stake", with no `perReply`.
+
 **Receiving.** A peer's `botInfo` (the peer is another bot) is stored per peer
 in the session state (`bi`), and a lower version than the stored one is
 ignored (`stale: true` in the log). It is never answered, never fed to the
@@ -511,6 +543,43 @@ account per 10 minutes (in memory); a failed transfer does not use it up. The
 key is a derivation path of the public Substrate dev phrase only. Logs:
 `BOT_FAUCET_ENABLED`, `BOT_FAUCET_DRIPPED`, `BOT_FAUCET_REFUSED`,
 `BOT_FAUCET_FAILED`.
+
+**Coin flip.** `BOT_FLIP_CONTRACT` turns it on (`lib/flip.mjs`; the contract
+is `contracts/flip/`, documented in
+`polkadot-chat-desktop/docs/spec/contracts/flip.md`). Every message (the
+opener after an accept, `/stake`, any other text) is answered with one
+buttons message, "Stake 0.5 PAS to flip. The second staker triggers the flip;
+the winner takes 1 PAS.", with one `tx` button "Stake 0.5 PAS": a Revive call
+of `stake()` with a value of 5 000 000 000 plancks, which expires after 10
+minutes. No brain turn runs (use the `echo` brain). The bot never signs a
+stake. The contract settles in the second player's own call: it takes a
+winner from `keccak256(abi.encode(blockhash(block.number - 1), player1,
+player2))` (`block.prevrandao` is a constant on pallet-revive) and pays the
+1 PAS pot. The second player can predict the result before signing; this is
+acceptable only for devnet.
+
+The bot watches the contract at the best block
+(`watchContractEvents` in `lib/revive-chain.mjs`: `System.Events` of each new
+best block, `Revive.ContractEmitted` from the contract, and the settling
+extrinsic's hash from the block body). On `Settled` it sends a
+`transactionReference` (status 1, that block, the settling extrinsic hash,
+note "Flip settled: <winner's username, or its 0x address> won 1 PAS") to
+both players. The players come from the `Matched(round, player1, player2)`
+event the contract emits just before `Settled`, so the bot needs no memory of
+the first stake. A round is notified once, even when a reorg delivers its
+block again.
+
+To find a player's chat, the bot keeps a map from contract address (H160) to
+peer. The account that signs a `tx` intent is the chat identity's own wallet
+account (spec 0007 client rule 3), so the bot computes `reviveAddress(peer)`
+for each peer it talks to: each inbound message, each received
+`transactionReference`, and each peer restored from the session state at
+startup. A player the bot never talked to is logged
+(`BOT_FLIP_UNKNOWN_PLAYER`) and not notified. Logs: `BOT_FLIP_ENABLED`,
+`BOT_FLIP_WATCHING`, `BOT_FLIP_OFFERED { on }`, `BOT_FLIP_STAKED`,
+`BOT_FLIP_SETTLED`, `BOT_FLIP_NOTIFIED`, `BOT_FLIP_NOTIFY_FAILED`,
+`BOT_FLIP_UNKNOWN_PLAYER`, `BOT_FLIP_REFUNDED`, `BOT_FLIP_REFERENCE`,
+`BOT_FLIP_WATCH_FAILED`, `BOT_FLIP_OFFER_FAILED`, `BOT_FLIP_USERNAME_FAILED`.
 
 ### Attachments (photos/videos/files)
 
