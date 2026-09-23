@@ -27,6 +27,10 @@ import {
   TYPING_KINDS,
   encodeOpaqueBotInfoMessage,
   BOT_INFO_CONTENT_KIND,
+  encodeTxIntent,
+  decodeTxIntent,
+  encodeOpaqueTransactionReferenceMessage,
+  TRANSACTION_REFERENCE_CONTENT_KIND,
   encodeOpaqueDataChannelClosedMessage,
   scaleEncodeBytes,
   x25519PublicKeyFromPrivateKey,
@@ -425,6 +429,117 @@ test("botInfo decoder rejects more than 32 commands", () => {
   const commands = Array.from({ length: 33 }, () => concat(str("c"), str("")));
   const over = opaqueMessage("BOT-33", 244, concat(Uint8Array.of(0), str("B"), str(""), str(""), compact(33), ...commands, Uint8Array.of(1, 0)));
   assert.equal(decodeOne(over).kind, "undecodable");
+});
+
+// Spec 0007 transactions. These two vectors are published to the desktop
+// client in polkadot-chat-desktop docs/spec/vectors-0007.md: the desktop
+// signer decodes the intent it dry-runs and signs from these bytes, so a
+// change here is a wire break, not a refactor.
+const TX_CHAIN_ID = `0x${"00".repeat(32)}`;
+const TX_INTENT_VECTOR = "01090130783030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303004010150111111111111111111111111111111111111111110deadbeef00e40b5402000000000000000000000000000018546f702075702841646473203120504153010431010c50415301601afe7790010000";
+const TX_BUTTONS_VECTOR = `35031054582d310030fd779001000000f248546f7020757020746f20636f6e74696e7565040430546f70207570203120504153036102${TX_INTENT_VECTOR}00`;
+const TX_REFERENCE_VECTOR = "4502145245462d311057fd779001000000f5090130783030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303080222222222222222222222222222222222222222222222222222222222222222201017b0000003c546f702d7570206f66203120504153011054582d31";
+const vectorIntent = {
+  chainId: TX_CHAIN_ID,
+  calls: [{ kind: 1, to: `0x${"11".repeat(20)}`, data: "0xdeadbeef", value: 10_000_000_000n }],
+  display: { title: "Top up", description: "Adds 1 PAS", amount: "1", asset: "PAS" },
+  dryRunRequired: true,
+  expiresAt: 1_720_000_060_000,
+};
+const u128 = (n) => { const out = new Uint8Array(16); let v = BigInt(n); for (let i = 0; i < 16; i += 1) { out[i] = Number(v & 0xffn); v >>= 8n; } return out; };
+
+test("tx intent: pinned vector matches the spec 0007 SCALE layout", () => {
+  const bytes = encodeTxIntent(vectorIntent);
+  assert.equal(hexOf(bytes), TX_INTENT_VECTOR);
+  // By hand: version, chainId String, Vec<Call>, Display, bool, u64 LE.
+  const call = concat(
+    Uint8Array.of(1),                                              // kind 1: Revive
+    Uint8Array.of(1), scaleEncodeBytes(new Uint8Array(20).fill(0x11)), // to: Some(20 bytes)
+    scaleEncodeBytes(hex("deadbeef")),                             // data
+    u128(10_000_000_000n),                                         // value u128 LE (1 PAS)
+    Uint8Array.of(0, 0, 0),                                        // gasRefTime, gasProofSize, storageDepositLimit: None
+  );
+  const byHand = concat(
+    Uint8Array.of(1), str(TX_CHAIN_ID), compact(1), call,
+    str("Top up"), str("Adds 1 PAS"), Uint8Array.of(1), str("1"), Uint8Array.of(1), str("PAS"),
+    Uint8Array.of(1), u64(1_720_000_060_000),
+  );
+  assert.equal(hexOf(bytes), hexOf(byHand));
+  const d = decodeTxIntent(hex(TX_INTENT_VECTOR));
+  assert.deepEqual(d, {
+    version: 1,
+    chainId: TX_CHAIN_ID,
+    calls: [{ kind: 1, to: new Uint8Array(20).fill(0x11), data: hex("deadbeef"), value: 10_000_000_000n, gasRefTime: null, gasProofSize: null, storageDepositLimit: null }],
+    display: { title: "Top up", description: "Adds 1 PAS", amount: "1", asset: "PAS" },
+    dryRunRequired: true,
+    expiresAt: 1_720_000_060_000n,
+  });
+});
+
+test("buttons with a tx action: pinned vector A of spec 0007", () => {
+  const opaque = encodeOpaqueButtonsMessage({ messageId: "TX-1", timestamp: 1_720_000_000_000, text: "Top up to continue", rows: [[{ label: "Top up 1 PAS", action: { tx: vectorIntent } }]], oneShot: false });
+  assert.equal(hexOf(opaque), TX_BUTTONS_VECTOR);
+  const m = decodeOne(hex(TX_BUTTONS_VECTOR));
+  assert.equal(m.kind, "buttons");
+  assert.equal(m.rows[0][0].label, "Top up 1 PAS");
+  assert.equal(hexOf(m.rows[0][0].action.tx), TX_INTENT_VECTOR, "the action carries the intent bytes, length-prefixed");
+  assert.equal(decodeTxIntent(m.rows[0][0].action.tx).calls[0].value, 10_000_000_000n);
+});
+
+test("transactionReference: pinned vector B of spec 0007", () => {
+  const opaque = encodeOpaqueTransactionReferenceMessage({ messageId: "REF-1", timestamp: 1_720_000_010_000, chainId: TX_CHAIN_ID, hash: `0x${"22".repeat(32)}`, status: 1, block: 123, note: "Top-up of 1 PAS", intentMessageId: "TX-1" });
+  assert.equal(hexOf(opaque), TX_REFERENCE_VECTOR);
+  assert.equal(TRANSACTION_REFERENCE_CONTENT_KIND, 245);
+  const content = concat(str(TX_CHAIN_ID), scaleEncodeBytes(new Uint8Array(32).fill(0x22)), Uint8Array.of(1), Uint8Array.of(1), u32(123), str("Top-up of 1 PAS"), Uint8Array.of(1), str("TX-1"));
+  assert.equal(hexOf(opaque), hexOf(scaleEncodeBytes(concat(str("REF-1"), u64(1_720_000_010_000), Uint8Array.of(0), Uint8Array.of(245), content))));
+  const m = decodeOne(hex(TX_REFERENCE_VECTOR));
+  assert.deepEqual(
+    { kind: m.kind, messageId: m.messageId, timestamp: m.timestamp, chainId: m.chainId, hash: m.hash, status: m.status, block: m.block, note: m.note, intentMessageId: m.intentMessageId },
+    { kind: "transactionReference", messageId: "REF-1", timestamp: 1_720_000_010_000, chainId: TX_CHAIN_ID, hash: new Uint8Array(32).fill(0x22), status: 1, block: 123, note: "Top-up of 1 PAS", intentMessageId: "TX-1" },
+  );
+});
+
+test("round-trip: a raw-call intent with gas fields absent, several calls, and a reference with no block", () => {
+  const intent = {
+    chainId: TX_CHAIN_ID,
+    calls: [
+      { kind: 0, to: null, data: Uint8Array.of(10, 3, 1), value: 0n },
+      { kind: 1, to: new Uint8Array(20).fill(7), data: new Uint8Array(0), value: (1n << 128n) - 1n, gasRefTime: 5n, gasProofSize: 6n, storageDepositLimit: 7n },
+    ],
+    display: { title: "Two", description: "", amount: null, asset: null },
+    expiresAt: 1n,
+  };
+  const d = decodeTxIntent(encodeTxIntent(intent));
+  assert.deepEqual(d.calls[0], { kind: 0, to: null, data: Uint8Array.of(10, 3, 1), value: 0n, gasRefTime: null, gasProofSize: null, storageDepositLimit: null });
+  assert.deepEqual([d.calls[1].value, d.calls[1].gasRefTime, d.calls[1].gasProofSize, d.calls[1].storageDepositLimit], [(1n << 128n) - 1n, 5n, 6n, 7n]);
+  assert.deepEqual(d.display, { title: "Two", description: "", amount: null, asset: null });
+  const r = decodeOne(encodeOpaqueTransactionReferenceMessage({ chainId: TX_CHAIN_ID, hash: Uint8Array.of(1), status: 3, note: "failed: out of gas" }));
+  assert.deepEqual([r.kind, r.status, r.block, r.note, r.intentMessageId], ["transactionReference", 3, null, "failed: out of gas", null]);
+});
+
+// Spec 0007 client rule 1: a client refuses to sign without a dry-run. The
+// encoder refuses to build an intent a client must refuse, and the limits
+// keep an intent small enough for a button.
+test("tx intent encoder and decoder enforce the spec 0007 rules", () => {
+  const base = { ...vectorIntent };
+  assert.throws(() => encodeTxIntent({ ...base, dryRunRequired: false }), /dryRunRequired/);
+  assert.throws(() => encodeTxIntent({ ...base, calls: [] }), /1 to 8 calls/);
+  assert.throws(() => encodeTxIntent({ ...base, calls: Array.from({ length: 9 }, () => base.calls[0]) }), /1 to 8 calls/);
+  assert.throws(() => encodeTxIntent({ ...base, calls: [{ ...base.calls[0], to: null }] }), /20-byte/);
+  assert.throws(() => encodeTxIntent({ ...base, calls: [{ ...base.calls[0], kind: 2 }] }), /kind/);
+  assert.throws(() => encodeTxIntent({ ...base, calls: [{ kind: 0, data: "0x00", gasRefTime: 1n }] }), /revive calls only/);
+  assert.throws(() => encodeTxIntent({ ...base, calls: [{ ...base.calls[0], data: new Uint8Array(16 * 1024 + 1) }] }), /16384 bytes/);
+  assert.throws(() => encodeTxIntent({ ...base, calls: [{ ...base.calls[0], value: -1n }] }), /u128/);
+  assert.throws(() => encodeTxIntent({ ...base, display: { ...base.display, title: "x".repeat(61) } }), /title/);
+  assert.throws(() => encodeTxIntent({ ...base, display: { ...base.display, description: "x".repeat(281) } }), /description/);
+  assert.throws(() => encodeOpaqueTransactionReferenceMessage({ chainId: TX_CHAIN_ID, hash: "0x22", status: 4 }), /status/);
+  assert.throws(() => encodeOpaqueTransactionReferenceMessage({ chainId: TX_CHAIN_ID, hash: "0x22", status: 0, note: "x".repeat(141) }), /note/);
+  // A bool byte other than 00/01 is malformed; `false` itself decodes, and the client refuses to sign it.
+  const noDryRun = hex(TX_INTENT_VECTOR); noDryRun[noDryRun.length - 9] = 2;
+  assert.throws(() => decodeTxIntent(noDryRun), /dryRunRequired/);
+  assert.throws(() => decodeTxIntent(concat(hex(TX_INTENT_VECTOR), Uint8Array.of(0))), /trailing/);
+  const unknownStatus = hex(TX_REFERENCE_VECTOR); unknownStatus[unknownStatus.indexOf(0x80) + 33] = 9;
+  assert.equal(decodeOne(unknownStatus).kind, "undecodable");
 });
 
 test("round-trip: dataChannelClosed carries offerId", () => {

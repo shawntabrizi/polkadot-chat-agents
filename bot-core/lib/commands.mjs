@@ -8,7 +8,7 @@
 
 import { parseProjectSpec } from "./workspaces.mjs";
 
-const COMMAND_RE = /^\/([a-z][a-z0-9_-]*)(?:\s+(\S+))?\s*$/i;
+export const COMMAND_RE = /^\/([a-z][a-z0-9_-]*)(?:\s+(\S+))?\s*$/i;
 
 // Resolve the /model switching policy into the `allowedModels` shape the
 // handler expects: null = open (no restriction), [] = locked (no switching),

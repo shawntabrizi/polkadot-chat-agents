@@ -205,7 +205,7 @@ time") gives 21. `DELETED_CONTENT_KIND` is the only place to change it.
 **Sending extensions is not gated.** The desktop spec set's development-mode
 rule (owner decision, 2026-09-23; `polkadot-chat-desktop/docs/spec/README.md`)
 holds: every client is in development, so the bot sends every enabled
-extension kind (deleted, buttons, typing, seen, botinfo) to every peer. There is no
+extension kind (deleted, buttons, typing, seen, botinfo, txref) to every peer. There is no
 per-peer evidence and no advertisement. A client that does not know a kind
 shows the base spec's unsupported-message row, and that is accepted while the
 kinds iterate. `BOT_PROTOCOL_EXTENSIONS` is the operator's switch: unset means
@@ -241,7 +241,7 @@ ButtonPressContent { messageId: String, row: u8, index: u8, payload: Bytes }
 ```
 
 The envelope is the usual one (messageId, timestamp u64 LE, version 0, kind
-byte). `tx` is opaque bytes until RFC 0007. Limits: 8 rows of 4 buttons,
+byte). `tx` carries a spec 0007 TxIntent (see Transactions below). Limits: 8 rows of 4 buttons,
 labels up to 40 characters, callback payloads up to 256 bytes. The codec is
 `encodeOpaqueButtonsMessage` / `encodeOpaqueButtonPressMessage` in
 `vendor/app-chat-codec.mjs`; two pinned byte vectors are in
@@ -266,7 +266,7 @@ Pick one
 - `callback`: UTF-8 bytes, or raw bytes with a `base64:` prefix; the client
   sends them back in a `buttonPress`.
 - `url`: `https://` or `polkadotapp://` only.
-- `oneShot` is optional (default false). `tx` is not offered to brains.
+- `oneShot` is optional (default false). A `tx` action takes the JSON form in Transactions (spec 0007) below.
 
 The bot strips the block and sends the rest of the text plus the rows as ONE
 kind-242 message (a long text is chunked; the last part carries the rows).
@@ -424,6 +424,93 @@ in the session state (`bi`), and a lower version than the stored one is
 ignored (`stale: true` in the log). It is never answered, never fed to the
 brain, and never makes the bot send its own `botInfo`: two bots must not
 loop. Log: `BOT_RECEIVED_BOTINFO { from, kind, name, version, commands }`.
+
+### Transactions (spec 0007)
+
+Spec 0007 (`polkadot-chat-desktop/docs/spec/0007-transactions.md`) fills the
+`tx` action of spec 0006 and adds one provisional kind:
+
+```
+Action::tx(Bytes)   -> 3      // Bytes = SCALE(TxIntent)
+TxIntent = { version: u8 (1), chainId: String /* genesis hash, 0x hex */,
+             calls: Vec<Call> /* 1..8 */, display: Display,
+             dryRunRequired: bool /* true in v1 */, expiresAt: u64 /* unix ms */ }
+Call     = { kind: u8 /* 0 raw call, 1 Revive */, to: Option<Bytes>, data: Bytes /* <= 16 KiB */,
+             value: u128, gasRefTime: Option<u64>, gasProofSize: Option<u64>,
+             storageDepositLimit: Option<u128> }
+Display  = { title: String /* <= 60 */, description: String /* <= 280 */,
+             amount: Option<String>, asset: Option<String> }
+transactionReference(TransactionReference) -> 245
+TransactionReference = { chainId: String, hash: Bytes, status: u8 /* 0 submitted, 1 in block,
+                         2 finalized, 3 failed */, block: Option<u32>, note: String /* <= 140 */,
+                         intentMessageId: Option<String> }
+```
+
+`u64` and `u128` are fixed-width little-endian. The codec is
+`encodeTxIntent` / `decodeTxIntent` and `encodeOpaqueTransactionReferenceMessage`
+in `vendor/app-chat-codec.mjs`; the pinned vectors are in
+`polkadot-chat-desktop/docs/spec/vectors-0007.md` and in `test/codec.test.mjs`.
+A buttons message decodes with the `tx` action as bytes; `decodeTxIntent`
+gives its shape. `encodeOpaqueButtonsMessage` takes `{ tx }` as bytes or as a
+TxIntent object. The encoder refuses `dryRunRequired: false`, more than 8
+calls, and a Revive call without a 20-byte `to`.
+
+**The key stays with the client.** The bot never signs for the user. A `tx`
+button is an intent: the client dry-runs it at the best block, shows the
+effect and the fee, and signs with the user's key. What the bot signs with
+its own wallet key (a meter charge, a faucet transfer) it reports with a
+`transactionReference`.
+
+**From a brain.** The fenced ```buttons block (spec 0006) accepts
+`"action": { "tx": { "chainId", "calls", "display", "expiresAt", "dryRunRequired"? } }`,
+with `to` and `data` as 0x hex and `value` as a decimal string (u128).
+`dryRunRequired` defaults to true; false, an unknown key, or any value out of
+range leaves the whole block as text (`lib/buttons-block.mjs`, `toTxIntent`).
+
+**Sending references.** `BOT_PROTOCOL_EXTENSIONS` without `txref` stops them
+(`BOT_TX_REFERENCE_SKIPPED`). Log: `BOT_SENT_TX_REFERENCE { to, messageId,
+status, block, hash, note }`. The bot reports status 1 (in block) when its
+extrinsic is in a best block, or 3 when it failed on chain; it does not wait
+for finality.
+
+**Receiving references.** A peer's `transactionReference` is logged
+(`BOT_RECEIVED_TX_REFERENCE { from, status, block, hash, note,
+intentMessageId? }`), kept in memory per peer (the last 20), and never
+answered or fed to the brain. It is a claim, not proof: with the meter on,
+the bot re-reads the user's balance from the chain (`BOT_METER_BALANCE
+{ on: "reference" }`) and trusts only that.
+
+**Chain access.** `lib/revive-chain.mjs` talks to a pallet-revive chain
+(devnet Asset Hub) through Substrate extrinsics and runtime calls with papi's
+metadata-driven API: `ReviveApi_call` dry-runs at the best block,
+`Revive.call` with the dry-run's weight and deposit plus 20 %,
+`Revive.map_account` once, and `Balances.transfer_keep_alive`. A user's
+contract address is pallet-revive's mapping of the chat account:
+`keccak256(accountId32)[12..32]`. Inside a contract, native value is scaled
+by the runtime's `NativeToEthRatio` (1e8 on Asset Hub, so 1 PAS = 1e18).
+
+**Meter (pay-as-you-go replies).** `BOT_METER_CONTRACT` + `BOT_METER_CHAIN`
+turn it on for a direct brain (`lib/meter.mjs`; the contract is
+`contracts/meter/`). Before each brain turn the bot reads `balanceOf(user)` at
+the best block. Below `BOT_METER_PRICE` it answers with one buttons message:
+a line with the balance and a "Top up 1 PAS" `tx` button (a Revive call of
+`topUp()` with 1 PAS), and the brain does not run. Otherwise the brain runs;
+after the turn the bot calls `charge(user, price)` from its own wallet (the
+contract's operator) and sends a `transactionReference` with the note
+`balance: <remaining plancks>`. `/balance` answers the balance and a Top up
+button; `/topup` sends the button. Other slash commands are free. A failed
+balance read answers with a notice and runs no brain (fail closed). Logs:
+`BOT_METER_ENABLED`, `BOT_METER_BALANCE`, `BOT_METER_TOPUP_OFFERED`,
+`BOT_METER_CHARGED`, `BOT_METER_CHARGE_FAILED`, `BOT_METER_READ_FAILED`,
+`BOT_METER_OPERATOR_MAPPED`.
+
+**Faucet.** `BOT_FAUCET_KEY` turns it on (`lib/faucet.mjs`). `/drip <SS58 or
+0x account>` sends `BOT_FAUCET_AMOUNT` with `Balances.transfer_keep_alive`
+and posts a reference with the note "Dripped 1 PAS". One drip per target
+account per 10 minutes (in memory); a failed transfer does not use it up. The
+key is a derivation path of the public Substrate dev phrase only. Logs:
+`BOT_FAUCET_ENABLED`, `BOT_FAUCET_DRIPPED`, `BOT_FAUCET_REFUSED`,
+`BOT_FAUCET_FAILED`.
 
 ### Attachments (photos/videos/files)
 

@@ -13,7 +13,10 @@
 // Actions: { "command": string } (the client sends it as the user's text),
 // { "callback": string } (UTF-8 bytes echoed in a buttonPress; a
 // "base64:" prefix gives raw bytes instead), { "url": string } (https:// or
-// polkadotapp:// only). `tx` is not offered to brains (RFC 0007).
+// polkadotapp:// only), { "tx": { chainId, calls, display, expiresAt,
+// dryRunRequired? } } (spec 0007: a chain call the client dry-runs and signs;
+// see toTxIntent). A `tx` becomes the codec's TxIntent object (u64/u128 as
+// bigint, bytes as Uint8Array); the codec encodes it into Action tag 3.
 //
 // Pure functions, no Node APIs: keep this file easy to port byte for byte.
 // Any rule broken -> the block is invalid and the reply stays plain text.
@@ -23,6 +26,11 @@ export const MAX_BUTTONS_PER_ROW = 4;
 export const MAX_LABEL_CHARS = 40;
 export const MAX_CALLBACK_BYTES = 256;
 
+export const MAX_TX_CALLS = 8;
+export const MAX_TX_DATA_BYTES = 16 * 1024;
+export const MAX_TX_TITLE_CHARS = 60;
+export const MAX_TX_DESCRIPTION_CHARS = 280;
+
 const OPEN_FENCE = "```buttons";
 const URL_SCHEMES = ["https://", "polkadotapp://"];
 
@@ -31,14 +39,76 @@ const decodeBase64 = (value) => {
   try { return Uint8Array.from(atob(value), (c) => c.charCodeAt(0)); } catch { return null; }
 };
 
-// { command } | { callback } | { url } from the JSON -> the codec's action
-// shape (callback as bytes), or null.
+const isObject = (v) => v != null && typeof v === "object" && !Array.isArray(v);
+const hexBytes = (value, { length = null, max = Infinity } = {}) => {
+  if (typeof value !== "string" || !/^0x([0-9a-fA-F]{2})*$/.test(value)) return null;
+  const bytes = Uint8Array.from(value.slice(2).match(/../g) ?? [], (h) => parseInt(h, 16));
+  if ((length != null && bytes.length !== length) || bytes.length > max) return null;
+  return bytes;
+};
+// A decimal string or a non-negative safe integer -> bigint below 2^bits, or null.
+const uint = (value, bits) => {
+  let big = null;
+  if (typeof value === "string" && /^\d{1,40}$/.test(value)) big = BigInt(value);
+  else if (Number.isSafeInteger(value) && value >= 0) big = BigInt(value);
+  return big != null && big < 1n << BigInt(bits) ? big : null;
+};
+const optionalUint = (value, bits) => (value === undefined || value === null ? { ok: true, value: null } : { ok: uint(value, bits) != null, value: uint(value, bits) });
+const shortString = (value, max, { empty = true } = {}) =>
+  typeof value === "string" && (empty || value.length > 0) && [...value].length <= max;
+
+// Spec 0007 TxIntent from the JSON, or null. chainId is the target chain's
+// genesis hash; `to`/`data` are 0x hex; `value` a decimal string (u128).
+export const toTxIntent = (tx) => {
+  if (!isObject(tx)) return null;
+  const known = new Set(["chainId", "calls", "display", "expiresAt", "dryRunRequired", "version"]);
+  if (Object.keys(tx).some((k) => !known.has(k))) return null;
+  if (tx.version !== undefined && tx.version !== 1) return null;
+  if (tx.dryRunRequired !== undefined && tx.dryRunRequired !== true) return null;
+  if (!hexBytes(tx.chainId, { length: 32 })) return null;
+  const expiresAt = uint(tx.expiresAt, 64);
+  if (expiresAt == null || expiresAt === 0n) return null;
+  if (!Array.isArray(tx.calls) || tx.calls.length === 0 || tx.calls.length > MAX_TX_CALLS) return null;
+  const calls = [];
+  for (const call of tx.calls) {
+    if (!isObject(call) || (call.kind !== 0 && call.kind !== 1)) return null;
+    const to = call.to == null ? null : hexBytes(call.to, { length: 20 });
+    if (call.to != null && !to) return null;
+    if (call.kind === 1 && !to) return null;
+    const data = hexBytes(call.data, { max: MAX_TX_DATA_BYTES });
+    const value = call.value === undefined ? 0n : uint(call.value, 128);
+    if (!data || value == null) return null;
+    const gas = [optionalUint(call.gasRefTime, 64), optionalUint(call.gasProofSize, 64), optionalUint(call.storageDepositLimit, 128)];
+    if (gas.some((g) => !g.ok)) return null;
+    if (call.kind === 0 && gas.some((g) => g.value != null)) return null;
+    calls.push({ kind: call.kind, to, data, value, gasRefTime: gas[0].value, gasProofSize: gas[1].value, storageDepositLimit: gas[2].value });
+  }
+  const d = tx.display;
+  if (!isObject(d) || !shortString(d.title, MAX_TX_TITLE_CHARS, { empty: false })) return null;
+  if (d.description !== undefined && !shortString(d.description, MAX_TX_DESCRIPTION_CHARS)) return null;
+  for (const key of ["amount", "asset"]) if (d[key] != null && !shortString(d[key], 64, { empty: false })) return null;
+  return {
+    version: 1,
+    chainId: tx.chainId.toLowerCase(),
+    calls,
+    display: { title: d.title, description: d.description ?? "", amount: d.amount ?? null, asset: d.asset ?? null },
+    dryRunRequired: true,
+    expiresAt,
+  };
+};
+
+// { command } | { callback } | { url } | { tx } from the JSON -> the codec's
+// action shape (callback as bytes, tx as a TxIntent object), or null.
 const toAction = (action) => {
   if (action == null || typeof action !== "object" || Array.isArray(action)) return null;
   const keys = Object.keys(action);
   if (keys.length !== 1) return null;
   const [key] = keys;
   const value = action[key];
+  if (key === "tx") {
+    const intent = toTxIntent(value);
+    return intent ? { tx: intent } : null;
+  }
   if (typeof value !== "string" || value.length === 0) return null;
   if (key === "command") return { command: value };
   if (key === "url") return URL_SCHEMES.some((s) => value.startsWith(s)) && value.length > 8 ? { url: value } : null;

@@ -1088,7 +1088,8 @@ export function encodeOpaqueDeletedMessage({
 // Action { command(String)=0 | callback(Bytes)=1 | url(String)=2 | tx(Bytes)=3 }
 // ButtonPressContent { messageId: String, row: u8, index: u8, payload: Bytes }
 // An action is one of { command }, { callback: Uint8Array }, { url },
-// { tx: Uint8Array }; `tx` is opaque here (its shape is RFC 0007).
+// { tx: Uint8Array | TxIntent }; on decode `tx` stays bytes (decodeTxIntent
+// gives the spec 0007 shape).
 export const BUTTONS_CONTENT_KIND = 242;
 export const BUTTON_PRESS_CONTENT_KIND = 243;
 export const BUTTONS_MAX_ROWS = 8;
@@ -1107,6 +1108,8 @@ function encodeButtonAction(action) {
     if (typeof value !== "string" || value.length === 0) throw new Error(`button ${keys[0]} must be a non-empty string`);
     return concatBytes(Uint8Array.of(tag), scaleEncodeString(value));
   }
+  // Spec 0007: a tx action may be given as a TxIntent object; it goes out as its SCALE bytes.
+  if (tag === 3 && !(value instanceof Uint8Array)) return concatBytes(Uint8Array.of(tag), scaleEncodeBytes(encodeTxIntent(value)));
   if (!(value instanceof Uint8Array)) throw new Error(`button ${keys[0]} must be bytes`);
   if (tag === 1 && value.length > BUTTON_PAYLOAD_MAX_BYTES) throw new Error(`button callback exceeds ${BUTTON_PAYLOAD_MAX_BYTES} bytes`);
   return concatBytes(Uint8Array.of(tag), scaleEncodeBytes(value));
@@ -1282,6 +1285,172 @@ export function encodeOpaqueBotInfoMessage({
       botInfoString(greeting, L.greeting, "greeting"),
       scaleEncodeArray(encodedCommands),
       Uint8Array.of(version & 0xff, version >> 8),
+    ),
+  });
+}
+
+// Spec 0007 transactions (polkadot-chat-desktop docs/spec/0007-transactions.md).
+// TxIntent is the SCALE payload inside Action tag 3 (`tx(Bytes)`) of spec 0006;
+// the buttons codec keeps it opaque, these two functions give it its shape.
+// TxIntent { version: u8 (1), chainId: String, calls: Vec<Call> (1..8),
+//            display: Display, dryRunRequired: bool, expiresAt: u64 }
+// Call { kind: u8 (0 raw call, 1 Revive), to: Option<Bytes>, data: Bytes (<= 16 KiB),
+//        value: u128, gasRefTime: Option<u64>, gasProofSize: Option<u64>,
+//        storageDepositLimit: Option<u128> }
+// Display { title: String (<= 60), description: String (<= 280),
+//           amount: Option<String>, asset: Option<String> }
+// Provisional kind from the desktop spec set (kinds.md, range 240-249):
+//   transactionReference(TransactionReference) -> 245
+// TransactionReference { chainId: String, hash: Bytes, status: u8
+//   (0 submitted, 1 in block, 2 finalized, 3 failed), block: Option<u32>,
+//   note: String (<= 140), intentMessageId: Option<String> }
+// u128 and u64 are fixed-width little-endian (not compact). Values are bigint.
+export const TX_INTENT_VERSION = 1;
+export const TX_CALL_KINDS = Object.freeze({ raw: 0, revive: 1 });
+export const TX_INTENT_LIMITS = Object.freeze({ calls: 8, dataBytes: 16 * 1024, title: 60, description: 280 });
+export const TRANSACTION_REFERENCE_CONTENT_KIND = 245;
+export const TX_STATUS = Object.freeze({ submitted: 0, inBlock: 1, finalized: 2, failed: 3 });
+export const TX_NOTE_MAX_CHARS = 140;
+const TX_SHORT_STRING_MAX_BYTES = 256; // chainId, amount, asset: no spec limit, bounded on decode
+const TX_HASH_MAX_BYTES = 64;
+
+const txString = (value, max, name, { empty = true } = {}) => {
+  if (typeof value !== "string" || (!empty && value.length === 0) || [...value].length > max) {
+    throw new Error(`${name} needs ${empty ? 0 : 1} to ${max} characters`);
+  }
+  return scaleEncodeString(value);
+};
+const assertU128 = (value, name) => {
+  const big = typeof value === "bigint" ? value : (typeof value === "string" && /^\d+$/.test(value)) || Number.isSafeInteger(value) ? BigInt(value) : null;
+  if (big == null || big < 0n || big >= 1n << 128n) throw new Error(`${name} must be a u128`);
+  return big;
+};
+const optionOf = (value, encode) => scaleEncodeOption(value == null ? null : encode(value));
+const toBytes = (value, name) => {
+  if (value instanceof Uint8Array) return value;
+  if (typeof value === "string" && /^0x([0-9a-fA-F]{2})*$/.test(value)) return hexToBytes(value.slice(2));
+  throw new Error(`${name} must be bytes or 0x hex`);
+};
+const scaleDecodeUInt128At = (bytes, offset) => {
+  if (offset + 16 > bytes.length) throw new Error(`SCALE u128 exceeds buffer at ${offset}`);
+  let value = 0n;
+  for (let index = 15; index >= 0; index -= 1) value = (value << 8n) | BigInt(bytes[offset + index]);
+  return { value, offset: offset + 16 };
+};
+const boolAt = (bytes, offset, label) => {
+  const b = bytes[offset];
+  if (b !== 0 && b !== 1) throw new Error(`invalid ${label} byte ${b}`);
+  return { value: b === 1, offset: offset + 1 };
+};
+
+/** A TxIntent object -> its SCALE bytes (the payload of a `tx` button action). */
+export function encodeTxIntent({ version = TX_INTENT_VERSION, chainId, calls, display, dryRunRequired = true, expiresAt }) {
+  if (version !== TX_INTENT_VERSION) throw new Error(`tx intent version must be ${TX_INTENT_VERSION}`);
+  if (dryRunRequired !== true) throw new Error("tx intent dryRunRequired must be true in v1");
+  if (!Array.isArray(calls) || calls.length === 0 || calls.length > TX_INTENT_LIMITS.calls) {
+    throw new Error(`tx intent needs 1 to ${TX_INTENT_LIMITS.calls} calls`);
+  }
+  const encodedCalls = calls.map((call) => {
+    if (!Object.values(TX_CALL_KINDS).includes(call?.kind)) throw new Error("tx call kind must be 0 (raw) or 1 (revive)");
+    const to = call.to == null ? null : toBytes(call.to, "tx call to");
+    if (call.kind === TX_CALL_KINDS.revive && to?.length !== 20) throw new Error("a revive tx call needs a 20-byte to");
+    const data = toBytes(call.data, "tx call data");
+    if (data.length > TX_INTENT_LIMITS.dataBytes) throw new Error(`tx call data exceeds ${TX_INTENT_LIMITS.dataBytes} bytes`);
+    const gasFields = [call.gasRefTime, call.gasProofSize, call.storageDepositLimit];
+    if (call.kind === TX_CALL_KINDS.raw && gasFields.some((v) => v != null)) throw new Error("gas fields are for revive calls only");
+    return concatBytes(
+      Uint8Array.of(call.kind),
+      optionOf(to, scaleEncodeBytes),
+      scaleEncodeBytes(data),
+      scaleEncodeUInt128(assertU128(call.value ?? 0n, "tx call value")),
+      optionOf(call.gasRefTime, (v) => scaleEncodeUInt64(assertU64(typeof v === "string" ? BigInt(v) : v, "tx gasRefTime"))),
+      optionOf(call.gasProofSize, (v) => scaleEncodeUInt64(assertU64(typeof v === "string" ? BigInt(v) : v, "tx gasProofSize"))),
+      optionOf(call.storageDepositLimit, (v) => scaleEncodeUInt128(assertU128(v, "tx storageDepositLimit"))),
+    );
+  });
+  const L = TX_INTENT_LIMITS;
+  return concatBytes(
+    Uint8Array.of(version),
+    txString(chainId, TX_SHORT_STRING_MAX_BYTES, "tx chainId", { empty: false }),
+    scaleEncodeArray(encodedCalls),
+    txString(display?.title, L.title, "tx display title", { empty: false }),
+    txString(display?.description ?? "", L.description, "tx display description"),
+    optionOf(display?.amount, (v) => txString(v, TX_SHORT_STRING_MAX_BYTES, "tx display amount")),
+    optionOf(display?.asset, (v) => txString(v, TX_SHORT_STRING_MAX_BYTES, "tx display asset")),
+    Uint8Array.of(1),
+    scaleEncodeUInt64(assertU64(expiresAt, "tx expiresAt")),
+  );
+}
+
+/** SCALE bytes of a `tx` action -> the TxIntent (u64/u128 as bigint, bytes as Uint8Array). Throws on anything malformed. */
+export function decodeTxIntent(bytes) {
+  const version = fixedBytesAt(bytes, 0, 1, "tx intent version");
+  if (version.value[0] !== TX_INTENT_VERSION) throw new Error(`unknown tx intent version ${version.value[0]}`);
+  const chainId = scaleDecodeStringAt(bytes, version.offset, TX_SHORT_STRING_MAX_BYTES, "tx chainId");
+  const optU64 = (b, at) => scaleDecodeOptionAt(b, at, scaleDecodeUInt64At);
+  const calls = scaleDecodeArrayAt(bytes, chainId.offset, (b, at) => {
+    const kind = fixedBytesAt(b, at, 1, "tx call kind");
+    if (!Object.values(TX_CALL_KINDS).includes(kind.value[0])) throw new Error(`unknown tx call kind ${kind.value[0]}`);
+    const to = scaleDecodeOptionAt(b, kind.offset, (bb, o) => scaleDecodeBytesAt(bb, o, 32, "tx call to"));
+    const data = scaleDecodeBytesAt(b, to.offset, TX_INTENT_LIMITS.dataBytes, "tx call data");
+    const value = scaleDecodeUInt128At(b, data.offset);
+    const gasRefTime = optU64(b, value.offset);
+    const gasProofSize = optU64(b, gasRefTime.offset);
+    const storageDepositLimit = scaleDecodeOptionAt(b, gasProofSize.offset, scaleDecodeUInt128At);
+    return {
+      value: {
+        kind: kind.value[0], to: to.value, data: data.value, value: value.value,
+        gasRefTime: gasRefTime.value, gasProofSize: gasProofSize.value, storageDepositLimit: storageDepositLimit.value,
+      },
+      offset: storageDepositLimit.offset,
+    };
+  }, TX_INTENT_LIMITS.calls, "tx calls");
+  if (calls.value.length === 0) throw new Error("tx intent has no calls");
+  const title = scaleDecodeStringAt(bytes, calls.offset, TX_INTENT_LIMITS.title * 4, "tx display title");
+  const description = scaleDecodeStringAt(bytes, title.offset, TX_INTENT_LIMITS.description * 4, "tx display description");
+  const optString = (b, at) => scaleDecodeStringAt(b, at, TX_SHORT_STRING_MAX_BYTES, "tx display string");
+  const amount = scaleDecodeOptionAt(bytes, description.offset, optString);
+  const asset = scaleDecodeOptionAt(bytes, amount.offset, optString);
+  const dryRunRequired = boolAt(bytes, asset.offset, "tx dryRunRequired");
+  const expiresAt = scaleDecodeUInt64At(bytes, dryRunRequired.offset);
+  if (expiresAt.offset !== bytes.length) throw new Error("trailing bytes after tx intent");
+  return {
+    version: version.value[0],
+    chainId: chainId.value,
+    calls: calls.value,
+    display: { title: title.value, description: description.value, amount: amount.value, asset: asset.value },
+    dryRunRequired: dryRunRequired.value,
+    expiresAt: expiresAt.value,
+  };
+}
+
+export function encodeOpaqueTransactionReferenceMessage({
+  messageId = makeAppUuid(),
+  timestamp = chatTimestampNow(),
+  chainId,
+  hash,
+  status,
+  block = null,
+  note = "",
+  intentMessageId = null,
+}) {
+  if (!Object.values(TX_STATUS).includes(status)) throw new Error("transaction reference status must be 0 to 3");
+  const hashBytes = toBytes(hash, "transaction reference hash");
+  if (hashBytes.length === 0 || hashBytes.length > TX_HASH_MAX_BYTES) throw new Error(`transaction reference hash needs 1 to ${TX_HASH_MAX_BYTES} bytes`);
+  if (intentMessageId != null && (typeof intentMessageId !== "string" || intentMessageId.length === 0)) {
+    throw new Error("transaction reference intentMessageId must be a non-empty string");
+  }
+  return encodeOpaqueRemoteMessage({
+    messageId,
+    timestamp,
+    content: concatBytes(
+      Uint8Array.of(TRANSACTION_REFERENCE_CONTENT_KIND),
+      txString(chainId, TX_SHORT_STRING_MAX_BYTES, "transaction reference chainId", { empty: false }),
+      scaleEncodeBytes(hashBytes),
+      Uint8Array.of(status),
+      optionOf(block, scaleEncodeUInt32),
+      txString(note, TX_NOTE_MAX_CHARS, "transaction reference note"),
+      optionOf(intentMessageId, scaleEncodeString),
     ),
   });
 }
@@ -1894,6 +2063,27 @@ function decodeRemoteMessage(bytes, budget) {
       upTo: upTo.value,
       at: Number(at.value),
       offset: at.offset,
+    };
+  }
+  if (contentKind === TRANSACTION_REFERENCE_CONTENT_KIND) {
+    const chainId = scaleDecodeStringAt(bytes, offset, TX_SHORT_STRING_MAX_BYTES, "transaction reference chainId");
+    const hash = scaleDecodeBytesAt(bytes, chainId.offset, TX_HASH_MAX_BYTES, "transaction reference hash");
+    const status = fixedBytesAt(bytes, hash.offset, 1, "transaction reference status");
+    if (status.value[0] > TX_STATUS.failed) throw new Error(`unknown transaction reference status ${status.value[0]}`);
+    const block = scaleDecodeOptionAt(bytes, status.offset, scaleDecodeUInt32At);
+    const note = scaleDecodeStringAt(bytes, block.offset, TX_NOTE_MAX_CHARS * 4, "transaction reference note");
+    const intentMessageId = scaleDecodeOptionAt(bytes, note.offset, (b, at) => decodeIdAt(b, at, "transaction reference intent id"));
+    return {
+      messageId: messageId.value,
+      timestamp: Number(timestamp.value),
+      kind: "transactionReference",
+      chainId: chainId.value,
+      hash: hash.value,
+      status: status.value[0],
+      block: block.value,
+      note: note.value,
+      intentMessageId: intentMessageId.value,
+      offset: intentMessageId.offset,
     };
   }
   if (contentKind === BUTTONS_CONTENT_KIND) {

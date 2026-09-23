@@ -27,6 +27,7 @@ import {
   encodeOpaqueEditedMessage,
   encodeOpaqueSeenMessage,
   encodeOpaqueTextMessage,
+  encodeOpaqueTransactionReferenceMessage,
   encodeOpaqueTypingMessage,
   x25519PublicKeyFromPrivateKey,
 } from "../vendor/app-chat-codec.mjs";
@@ -1538,6 +1539,31 @@ describe("transport e2e", { concurrency: 8 }, () => {
       await node.close();
       fs.rmSync(stateDir, { recursive: true, force: true });
       fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  // Spec 0007: a peer's transactionReference is a claim about the chain.
+  // The bot logs it and never answers it (two bots must not loop, and a
+  // reference alone is not proof of payment).
+  test("transaction reference: a peer's reference is logged and never answered", async () => {
+    const node = await startSandbox();
+    const stateDir = tmpState();
+    const bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: { BOT_SUBSCRIBE: "0" } });
+    try {
+      const alice = await startPersona(node);
+      await alice.open("tx opener");
+      await alice.reply((m) => textOf(m) === "Echo: tx opener");
+      await alice.sendRaw(remoteMessage(encodeOpaqueTransactionReferenceMessage({ chainId: `0x${"00".repeat(32)}`, hash: `0x${"22".repeat(32)}`, status: 1, block: 123, note: "Top-up of 1 PAS", intentMessageId: "TX-1" })));
+      const got = await bot.waitFor((e) => e.event === "BOT_RECEIVED_TX_REFERENCE", { label: "the peer's reference" });
+      assert.deepEqual([got.from, got.status, got.block, got.hash, got.note, got.intentMessageId], [alice.accountHex, 1, 123, `0x${"22".repeat(32)}`, "Top-up of 1 PAS", "TX-1"]);
+      await alice.send("after ref");
+      await alice.reply((m) => textOf(m) === "Echo: after ref");
+      assert.equal(bot.events.filter((e) => e.event === "BOT_RECEIVED_TEXT").length, 1, "a reference never runs a turn");
+      assert.equal(bot.events.filter((e) => e.event === "BOT_UNSUPPORTED_CONTENT").length, 0);
+    } finally {
+      await bot.stop();
+      await node.close();
+      fs.rmSync(stateDir, { recursive: true, force: true });
     }
   });
 

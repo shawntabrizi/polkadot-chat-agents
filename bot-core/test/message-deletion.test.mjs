@@ -79,7 +79,7 @@ test("tombstones and pending deletions survive a restart", () => {
 // extension goes to every peer unless the operator turns it off. A peer's own
 // extension kinds are logged, never required.
 test("BOT_PROTOCOL_EXTENSIONS: unset is all, none is none, a list restricts", () => {
-  const all = ["deleted", "buttons", "typing", "seen", "botinfo"];
+  const all = ["deleted", "buttons", "typing", "seen", "botinfo", "txref"];
   assert.deepEqual([...parseProtocolExtensions(undefined).enabled], all);
   assert.deepEqual([...parseProtocolExtensions("").enabled], all);
   assert.deepEqual([...parseProtocolExtensions(" none ").enabled], []);

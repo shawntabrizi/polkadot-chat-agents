@@ -437,6 +437,24 @@ The seeded file for a direct-engine or bridge bot named `guide`:
 - A direct engine with the `write` tool can edit files in its workspace,
   `botinfo.json` included.
 
+### Transactions: meter and faucet (spec 0007)
+
+Both features are off unless their variables are set. See
+[protocol: Transactions](../explanation/protocol.md#transactions-spec-0007).
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BOT_METER_CONTRACT` | unset | 0x address (20 bytes) of a deployed Meter contract (`contracts/meter/`). With `BOT_METER_CHAIN`, turns on pay-as-you-go replies. The bot's wallet account must be the contract's operator and must hold funds for fees. Direct brains only (not `bridge`). |
+| `BOT_METER_CHAIN` | unset | wss endpoint(s) of the chain that holds the contract, comma-separated (fallbacks after the first), e.g. `wss://asset-hub-paseo-rpc.n.dwellir.com,wss://sys.turboflakes.io/asset-hub-paseo`. |
+| `BOT_METER_PRICE` | `1000000000` | Price of one reply in plancks (default 0.1 PAS). |
+| `BOT_FAUCET_KEY` | unset | Turns on `/drip`. A derivation path of the **public** Substrate dev phrase (`bottom drive obey lake curtain smoke basket hold race lonely fit walk`), e.g. `//Alice`. Only dev-phrase accounts are acceptable: the value can never be a phrase or a seed, because anyone can ask a public faucet for funds. |
+| `BOT_FAUCET_AMOUNT` | `10000000000` | Plancks sent per drip (default 1 PAS). |
+| `BOT_FAUCET_CHAIN` | devnet Asset Hub | wss endpoint(s) for the faucet transfers, comma-separated. |
+
+The meter and faucet use the chain's metadata directly (papi's unsafe API),
+so no descriptors are generated for the chain. The meter's Top up button
+expires 10 minutes after it is sent.
+
 ### Replies & live replies
 
 | Variable | Default | Purpose |
@@ -452,7 +470,7 @@ The seeded file for a direct-engine or bridge bot named `guide`:
 | `BOT_LIVE_TTL_MS` | 600000 | A placeholder never finalized resolves to a timeout note. |
 | `BOT_LIVE_TIMEOUT_TEXT` | auto | That timeout note's text. |
 | `BOT_OUTBOUND_ACK_GRACE_MS` | 60000 | How long an un-ACKed statement holds the channel slot before a queued one takes over. |
-| `BOT_PROTOCOL_EXTENSIONS` | all | Protocol extensions the bot sends, to every peer, with no per-peer gating: `deleted` (RFC-0003), `buttons` (spec 0006), `typing` and `seen` (spec 0005), `botinfo` (spec 0008). Unset = all five; `none` = none; a comma list = only those named. With `buttons` off, buttons go out as a numbered text list. Receiving every extension is always on. |
+| `BOT_PROTOCOL_EXTENSIONS` | all | Protocol extensions the bot sends, to every peer, with no per-peer gating: `deleted` (RFC-0003), `buttons` (spec 0006), `typing` and `seen` (spec 0005), `botinfo` (spec 0008), `txref` (spec 0007 transaction references). Unset = all six; `none` = none; a comma list = only those named. With `buttons` off, buttons go out as a numbered text list. Receiving every extension is always on. |
 | `BOT_LOG_LEVEL` | unset | `debug` also prints debug events (`BOT_RECEIVED_TYPING`, `BOT_RECEIVED_SEEN`), marked `level: "debug"`. |
 
 T3ams uses the same placeholder, progress, final-wait, timeout, and chunk

@@ -90,6 +90,9 @@ import { createDeferredProgressTracker, createLiveReplies, renderTurnStats } fro
 import { RUNNERS, resolveEngine, ENGINES, assertEngineToolPolicy, toolPolicyEnforcement } from "./lib/runners.mjs";
 import { ToolPolicyError, hasToolCapability, toolPolicyFromEnvironment, toolPolicySummary } from "./lib/tool-policy.mjs";
 import { createKeyedDispatcher } from "./lib/keyed-dispatcher.mjs";
+import { createReviveChain } from "./lib/revive-chain.mjs";
+import { createMeter, DEFAULT_METER_PRICE, parsePlancks } from "./lib/meter.mjs";
+import { createFaucet, DEFAULT_FAUCET_AMOUNT, faucetPairFromPath } from "./lib/faucet.mjs";
 import { createClient as createPapiClient } from "polkadot-api";
 import { getWsProvider, WsEvent } from "polkadot-api/ws";
 import { paseoPeopleNext, productsDevnetPeople } from "./lib/descriptors.mjs";
@@ -129,6 +132,7 @@ import {
   encodeOpaqueDeletedMessage,
   encodeOpaqueBotInfoMessage,
   encodeOpaqueButtonsMessage,
+  encodeOpaqueTransactionReferenceMessage,
   encodeOpaqueTypingMessage,
   encodeOpaqueSeenMessage,
   encodeOpaqueDataChannelClosedMessage,
@@ -1037,7 +1041,7 @@ const outbound = createOutboundLanes({
 // Receiving every extension kind is always on. SENDING follows the desktop
 // spec set's development-mode rule: every client is in development, so the
 // bot sends each enabled extension to every peer, with no per-peer evidence.
-// BOT_PROTOCOL_EXTENSIONS: unset = all (deleted, buttons, typing, seen, botinfo),
+// BOT_PROTOCOL_EXTENSIONS: unset = all (deleted, buttons, typing, seen, botinfo, txref),
 // "none" = none, or a comma list. See docs/explanation/protocol.md.
 const protocolExtensions = parseProtocolExtensions(env.BOT_PROTOCOL_EXTENSIONS);
 const extensionOn = (name) => protocolExtensions.enabled.has(name);
@@ -1211,6 +1215,75 @@ const sendMessage = async (peerHex, opts) => {
   return (await submitMessage(peerHex, opts)).messageId;
 };
 const sendText = (peerHex, text) => sendMessage(peerHex, { text });
+
+// ---------- spec 0007 transactions: references, meter, faucet ----------
+// The bot never signs for a user: a `tx` button goes out as an intent the
+// client dry-runs and signs. What the bot signs itself (a meter charge, a
+// faucet drip) is reported with a transactionReference (kind 245), sent when
+// the `txref` extension is on. A peer's references are stored per peer and
+// never answered; they are claims, never trusted for anything of value.
+const DEFAULT_ASSET_HUB_ENDPOINTS = ["wss://asset-hub-paseo-rpc.n.dwellir.com", "wss://sys.turboflakes.io/asset-hub-paseo"];
+const endpointList = (raw) => String(raw ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+const PEER_TX_REFS_CAP = 20;
+const peerTxRefs = new Map(); // peerHex -> the peer's last references, oldest first (in memory)
+const sendTransactionReference = async (peerHex, ref) => {
+  const k = norm(peerHex);
+  if (!extensionOn("txref")) {
+    log("BOT_TX_REFERENCE_SKIPPED", { to: k, reason: "txref extension off", hash: ref.hash });
+    return null;
+  }
+  if (sessions.get(k) == null) throw new Error("no active session for peer");
+  const messageId = makeAppUuid();
+  await outbound.enqueue(k, encodeOpaqueTransactionReferenceMessage({ messageId, timestamp: stamp(k), ...ref })).submitted;
+  log("BOT_SENT_TX_REFERENCE", { to: k, messageId, status: ref.status, block: ref.block ?? null, hash: ref.hash, note: ref.note });
+  return messageId;
+};
+// A buttons message the bot builds itself (not a brain's fenced block);
+// without the `buttons` extension it goes out as the spec 0006 fallback text.
+const sendOwnButtons = (peerHex, text, rows) => (extensionOn("buttons")
+  ? sendMessage(peerHex, { text, buttons: { rows, oneShot: false } })
+  : sendMessage(peerHex, { text: buttonsFallbackText(text, rows) }));
+const txSend = { text: (peerHex, text) => sendText(peerHex, text), buttons: sendOwnButtons, reference: sendTransactionReference };
+const featureConfigError = (name, error) => {
+  console.error(`${name}: ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(2);
+};
+
+// Meter (lib/meter.mjs): BOT_METER_CONTRACT + BOT_METER_CHAIN turn it on.
+let meter = null;
+if (env.BOT_METER_CONTRACT || env.BOT_METER_CHAIN) {
+  if (!env.BOT_METER_CONTRACT || !env.BOT_METER_CHAIN) featureConfigError("BOT_METER_*", "set both BOT_METER_CONTRACT and BOT_METER_CHAIN");
+  if (usesBridgeQueue) featureConfigError("BOT_METER_*", "the meter needs a direct brain (echo, claude, codex, ...): a bridge harness answers outside the turn it would charge");
+  try {
+    meter = createMeter({
+      chain: createReviveChain({ endpoints: endpointList(env.BOT_METER_CHAIN) }),
+      contract: env.BOT_METER_CONTRACT.trim(),
+      operator: wallet,
+      price: parsePlancks(env.BOT_METER_PRICE, DEFAULT_METER_PRICE),
+      name: username || "this bot",
+      send: txSend,
+      log,
+    });
+  } catch (error) { featureConfigError("BOT_METER_*", error); }
+  log("BOT_METER_ENABLED", { contract: env.BOT_METER_CONTRACT.trim(), chain: endpointList(env.BOT_METER_CHAIN)[0], pricePlancks: String(parsePlancks(env.BOT_METER_PRICE, DEFAULT_METER_PRICE)), operator: meter.userAddress(accountIdHex) });
+}
+
+// Faucet (lib/faucet.mjs): BOT_FAUCET_KEY (a dev-phrase derivation path) turns it on.
+let faucet = null;
+if (env.BOT_FAUCET_KEY) {
+  try {
+    const faucetPair = faucetPairFromPath(env.BOT_FAUCET_KEY);
+    const endpoints = endpointList(env.BOT_FAUCET_CHAIN);
+    faucet = createFaucet({
+      chain: createReviveChain({ endpoints: endpoints.length ? endpoints : DEFAULT_ASSET_HUB_ENDPOINTS }),
+      pair: faucetPair,
+      amount: parsePlancks(env.BOT_FAUCET_AMOUNT, DEFAULT_FAUCET_AMOUNT),
+      send: txSend,
+      log,
+    });
+    log("BOT_FAUCET_ENABLED", { key: env.BOT_FAUCET_KEY.trim(), account: `0x${bytesToHex(faucetPair.publicKey)}`, amountPlancks: String(parsePlancks(env.BOT_FAUCET_AMOUNT, DEFAULT_FAUCET_AMOUNT)), chain: (endpoints.length ? endpoints : DEFAULT_ASSET_HUB_ENDPOINTS)[0] });
+  } catch (error) { featureConfigError("BOT_FAUCET_*", error); }
+}
 
 // HOP accepts the dedicated Bulletin allowance signer, not the bot's chat
 // wallet. The uploaded ticket is only embedded into the encrypted RichText
@@ -1517,16 +1590,36 @@ const handleInbound = async (peerHex, msg, owedId = null, { reservedBridge = fal
     if (usesBridgeQueue && owedId) settleOwed(owedId);
     return;
   }
+  // Spec 0007 faucet: /drip is answered here, never by the brain.
+  if (faucet && await faucet.handle(peerHex, msg).catch((e) => { log("BOT_FAUCET_FAILED", { peer: peerHex, error: String(e?.message ?? e) }); return true; })) {
+    // As for /start: no harness sees it, so a bridge owed entry is settled here.
+    if (reservedBridge) releaseBridgeReservation();
+    if (usesBridgeQueue && owedId) settleOwed(owedId);
+    return;
+  }
+  // Spec 0007 meter: the balance gates the turn; a turn that ran is charged after it.
+  let meterGate = null;
+  if (meter) {
+    try { meterGate = await meter.beforeTurn(peerHex, msg); }
+    catch (e) { log("BOT_METER_FAILED", { peer: peerHex, error: String(e?.message ?? e) }); return; }
+    if (!meterGate.run) return;
+  }
+  const chargeTurn = async () => { if (meterGate?.charge) await meter.afterTurn(peerHex); };
   if (brain === "echo") {
     // Through deliverToChat, so an echoed ```buttons block exercises spec 0006.
-    await deliverToChat(peerHex, `Echo: ${synthesizeText(msg.text, msg.attachments)}`).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
+    const delivered = await deliverToChat(peerHex, `Echo: ${synthesizeText(msg.text, msg.attachments)}`).then(() => true, (e) => { log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }); return false; });
+    if (delivered) await chargeTurn();
     return;
   }
   if (agentRuntime) {
     // A turn that ends with no reply (a failed delivery, /stop) closes its
     // typing hint with typing{stopped}; after a reply this is a no-op.
-    try { return await agentRuntime.handleMessage(peerHex, msg); }
+    let result;
+    try { result = await agentRuntime.handleMessage(peerHex, msg); }
     finally { typingAndSeen.turnEnded(norm(peerHex)); }
+    // false = shutdown interrupted the turn: it is retried later, so no charge now.
+    if (result !== false) await chargeTurn();
+    return result;
   }
   // bridge: hand off to an external agent via the HTTP bridge.
   // The agent replies via POST /send -> sendMessage, which disarms the ack
@@ -2088,7 +2181,7 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
       continue;
     }
     // Which extension kinds this peer sends: a log, it gates nothing.
-    if (m.kind === "buttons" || m.kind === "buttonPress" || m.kind === "typing" || m.kind === "seen" || m.kind === "botInfo"
+    if (m.kind === "buttons" || m.kind === "buttonPress" || m.kind === "typing" || m.kind === "seen" || m.kind === "botInfo" || m.kind === "transactionReference"
       || (m.kind === "unsupported" && m.contentKind >= 240 && m.contentKind <= 249)) {
       observeExtension(peerHex, m.kind === "unsupported" ? "extension" : m.kind);
     }
@@ -2209,6 +2302,17 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
         ...(outcome === "duplicate" ? { duplicate: true } : {}),
       });
       if (outcome === "applied") enqueueEvent({ chat_id: peerHex, kind: "deleted", message_id: m.messageId, target_message_id: m.targetMessageId, text: "[user deleted one of their messages]" });
+    } else if (m.kind === "transactionReference") {
+      // Spec 0007: stored per peer, never answered, never trusted. The meter
+      // re-reads the chain (the reference may be a top-up) and only logs.
+      const k = norm(peerHex);
+      const ref = { messageId: m.messageId, chainId: m.chainId, hash: `0x${bytesToHex(m.hash)}`, status: m.status, block: m.block, note: m.note, intentMessageId: m.intentMessageId, at: Date.now() };
+      const refs = peerTxRefs.get(k) ?? [];
+      peerTxRefs.delete(k);
+      peerTxRefs.set(k, [...refs, ref].slice(-PEER_TX_REFS_CAP));
+      trimMap(peerTxRefs, SEEN_CAP);
+      log("BOT_RECEIVED_TX_REFERENCE", { from: peerHex, status: m.status, block: m.block, hash: ref.hash, note: m.note, ...(m.intentMessageId ? { intentMessageId: m.intentMessageId } : {}) });
+      if (meter) meter.onReference(k, ref);
     } else if (m.kind === "unsupported") {
       log("BOT_UNSUPPORTED_CONTENT", { from: peerHex, contentKind: m.contentKind });
     }
