@@ -1541,6 +1541,57 @@ describe("transport e2e", { concurrency: 8 }, () => {
     }
   });
 
+  // Spec 0008 catch-up: a peer from before the bot had a document (no `bs`)
+  // gets botInfo with the bot's next reply, without asking, and only once
+  // per version; an edit of botinfo.json triggers exactly one more.
+  test("bot info: catch-up with the next reply, once per version", async () => {
+    const node = await startSandbox();
+    const stateDir = tmpState();
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "pca-e2e-ws-"));
+    const botInfoFile = path.join(workspace, "botinfo.json");
+    fs.writeFileSync(botInfoFile, JSON.stringify({ name: "Guide" }));
+    const env = { BOT_SUBSCRIBE: "0", BOT_AI_WORKSPACE: workspace };
+    // The peer's chat starts while the bot sends no botInfo at all.
+    let bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: { ...env, BOT_PROTOCOL_EXTENSIONS: "deleted,buttons,typing,seen" } });
+    try {
+      const alice = await startPersona(node);
+      await alice.open("old chat");
+      await alice.reply((m) => textOf(m) === "Echo: old chat");
+      await bot.stop();
+      const before = JSON.parse(fs.readFileSync(path.join(stateDir, "session-state.json"), "utf8"));
+      assert.equal(before.peers.find((p) => p.peerHex === alice.accountHex).bs, undefined, "no botInfo sent yet");
+
+      bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: env });
+      const catchUps = () => bot.events.filter((e) => e.event === "BOT_SENT_BOTINFO");
+      await alice.send("first");
+      await alice.reply((m) => textOf(m) === "Echo: first");
+      const first = await bot.waitFor((e) => e.event === "BOT_SENT_BOTINFO", { label: "the catch-up botInfo" });
+      assert.deepEqual([first.to, first.version, first.on], [alice.accountHex, 1, "catch-up"]);
+      await alice.send("second");
+      await alice.reply((m) => textOf(m) === "Echo: second");
+      assert.equal(catchUps().length, 1, "the same version is never sent twice to the same peer");
+
+      // The operator edits the file: version 2 goes out once, with the next reply.
+      fs.writeFileSync(botInfoFile, JSON.stringify({ name: "Guide", greeting: "Hi again!" }));
+      await alice.send("third");
+      await alice.reply((m) => textOf(m) === "Echo: third");
+      const bumped = await bot.waitFor((e) => e.event === "BOT_SENT_BOTINFO" && e.version === 2, { label: "the version 2 catch-up" });
+      assert.equal(bumped.on, "catch-up");
+      await alice.send("fourth");
+      await alice.reply((m) => textOf(m) === "Echo: fourth");
+      assert.equal(catchUps().length, 2);
+
+      await bot.stop();
+      const after = JSON.parse(fs.readFileSync(path.join(stateDir, "session-state.json"), "utf8"));
+      assert.equal(after.peers.find((p) => p.peerHex === alice.accountHex).bs, 2, "bs persists the version sent");
+    } finally {
+      await bot.stop();
+      await node.close();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
   test("owed attachment survives kill -9 and re-processes after restart", async () => {
     const node = await startSandbox();
     const stateDir = tmpState();

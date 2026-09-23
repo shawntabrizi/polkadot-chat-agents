@@ -401,11 +401,22 @@ version stops at 65535; it never wraps to a lower number. The logic is
 - On a text `/start` (any brain; a bridge harness never sees it): the
   `botInfo` on the session lane, then the greeting as a normal text message.
   An empty greeting sends no text.
-- Log: `BOT_SENT_BOTINFO { to, version, on: "accept" | "start" }`. At startup
-  the bot logs `BOT_BOTINFO { kind, version, commands }`, and
+- Catch-up: the spec says a bot MUST send `botInfo` with its next reply to a
+  peer that has not received the current `version`. The bot keeps, per peer,
+  the version it last sent (`bs` in the session state). When a peer's `bs` is
+  missing or lower than the current version, the bot enqueues `botInfo` in
+  the same tick as the reply, just before it, so both ride one statement. A
+  reply is any new outbound message: text, buttons, a file, the live
+  placeholder, or a re-sent owed answer. An edit of the bot's own message does
+  not trigger it. The bot marks `bs` before the send, so two replies never both
+  carry it; a failed send goes back to the old value. The accept and `/start`
+  sends also set `bs`. So a peer from before the bot had a document, or from
+  before an edit of `botinfo.json`, gets the current version once, without
+  asking. A crash between the send and the next state save can send it once
+  more.
+- Log: `BOT_SENT_BOTINFO { to, version, on: "accept" | "start" | "catch-up" }`.
+  At startup the bot logs `BOT_BOTINFO { kind, version, commands }`, and
   `BOT_BOTINFO_VERSION { version }` each time the version goes up.
-- The spec lets a bot resend on change; `pca` does not push a change to open
-  chats. The peer gets the new version on its next `/start`.
 - `BOT_PROTOCOL_EXTENSIONS` without `botinfo` turns all of this off.
 
 **Receiving.** A peer's `botInfo` (the peer is another bot) is stored per peer

@@ -80,7 +80,7 @@ import { createDeletionLedger, createExtensionObserver, createMessageDeleter, pa
 import { TYPING_PLACEHOLDER_AFTER_MS, createTypingAndSeen } from "./lib/typing-seen.mjs";
 import { buttonsFallbackText, parseButtonsBlock } from "./lib/buttons-block.mjs";
 import { buttonPressText, createSentButtons } from "./lib/button-presses.mjs";
-import { createPeerBotInfo, defaultBotInfo, loadBotInfo } from "./lib/bot-info.mjs";
+import { createBotInfoSent, createPeerBotInfo, defaultBotInfo, loadBotInfo } from "./lib/bot-info.mjs";
 import { createWorkspaces } from "./lib/workspaces.mjs";
 import { downloadP2PFile, uploadP2PFile, validateHopUrl } from "./lib/hop-client.mjs";
 import { createMediaStore } from "./lib/media-store.mjs";
@@ -1113,10 +1113,13 @@ const prepareReply = (peerHex, text, { allowButtons = true } = {}) => {
 // ---------- spec 0008 bot info ----------
 // The bot's own document comes from the operator-owned botinfo.json in the
 // workspace (lib/bot-info.mjs), re-read for each send so an edit applies to
-// the next accept or /start. It goes out on request accept and on /start.
-// A peer's botInfo (another bot) is stored per peer and never answered.
+// the next accept or /start. It goes out on request accept, on /start, and
+// (catch-up) with the next reply to a peer that has not received the current
+// version. A peer's botInfo (another bot) is stored per peer and never answered.
 const botInfoDefaults = defaultBotInfo({ name: username, brain });
 const peerBotInfo = createPeerBotInfo();
+// The version of our botInfo last sent to each peer (`bs` in session state).
+const botInfoSent = createBotInfoSent();
 // null when the extension is off or the file is invalid (logged, not sent).
 const currentBotInfo = () => {
   if (!extensionOn("botinfo")) return null;
@@ -1138,6 +1141,22 @@ const encodeBotInfo = (peerHex, info) => encodeOpaqueBotInfoMessage({
   commands: info.commands,
   version: info.version,
 });
+// Spec 0008 catch-up: called in the same tick as a reply's enqueue, so the
+// botInfo rides the reply's statement, ahead of it. Marked before the send,
+// so two concurrent replies never both carry it; a failed send reverts.
+const catchUpBotInfo = (peerHex) => {
+  const k = norm(peerHex);
+  const info = currentBotInfo();
+  if (!info || !botInfoSent.needs(k, info.version)) return;
+  const previous = botInfoSent.mark(k, info.version);
+  outbound.enqueue(k, encodeBotInfo(k, info)).submitted.then(() => {
+    log("BOT_SENT_BOTINFO", { to: peerHex, version: info.version, on: "catch-up" });
+    persist();
+  }, (error) => {
+    botInfoSent.revert(k, info.version, previous);
+    log("BOT_BOTINFO_SEND_FAILED", { to: peerHex, error: String(error?.message ?? error) });
+  });
+};
 const START_RE = /^\s*\/start\s*$/i;
 {
   // Surface an invalid botinfo.json at startup, not at the first chat.
@@ -1174,6 +1193,8 @@ const submitMessage = async (peerHex, { text, replyTo = null, editOf = null, sup
   // peer has not fetched yet from the slot. Not journaled: after a restart
   // those typing entries are gone anyway.
   const typingIds = ephemeral ? [] : typingAndSeen.replyGoingOut(k);
+  // Spec 0008: an edit follows a message that already carried the catch-up.
+  if (!editOf) catchUpBotInfo(k);
   const { submitted, delivered } = outbound.enqueue(k, opaque, { messageId, supersedes: [...supersedes, ...typingIds] });
   await submitted;
   log(buttons ? "BOT_SENT_BUTTONS" : "BOT_SENT_TEXT", {
@@ -1230,6 +1251,7 @@ const sendAttachment = async (peerHex, { filePath, mime, size, text = null }) =>
   // The envelope holds the claim ticket; journaled, it lands in the 0600
   // state file like an inbound attachment's ticket does (see snapshotState).
   await journalAnswer(k, { messageId, opaque, supersedes: [] });
+  catchUpBotInfo(k);
   const { submitted, delivered } = outbound.enqueue(k, opaque, { messageId, supersedes: typingAndSeen.replyGoingOut(k) });
   await submitted;
   disarmThinking(peerHex);
@@ -1483,6 +1505,7 @@ const handleInbound = async (peerHex, msg, owedId = null, { reservedBridge = fal
   if (startInfo) {
     try {
       await outbound.enqueue(norm(peerHex), encodeBotInfo(peerHex, startInfo)).submitted;
+      botInfoSent.mark(norm(peerHex), startInfo.version);
       log("BOT_SENT_BOTINFO", { to: peerHex, version: startInfo.version, on: "start" });
     } catch (error) { log("BOT_BOTINFO_SEND_FAILED", { to: peerHex, error: String(error?.message ?? error) }); }
     if (startInfo.greeting) {
@@ -1693,6 +1716,7 @@ const journalAnswer = async (k, { messageId, opaque, supersedes }) => {
 // did finally gets them.
 const resendAnswer = async (k, answer) => {
   try {
+    catchUpBotInfo(k);
     const sends = answer.map((a) => outbound.enqueue(k, a.opaque, { messageId: a.messageId, supersedes: a.supersedes }));
     await Promise.all(sends.map((send) => send.submitted));
     log("BOT_OWED_ANSWER_RESENT", { to: k, messages: answer.length });
@@ -1743,6 +1767,8 @@ const snapshotState = () => ({
     ...(sentButtons.snapshot(norm(peerHex)) ? { bp: sentButtons.snapshot(norm(peerHex)) } : {}),
     // Spec 0008: the peer's own botInfo (bi), when the peer is a bot.
     ...(peerBotInfo.snapshot(norm(peerHex)) ? { bi: peerBotInfo.snapshot(norm(peerHex)) } : {}),
+    // Spec 0008: the version of our own botInfo last sent to this peer (bs).
+    ...(botInfoSent.snapshot(norm(peerHex)) ? { bs: botInfoSent.snapshot(norm(peerHex)) } : {}),
   })),
   seen: [...seenRequests].slice(-SEEN_CAP),
   // An unresolved acceptance marker is paired with an owed entry, so its
@@ -1897,7 +1923,10 @@ const handleOpener = async (data) => {
     return "deferred";
   }
   if (pendingOpenerAcks.delete(openerId)) persist();
-  if (botInfo) log("BOT_SENT_BOTINFO", { to: senderHex, version: botInfo.version, on: "accept" });
+  if (botInfo) {
+    botInfoSent.mark(norm(senderHex), botInfo.version);
+    log("BOT_SENT_BOTINFO", { to: senderHex, version: botInfo.version, on: "accept" });
+  }
   log("BOT_RECEIVED_OPENER", { from: senderHex, requestId: decoded.messageId, chars: String(decoded.text ?? "").length, ...(openerAttachments.length ? { attachments: openerAttachments.length } : {}) });
   // A transient acceptance failure leaves the durable owed record behind but
   // deliberately does not start its brain work until the peer has a session.
@@ -2923,6 +2952,7 @@ for (const p of restored?.peers ?? []) {
     deletions.restore(norm(p.peerHex), p.dl);
     sentButtons.restore(norm(p.peerHex), p.bp);
     peerBotInfo.restore(norm(p.peerHex), p.bi);
+    botInfoSent.restore(norm(p.peerHex), p.bs);
     restoredPeers += 1;
   } catch (e) { log("BOT_STATE_PEER_SKIPPED", { peer: p?.peerHex, error: String(e?.message ?? e) }); }
 }

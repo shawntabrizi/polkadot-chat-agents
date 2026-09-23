@@ -120,3 +120,32 @@ export const createPeerBotInfo = ({ maxPeers = 10_000 } = {}) => {
     restore(peerHex, saved) { if (valid(saved)) put(peerHex, saved); },
   };
 };
+
+// The version of our own botInfo last sent to each peer. Kept in the session
+// state as `bs`. Spec 0008: a peer that has not received the current version
+// gets it with the bot's next reply (catch-up), once per version.
+export const createBotInfoSent = ({ maxPeers = 10_000 } = {}) => {
+  const peers = new Map();
+  const set = (peerHex, version) => {
+    peers.delete(peerHex);
+    if (version) peers.set(peerHex, version);
+    while (peers.size > maxPeers) peers.delete(peers.keys().next().value);
+  };
+  const valid = (v) => Number.isInteger(v) && v >= 1 && v <= 0xffff;
+  return {
+    // True when the peer has not received `version` (no record, or lower).
+    needs: (peerHex, version) => (peers.get(peerHex) ?? 0) < version,
+    // Record a send; returns the previous value for `revert`.
+    mark(peerHex, version) {
+      const previous = peers.get(peerHex) ?? null;
+      if (!(previous >= version)) set(peerHex, version);
+      return previous;
+    },
+    // A failed send: go back to `previous`, unless a later send moved on.
+    revert(peerHex, version, previous) {
+      if (peers.get(peerHex) === version) set(peerHex, previous);
+    },
+    snapshot: (peerHex) => peers.get(peerHex) ?? null,
+    restore(peerHex, saved) { if (valid(saved)) set(peerHex, saved); },
+  };
+};

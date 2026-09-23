@@ -7,6 +7,7 @@ import {
   BOT_INFO_FILE,
   BOT_INFO_STATE_FILE,
   botInfoFromFile,
+  createBotInfoSent,
   createPeerBotInfo,
   defaultBotInfo,
   loadBotInfo,
@@ -124,4 +125,26 @@ test("peer botInfo: stored per peer, a lower version is stale, restore validates
   assert.deepEqual(fresh.get("bob"), store.get("bob"));
   fresh.restore("carol", { name: 5 });
   assert.equal(fresh.get("carol"), null, "a malformed saved entry is dropped");
+});
+
+// Spec 0008 catch-up: send when the peer lacks the current version, once
+// per version; a failed send must not count as sent.
+test("sent botInfo: needs until marked, a bump needs again, revert and restore", () => {
+  const sent = createBotInfoSent();
+  assert.equal(sent.needs("bob", 1), true, "no record: a peer from before the document");
+  assert.equal(sent.mark("bob", 1), null);
+  assert.equal(sent.needs("bob", 1), false);
+  assert.equal(sent.needs("bob", 2), true, "a version bump needs one more send");
+  const previous = sent.mark("bob", 2);
+  sent.revert("bob", 2, previous);
+  assert.equal(sent.snapshot("bob"), 1, "a failed send goes back");
+  sent.mark("bob", 3);
+  sent.revert("bob", 2, 1);
+  assert.equal(sent.snapshot("bob"), 3, "a stale revert never undoes a later send");
+  sent.mark("bob", 2);
+  assert.equal(sent.snapshot("bob"), 3, "never goes down");
+  const fresh = createBotInfoSent();
+  fresh.restore("bob", sent.snapshot("bob"));
+  fresh.restore("carol", "7");
+  assert.deepEqual([fresh.snapshot("bob"), fresh.snapshot("carol")], [3, null]);
 });
