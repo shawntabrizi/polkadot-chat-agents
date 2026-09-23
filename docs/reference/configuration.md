@@ -387,6 +387,56 @@ never replaced: PCA writes `.pca/OPERATOR-CONTEXT.md`, logs
 `BOT_AI_CONTEXT_FILE_SKIPPED`, and uses a first-prompt fallback for each fresh
 session. Claude delivers the same facts through its system-prompt option.
 
+### Bot info (`botinfo.json`)
+
+Spec 0008 bot info: the name, description, greeting and command menu that a
+chat client shows for the bot. The file is `botinfo.json` in
+`BOT_AI_WORKSPACE`, next to `PERSONA.md`. It is operator-owned: `pca create`
+and `pca run` write it once with defaults, and never overwrite it. The bot
+reads it for each send (on request accept and on `/start`), so an edit needs
+no restart. See [the protocol page](../explanation/protocol.md#bot-info-spec-0008).
+
+The seeded file for a direct-engine or bridge bot named `guide`:
+
+```json
+{
+  "kind": 1,
+  "name": "guide",
+  "description": "A bot on Polkadot",
+  "greeting": "Hello!",
+  "commands": [
+    { "name": "help", "description": "list these commands" },
+    { "name": "reset", "description": "start a fresh session (forget our conversation so far)" },
+    { "name": "stop", "description": "stop what I'm currently working on" },
+    { "name": "model", "description": "show the active model" },
+    { "name": "file", "description": "save, retrieve, list, or remove durable files" },
+    { "name": "usage", "description": "show tokens and cost spent on this chat since my last restart" },
+    { "name": "ping", "description": "check the bot is alive" }
+  ]
+}
+```
+
+| Field | Default | Rule |
+|---|---|---|
+| `kind` | `1` for `claude`, `codex`, `opencode`, `kimi`, `bridge`; `0` for `echo` | `0` bot, `1` agent (an AI acting for a person), `2` person-operated service |
+| `name` | the bot name | 1 to 40 characters |
+| `description` | `A bot on Polkadot` | up to 280 characters; clients show it under the name |
+| `greeting` | `Hello!` | up to 280 characters; clients show it once; the bot also sends it as a text on `/start` |
+| `commands` | the chat command catalog (the `/help` list); `[]` for `echo` | up to 32 of `{ "name", "description" }`; a name has 1 to 32 characters, no `/`, no spaces; a description up to 80 characters. Add the bot's own commands here. |
+
+- A missing field takes its default; a missing file means all defaults.
+- An unknown field (a typo such as `greting`) or a value over a limit makes
+  the file invalid: the bot logs `BOT_BOTINFO_INVALID` and sends no bot info.
+- There is no `version` field. The bot keeps `{ hash, version }` in
+  `botinfo.state.json` next to the file and adds 1 when the content changes.
+  Do not edit that file.
+- The commands the bot lists do not change what it answers. List a command
+  only if the brain handles it.
+- `pca deploy` does not upload `botinfo.json`. A deployed bot reads the file
+  in its remote workspace, and uses the defaults when there is none.
+- A direct engine with the `write` tool can edit files in its workspace,
+  `botinfo.json` included.
+
 ### Replies & live replies
 
 | Variable | Default | Purpose |
@@ -402,7 +452,7 @@ session. Claude delivers the same facts through its system-prompt option.
 | `BOT_LIVE_TTL_MS` | 600000 | A placeholder never finalized resolves to a timeout note. |
 | `BOT_LIVE_TIMEOUT_TEXT` | auto | That timeout note's text. |
 | `BOT_OUTBOUND_ACK_GRACE_MS` | 60000 | How long an un-ACKed statement holds the channel slot before a queued one takes over. |
-| `BOT_PROTOCOL_EXTENSIONS` | all | Protocol extensions the bot sends, to every peer, with no per-peer gating: `deleted` (RFC-0003), `buttons` (spec 0006), `typing` and `seen` (spec 0005). Unset = all four; `none` = none; a comma list = only those named. With `buttons` off, buttons go out as a numbered text list. Receiving every extension is always on. |
+| `BOT_PROTOCOL_EXTENSIONS` | all | Protocol extensions the bot sends, to every peer, with no per-peer gating: `deleted` (RFC-0003), `buttons` (spec 0006), `typing` and `seen` (spec 0005), `botinfo` (spec 0008). Unset = all five; `none` = none; a comma list = only those named. With `buttons` off, buttons go out as a numbered text list. Receiving every extension is always on. |
 | `BOT_LOG_LEVEL` | unset | `debug` also prints debug events (`BOT_RECEIVED_TYPING`, `BOT_RECEIVED_SEEN`), marked `level: "debug"`. |
 
 T3ams uses the same placeholder, progress, final-wait, timeout, and chunk

@@ -1226,6 +1226,66 @@ export function encodeOpaqueSeenMessage({
   });
 }
 
+// Spec 0008 bot info (polkadot-chat-desktop docs/spec/0008-bot-info.md).
+// Provisional kind from the desktop spec set (kinds.md, range 240-249):
+//   botInfo(BotInfo) -> 244
+// BotInfo { kind: u8, name: String, description: String, greeting: String,
+//           commands: Vec<Command>, version: u16 LE }
+// Command { name: String (no slash), description: String }
+// kind: 0 bot (automated), 1 agent (AI acting for a person), 2 person-operated.
+// Limits are in characters, as the spec states them.
+export const BOT_INFO_CONTENT_KIND = 244;
+export const BOT_INFO_KINDS = Object.freeze({ bot: 0, agent: 1, service: 2 });
+export const BOT_INFO_LIMITS = Object.freeze({ name: 40, description: 280, greeting: 280, commands: 32, commandName: 32, commandDescription: 80 });
+// Decode bounds in bytes: a character is at most 4 UTF-8 bytes.
+const BOT_INFO_MAX_BYTES = Object.fromEntries(Object.entries(BOT_INFO_LIMITS).map(([k, v]) => [k, v * 4]));
+
+const botInfoString = (value, max, name, { empty = true } = {}) => {
+  if (typeof value !== "string" || (!empty && value.length === 0) || [...value].length > max) {
+    throw new Error(`bot info ${name} needs ${empty ? 0 : 1} to ${max} characters`);
+  }
+  return scaleEncodeString(value);
+};
+
+export function encodeOpaqueBotInfoMessage({
+  messageId = makeAppUuid(),
+  timestamp = chatTimestampNow(),
+  kind,
+  name,
+  description = "",
+  greeting = "",
+  commands = [],
+  version,
+}) {
+  if (!Object.values(BOT_INFO_KINDS).includes(kind)) throw new Error("bot info kind must be 0 (bot), 1 (agent) or 2 (service)");
+  if (!Number.isInteger(version) || version < 0 || version > 0xffff) throw new Error("bot info version must be a u16");
+  if (!Array.isArray(commands) || commands.length > BOT_INFO_LIMITS.commands) {
+    throw new Error(`bot info needs at most ${BOT_INFO_LIMITS.commands} commands`);
+  }
+  const L = BOT_INFO_LIMITS;
+  const encodedCommands = commands.map((c) => {
+    if (typeof c?.name === "string" && (c.name.startsWith("/") || /\s/.test(c.name))) {
+      throw new Error("bot info command name has no slash and no spaces");
+    }
+    return concatBytes(
+      botInfoString(c?.name, L.commandName, "command name", { empty: false }),
+      botInfoString(c?.description, L.commandDescription, "command description"),
+    );
+  });
+  return encodeOpaqueRemoteMessage({
+    messageId,
+    timestamp,
+    content: concatBytes(
+      Uint8Array.of(BOT_INFO_CONTENT_KIND, kind),
+      botInfoString(name, L.name, "name", { empty: false }),
+      botInfoString(description, L.description, "description"),
+      botInfoString(greeting, L.greeting, "greeting"),
+      scaleEncodeArray(encodedCommands),
+      Uint8Array.of(version & 0xff, version >> 8),
+    ),
+  });
+}
+
 export function encodeOpaqueDataChannelClosedMessage({
   messageId = makeAppUuid(),
   timestamp = chatTimestampNow(),
@@ -1785,6 +1845,31 @@ function decodeRemoteMessage(bytes, budget) {
       kind: "deleted",
       targetMessageId: targetMessageId.value,
       offset: targetMessageId.offset,
+    };
+  }
+  if (contentKind === BOT_INFO_CONTENT_KIND) {
+    const B = BOT_INFO_MAX_BYTES;
+    const infoKind = fixedBytesAt(bytes, offset, 1, "bot info kind");
+    const name = scaleDecodeStringAt(bytes, infoKind.offset, B.name, "bot info name");
+    const description = scaleDecodeStringAt(bytes, name.offset, B.description, "bot info description");
+    const greeting = scaleDecodeStringAt(bytes, description.offset, B.greeting, "bot info greeting");
+    const commands = scaleDecodeArrayAt(bytes, greeting.offset, (b, at) => {
+      const commandName = scaleDecodeStringAt(b, at, B.commandName, "bot info command name");
+      const commandDescription = scaleDecodeStringAt(b, commandName.offset, B.commandDescription, "bot info command description");
+      return { value: { name: commandName.value, description: commandDescription.value }, offset: commandDescription.offset };
+    }, BOT_INFO_LIMITS.commands, "bot info commands", budget);
+    const version = fixedBytesAt(bytes, commands.offset, 2, "bot info version");
+    return {
+      messageId: messageId.value,
+      timestamp: Number(timestamp.value),
+      kind: "botInfo",
+      botKind: infoKind.value[0],
+      name: name.value,
+      description: description.value,
+      greeting: greeting.value,
+      commands: commands.value,
+      version: version.value[0] | (version.value[1] << 8),
+      offset: version.offset,
     };
   }
   if (contentKind === TYPING_CONTENT_KIND) {

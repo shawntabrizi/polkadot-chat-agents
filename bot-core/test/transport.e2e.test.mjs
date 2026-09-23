@@ -21,6 +21,7 @@ import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
 import {
   deriveX25519PrivateKey,
   encodeAccountEcdhKey,
+  encodeOpaqueBotInfoMessage,
   encodeOpaqueButtonPressMessage,
   encodeOpaqueDeletedMessage,
   encodeOpaqueEditedMessage,
@@ -1482,6 +1483,61 @@ describe("transport e2e", { concurrency: 8 }, () => {
       await bot.stop();
       await node.close();
       fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  // Spec 0008: botInfo goes out with the accept and on /start (then the
+  // greeting as a text); an edit of botinfo.json raises the version; a
+  // peer's botInfo is stored and never answered (two bots must not loop).
+  test("bot info: sent on accept and on /start, a peer's botInfo stored and never answered", async () => {
+    const node = await startSandbox();
+    const stateDir = tmpState();
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "pca-e2e-ws-"));
+    const botInfoFile = path.join(workspace, "botinfo.json");
+    fs.writeFileSync(botInfoFile, JSON.stringify({ name: "Guide", greeting: "Hi! Ask me about Polkadot." }));
+    const bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: { BOT_SUBSCRIBE: "0", BOT_AI_WORKSPACE: workspace } });
+    try {
+      const startup = await bot.waitFor((e) => e.event === "BOT_BOTINFO", { label: "the startup botInfo log" });
+      assert.deepEqual([startup.kind, startup.version, startup.commands], [0, 1, 0], "echo brain: kind 0, no commands");
+      const alice = await startPersona(node);
+      await alice.open("info opener");
+      const onAccept = await bot.waitFor((e) => e.event === "BOT_SENT_BOTINFO", { label: "botInfo on accept" });
+      assert.deepEqual([onAccept.to, onAccept.version, onAccept.on], [alice.accountHex, 1, "accept"]);
+      await alice.reply((m) => textOf(m) === "Echo: info opener");
+
+      // The operator edits the file: the next send carries version 2.
+      fs.writeFileSync(botInfoFile, JSON.stringify({ name: "Guide", greeting: "Hi again!" }));
+      await alice.send("/start");
+      const onStart = await bot.waitFor((e) => e.event === "BOT_SENT_BOTINFO" && e.on === "start", { label: "botInfo on /start" });
+      assert.deepEqual([onStart.to, onStart.version], [alice.accountHex, 2]);
+      await alice.reply((m) => textOf(m) === "Hi again!", { label: "the greeting" });
+      assert.equal((await alice.incoming()).some((m) => textOf(m) === "Echo: /start"), false, "/start is not brain input");
+
+      // Another bot's botInfo: stored and logged, never answered.
+      await alice.sendRaw(remoteMessage(encodeOpaqueBotInfoMessage({ kind: 1, name: "Peer bot", commands: [{ name: "help", description: "list commands" }], version: 3 })));
+      const got = await bot.waitFor((e) => e.event === "BOT_RECEIVED_BOTINFO", { label: "the peer's botInfo" });
+      assert.deepEqual([got.from, got.kind, got.name, got.version, got.commands], [alice.accountHex, 1, "Peer bot", 3, 1]);
+      await alice.sendRaw(remoteMessage(encodeOpaqueBotInfoMessage({ kind: 1, name: "Older", version: 2 })));
+      await bot.waitFor((e) => e.event === "BOT_RECEIVED_BOTINFO" && e.stale === true, { label: "the older botInfo is stale" });
+      await alice.send("after info");
+      await alice.reply((m) => textOf(m) === "Echo: after info");
+      assert.equal(
+        bot.events.filter((e) => e.event === "BOT_RECEIVED_TEXT").length, 2,
+        "/start and one text (the opener logs BOT_RECEIVED_OPENER); a botInfo never runs a turn",
+      );
+      assert.equal(bot.events.filter((e) => e.event === "BOT_SENT_BOTINFO").length, 2, "a received botInfo is not answered with ours");
+      assert.equal(bot.events.filter((e) => e.event === "BOT_UNSUPPORTED_CONTENT").length, 0);
+
+      await bot.stop();
+      const state = JSON.parse(fs.readFileSync(path.join(stateDir, "session-state.json"), "utf8"));
+      const stored = state.peers.find((p) => p.peerHex === alice.accountHex).bi;
+      assert.deepEqual(stored, { kind: 1, name: "Peer bot", description: "", greeting: "", commands: [{ name: "help", description: "list commands" }], version: 3 });
+      assert.equal(JSON.parse(fs.readFileSync(path.join(workspace, "botinfo.state.json"), "utf8")).version, 2);
+    } finally {
+      await bot.stop();
+      await node.close();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+      fs.rmSync(workspace, { recursive: true, force: true });
     }
   });
 

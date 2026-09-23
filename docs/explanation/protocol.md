@@ -205,7 +205,7 @@ time") gives 21. `DELETED_CONTENT_KIND` is the only place to change it.
 **Sending extensions is not gated.** The desktop spec set's development-mode
 rule (owner decision, 2026-09-23; `polkadot-chat-desktop/docs/spec/README.md`)
 holds: every client is in development, so the bot sends every enabled
-extension kind (deleted, buttons, typing, seen) to every peer. There is no
+extension kind (deleted, buttons, typing, seen, botinfo) to every peer. There is no
 per-peer evidence and no advertisement. A client that does not know a kind
 shows the base spec's unsupported-message row, and that is accepted while the
 kinds iterate. `BOT_PROTOCOL_EXTENSIONS` is the operator's switch: unset means
@@ -355,6 +355,64 @@ as before. With `typing` off, the placeholder follows `BOT_THINKING_AFTER_MS`
 and `BOT_THINKING_TEXT` as before. The bridge's `GET /health` reports the
 delay in use as `live.placeholderAfterMs`. (Decision 2026-09-23, with spec
 0005.)
+
+### Bot info (spec 0008)
+
+Spec 0008 (`polkadot-chat-desktop/docs/spec/0008-bot-info.md`) adds one
+provisional kind. A bot uses it to describe itself to a peer:
+
+```
+botInfo(BotInfo) -> 244
+BotInfo = { kind: u8, name: String, description: String, greeting: String,
+            commands: Vec<Command>, version: u16 LE }
+Command = { name: String /* no slash */, description: String }
+// kind: 0 bot (automated), 1 agent (an AI acting for a person), 2 person-operated service
+```
+
+The envelope is the usual one. The codec is `encodeOpaqueBotInfoMessage` in
+`vendor/app-chat-codec.mjs`; the pinned byte vector is in
+`polkadot-chat-desktop/docs/spec/vectors-0008.md` and in
+`test/codec.test.mjs`. The encoder refuses a document over the spec limits
+(name 40 characters, description and greeting 280, 32 commands, command name
+32 without a slash, command description 80). The decoder bounds the same
+fields in bytes; a larger message is undecodable and the rest of the batch
+still decodes.
+
+**The document.** It comes from `botinfo.json` in the bot workspace, next to
+`PERSONA.md` (see [Configuration](../reference/configuration.md#bot-info-botinfo-json)).
+The file is operator-owned: `pca create` and `pca run` seed it once with
+defaults and never overwrite it. The bot reads it again for each send, so an
+edit applies to the next accept or `/start` with no restart. A field that is
+missing takes its default. An unknown field or a value over a limit makes the
+file invalid: the bot logs `BOT_BOTINFO_INVALID { error }` and sends no
+`botInfo` until the file is fixed (`/start` is then ordinary input). The file
+has no `version`. The bot keeps `{ hash, version }` in `botinfo.state.json`
+next to it and adds 1 to the version each time the document's content hash
+changes (a new layout of the same JSON is not a change). A client keeps the
+highest version, so an edit that did not raise it would never show. The
+version stops at 65535; it never wraps to a lower number. The logic is
+`lib/bot-info.mjs`.
+
+**Sending.**
+
+- On request accept: the `botInfo` is enqueued on the identity channel right
+  after the accept and the `BOT_ACK_TEXT` welcome, so all of them ride one
+  statement. A failed accept is retried with its `botInfo`.
+- On a text `/start` (any brain; a bridge harness never sees it): the
+  `botInfo` on the session lane, then the greeting as a normal text message.
+  An empty greeting sends no text.
+- Log: `BOT_SENT_BOTINFO { to, version, on: "accept" | "start" }`. At startup
+  the bot logs `BOT_BOTINFO { kind, version, commands }`, and
+  `BOT_BOTINFO_VERSION { version }` each time the version goes up.
+- The spec lets a bot resend on change; `pca` does not push a change to open
+  chats. The peer gets the new version on its next `/start`.
+- `BOT_PROTOCOL_EXTENSIONS` without `botinfo` turns all of this off.
+
+**Receiving.** A peer's `botInfo` (the peer is another bot) is stored per peer
+in the session state (`bi`), and a lower version than the stored one is
+ignored (`stale: true` in the log). It is never answered, never fed to the
+brain, and never makes the bot send its own `botInfo`: two bots must not
+loop. Log: `BOT_RECEIVED_BOTINFO { from, kind, name, version, commands }`.
 
 ### Attachments (photos/videos/files)
 

@@ -25,6 +25,8 @@ import {
   TYPING_CONTENT_KIND,
   SEEN_CONTENT_KIND,
   TYPING_KINDS,
+  encodeOpaqueBotInfoMessage,
+  BOT_INFO_CONTENT_KIND,
   encodeOpaqueDataChannelClosedMessage,
   scaleEncodeBytes,
   x25519PublicKeyFromPrivateKey,
@@ -355,6 +357,74 @@ test("typing and seen encoders refuse values the spec does not define", () => {
   // A truncated typing (no kind byte) makes only that message undecodable.
   const truncated = decodeOne(scaleEncodeBytes(hex(TYPING_VECTOR.slice(2, -2))));
   assert.equal(truncated.kind, "undecodable");
+});
+
+// Spec 0008 bot info. This vector is published to the desktop client in
+// polkadot-chat-desktop docs/spec/vectors-0008.md; a change here is a wire
+// break, not a refactor.
+const BOT_INFO_VECTOR = "010214424f542d310030fd779001000000f40114477569646558506f6c6b61646f7420737570706f7274206775696465684869212041736b206d652061626f757420506f6c6b61646f742e081c7374616b696e67385374616b696e672062617369637328676f7665726e616e636544486f77204f70656e476f7620776f726b730100";
+const vectorBotInfo = {
+  kind: 1,
+  name: "Guide",
+  description: "Polkadot support guide",
+  greeting: "Hi! Ask me about Polkadot.",
+  commands: [{ name: "staking", description: "Staking basics" }, { name: "governance", description: "How OpenGov works" }],
+  version: 1,
+};
+
+test("botInfo: pinned vector matches the spec 0008 SCALE layout", () => {
+  const opaque = encodeOpaqueBotInfoMessage({ messageId: "BOT-1", timestamp: 1_720_000_000_000, ...vectorBotInfo });
+  assert.equal(hexOf(opaque), BOT_INFO_VECTOR);
+  // The same bytes built by hand from the spec: u8, 3 strings, Vec<Command>, u16 LE.
+  const content = concat(
+    Uint8Array.of(1),
+    str("Guide"), str("Polkadot support guide"), str("Hi! Ask me about Polkadot."),
+    compact(2), str("staking"), str("Staking basics"), str("governance"), str("How OpenGov works"),
+    Uint8Array.of(1, 0),
+  );
+  assert.equal(BOT_INFO_CONTENT_KIND, 244);
+  assert.equal(hexOf(opaque), hexOf(opaqueMessage("BOT-1", 244, content)));
+  const m = decodeOne(hex(BOT_INFO_VECTOR));
+  assert.deepEqual(
+    { kind: m.kind, messageId: m.messageId, timestamp: m.timestamp, botKind: m.botKind, name: m.name, description: m.description, greeting: m.greeting, commands: m.commands, version: m.version },
+    { kind: "botInfo", messageId: "BOT-1", timestamp: 1_720_000_000_000, botKind: 1, name: vectorBotInfo.name, description: vectorBotInfo.description, greeting: vectorBotInfo.greeting, commands: vectorBotInfo.commands, version: 1 },
+  );
+});
+
+// version is u16 little-endian: 0x0102 must go out as 02 01, or a client
+// comparing versions ("latest wins") would order updates wrongly.
+test("round-trip: botInfo with no commands, empty strings and a two-byte version", () => {
+  const opaque = encodeOpaqueBotInfoMessage({ kind: 0, name: "Echo", commands: [], version: 0x0102 });
+  assert.equal(hexOf(opaque.subarray(-3)), "000201", "empty command vector, then version 0x0102 LE");
+  const m = decodeOne(opaque);
+  assert.deepEqual([m.kind, m.botKind, m.name, m.description, m.greeting, m.commands, m.version], ["botInfo", 0, "Echo", "", "", [], 0x0102]);
+});
+
+// The spec limits (name 40, description/greeting 280, 32 commands, command
+// name 32 without a slash, command description 80): the encoder refuses to
+// build what a client should never have to render.
+test("botInfo encoder enforces the spec 0008 limits", () => {
+  const base = { kind: 1, name: "Bot", version: 1 };
+  const cmd = (name, description = "d") => ({ name, description });
+  assert.throws(() => encodeOpaqueBotInfoMessage({ ...base, kind: 3 }), /kind/);
+  assert.throws(() => encodeOpaqueBotInfoMessage({ ...base, name: "" }), /name/);
+  assert.throws(() => encodeOpaqueBotInfoMessage({ ...base, name: "x".repeat(41) }), /name/);
+  assert.doesNotThrow(() => encodeOpaqueBotInfoMessage({ ...base, name: "é".repeat(40) }));
+  assert.throws(() => encodeOpaqueBotInfoMessage({ ...base, description: "x".repeat(281) }), /description/);
+  assert.throws(() => encodeOpaqueBotInfoMessage({ ...base, greeting: "x".repeat(281) }), /greeting/);
+  assert.throws(() => encodeOpaqueBotInfoMessage({ ...base, commands: Array.from({ length: 33 }, (_, i) => cmd(`c${i}`)) }), /32 commands/);
+  assert.throws(() => encodeOpaqueBotInfoMessage({ ...base, commands: [cmd("/help")] }), /no slash/);
+  assert.throws(() => encodeOpaqueBotInfoMessage({ ...base, commands: [cmd("x".repeat(33))] }), /command name/);
+  assert.throws(() => encodeOpaqueBotInfoMessage({ ...base, commands: [cmd("ok", "x".repeat(81))] }), /command description/);
+  assert.throws(() => encodeOpaqueBotInfoMessage({ ...base, version: 65536 }), /u16/);
+});
+
+// A decoder bound: 33 commands on the wire is undecodable, and must not
+// break the next message in the batch (the batch-decoding invariant).
+test("botInfo decoder rejects more than 32 commands", () => {
+  const commands = Array.from({ length: 33 }, () => concat(str("c"), str("")));
+  const over = opaqueMessage("BOT-33", 244, concat(Uint8Array.of(0), str("B"), str(""), str(""), compact(33), ...commands, Uint8Array.of(1, 0)));
+  assert.equal(decodeOne(over).kind, "undecodable");
 });
 
 test("round-trip: dataChannelClosed carries offerId", () => {

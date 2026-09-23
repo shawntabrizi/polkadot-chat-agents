@@ -42,6 +42,7 @@ import {
 } from "./vendor/app-chat-codec.mjs";
 import { entrypointForTransport } from "./lib/transport-entrypoint.mjs";
 import { PERSONA_TEMPLATE } from "./lib/agent-context.mjs";
+import { defaultBotInfo, seedBotInfoFile } from "./lib/bot-info.mjs";
 import { assertEngineToolPolicy, toolPolicyEnforcement } from "./lib/runners.mjs";
 import {
   DEFAULT_TOOL_POLICY,
@@ -186,6 +187,14 @@ const ensurePersonaFile = (name, brain) => {
   try { fs.writeFileSync(file, PERSONA_TEMPLATE, { flag: "wx", mode: 0o600 }); }
   catch (error) { if (error?.code !== "EEXIST") throw error; }
   return file;
+};
+// Spec 0008: the operator-owned botinfo.json (the bot's name, description,
+// greeting and command menu as chat clients show them), seeded once with
+// defaults from the bot name and brain. Never overwritten.
+const ensureBotInfoFile = (name, brain) => {
+  const workspace = botWorkspace(name);
+  fs.mkdirSync(workspace, { recursive: true, mode: 0o700 });
+  return seedBotInfoFile(workspace, defaultBotInfo({ name, brain }));
 };
 function warnMissingBrainCli(brain) {
   if (!DIRECT_BRAIN_CLIS.has(brain) || process.env.BOT_AI_CMD) return;
@@ -1123,6 +1132,7 @@ async function cmdCreate(name, flags) {
   };
   saveConfig(name, config);
   ensurePersonaFile(name, brain);
+  ensureBotInfoFile(name, brain);
 
   let reg = "skipped";
   if (register) {
@@ -1722,6 +1732,7 @@ function cmdRun(name, flags = {}) {
   const workspace = botWorkspace(name);
   fs.mkdirSync(workspace, { recursive: true, mode: 0o700 });
   ensurePersonaFile(name, cfg.brain);
+  ensureBotInfoFile(name, cfg.brain);
   if (!cfg.registered) note("Warning: this bot isn't registered on the network yet, so people can't message it.");
   warnMissingBrainCli(cfg.brain);
   if (cfg.deploy?.host) warn(`Heads up: "${name}" is also deployed on ${cfg.deploy.host}. Running it here too = two processes on one identity (they will double-reply). Stop one first.`);

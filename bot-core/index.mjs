@@ -80,6 +80,7 @@ import { createDeletionLedger, createExtensionObserver, createMessageDeleter, pa
 import { TYPING_PLACEHOLDER_AFTER_MS, createTypingAndSeen } from "./lib/typing-seen.mjs";
 import { buttonsFallbackText, parseButtonsBlock } from "./lib/buttons-block.mjs";
 import { buttonPressText, createSentButtons } from "./lib/button-presses.mjs";
+import { createPeerBotInfo, defaultBotInfo, loadBotInfo } from "./lib/bot-info.mjs";
 import { createWorkspaces } from "./lib/workspaces.mjs";
 import { downloadP2PFile, uploadP2PFile, validateHopUrl } from "./lib/hop-client.mjs";
 import { createMediaStore } from "./lib/media-store.mjs";
@@ -126,6 +127,7 @@ import {
   encodeOpaqueReplyMessage,
   encodeOpaqueEditedMessage,
   encodeOpaqueDeletedMessage,
+  encodeOpaqueBotInfoMessage,
   encodeOpaqueButtonsMessage,
   encodeOpaqueTypingMessage,
   encodeOpaqueSeenMessage,
@@ -1031,11 +1033,11 @@ const outbound = createOutboundLanes({
   log,
 });
 
-// ---------- protocol extensions (RFC-0003, specs 0005 and 0006) ----------
+// ---------- protocol extensions (RFC-0003, specs 0005, 0006 and 0008) ----------
 // Receiving every extension kind is always on. SENDING follows the desktop
 // spec set's development-mode rule: every client is in development, so the
 // bot sends each enabled extension to every peer, with no per-peer evidence.
-// BOT_PROTOCOL_EXTENSIONS: unset = all (deleted, buttons, typing, seen),
+// BOT_PROTOCOL_EXTENSIONS: unset = all (deleted, buttons, typing, seen, botinfo),
 // "none" = none, or a comma list. See docs/explanation/protocol.md.
 const protocolExtensions = parseProtocolExtensions(env.BOT_PROTOCOL_EXTENSIONS);
 const extensionOn = (name) => protocolExtensions.enabled.has(name);
@@ -1107,6 +1109,41 @@ const prepareReply = (peerHex, text, { allowButtons = true } = {}) => {
   log("BOT_BUTTONS_FALLBACK", { to: peerHex, buttons: parsed.rows.flat().length });
   return { text: buttonsFallbackText(parsed.text, parsed.rows), buttons: null };
 };
+
+// ---------- spec 0008 bot info ----------
+// The bot's own document comes from the operator-owned botinfo.json in the
+// workspace (lib/bot-info.mjs), re-read for each send so an edit applies to
+// the next accept or /start. It goes out on request accept and on /start.
+// A peer's botInfo (another bot) is stored per peer and never answered.
+const botInfoDefaults = defaultBotInfo({ name: username, brain });
+const peerBotInfo = createPeerBotInfo();
+// null when the extension is off or the file is invalid (logged, not sent).
+const currentBotInfo = () => {
+  if (!extensionOn("botinfo")) return null;
+  try {
+    const info = loadBotInfo({ dir: aiWorkspace, defaults: botInfoDefaults });
+    if (info.changed) log("BOT_BOTINFO_VERSION", { version: info.version, ...(info.stateError ? { stateError: info.stateError } : {}) });
+    return info;
+  } catch (error) {
+    log("BOT_BOTINFO_INVALID", { error: String(error?.message ?? error) });
+    return null;
+  }
+};
+const encodeBotInfo = (peerHex, info) => encodeOpaqueBotInfoMessage({
+  timestamp: stamp(peerHex),
+  kind: info.kind,
+  name: info.name,
+  description: info.description,
+  greeting: info.greeting,
+  commands: info.commands,
+  version: info.version,
+});
+const START_RE = /^\s*\/start\s*$/i;
+{
+  // Surface an invalid botinfo.json at startup, not at the first chat.
+  const info = currentBotInfo();
+  if (info) log("BOT_BOTINFO", { kind: info.kind, version: info.version, commands: info.commands.length });
+}
 
 // ---------- send a reply to a peer ----------
 // Returns the outgoing envelope messageId (an app UUID) so callers — notably
@@ -1439,6 +1476,24 @@ const handleInbound = async (peerHex, msg, owedId = null, { reservedBridge = fal
     if (reservedBridge) releaseBridgeReservation();
     return;
   }
+  // Spec 0008: /start gets the botInfo document, then the greeting as a
+  // normal message, for every brain (a harness never sees it). With the
+  // extension off or an invalid botinfo.json, /start is ordinary input.
+  const startInfo = msg.kind === "text" && START_RE.test(msg.text ?? "") ? currentBotInfo() : null;
+  if (startInfo) {
+    try {
+      await outbound.enqueue(norm(peerHex), encodeBotInfo(peerHex, startInfo)).submitted;
+      log("BOT_SENT_BOTINFO", { to: peerHex, version: startInfo.version, on: "start" });
+    } catch (error) { log("BOT_BOTINFO_SEND_FAILED", { to: peerHex, error: String(error?.message ?? error) }); }
+    if (startInfo.greeting) {
+      await sendText(peerHex, startInfo.greeting).catch((error) => log("BOT_REPLY_FAILED", { to: peerHex, error: String(error?.message ?? error) }));
+    }
+    if (reservedBridge) releaseBridgeReservation();
+    // A bridge owed entry is settled by the harness's ACK; this one never
+    // reaches a harness, so settle it here.
+    if (usesBridgeQueue && owedId) settleOwed(owedId);
+    return;
+  }
   if (brain === "echo") {
     // Through deliverToChat, so an echoed ```buttons block exercises spec 0006.
     await deliverToChat(peerHex, `Echo: ${synthesizeText(msg.text, msg.attachments)}`).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
@@ -1686,6 +1741,8 @@ const snapshotState = () => ({
     ...(deletions.snapshot(norm(peerHex)) ? { dl: deletions.snapshot(norm(peerHex)) } : {}),
     // Spec 0006: the bot's own recent buttons messages (bp), for press checks.
     ...(sentButtons.snapshot(norm(peerHex)) ? { bp: sentButtons.snapshot(norm(peerHex)) } : {}),
+    // Spec 0008: the peer's own botInfo (bi), when the peer is a bot.
+    ...(peerBotInfo.snapshot(norm(peerHex)) ? { bi: peerBotInfo.snapshot(norm(peerHex)) } : {}),
   })),
   seen: [...seenRequests].slice(-SEEN_CAP),
   // An unresolved acceptance marker is paired with an owed entry, so its
@@ -1817,13 +1874,16 @@ const handleOpener = async (data) => {
         encryptionPublicKey: deviceKeypair.publicKey,
       })
     : encodeOpaqueChatAcceptedMessage({ timestamp: stamp(senderHex), acceptedRequestId: decoded.messageId });
+  const botInfo = currentBotInfo();
   try {
     // Same-tick enqueues ride one statement: [accept, welcome] on first
     // contact. An empty BOT_ACK_TEXT sends the accept alone — an empty text
     // message is an empty bubble on the phone, not "no welcome".
     const a = outbound.enqueue(senderHex, accept, { forceIdentity: true });
     const w = ackText ? outbound.enqueue(senderHex, encodeOpaqueTextMessage({ timestamp: stamp(senderHex), text: ackText }), { forceIdentity: true }) : null;
-    await Promise.all([a.submitted, w?.submitted]);
+    // Spec 0008: botInfo right after the accept, in the same statement.
+    const b = botInfo ? outbound.enqueue(senderHex, encodeBotInfo(senderHex, botInfo), { forceIdentity: true }) : null;
+    await Promise.all([a.submitted, w?.submitted, b?.submitted]);
   } catch (error) {
     pendingOpenerAcks.add(openerId);
     // Every pending acceptance still owns an owed entry, so MAX_OWED bounds
@@ -1837,6 +1897,7 @@ const handleOpener = async (data) => {
     return "deferred";
   }
   if (pendingOpenerAcks.delete(openerId)) persist();
+  if (botInfo) log("BOT_SENT_BOTINFO", { to: senderHex, version: botInfo.version, on: "accept" });
   log("BOT_RECEIVED_OPENER", { from: senderHex, requestId: decoded.messageId, chars: String(decoded.text ?? "").length, ...(openerAttachments.length ? { attachments: openerAttachments.length } : {}) });
   // A transient acceptance failure leaves the durable owed record behind but
   // deliberately does not start its brain work until the peer has a session.
@@ -1998,7 +2059,7 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
       continue;
     }
     // Which extension kinds this peer sends: a log, it gates nothing.
-    if (m.kind === "buttons" || m.kind === "buttonPress" || m.kind === "typing" || m.kind === "seen"
+    if (m.kind === "buttons" || m.kind === "buttonPress" || m.kind === "typing" || m.kind === "seen" || m.kind === "botInfo"
       || (m.kind === "unsupported" && m.contentKind >= 240 && m.contentKind <= 249)) {
       observeExtension(peerHex, m.kind === "unsupported" ? "extension" : m.kind);
     }
@@ -2011,6 +2072,14 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
     }
     if (m.kind === "seen") {
       logDebug("BOT_RECEIVED_SEEN", { from: peerHex, upTo: m.upTo, at: m.at });
+      continue;
+    }
+    // Spec 0008: a peer's botInfo (another bot) is stored, latest version
+    // wins, and never answered: two bots must not loop on each other.
+    if (m.kind === "botInfo") {
+      const outcome = peerBotInfo.record(norm(peerHex), m);
+      if (outcome === "stored") stateChanged = true;
+      log("BOT_RECEIVED_BOTINFO", { from: peerHex, kind: m.botKind, name: m.name, version: m.version, commands: m.commands.length, ...(outcome === "stale" ? { stale: true } : {}) });
       continue;
     }
     // A buttonPress runs a brain turn, but only for a buttons message this
@@ -2853,6 +2922,7 @@ for (const p of restored?.peers ?? []) {
     agentRuntime?.restorePeer(norm(p.peerHex), { rs: p.rs, mo: p.mo, pj: p.pj, br: p.br });
     deletions.restore(norm(p.peerHex), p.dl);
     sentButtons.restore(norm(p.peerHex), p.bp);
+    peerBotInfo.restore(norm(p.peerHex), p.bi);
     restoredPeers += 1;
   } catch (e) { log("BOT_STATE_PEER_SKIPPED", { peer: p?.peerHex, error: String(e?.message ?? e) }); }
 }
