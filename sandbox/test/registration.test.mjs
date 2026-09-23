@@ -18,6 +18,7 @@ import { verify as verifySr25519 } from "@scure/sr25519";
 import { createPersonaStore } from "../lib/persona-store.mjs";
 import { applyCheck, checkRegistration, defaultUsername, keysOf, mintPersonaRecord, provisionBulletin, registerPersona, registrationView } from "../lib/registration.mjs";
 import { unwrapIdentifierKey } from "../lib/directory.mjs";
+import { networkProfile } from "../lib/network.mjs";
 
 const GENESIS = `0x${"4a".repeat(32)}`;
 const concatBytes = (...parts) => { const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; } return out; };
@@ -236,7 +237,7 @@ function fakeClientProofBackend({ refuse = () => false, assign = (body) => `${bo
   };
 }
 
-test("client-proof: the claim carries a bearer minted with the persona's wallet key; the session is saved before the claim and gone after", async (t) => {
+test("Paseo registration authenticates with the persona's wallet and retains credentials only until the claim succeeds", async (t) => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pcs-registration-"));
   t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
   const bandersnatchBin = fakeProofHelper(temp);
@@ -250,7 +251,8 @@ test("client-proof: the claim carries a bearer minted with the persona's wallet 
   };
   const record = mintPersonaRecord("alice", { genesis: GENESIS });
   store.savePersona(record);
-  const deps = { backendUrl: "https://identity.example.test", identityAuth: "client-proof", env: {}, directory: fakeChain(), genesis: GENESIS, save: async (r) => store.savePersona(r), fetchImpl, bandersnatchBin, waitMs: 30 };
+  const profile = networkProfile("paseo");
+  const deps = { backendUrl: profile.identityBackendUrl, identityAuth: profile.identityRegistrationAuth, env: {}, directory: fakeChain(), genesis: GENESIS, save: async (r) => store.savePersona(r), fetchImpl, bandersnatchBin, waitMs: 30 };
 
   const view = await registerPersona(record, deps);
   assert.deepEqual([view.status, view.username], ["claimed", "sandboxalice.05"]);
@@ -264,7 +266,7 @@ test("client-proof: the claim carries a bearer minted with the persona's wallet 
   const clientDataHash = sha256(concatBytes(challenge, identity.identityAccountId, sha256(new TextEncoder().encode(token.body))));
   assert.equal(verifySr25519(clientDataHash, proof, identity.identityAccountId), true, "the proof is the persona's signature over the backend's client-data hash");
   assert.equal(backend.calls[3].headers.get("authorization"), "Bearer access.jwt.token", "the claim carries the minted bearer");
-  assert.deepEqual(sessionsOnDiskAtClaim, [{ backendUrl: "https://identity.example.test/", token: "access.jwt.token", refreshToken: "refresh-token" }], "the session was on disk before the claim, so a failed claim reuses it");
+  assert.deepEqual(sessionsOnDiskAtClaim, [{ backendUrl: new URL(profile.identityBackendUrl).href, token: "access.jwt.token", refreshToken: "refresh-token" }], "the session was on disk before the claim, so a failed claim reuses it");
   assert.equal(record.identityRegistrationSession, undefined, "and is dropped once the claim is in");
   assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).identityRegistrationSession, undefined);
   assert.ok(!JSON.stringify(view).includes("access.jwt.token"), "no view carries the token");
@@ -306,7 +308,7 @@ test("client-proof: an issued PCA_IDENTITY_TOKEN skips the exchange; a refusal n
   assert.equal(tokenTries[1].headers.get("auth-voucher-secret"), voucher);
   assert.ok(!JSON.stringify(view).includes(voucher), "no view carries the voucher");
 
-  // A profile without a bearer (Paseo Next): no exchange at all, and no authorization header.
+  // A custom backend without a bearer: no exchange at all, and no authorization header.
   const open = fakeClientProofBackend();
   await registerPersona(mintPersonaRecord("alice", { genesis: GENESIS }), { ...base, identityAuth: "none", env: {}, fetchImpl: open.fetchImpl });
   assert.deepEqual(open.calls.map((c) => c.route), ["/api/v1/attester", "/api/v1/usernames"]);

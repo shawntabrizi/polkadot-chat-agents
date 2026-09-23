@@ -6,10 +6,9 @@
 // key. Only the phone can mint the ring-proof origin a second device needs.
 //
 // The backend admits a claim the way the profile says
-// (`identityRegistrationAuth`): Paseo Next takes it as is; Products Devnet
-// wants a bearer the persona mints by proving its own //wallet key (the
-// client-proof exchange `pca create --network devnet` runs), with the same
-// operator overrides — PCA_IDENTITY_TOKEN, an issued bearer, and
+// (`identityRegistrationAuth`): both named testnets want a bearer the persona
+// mints by proving its own //wallet key (the client-proof exchange `pca create`
+// runs), with the same operator overrides — PCA_IDENTITY_TOKEN, an issued bearer, and
 // PCA_IDENTITY_VOUCHER, a single-use enrollment voucher presented only
 // after the backend refused the client proof. See docs/guide/devnet.md.
 //

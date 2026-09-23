@@ -97,11 +97,10 @@ the Bulletin HOP nodes carry attachments — so a persona can chat with a
 deployed bot and with a phone. Both profiles are rows of bot-core's network
 table (`lib/network-config.mjs`), so `pca create --network <id>` and
 `pcs up --network <id>` see one network. `mock` stays the default and is
-unchanged. Devnet is the one whose backend attests today (its
-client-proof session is minted from the persona's own wallet key, as
-`pca create` does; `PCA_IDENTITY_TOKEN` / `PCA_IDENTITY_VOUCHER` in the
-daemon's environment are the same overrides `pca` takes — see
-[Use Products Devnet](/guide/devnet)).
+unchanged. Both testnets use a client-proof session minted from the persona's
+own wallet key, as `pca create` does; `PCA_IDENTITY_TOKEN` /
+`PCA_IDENTITY_VOUCHER` in the daemon's environment are the same overrides
+`pca` takes — see [Use Products Devnet](/guide/devnet).
 
 ```bash
 pcs up --network devnet                  # prints the chain genesis; refuses to start if the RPC is unreachable

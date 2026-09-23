@@ -28,7 +28,7 @@ const MSG_PREFIX = "pop:people-lite:register using";
 
 export const DEFAULT_BACKENDS = {
   devnet: "https://polkadot-app.api.polkadotcommunity.foundation",
-  paseo: "https://identity-backend-next.parity-testnet.parity.io",
+  paseo: "https://identity.dotspark.app",
   summit: "https://polkadot-app.api.polkadotcommunity.foundation",
 };
 
@@ -191,9 +191,9 @@ async function issueIdentitySession({
   return tokenPair(data, normalizedVoucher ? "voucher enrollment" : "client-proof enrollment");
 }
 
-// Products Devnet currently runs its attestation layer in soft mode. A bot can
-// therefore mint the bearer required for username writes by proving possession
-// of its own //wallet SR25519 key, without a phone or operator secret.
+// The named testnet backends currently run their attestation layers in soft
+// mode. A bot can mint the bearer required for username writes by proving
+// possession of its own //wallet SR25519 key, without a phone or operator secret.
 export async function obtainIdentitySession({ backendUrl, mnemonic, fetchImpl = fetch }) {
   if (typeof mnemonic !== "string" || !mnemonic.trim()) {
     throw new Error("automatic identity enrollment requires the bot mnemonic");

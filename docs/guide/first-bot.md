@@ -49,7 +49,16 @@ Paseo Next v2 remains a complete named profile:
 pca create mycoolbot --network paseo --brain claude --owner <your-app-username-or-SS58-address>
 ```
 
-During Devnet registration, `pca` temporarily saves the refreshable backend
+Paseo uses `https://identity.dotspark.app` and the same automatic wallet-proof
+authentication as Devnet. No operator token is needed.
+
+For an existing Paseo bot created with the old backend, update only
+`backendUrl` in `~/.pca/bots/<name>/config.json` to
+`https://identity.dotspark.app`, then run `pca register <name> --again`.
+Keep its keys and other settings. This submits the pending identity to the
+new backend; the username number may change if it is already taken.
+
+During either network's registration, `pca` temporarily saves the refreshable backend
 session in the bot's protected `secret.json`. If registration is interrupted,
 retry normally:
 
@@ -59,7 +68,7 @@ pca register mycoolbot
 
 The retry reuses or refreshes the session and does not require any credential.
 For controlled automation, `PCA_IDENTITY_TOKEN` can still override automatic
-enrollment. A single-use `PCA_IDENTITY_VOUCHER` is only a fallback if a Devnet
+enrollment. A single-use `PCA_IDENTITY_VOUCHER` is only a fallback if the
 operator later enables hard platform-attestation enforcement. The dedicated
 [Products Devnet guide](/guide/devnet) covers the protocol and local macOS
 testing.

@@ -698,7 +698,6 @@ test("Devnet is the default network while Paseo remains a complete named profile
     const paseoBot = readBot(botsDir, "paseobot");
     assert.equal(paseoBot.networkProfile, "paseo");
     assert.equal(paseoBot.endpoint, "wss://paseo-people-next-system-rpc.polkadot.io");
-    assert.equal(paseoBot.backendUrl, "https://identity-backend-next.parity-testnet.parity.io");
     assert.deepEqual(paseoBot.fileDelivery, { profile: "paseo-next-v2" });
     assert.match(result.stdout, /Bulletin Paseo Next v2/);
 
@@ -1208,6 +1207,80 @@ test("info, status and register --again read the chain on a devnet bot the netwo
     result = await runCliAsync(botsDir, ["info", "devbot"], { ...env, PCA_PEOPLE_DIRECTORY_URL: "http://127.0.0.1:9" });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /can't reach the network right now/);
+  } finally {
+    server.close();
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
+});
+
+test("Paseo create and re-registration authenticate without an operator token", async () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
+  const consumers = new Map();
+  const claims = [];
+  const server = http.createServer((req, res) => {
+    const reply = (status, body) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
+    const consumer = /^\/api\/consumers\/(0x[0-9a-f]{64})$/.exec(req.url);
+    if (req.method === "GET" && consumer) return consumers.has(consumer[1]) ? reply(200, consumers.get(consumer[1])) : reply(404, { error: "no consumer" });
+    if (req.url === "/api/v1/auth/challenges") return reply(201, { challenge: Buffer.alloc(48, 5).toString("base64") });
+    if (req.url === "/api/v1/auth/token") return reply(200, { token: "paseo.access.token", refreshToken: "paseo.refresh.token" });
+    if (req.url === "/api/v1/attester") return reply(200, { attester: `0x${"33".repeat(32)}` });
+    if (req.method === "POST" && req.url === "/api/v1/usernames") {
+      if (req.headers.authorization !== "Bearer paseo.access.token") return reply(401, { error: "Missing bearer token" });
+      let raw = "";
+      req.on("data", (d) => { raw += d; });
+      req.on("end", () => {
+        const body = JSON.parse(raw);
+        const account = `0x${Buffer.from(ss58Decode(body.candidateAccountId)[0]).toString("hex")}`;
+        const username = `${body.username}.${body.preferredDigits ?? "07"}`;
+        claims.push(body);
+        consumers.set(account, { username, identifierKey: body.identifierKey, credibility: "Lite" });
+        reply(202, { username });
+      });
+      return;
+    }
+    reply(404, { error: "unexpected route" });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const local = `http://127.0.0.1:${server.address().port}`;
+  // Redirect only the supported Paseo backend; never contact a real service.
+  // Keeping the configured URL intact exercises the CLI's profile/auth gate.
+  const preload = path.join(botsDir, "fetch.mjs");
+  fs.writeFileSync(preload, `
+    const original = globalThis.fetch;
+    globalThis.fetch = (input, options) => {
+      const url = new URL(String(input));
+      if (url.origin === "https://identity.dotspark.app") {
+        return original(${JSON.stringify(local)} + url.pathname + url.search, options);
+      }
+      if (url.origin === ${JSON.stringify(local)}) return original(input, options);
+      throw new Error("Unexpected network request: " + url.origin);
+    };
+  `);
+  const env = {
+    NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+    PCA_PEOPLE_DIRECTORY_URL: local,
+    PCA_NO_UPDATE_CHECK: "1",
+    PCA_IDENTITY_TOKEN: "",
+    PCA_IDENTITY_VOUCHER: "",
+    PCA_BANDERSNATCH_CLI: "",
+  };
+  try {
+    let result = await runCliAsync(botsDir, ["create", "paseobot", "--network", "paseo", "--brain", "echo", "--public", "--wait", "1"], env);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const bot = readBot(botsDir, "paseobot");
+    assert.equal(bot.registered, true, result.stdout + result.stderr);
+    assert.equal(bot.username, "paseobot.07");
+
+    consumers.clear();
+    result = await runCliAsync(botsDir, ["register", "paseobot", "--again", "--wait", "1"], env);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(consumers.get(bot.account)?.username, "paseobot.07");
+    assert.equal(claims.length, 2);
+    assert.equal(claims[1].candidateAccountId, claims[0].candidateAccountId, "re-registration preserves the identity");
+    assert.equal(claims[1].identifierKey, claims[0].identifierKey);
+    const secret = JSON.parse(fs.readFileSync(path.join(botsDir, "paseobot", "secret.json"), "utf8"));
+    assert.equal(secret.identityRegistrationSession, undefined, "successful claims discard temporary credentials");
+    assert.ok(!`${result.stdout}${result.stderr}`.includes("paseo.access.token"));
   } finally {
     server.close();
     fs.rmSync(botsDir, { recursive: true, force: true });
