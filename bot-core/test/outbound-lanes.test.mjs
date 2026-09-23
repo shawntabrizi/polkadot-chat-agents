@@ -192,3 +192,36 @@ test("an expired session releases an unacknowledged lane", async () => {
   assert.equal(h.lanes.hasPending("peer"), false);
   assert.equal(h.lanes.depth("peer"), 0);
 });
+
+test("an ACK that lands while an extension is being submitted does not crash the pump", async () => {
+  // Regression (2026-09-23): the pump read lane.current after the submit
+  // await; an ACK for the extended statement arriving during that await set
+  // lane.current to null and the next line threw, killing the bot process.
+  const submits = [];
+  let rid = 0;
+  let lanes;
+  lanes = createOutboundLanes({
+    encodeBatch: (_peer, requestId, opaques, { forceIdentity }) => Buffer.from(JSON.stringify({ requestId, opaques, forceIdentity })),
+    submitPayload: async (peerHex, payload) => {
+      const batch = JSON.parse(payload.toString());
+      submits.push(batch);
+      // Second submit is the extension of RID-1; the peer ACKs RID-1 mid-flight.
+      if (submits.length === 2) lanes.onAck(peerHex, "RID-1");
+    },
+    makeRequestId: () => `RID-${++rid}`,
+    maxPayloadBytes: 10_000, maxExtensions: 8, maxQueued: 200, ackGraceMs: 3_600_000,
+  });
+  const settle = () => new Promise((r) => setTimeout(r, 5));
+  const a = lanes.enqueue("peer", "m1", { messageId: "M1" });
+  await settle();
+  const b = lanes.enqueue("peer", "m2", { messageId: "M2" });
+  await settle();
+  assert.equal(submits.length, 2);
+  assert.deepEqual(submits[1].opaques, ["m1", "m2"]);
+  await a.submitted; await b.submitted;
+  // The lane keeps working afterwards: a third message goes out as a fresh statement or extension without throwing.
+  const c = lanes.enqueue("peer", "m3", { messageId: "M3" });
+  await settle();
+  await c.submitted;
+  assert.ok(submits.length >= 3);
+});

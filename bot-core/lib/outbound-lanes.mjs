@@ -153,12 +153,16 @@ export const createOutboundLanes = ({
       // answer) land before packing, so they ride one statement, not N.
       await new Promise((resolve) => setImmediate(resolve));
       while (lane.queue.length > 0) {
-        const extending = lane.current != null;
-        if (extending && lane.current.extensions >= maxExtensions) { blocked = true; return armGrace(peerHex, lane); }
-        const batch = packBatch(peerHex, lane, extending ? lane.current.entries : []);
+        // Snapshot the slot: an ACK that lands during the submit below clears
+        // lane.current, and the bookkeeping after the await must describe the
+        // statement that was actually extended, not the cleared slot.
+        const prior = lane.current;
+        const extending = prior != null;
+        if (extending && prior.extensions >= maxExtensions) { blocked = true; return armGrace(peerHex, lane); }
+        const batch = packBatch(peerHex, lane, extending ? prior.entries : []);
         if (!batch) { blocked = true; return armGrace(peerHex, lane); }
-        const newEntries = batch.entries.filter((e) => !extending || !lane.current.entries.includes(e));
-        const droppedBySupersede = extending ? lane.current.entries.filter((e) => !batch.entries.includes(e)) : [];
+        const newEntries = batch.entries.filter((e) => !extending || !prior.entries.includes(e));
+        const droppedBySupersede = extending ? prior.entries.filter((e) => !batch.entries.includes(e)) : [];
         try {
           await submitPayload(peerHex, batch.payload, { forceIdentity: batch.flag });
         } catch (e) {
@@ -176,7 +180,7 @@ export const createOutboundLanes = ({
         lane.current = {
           requestId: batch.requestId,
           entries: batch.entries,
-          extensions: extending ? lane.current.extensions + 1 : 0,
+          extensions: extending ? prior.extensions + 1 : 0,
           forceIdentity: batch.flag,
           // An extension refreshes the window: the statement in the slot is new.
           submittedAt: now(),
