@@ -50,6 +50,7 @@ never turns a supplied stale lease into a valid one.
 | `PUT /files/<chat_id>/<path>` | Save raw request bytes in that chat's vault, subject to the bot's per-file, per-peer, and global caps. Set `Content-Type`; add `?overwrite=1` to replace a file. |
 | `DELETE /files/<chat_id>/<path>` | Remove one durable file. |
 | `POST /send` `{ chat_id, text?, file_path?, reply_to?, edit_of? }` | Publish a reply, edit a bot-issued message, or send a vault file. `reply_to` renders a quote; `edit_of` rewrites one of the bot's own messages and cannot be combined with `reply_to`. The default transport does not combine a file with a reply or edit; T3ams permits a file caption and reply target, but never an edit of a file message. Returns `{ success, message_id }` — the outgoing message's id, which is what you keep to edit it later. |
+| `POST /send` `{ group_id, text }` | Default transport only. Answer a spec 0009 group turn (an inbound item with `group_id`, `group_name` and `sender`): the text fans out to every member as one group message. Returns `{ success, message_id }`; 404 for an unknown group, 409 when the bot is no longer in the group. |
 | `POST /react` `{ chat_id, message_id, emoji, remove? }` | Publish or remove an emoji reaction. T3ams maps this to its native reaction operation. |
 | `POST /typing` `{ chat_id }` | Best-effort typing signal. T3ams publishes it natively; a transport without a typing operation can no-op. |
 

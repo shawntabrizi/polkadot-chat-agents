@@ -615,7 +615,7 @@ export const createAgentRuntime = ({
     effortLevels: engine?.effortLevels ?? null,
     hasProjects: (workspaces?.size ?? 0) > 0,
   });
-  const buildTurnOperatorContext = (turnModel, peerHex = null) => {
+  const buildTurnOperatorContext = (turnModel, peerHex = null, sessionKey = peerHex) => {
     if (operatorContext == null) return "";
     let facts = "";
     if (operatorContext.enabled !== false) {
@@ -627,6 +627,8 @@ export const createAgentRuntime = ({
         modelPolicy: allowedModels,
         commands: contextCommands,
         buttons: peerHex != null && typeof operatorContext.buttons === "function" && operatorContext.buttons(peerHex) === true,
+        // Spec 0009: a group turn runs under the group's session key.
+        group: sessionKey != null && typeof operatorContext.group === "function" ? operatorContext.group(sessionKey) ?? null : null,
         docsUrl: operatorContext.docsUrl,
       });
     }
@@ -763,7 +765,7 @@ export const createAgentRuntime = ({
     try {
       resume = peerResume.get(k) ?? null;
       const effort = peerEffortOverrides.get(k) ?? reasoning ?? "";
-      const turnOperatorContext = buildTurnOperatorContext(turnModel, peerHex);
+      const turnOperatorContext = buildTurnOperatorContext(turnModel, peerHex, k);
       let prompt = userText;
       if (NATIVE_CONTEXT_FILE_ENGINES.has(engineName)) {
         const prepared = prepareNativeContext(cwd, turnOperatorContext);

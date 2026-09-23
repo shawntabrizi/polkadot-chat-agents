@@ -195,6 +195,40 @@ test("the buttons hint is asked per peer from the transport", async () => {
   assert.deepEqual(asked, ["able", "plain"]);
 });
 
+// Spec 0009: a group turn runs under the group's session key; the hint
+// names the room and its size, and the reply goes back with the group's
+// delivery context (the transport fans it out). Group history is separate
+// from the sender's 1:1 history.
+test("a group turn gets the group hint, its own session, and a delivery context the transport routes", async () => {
+  const turns = [];
+  const routed = [];
+  const h = makeRuntime({
+    buildArgs: (turn) => {
+      turns.push(turn);
+      return ["-c", `printf '{"type":"system","subtype":"init","session_id":"S-${turns.length}"}\\n{"type":"result","result":"ok"}\\n'`];
+    },
+    operatorContext: {
+      username: "atlas.42",
+      transport: "polkadot-app",
+      policy: { capabilities: [], scope: "workspace" },
+      group: (key) => (key === "group:g-1" ? { name: "Test group", size: 3 } : null),
+    },
+    chat: {
+      sendText: async () => {},
+      deliver: async (peer, text, context) => { routed.push([peer, context]); },
+      beginTurn: () => () => {},
+    },
+  });
+  await h.runtime.handleMessage("alice", { text: "[group Test group] alice.01: hi", commandText: "hi", messageId: "M1", kind: "text", sessionKey: "group:G-1", deliveryContext: { groupId: "G-1" } });
+  await h.runtime.handleMessage("alice", { text: "hi", messageId: "M2", kind: "text" });
+  await h.runtime.handleMessage("alice", { text: "[group Test group] alice.01: again", commandText: "again", messageId: "M3", kind: "text", sessionKey: "group:G-1", deliveryContext: { groupId: "G-1" } });
+  assert.match(turns[0].operatorContext, /You are in the group Test group with 3 people; address the sender by name\./);
+  assert.doesNotMatch(turns[1].operatorContext, /You are in the group/, "no hint in the 1:1 turn");
+  assert.equal(turns[1].resume, null, "the 1:1 chat does not resume the group's session");
+  assert.equal(turns[2].resume, "S-1", "the group resumes its own session");
+  assert.deepEqual(routed.map(([, context]) => context), [{ groupId: "G-1" }, null, { groupId: "G-1" }], "the group's replies carry its delivery context");
+});
+
 test("final-text stream deltas reach the transport without changing the durable answer", async () => {
   const h = makeRuntime({
     script: `printf '%s\\n' \

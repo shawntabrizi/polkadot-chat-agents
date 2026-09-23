@@ -488,7 +488,7 @@ The `pcdmeter` hint, for example:
 | `BOT_LIVE_TTL_MS` | 600000 | A placeholder never finalized resolves to a timeout note. |
 | `BOT_LIVE_TIMEOUT_TEXT` | auto | That timeout note's text. |
 | `BOT_OUTBOUND_ACK_GRACE_MS` | 60000 | How long an un-ACKed statement holds the channel slot before a queued one takes over. |
-| `BOT_PROTOCOL_EXTENSIONS` | all | Protocol extensions the bot sends, to every peer, with no per-peer gating: `deleted` (RFC-0003), `buttons` (spec 0006), `typing` and `seen` (spec 0005), `botinfo` (spec 0008), `txref` (spec 0007 transaction references). Unset = all six; `none` = none; a comma list = only those named. With `buttons` off, buttons go out as a numbered text list. Receiving every extension is always on. |
+| `BOT_PROTOCOL_EXTENSIONS` | all | Protocol extensions the bot sends, to every peer, with no per-peer gating: `deleted` (RFC-0003), `buttons` (spec 0006), `typing` and `seen` (spec 0005), `botinfo` (spec 0008), `txref` (spec 0007 transaction references), `groups` (spec 0009 fan-out groups; off = every group kind is ignored). Unset = all seven; `none` = none; a comma list = only those named. With `buttons` off, buttons go out as a numbered text list. Receiving every extension is always on. |
 | `BOT_LOG_LEVEL` | unset | `debug` also prints debug events (`BOT_RECEIVED_TYPING`, `BOT_RECEIVED_SEEN`), marked `level: "debug"`. |
 
 T3ams uses the same placeholder, progress, final-wait, timeout, and chunk

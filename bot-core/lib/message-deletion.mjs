@@ -14,7 +14,7 @@
 //    outbound lanes.
 
 // Extensions the bot can send. BOT_PROTOCOL_EXTENSIONS unset = all of them.
-export const PROTOCOL_EXTENSIONS = Object.freeze(["deleted", "buttons", "typing", "seen", "botinfo", "txref"]);
+export const PROTOCOL_EXTENSIONS = Object.freeze(["deleted", "buttons", "typing", "seen", "botinfo", "txref", "groups"]);
 
 // The RFC lets an implementation bound the pending set per peer; eviction is
 // safe (a deletion whose target never arrives has no effect).

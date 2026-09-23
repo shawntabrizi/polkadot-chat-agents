@@ -21,6 +21,11 @@ export const BUTTONS_HINT = "Buttons: the chat app renders a trailing fenced ```
   + "an action is {\"command\":text sent back to you as the user's next message}, {\"callback\":string echoed back to you as \"[button] <label> (payload: <hex>)\"} "
   + "or {\"url\":\"https://...\"}; at most 8 rows of 4 buttons, labels up to 40 characters; put nothing after the block.";
 
+// Spec 0009: one line when the turn comes from a group room. The message
+// itself arrives as "[group <name>] <sender>: <text>".
+export const groupHint = ({ name, size }) =>
+  `You are in the group ${name} with ${size} people; address the sender by name.`;
+
 const modelPolicyText = (modelPolicy) => {
   if (modelPolicy == null) return "open";
   if (Array.isArray(modelPolicy) && modelPolicy.length > 0) {
@@ -44,6 +49,7 @@ export const buildOperatorContext = ({
   modelPolicy,
   commands,
   buttons = false, // spec 0006: this peer can render a buttons message
+  group = null, // spec 0009: { name, size } when the turn comes from a group
   docsUrl = OPERATOR_CONTEXT_DOCS_URL,
 } = {}) => {
   const normalizedPolicy = createToolPolicy(policy);
@@ -63,6 +69,7 @@ export const buildOperatorContext = ({
   if (tools.includes("read")) lines.push("Attachments: incoming files are staged in a per-turn attachment directory.");
   if (tools.includes("write")) lines.push("Generated files placed in the per-turn output directory are sent back.");
   if (buttons) lines.push(BUTTONS_HINT);
+  if (group) lines.push(groupHint(group));
   lines.push(
     "Replies are read on a phone: keep them short and use no Markdown tables. The transport adds the status receipt; do not write one.",
     `Docs: ${docsUrl}`,

@@ -205,7 +205,7 @@ time") gives 21. `DELETED_CONTENT_KIND` is the only place to change it.
 **Sending extensions is not gated.** The desktop spec set's development-mode
 rule (owner decision, 2026-09-23; `polkadot-chat-desktop/docs/spec/README.md`)
 holds: every client is in development, so the bot sends every enabled
-extension kind (deleted, buttons, typing, seen, botinfo, txref) to every peer. There is no
+extension kind (deleted, buttons, typing, seen, botinfo, txref, groups) to every peer. There is no
 per-peer evidence and no advertisement. A client that does not know a kind
 shows the base spec's unsupported-message row, and that is accepted while the
 kinds iterate. `BOT_PROTOCOL_EXTENSIONS` is the operator's switch: unset means
@@ -580,6 +580,88 @@ startup. A player the bot never talked to is logged
 `BOT_FLIP_SETTLED`, `BOT_FLIP_NOTIFIED`, `BOT_FLIP_NOTIFY_FAILED`,
 `BOT_FLIP_UNKNOWN_PLAYER`, `BOT_FLIP_REFUNDED`, `BOT_FLIP_REFERENCE`,
 `BOT_FLIP_WATCH_FAILED`, `BOT_FLIP_OFFER_FAILED`, `BOT_FLIP_USERNAME_FAILED`.
+
+### Groups (spec 0009)
+
+Spec 0009 (`polkadot-chat-desktop/docs/spec/0009-groups.md`) adds small group
+rooms with no new cryptography. A group is an id, a name and a roster. A
+member sends to the group by fanning one message out over its pairwise
+sessions. Three provisional kinds:
+
+```
+groupInfo(GroupInfo)       -> 246
+groupMessage(GroupMessage) -> 247
+groupLeave(GroupLeave)     -> 248
+GroupInfo = { groupId: String /* UUID */, name: String /* <= 60 */, admin: AccountId /* 32 raw bytes */,
+              members: Vec<Member> /* <= 16 */, version: u32 LE, createdAt: u64 LE }
+Member = { account: AccountId, username: String, joinedAt: u64 LE }
+GroupMessage = { groupId: String, infoVersion: u32 LE, seq: u64 LE, content: MessageContent }
+GroupLeave = { groupId: String }
+```
+
+`content` is inline: the kind byte and the body of any non-group kind, to the
+end of the message, with no length prefix and no inner envelope. The codec is
+`encodeOpaqueGroupInfoMessage`, `encodeOpaqueGroupMessage` (it takes an
+opaque message from any other encoder and keeps only its content) and
+`encodeOpaqueGroupLeaveMessage` in `vendor/app-chat-codec.mjs`. The decoder
+decodes the wrapped content with the normal decoder. Both sides refuse a
+group kind inside a `groupMessage`. The pinned vectors are in
+`polkadot-chat-desktop/docs/spec/vectors-0009.md` and `test/codec.test.mjs`.
+
+**Joining.** A bot is a member like any other. The admin invites it with a
+chat request (a public bot accepts as always; an allowlisted bot accepts
+when the admin is allowlisted) and sends the `groupInfo` on the session. The
+bot applies a `groupInfo` only from the admin it names, and only when its
+`version` is higher than the one it holds. A `groupInfo` from anyone else,
+or an older one, is ignored (`BOT_GROUP_INFO_IGNORED { reason }`). On join
+(`BOT_GROUP_JOINED`) the bot sends its `botInfo`, wrapped, to every member.
+The rules live in `lib/groups.mjs`; the rosters, the bot's own `seq` and the
+recent envelope ids per group persist in the session state (`groups`).
+
+**Allowlisted bots.** An allowlisted bot also talks to the members of a group
+whose admin it allows, for the group kinds only. It accepts their chat
+requests (`BOT_GROUP_MEMBER_ACCEPTED`; the welcome text is not a turn) and
+drops any other kind from them (`BOT_GROUP_ONLY_DROPPED`).
+
+**Receiving.** A `groupMessage` from an account that is not in the roster, or
+that sent a `groupLeave`, is rejected (`BOT_GROUP_MESSAGE_REJECTED { reason:
+"non-member" }`). A second copy of one envelope id is rejected as
+`duplicate`. Per sender, `seq` orders messages; a gap is logged once
+(`BOT_GROUP_SEQ_GAP`). A text, rich text, reply, edit or buttons message
+becomes one brain turn: the brain sees `[group <name>] <sender username>:
+<text>`. A direct engine runs it under the session key `group:<groupId>`, so
+the group has its own conversation history, separate from each member's 1:1
+history. Chat commands (`/help`, `/model` …) in a group apply to the group's
+session. The operator context gains one line: "You are in the group <name>
+with N people; address the sender by name." A `buttonPress` runs a turn only
+for a buttons message the bot sent to that group. Reactions, deletions,
+`botInfo` and transaction references inside a group are logged
+(`BOT_GROUP_RECEIVED { kind }`) and never answered. The group features that
+are 1:1 by nature (`/start`, file commands, the meter, the faucet, the coin
+flip) do not run in a group.
+
+**Replying.** The answer goes to every other member in the bot's roster as a
+`groupMessage`. Every copy has one envelope id and one timestamp, and the
+bot's next per-group `seq` (`BOT_GROUP_SENT { group, kind, messageId, seq, to
+}`). Long answers are chunked and a trailing buttons block becomes spec 0006
+buttons, as in a 1:1 chat. To reach a member it has no session with, the bot
+opens a chat request first (`BOT_GROUP_REQUEST_OPENED`); the request text is
+the fallback form of its `botInfo` (name — description). A failure to reach
+one member is logged (`BOT_GROUP_SEND_FAILED`) and does not stop the others.
+A bridge harness gets a group turn with `group_id`, `group_name` and `sender`
+and answers with `POST /send { group_id, text }`.
+
+**Typing and seen.** `typing` fans out while a direct-engine turn runs
+(refreshed every 4 s); it carries the bot's current `seq` and does not advance
+it, so a client that does not store typing sees no gap. `seen` does not fan
+out, and the bot sends no 1:1 `seen` for a group message.
+
+**Stopping.** A `groupLeave` from a member takes that member out of the
+fan-out (`BOT_GROUP_MEMBER_LEFT`). A `groupInfo` whose roster does not list
+the bot marks the group `removed` (`BOT_GROUP_REMOVED`): the bot stops sending
+to it and rejects its messages (`reason: "removed"`) until a higher version
+lists it again. `BOT_PROTOCOL_EXTENSIONS` without `groups` ignores every
+group kind (`BOT_GROUP_IGNORED`).
 
 ### Attachments (photos/videos/files)
 

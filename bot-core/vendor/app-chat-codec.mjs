@@ -1510,6 +1510,132 @@ export function encodeOpaqueTransactionReferenceMessage({
   });
 }
 
+// Spec 0009 fan-out groups (polkadot-chat-desktop docs/spec/0009-groups.md).
+// Provisional kinds from the desktop spec set (kinds.md):
+//   groupInfo(GroupInfo)       -> 246
+//   groupMessage(GroupMessage) -> 247
+//   groupLeave(GroupLeave)     -> 248
+// GroupInfo { groupId: String (UUID), name: String (<= 60), admin: [u8; 32],
+//             members: Vec<Member> (<= 16), version: u32 LE, createdAt: u64 LE }
+// Member { account: [u8; 32], username: String, joinedAt: u64 LE }
+// GroupMessage { groupId: String, infoVersion: u32 LE, seq: u64 LE,
+//                content: MessageContent }   // inline: kind byte + body, to the end
+// GroupLeave { groupId: String }
+// `content` is any non-group kind; a nested group kind is refused both ways.
+// The encoder takes the inner message as an opaque message from any encoder
+// here and keeps only its content (its envelope id and timestamp are dropped:
+// the group message's envelope is the one that counts).
+export const GROUP_INFO_CONTENT_KIND = 246;
+export const GROUP_MESSAGE_CONTENT_KIND = 247;
+export const GROUP_LEAVE_CONTENT_KIND = 248;
+export const GROUP_LIMITS = Object.freeze({ name: 60, members: 16, username: 64 });
+const GROUP_KINDS = [GROUP_INFO_CONTENT_KIND, GROUP_MESSAGE_CONTENT_KIND, GROUP_LEAVE_CONTENT_KIND];
+const GROUP_USERNAME_MAX_BYTES = GROUP_LIMITS.username * 4;
+
+const groupIdString = (groupId) => {
+  if (typeof groupId !== "string" || groupId.length === 0 || textEncoder.encode(groupId).length > MAX_ID_BYTES) {
+    throw new Error(`group id needs 1 to ${MAX_ID_BYTES} bytes`);
+  }
+  return scaleEncodeString(groupId);
+};
+const accountIdBytes = (value, name) => {
+  const bytes = typeof value === "string" ? hexToBytes(normalizeHex(value)) : value;
+  if (!(bytes instanceof Uint8Array) || bytes.length !== 32) throw new Error(`${name} must be a 32-byte account id`);
+  return bytes;
+};
+
+// The content of an opaque message (compact length + remote message): the
+// bytes after messageId, timestamp and the version byte.
+export function opaqueMessageContent(opaque) {
+  const remote = scaleDecodeBytesAt(opaque, 0, MAX_OPAQUE_MESSAGE_BYTES, "opaque message");
+  if (remote.offset !== opaque.length) throw new Error("opaque message has trailing bytes");
+  const id = decodeIdAt(remote.value, 0, "message id");
+  const versionAt = id.offset + 8;
+  if (remote.value[versionAt] !== 0) throw new Error("only version-0 content can be wrapped");
+  const content = remote.value.slice(versionAt + 1);
+  if (content.length === 0) throw new Error("message has no content");
+  return content;
+}
+
+export function encodeOpaqueGroupInfoMessage({
+  messageId = makeAppUuid(),
+  timestamp = chatTimestampNow(),
+  groupId,
+  name,
+  admin,
+  members,
+  version,
+  createdAt,
+}) {
+  if (typeof name !== "string" || name.length === 0 || [...name].length > GROUP_LIMITS.name) {
+    throw new Error(`group name needs 1 to ${GROUP_LIMITS.name} characters`);
+  }
+  if (!Array.isArray(members) || members.length === 0 || members.length > GROUP_LIMITS.members) {
+    throw new Error(`a group needs 1 to ${GROUP_LIMITS.members} members`);
+  }
+  if (!Number.isInteger(version) || version < 0 || version > 0xffff_ffff) throw new Error("group version must be a u32");
+  const encodedMembers = members.map((m) => {
+    if (typeof m?.username !== "string" || [...m.username].length > GROUP_LIMITS.username) {
+      throw new Error(`a member username needs at most ${GROUP_LIMITS.username} characters`);
+    }
+    return concatBytes(
+      accountIdBytes(m.account, "member account"),
+      scaleEncodeString(m.username),
+      scaleEncodeUInt64(assertU64(m.joinedAt, "member joinedAt")),
+    );
+  });
+  return encodeOpaqueRemoteMessage({
+    messageId,
+    timestamp,
+    content: concatBytes(
+      Uint8Array.of(GROUP_INFO_CONTENT_KIND),
+      groupIdString(groupId),
+      scaleEncodeString(name),
+      accountIdBytes(admin, "group admin"),
+      scaleEncodeArray(encodedMembers),
+      scaleEncodeUInt32(version),
+      scaleEncodeUInt64(assertU64(createdAt, "group createdAt")),
+    ),
+  });
+}
+
+export function encodeOpaqueGroupMessage({
+  messageId = makeAppUuid(),
+  timestamp = chatTimestampNow(),
+  groupId,
+  infoVersion,
+  seq,
+  content, // an opaque message from any encoder here (a non-group kind)
+}) {
+  if (!Number.isInteger(infoVersion) || infoVersion < 0 || infoVersion > 0xffff_ffff) throw new Error("group infoVersion must be a u32");
+  if (!(content instanceof Uint8Array)) throw new Error("group message content must be an opaque message");
+  const inner = opaqueMessageContent(content);
+  if (GROUP_KINDS.includes(inner[0])) throw new Error("a group message cannot wrap a group kind");
+  return encodeOpaqueRemoteMessage({
+    messageId,
+    timestamp,
+    content: concatBytes(
+      Uint8Array.of(GROUP_MESSAGE_CONTENT_KIND),
+      groupIdString(groupId),
+      scaleEncodeUInt32(infoVersion),
+      scaleEncodeUInt64(assertU64(seq, "group seq")),
+      inner,
+    ),
+  });
+}
+
+export function encodeOpaqueGroupLeaveMessage({
+  messageId = makeAppUuid(),
+  timestamp = chatTimestampNow(),
+  groupId,
+}) {
+  return encodeOpaqueRemoteMessage({
+    messageId,
+    timestamp,
+    content: concatBytes(Uint8Array.of(GROUP_LEAVE_CONTENT_KIND), groupIdString(groupId)),
+  });
+}
+
 export function encodeOpaqueDataChannelClosedMessage({
   messageId = makeAppUuid(),
   timestamp = chatTimestampNow(),
@@ -2181,6 +2307,66 @@ function decodeRemoteMessage(bytes, budget) {
       index: position.value[1],
       payload: payload.value,
       offset: payload.offset,
+    };
+  }
+  if (contentKind === GROUP_INFO_CONTENT_KIND) {
+    const groupId = decodeIdAt(bytes, offset, "group id");
+    const name = scaleDecodeStringAt(bytes, groupId.offset, GROUP_LIMITS.name * 4, "group name");
+    const admin = fixedBytesAt(bytes, name.offset, 32, "group admin");
+    const members = scaleDecodeArrayAt(bytes, admin.offset, (b, at) => {
+      const account = fixedBytesAt(b, at, 32, "member account");
+      const memberName = scaleDecodeStringAt(b, account.offset, GROUP_USERNAME_MAX_BYTES, "member username");
+      const joinedAt = scaleDecodeUInt64At(b, memberName.offset);
+      return {
+        value: { account: account.value, accountHex: normalizeHex(bytesToHex(account.value)), username: memberName.value, joinedAt: Number(joinedAt.value) },
+        offset: joinedAt.offset,
+      };
+    }, GROUP_LIMITS.members, "group members", budget);
+    const version = scaleDecodeUInt32At(bytes, members.offset);
+    const createdAt = scaleDecodeUInt64At(bytes, version.offset);
+    return {
+      messageId: messageId.value,
+      timestamp: Number(timestamp.value),
+      kind: "groupInfo",
+      groupId: groupId.value,
+      name: name.value,
+      admin: admin.value,
+      adminHex: normalizeHex(bytesToHex(admin.value)),
+      members: members.value,
+      version: version.value,
+      createdAt: Number(createdAt.value),
+      offset: createdAt.offset,
+    };
+  }
+  if (contentKind === GROUP_MESSAGE_CONTENT_KIND) {
+    const groupId = decodeIdAt(bytes, offset, "group id");
+    const infoVersion = scaleDecodeUInt32At(bytes, groupId.offset);
+    const seq = scaleDecodeUInt64At(bytes, infoVersion.offset);
+    if (seq.offset >= bytes.length) throw new Error("group message has no content");
+    if (GROUP_KINDS.includes(bytes[seq.offset])) throw new Error("a group message cannot wrap a group kind");
+    // The wrapped content decodes as a message of its own under this
+    // envelope's id and timestamp (header = messageId, timestamp, version).
+    const header = bytes.slice(0, offset - 1);
+    const { messageId: _id, timestamp: _ts, offset: innerEnd, ...content } = decodeRemoteMessage(concatBytes(header, bytes.slice(seq.offset)), budget);
+    return {
+      messageId: messageId.value,
+      timestamp: Number(timestamp.value),
+      kind: "groupMessage",
+      groupId: groupId.value,
+      infoVersion: infoVersion.value,
+      seq: Number(seq.value),
+      content,
+      offset: innerEnd == null ? bytes.length : innerEnd - header.length + seq.offset,
+    };
+  }
+  if (contentKind === GROUP_LEAVE_CONTENT_KIND) {
+    const groupId = decodeIdAt(bytes, offset, "group id");
+    return {
+      messageId: messageId.value,
+      timestamp: Number(timestamp.value),
+      kind: "groupLeave",
+      groupId: groupId.value,
+      offset: groupId.offset,
     };
   }
   if (contentKind === 13) {

@@ -25,6 +25,9 @@ import {
   encodeOpaqueButtonPressMessage,
   encodeOpaqueDeletedMessage,
   encodeOpaqueEditedMessage,
+  encodeOpaqueGroupInfoMessage,
+  encodeOpaqueGroupLeaveMessage,
+  encodeOpaqueGroupMessage,
   encodeOpaqueSeenMessage,
   encodeOpaqueTextMessage,
   encodeOpaqueTransactionReferenceMessage,
@@ -1656,6 +1659,126 @@ describe("transport e2e", { concurrency: 8 }, () => {
       await bot.waitFor((e) => e.event === "BOT_SENT_TEXT", { label: "owed reply sent", timeoutMs: 20_000 });
       await waitFor(async () => (await alice.incoming()).filter((m) => textOf(m).startsWith("recovered-answer")).length === 2, { label: "the owed answer" });
       assert.equal(bot.events.filter((e) => e.event === "BOT_MEDIA_DOWNLOADED").length, 0, "the cached photo was not downloaded again (the pool entry is gone anyway)");
+    } finally {
+      await bot.stop();
+      await node.close();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  // Spec 0009 through the real bot process: the admin's roster arrives on its
+  // session, the bot opens a chat with the member it has never talked to,
+  // answers "hello all" with ONE envelope to both members, rejects a
+  // non-member, and stops sending once a roster drops it.
+  test("groups: join, fan-out to two members with one envelope id, non-member, removal (spec 0009)", async () => {
+    const node = await startSandbox();
+    const stateDir = tmpState();
+    const bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: { BOT_SUBSCRIBE: "0" } });
+    try {
+      const alice = await startPersona(node, { name: "alice" });
+      const bob = await startPersona(node, { name: "bob" });
+      const carol = await startPersona(node, { name: "carol" });
+      // One opener at a time, each answered before the next (as the buttons test does).
+      for (const who of [alice, carol]) {
+        await who.open(`hi from ${who.name}`);
+        await who.reply((m) => textOf(m) === `Echo: hi from ${who.name}`, { label: `${who.name}'s opener echo` });
+      }
+      const groupId = "5E4B1C2D-0000-4000-8000-00000000A11C";
+      const info = (version, members) => remoteMessage(encodeOpaqueGroupInfoMessage({
+        groupId, name: "Test group", admin: alice.account, version, createdAt: Date.now(),
+        members: members.map(([account, username]) => ({ account, username, joinedAt: Date.now() })),
+      }));
+      const groupMessage = (seq, text, version = 1) => remoteMessage(encodeOpaqueGroupMessage({
+        groupId, infoVersion: version, seq, content: encodeOpaqueTextMessage({ messageId: "inner", timestamp: 0, text }),
+      }));
+      const say = (who, seq, text, version = 1) => who.sendRaw(groupMessage(seq, text, version));
+      await alice.sendRaw(info(1, [[alice.account, "alice"], [bob.account, "bob"], [`0x${BOT_ACCOUNT}`, BOT_USERNAME]]));
+      const joined = await bot.waitFor((e) => e.event === "BOT_GROUP_JOINED", { label: "BOT_GROUP_JOINED" });
+      assert.deepEqual([joined.group, joined.members, joined.version], [groupId, 3, 1]);
+      // bob never talked to the bot: the bot opens the chat to reach him.
+      await bot.waitFor((e) => e.event === "BOT_GROUP_REQUEST_OPENED" && e.to === bob.accountHex, { label: "request to bob" });
+      const request = await waitFor(async () => (await bob.api("GET", "/personas/bob/requests")).find((r) => r.direction === "incoming"), { label: "bob's incoming request" });
+      await bob.api("POST", `/personas/bob/requests/${request.requestId}/accept`, {});
+      await bot.waitFor((e) => e.event === "BOT_PEER_DEVICE_ADDED" && e.from === bob.accountHex, { label: "bob's accept" });
+
+      const hello = groupMessage(1, "hello all");
+      await alice.sendRaw(hello);
+      await bot.waitFor((e) => e.event === "BOT_GROUP_RECEIVED" && e.kind === "text", { label: "BOT_GROUP_RECEIVED" });
+      const reply = await bot.waitFor((e) => e.event === "BOT_GROUP_SENT" && e.kind === "text", { label: "the group reply" });
+      assert.deepEqual(reply.to.sort(), [alice.accountHex, bob.accountHex].sort(), "one reply to both members");
+      assert.equal(typeof reply.messageId, "string");
+      assert.equal(reply.seq, 2, "seq 1 was the botInfo sent on join");
+      // The same envelope again (a resend): answered once.
+      await alice.sendRaw(hello);
+      // A non-member's group message is dropped.
+      await say(carol, 1, "let me in");
+      const rejected = await bot.waitFor((e) => e.event === "BOT_GROUP_MESSAGE_REJECTED" && e.from === carol.accountHex, { label: "carol rejected" });
+      assert.equal(rejected.reason, "non-member");
+      // bob leaves: the fan-out stops reaching him.
+      await bob.sendRaw(remoteMessage(encodeOpaqueGroupLeaveMessage({ groupId })));
+      await bot.waitFor((e) => e.event === "BOT_GROUP_MEMBER_LEFT" && e.from === bob.accountHex, { label: "bob left" });
+      await say(alice, 2, "just us");
+      const second = await bot.waitFor((e) => e.event === "BOT_GROUP_SENT" && e.kind === "text" && e.seq === 3, { label: "the reply after the leave" });
+      assert.deepEqual(second.to, [alice.accountHex]);
+      // Roster v2 without the bot: it stops answering the group.
+      await alice.sendRaw(info(2, [[alice.account, "alice"]]));
+      await bot.waitFor((e) => e.event === "BOT_GROUP_REMOVED", { label: "BOT_GROUP_REMOVED" });
+      await say(alice, 3, "anyone?", 2);
+      const dropped = await bot.waitFor((e) => e.event === "BOT_GROUP_MESSAGE_REJECTED" && e.from === alice.accountHex, { label: "dropped after removal" });
+      assert.equal(dropped.reason, "removed");
+      assert.equal(bot.events.filter((e) => e.event === "BOT_GROUP_SENT" && e.kind === "text").length, 2, "no reply to the resend, the non-member or after removal");
+      assert.equal(bot.events.filter((e) => e.event === "BOT_SENT_TEXT" && e.to === bob.accountHex).length, 0, "nothing went to bob 1:1");
+      await bot.stop();
+      const state = JSON.parse(fs.readFileSync(path.join(stateDir, "session-state.json"), "utf8"));
+      assert.deepEqual([state.groups[0].id, state.groups[0].st, state.groups[0].q], [groupId, "removed", 3], "the roster and seq persist");
+    } finally {
+      await bot.stop();
+      await node.close();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  // The direct-engine path (what a claude bot runs): the prompt carries the
+  // group context, typing fans out while the turn runs, the answer reaches
+  // both members as one envelope.
+  test("groups: a direct-engine turn sees the group context and fans typing and the answer out (spec 0009)", async () => {
+    const node = await startSandbox();
+    const stateDir = tmpState();
+    const bot = await startBot({
+      endpoint: node.url, apiUrl: node.apiUrl, stateDir,
+      extraEnv: {
+        BOT_SUBSCRIBE: "0",
+        BOT_LOG_LEVEL: "debug",
+        BOT_BRAIN: "claude",
+        BOT_AI_CMD: process.execPath,
+        // The mock CLI records each prompt, then answers after a second.
+        BOT_AI_ARGS: JSON.stringify(["-e", `require("fs").appendFileSync(${JSON.stringify(path.join(stateDir, "prompts.log"))}, process.argv[1] + "\\n"); setTimeout(() => console.log(JSON.stringify({ type: "result", result: "ok" })), 1000);`, "__PROMPT__"]),
+        BOT_THINKING_TEXT: "",
+      },
+    });
+    try {
+      const alice = await startPersona(node, { name: "alice" });
+      const bob = await startPersona(node, { name: "bob" });
+      await alice.open("hi");
+      await alice.reply((m) => textOf(m).startsWith("ok"), { label: "the opener answer" });
+      const groupId = "7A7A7A7A-0000-4000-8000-00000000A11C";
+      await alice.sendRaw(remoteMessage(encodeOpaqueGroupInfoMessage({
+        groupId, name: "Tea club", admin: alice.account, version: 1, createdAt: Date.now(),
+        members: [[alice.account, "alice"], [bob.account, "bob"], [`0x${BOT_ACCOUNT}`, BOT_USERNAME]].map(([account, username]) => ({ account, username, joinedAt: 1 })),
+      })));
+      await bot.waitFor((e) => e.event === "BOT_GROUP_JOINED", { label: "BOT_GROUP_JOINED" });
+      await alice.sendRaw(remoteMessage(encodeOpaqueGroupMessage({ groupId, infoVersion: 1, seq: 1, content: encodeOpaqueTextMessage({ messageId: "i", timestamp: 0, text: "who is here?" }) })));
+      const typing = await bot.waitFor((e) => e.event === "BOT_GROUP_SENT" && e.kind === "typing", { label: "group typing" });
+      assert.equal(typing.seq, 1, "typing does not advance seq (the botInfo on join was seq 1)");
+      const reply = await bot.waitFor((e) => e.event === "BOT_GROUP_SENT" && e.kind === "text", { label: "the group answer" });
+      assert.deepEqual(reply.to.sort(), [alice.accountHex, bob.accountHex].sort());
+      assert.equal(reply.seq, 2);
+      const prompts = fs.readFileSync(path.join(stateDir, "prompts.log"), "utf8");
+      assert.match(prompts, /\[group Tea club\] alice: who is here\?/, "the brain sees the group and the sender");
+      assert.match(prompts, /You are in the group Tea club with 3 people; address the sender by name\./, "the persona hint rides the group turn");
+      assert.equal(prompts.split("You are in the group").length - 1, 1, "and only the group turn");
+      // The answer went to the group, not to alice 1:1 (only her opener's answer did).
+      assert.equal(bot.events.filter((e) => e.event === "BOT_SENT_TEXT" && e.to === alice.accountHex).length, 1);
     } finally {
       await bot.stop();
       await node.close();

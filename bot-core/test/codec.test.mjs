@@ -32,6 +32,12 @@ import {
   encodeOpaqueTransactionReferenceMessage,
   TRANSACTION_REFERENCE_CONTENT_KIND,
   encodeOpaqueDataChannelClosedMessage,
+  encodeOpaqueGroupInfoMessage,
+  encodeOpaqueGroupMessage,
+  encodeOpaqueGroupLeaveMessage,
+  GROUP_INFO_CONTENT_KIND,
+  GROUP_MESSAGE_CONTENT_KIND,
+  GROUP_LEAVE_CONTENT_KIND,
   scaleEncodeBytes,
   x25519PublicKeyFromPrivateKey,
   x25519SharedSecret,
@@ -804,4 +810,106 @@ test("dataChannelOffer surfaces purpose and sdp length only", () => {
   assert.equal(m.purpose, 1);
   assert.equal(m.sdpLength, sdp.length);
   assert.equal(m.sdp, undefined);
+});
+
+// ---------- spec 0009 fan-out groups ----------
+// Pinned in polkadot-chat-desktop docs/spec/vectors-0009.md: the desktop
+// codec must decode these bytes to these values and encode them back.
+const GROUP_ADMIN = new Uint8Array(32).fill(1);
+const GROUP_BOB = new Uint8Array(32).fill(2);
+const GROUP_INFO_VALUES = {
+  messageId: "GRP-1", timestamp: 1_720_000_000_000, groupId: "GRP-1", name: "Test group", admin: GROUP_ADMIN,
+  members: [
+    { account: GROUP_ADMIN, username: "alice.01", joinedAt: 1_720_000_000_000 },
+    { account: GROUP_BOB, username: "bob.02", joinedAt: 1_720_000_001_000 },
+  ],
+  version: 1, createdAt: 1_720_000_000_000,
+};
+const GROUP_INFO_VECTOR = "b902144752502d310030fd779001000000f6144752502d3128546573742067726f7570010101010101010101010101010101010101010101010101010101010101010108010101010101010101010101010101010101010101010101010101010101010120616c6963652e30310030fd7790010000020202020202020202020202020202020202020202020202020202020202020218626f622e3032e833fd7790010000010000000030fd7790010000";
+const GROUP_MESSAGE_VECTOR = "b41447524d2d31d037fd779001000000f7144752502d31010000000100000000000000002468656c6c6f20616c6c";
+const GROUP_LEAVE_VECTOR = "581447524c2d31b83bfd779001000000f8144752502d31";
+const innerText = (text) => encodeOpaqueTextMessage({ messageId: "inner", timestamp: 0, text });
+
+test("groupInfo: pinned vector GRP-1 matches the spec 0009 SCALE layout", () => {
+  assert.deepEqual([GROUP_INFO_CONTENT_KIND, GROUP_MESSAGE_CONTENT_KIND, GROUP_LEAVE_CONTENT_KIND], [246, 247, 248]);
+  const opaque = encodeOpaqueGroupInfoMessage(GROUP_INFO_VALUES);
+  assert.equal(hexOf(opaque), GROUP_INFO_VECTOR);
+  // Built by hand from the spec: AccountId raw 32 bytes, u64/u32 LE.
+  const member = (account, username, joinedAt) => concat(account, str(username), u64(joinedAt));
+  const content = concat(
+    str("GRP-1"), str("Test group"), GROUP_ADMIN,
+    compact(2), member(GROUP_ADMIN, "alice.01", 1_720_000_000_000), member(GROUP_BOB, "bob.02", 1_720_000_001_000),
+    u32(1), u64(1_720_000_000_000),
+  );
+  assert.equal(hexOf(opaque), hexOf(opaqueMessage("GRP-1", 246, content)));
+  const m = decodeOne(hex(GROUP_INFO_VECTOR));
+  assert.deepEqual(
+    { kind: m.kind, messageId: m.messageId, timestamp: m.timestamp, groupId: m.groupId, name: m.name, adminHex: m.adminHex, version: m.version, createdAt: m.createdAt },
+    { kind: "groupInfo", messageId: "GRP-1", timestamp: 1_720_000_000_000, groupId: "GRP-1", name: "Test group", adminHex: "01".repeat(32), version: 1, createdAt: 1_720_000_000_000 },
+  );
+  assert.deepEqual(m.members.map((x) => [x.accountHex, x.username, x.joinedAt]), [["01".repeat(32), "alice.01", 1_720_000_000_000], ["02".repeat(32), "bob.02", 1_720_000_001_000]]);
+});
+
+test("groupMessage: pinned vector GRM-1 wraps a text as inline content", () => {
+  const opaque = encodeOpaqueGroupMessage({ messageId: "GRM-1", timestamp: 1_720_000_002_000, groupId: "GRP-1", infoVersion: 1, seq: 1, content: innerText("hello all") });
+  assert.equal(hexOf(opaque), GROUP_MESSAGE_VECTOR);
+  // The wrapped content is the text content itself (kind 0 + String), no
+  // length prefix and no inner envelope.
+  const content = concat(str("GRP-1"), u32(1), u64(1), Uint8Array.of(0), str("hello all"));
+  assert.equal(hexOf(opaque), hexOf(scaleEncodeBytes(concat(str("GRM-1"), u64(1_720_000_002_000), Uint8Array.of(0), Uint8Array.of(247), content))));
+  const m = decodeOne(hex(GROUP_MESSAGE_VECTOR));
+  assert.deepEqual(
+    { kind: m.kind, messageId: m.messageId, timestamp: m.timestamp, groupId: m.groupId, infoVersion: m.infoVersion, seq: m.seq, content: m.content },
+    { kind: "groupMessage", messageId: "GRM-1", timestamp: 1_720_000_002_000, groupId: "GRP-1", infoVersion: 1, seq: 1, content: { kind: "text", text: "hello all" } },
+  );
+});
+
+test("groupLeave: pinned vector GRL-1", () => {
+  const opaque = encodeOpaqueGroupLeaveMessage({ messageId: "GRL-1", timestamp: 1_720_000_003_000, groupId: "GRP-1" });
+  assert.equal(hexOf(opaque), GROUP_LEAVE_VECTOR);
+  const m = decodeOne(hex(GROUP_LEAVE_VECTOR));
+  assert.deepEqual({ kind: m.kind, messageId: m.messageId, timestamp: m.timestamp, groupId: m.groupId }, { kind: "groupLeave", messageId: "GRL-1", timestamp: 1_720_000_003_000, groupId: "GRP-1" });
+});
+
+test("round-trip: groupMessage wraps buttons, a tx reference, a reply and typing like any content", () => {
+  const wrap = (content, seq = 7) => decodeOne(encodeOpaqueGroupMessage({ messageId: "G", timestamp: 5, groupId: "0A0B0C0D-0000-4000-8000-000000000001", infoVersion: 3, seq, content }));
+  const buttons = wrap(encodeOpaqueButtonsMessage({ messageId: "x", timestamp: 0, text: "Pick", rows: [[{ label: "Yes", action: { command: "yes" } }]], oneShot: true }));
+  assert.equal(buttons.content.kind, "buttons");
+  assert.deepEqual([buttons.content.text, buttons.content.rows[0][0].label, buttons.content.oneShot], ["Pick", "Yes", true]);
+  const ref = wrap(encodeOpaqueTransactionReferenceMessage({ messageId: "x", timestamp: 0, chainId: "0x01", hash: `0x${"ab".repeat(32)}`, status: 2, note: "paid" }));
+  assert.deepEqual([ref.content.kind, ref.content.status, ref.content.note, ref.content.block], ["transactionReference", 2, "paid", null]);
+  const reply = wrap(encodeOpaqueReplyMessage({ messageId: "x", timestamp: 0, replyToMessageId: "GRM-1", text: "me too" }));
+  assert.deepEqual([reply.content.kind, reply.content.replyToMessageId, reply.content.text], ["reply", "GRM-1", "me too"]);
+  const typing = wrap(encodeOpaqueTypingMessage({ messageId: "x", timestamp: 0, until: 99, kind: TYPING_KINDS.working }), 2n ** 40n);
+  assert.deepEqual([typing.content.kind, typing.content.typingKind, typing.seq, typing.infoVersion], ["typing", 1, 2 ** 40, 3]);
+  // The envelope's id and timestamp are the message's; the inner ones are dropped.
+  assert.deepEqual([reply.messageId, reply.timestamp, reply.content.messageId], ["G", 5, undefined]);
+});
+
+test("group kinds refuse nesting and out-of-range fields on both sides", () => {
+  const info = encodeOpaqueGroupInfoMessage(GROUP_INFO_VALUES);
+  const leave = encodeOpaqueGroupLeaveMessage({ groupId: "GRP-1" });
+  for (const nested of [info, leave, encodeOpaqueGroupMessage({ groupId: "GRP-1", infoVersion: 1, seq: 1, content: innerText("x") })]) {
+    assert.throws(() => encodeOpaqueGroupMessage({ groupId: "GRP-1", infoVersion: 1, seq: 1, content: nested }), /cannot wrap a group kind/);
+  }
+  // A hand-built nested group message decodes as undecodable, not as a group turn.
+  const nested = opaqueMessage("N", 247, concat(str("GRP-1"), u32(1), u64(1), Uint8Array.of(248), str("GRP-1")));
+  assert.equal(decodeOne(nested).kind, "undecodable");
+  assert.match(decodeOne(nested).error, /cannot wrap a group kind/);
+  assert.equal(decodeOne(opaqueMessage("E", 247, concat(str("GRP-1"), u32(1), u64(1)))).kind, "undecodable");
+  const base = GROUP_INFO_VALUES;
+  assert.throws(() => encodeOpaqueGroupInfoMessage({ ...base, name: "x".repeat(61) }), /group name/);
+  assert.throws(() => encodeOpaqueGroupInfoMessage({ ...base, name: "" }), /group name/);
+  assert.throws(() => encodeOpaqueGroupInfoMessage({ ...base, admin: new Uint8Array(31) }), /32-byte account/);
+  assert.throws(() => encodeOpaqueGroupInfoMessage({ ...base, members: Array.from({ length: 17 }, () => base.members[0]) }), /1 to 16 members/);
+  assert.throws(() => encodeOpaqueGroupInfoMessage({ ...base, version: 2 ** 32 }), /u32/);
+  assert.throws(() => encodeOpaqueGroupMessage({ groupId: "GRP-1", infoVersion: 1, seq: -1, content: innerText("x") }), /u64/);
+  assert.throws(() => encodeOpaqueGroupLeaveMessage({ groupId: "" }), /group id/);
+  // 17 members on the wire: refused by the decoder.
+  const one = concat(GROUP_ADMIN, str("a"), u64(0));
+  const tooMany = opaqueMessage("T", 246, concat(str("GRP-1"), str("n"), GROUP_ADMIN, compact(17), ...Array.from({ length: 17 }, () => one), u32(1), u64(0)));
+  assert.match(decodeOne(tooMany).error, /group members exceeds maximum of 16/);
+  // Hex account ids are accepted by the encoder.
+  const fromHex = encodeOpaqueGroupInfoMessage({ ...base, admin: `0x${"01".repeat(32)}`, members: [{ account: "02".repeat(32), username: "bob.02", joinedAt: 1 }] });
+  assert.equal(decodeOne(fromHex).members[0].accountHex, "02".repeat(32));
 });
