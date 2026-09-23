@@ -12,6 +12,7 @@ import {
   TOOL_MARKUP_NOTE,
 } from "../lib/agent-runtime.mjs";
 import { OPERATOR_CONTEXT_MARKER } from "../lib/agent-context.mjs";
+import { parseButtonsBlock } from "../lib/buttons-block.mjs";
 import { RUNNERS } from "../lib/runners.mjs";
 
 // A runtime wired to a mock "CLI": `sh -c <script>` emitting claude-shaped
@@ -157,6 +158,41 @@ test("BOT_AI_CONTEXT=0 semantics disable facts without disabling PERSONA.md", as
   await h.runtime.handleMessage("peer", { text: "hello", messageId: "M1", kind: "text" });
   assert.doesNotMatch(turns[0].operatorContext, /hidden\.42|polkadot-chat-agents|Tools:/);
   assert.match(turns[0].operatorContext, /Still operator-owned/);
+});
+
+// Spec 0006: a block counts only when it ENDS the reply, so the one-time
+// /help tip must not land after it (the first reply would show raw JSON).
+test("the first-reply tip goes before a trailing buttons block", async () => {
+  const answer = 'Pick\\n```buttons\\n{\\"rows\\":[[{\\"label\\":\\"A\\",\\"action\\":{\\"command\\":\\"a\\"}}]]}\\n```';
+  const h = makeRuntime({ script: `printf '%s\\n' '{"type":"result","result":"${answer}"}'` });
+  await h.runtime.handleMessage("PEER", { text: "hi", messageId: "M1", kind: "text" });
+  assert.match(h.delivered[0], /^Pick\n\n\(Tip: send \/help to see my commands\.\)\n\n```buttons\n/);
+  assert.ok(parseButtonsBlock(h.delivered[0]), "the block still parses");
+});
+
+// Spec 0006: the transport decides per peer whether buttons can be rendered;
+// the hint must follow that peer, or a brain would write blocks that always
+// degrade to the fallback list.
+test("the buttons hint is asked per peer from the transport", async () => {
+  const turns = [];
+  const asked = [];
+  const h = makeRuntime({
+    buildArgs: (turn) => {
+      turns.push(turn);
+      return ["-c", `printf '{"type":"result","result":"ok"}\\n'`];
+    },
+    operatorContext: {
+      username: "atlas.42",
+      transport: "polkadot-app",
+      policy: { capabilities: [], scope: "workspace" },
+      buttons: (peer) => { asked.push(peer); return peer === "able"; },
+    },
+  });
+  await h.runtime.handleMessage("able", { text: "hi", messageId: "M1", kind: "text" });
+  await h.runtime.handleMessage("plain", { text: "hi", messageId: "M2", kind: "text" });
+  assert.match(turns[0].operatorContext, /```buttons/);
+  assert.doesNotMatch(turns[1].operatorContext, /```buttons/);
+  assert.deepEqual(asked, ["able", "plain"]);
 });
 
 test("final-text stream deltas reach the transport without changing the durable answer", async () => {

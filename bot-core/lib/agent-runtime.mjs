@@ -35,6 +35,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { buildOperatorContext, OPERATOR_CONTEXT_MARKER } from "./agent-context.mjs";
+import { parseButtonsBlock } from "./buttons-block.mjs";
 import { commandCatalog, createCommandHandler } from "./commands.mjs";
 
 const NATIVE_CONTEXT_FILE_ENGINES = new Set(["codex", "opencode", "kimi"]);
@@ -614,7 +615,7 @@ export const createAgentRuntime = ({
     effortLevels: engine?.effortLevels ?? null,
     hasProjects: (workspaces?.size ?? 0) > 0,
   });
-  const buildTurnOperatorContext = (turnModel) => {
+  const buildTurnOperatorContext = (turnModel, peerHex = null) => {
     if (operatorContext == null) return "";
     let facts = "";
     if (operatorContext.enabled !== false) {
@@ -625,6 +626,7 @@ export const createAgentRuntime = ({
         model: turnModel,
         modelPolicy: allowedModels,
         commands: contextCommands,
+        buttons: peerHex != null && typeof operatorContext.buttons === "function" && operatorContext.buttons(peerHex) === true,
         docsUrl: operatorContext.docsUrl,
       });
     }
@@ -761,7 +763,7 @@ export const createAgentRuntime = ({
     try {
       resume = peerResume.get(k) ?? null;
       const effort = peerEffortOverrides.get(k) ?? reasoning ?? "";
-      const turnOperatorContext = buildTurnOperatorContext(turnModel);
+      const turnOperatorContext = buildTurnOperatorContext(turnModel, peerHex);
       let prompt = userText;
       if (NATIVE_CONTEXT_FILE_ENGINES.has(engineName)) {
         const prepared = prepareNativeContext(cwd, turnOperatorContext);
@@ -1104,7 +1106,13 @@ export const createAgentRuntime = ({
             introducedPeers.add(deliveryKey);
             trimSet(introducedPeers, peerCap);
             persist();
-            outgoing += "\n\n(Tip: send /help to see my commands.)";
+            // A trailing ```buttons block must stay last (spec 0006), so the
+            // tip goes before it.
+            const tip = "(Tip: send /help to see my commands.)";
+            const block = parseButtonsBlock(outgoing) ? outgoing.lastIndexOf("```buttons") : -1;
+            outgoing = block >= 0
+              ? [outgoing.slice(0, block).trimEnd(), tip, outgoing.slice(block)].filter(Boolean).join("\n\n")
+              : `${outgoing}\n\n${tip}`;
           }
           await sendTurn(
             peerHex,

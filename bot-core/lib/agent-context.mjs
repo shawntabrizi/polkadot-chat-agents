@@ -14,6 +14,12 @@ Priorities or boundaries:
 -->
 `;
 
+// Spec 0006; the block format is parsed by lib/buttons-block.mjs.
+export const BUTTONS_HINT = "Buttons: you MAY end a reply with a ```buttons fenced block holding JSON "
+  + "{\"rows\":[[{\"label\":\"Yes\",\"action\":{\"command\":\"yes\"}}]],\"oneShot\":false}; "
+  + "an action is {\"command\":text the user sends}, {\"callback\":string echoed back to you as \"[button] <label> (payload: <hex>)\"} "
+  + "or {\"url\":\"https://...\"}; at most 8 rows of 4 buttons, labels up to 40 characters.";
+
 const modelPolicyText = (modelPolicy) => {
   if (modelPolicy == null) return "open";
   if (Array.isArray(modelPolicy) && modelPolicy.length > 0) {
@@ -36,6 +42,7 @@ export const buildOperatorContext = ({
   model,
   modelPolicy,
   commands,
+  buttons = false, // spec 0006: this peer can render a buttons message
   docsUrl = OPERATOR_CONTEXT_DOCS_URL,
 } = {}) => {
   const normalizedPolicy = createToolPolicy(policy);
@@ -54,6 +61,7 @@ export const buildOperatorContext = ({
   ];
   if (tools.includes("read")) lines.push("Attachments: incoming files are staged in a per-turn attachment directory.");
   if (tools.includes("write")) lines.push("Generated files placed in the per-turn output directory are sent back.");
+  if (buttons) lines.push(BUTTONS_HINT);
   lines.push(
     "Replies are read on a phone: keep them short and use no Markdown tables. The transport adds the status receipt; do not write one.",
     `Docs: ${docsUrl}`,

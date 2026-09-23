@@ -6,13 +6,22 @@
 //  - createExtensionGate: may the bot SEND a protocol extension to a peer?
 //    Phone clients that predate an extension render its kind as an
 //    "unsupported message" bubble, so the bot sends one only to a peer that
-//    has proven support by sending that kind itself, or when the operator
-//    enables it for everyone (BOT_PROTOCOL_EXTENSIONS).
+//    has proven support by sending that kind itself (buttons: any extension
+//    kind), or when the operator enables it for everyone
+//    (BOT_PROTOCOL_EXTENSIONS).
 //  - createMessageDeleter: the sender side of one retraction, on top of the
 //    outbound lanes.
 
 // Extensions the operator may force on with BOT_PROTOCOL_EXTENSIONS.
-export const PROTOCOL_EXTENSIONS = Object.freeze(["deleted"]);
+export const PROTOCOL_EXTENSIONS = Object.freeze(["deleted", "buttons"]);
+// Evidence names the gate records: an extension's own kind, or "extension"
+// for any other provisional kind (240-249) the peer sent.
+export const EXTENSION_EVIDENCE = Object.freeze(["deleted", "buttons", "extension"]);
+// Which evidence enables SENDING an extension. `deleted` keeps its RFC-0003
+// rule (the peer sent a deletion). `buttons` follows the desktop spec set's
+// rule (spec 0006): any extension kind from that peer (21 or 240+) proves the
+// client renders kinds it did not ship with.
+const ENABLED_BY = Object.freeze({ deleted: ["deleted"], buttons: EXTENSION_EVIDENCE });
 
 // The RFC lets an implementation bound the pending set per peer; eviction is
 // safe (a deletion whose target never arrives has no effect).
@@ -95,7 +104,8 @@ export const parseProtocolExtensions = (raw) => {
 export const createExtensionGate = ({ forced = new Set(), maxPeers = 10_000 } = {}) => {
   const evidence = new Map(); // peerHex -> Set<extension>
   return {
-    enabled: (peerHex, extension) => forced.has(extension) || Boolean(evidence.get(peerHex)?.has(extension)),
+    enabled: (peerHex, extension) => forced.has(extension)
+      || (ENABLED_BY[extension] ?? []).some((name) => evidence.get(peerHex)?.has(name)),
     // The peer sent us this extension's kind. True only the first time, so
     // the caller logs and persists once.
     observe(peerHex, extension) {
@@ -108,8 +118,8 @@ export const createExtensionGate = ({ forced = new Set(), maxPeers = 10_000 } = 
       return set?.size ? [...set] : null;
     },
     restore(peerHex, saved) {
-      for (const extension of ids(saved, PROTOCOL_EXTENSIONS.length)) {
-        if (PROTOCOL_EXTENSIONS.includes(extension)) boundedMap(evidence, peerHex, () => new Set(), maxPeers).add(extension);
+      for (const extension of ids(saved, EXTENSION_EVIDENCE.length)) {
+        if (EXTENSION_EVIDENCE.includes(extension)) boundedMap(evidence, peerHex, () => new Set(), maxPeers).add(extension);
       }
     },
   };

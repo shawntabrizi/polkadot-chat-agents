@@ -21,6 +21,7 @@ import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
 import {
   deriveX25519PrivateKey,
   encodeAccountEcdhKey,
+  encodeOpaqueButtonPressMessage,
   encodeOpaqueDeletedMessage,
   encodeOpaqueEditedMessage,
   encodeOpaqueTextMessage,
@@ -1313,6 +1314,66 @@ describe("transport e2e", { concurrency: 8 }, () => {
       const state = JSON.parse(fs.readFileSync(path.join(stateDir, "session-state.json"), "utf8"));
       assert.deepEqual(state.peers[0].x, ["deleted"], "the evidence survives a restart");
       assert.ok(state.peers[0].dl.d.includes(kept.messageId) && state.peers[0].dl.d.includes(lateId));
+    } finally {
+      await bot.stop();
+      await node.close();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  // Spec 0006 through the real receive and send paths. The echo brain echoes
+  // the persona's ```buttons block, so the bot's reply ends with one. The
+  // persona's SDK has no buttonPress kind yet, so presses go in as raw bytes.
+  test("buttons: fallback without evidence, buttons with it, press runs a turn, foreign press ignored", async () => {
+    const node = await startSandbox();
+    const stateDir = tmpState();
+    const bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: { BOT_SUBSCRIBE: "0" } });
+    try {
+      const block = "Pick one\n```buttons\n" + JSON.stringify({ rows: [[
+        { label: "Echo", action: { command: "echo hi" } },
+        { label: "Colour", action: { callback: "base64:AQI=" } },
+      ]] }) + "\n```";
+      const alice = await startPersona(node);
+      await alice.open("buttons opener");
+      await alice.reply((m) => textOf(m) === "Echo: buttons opener");
+
+      // No evidence yet: an old phone must get readable text, not kind 242.
+      await alice.send(block);
+      await alice.reply((m) => textOf(m) === "Echo: Pick one\n\n1. Echo\n2. Colour", { label: "the fallback list" });
+      assert.equal(bot.events.filter((e) => e.event === "BOT_SENT_BUTTONS").length, 0);
+
+      // A press for a message the bot never sent: ignored, but it is evidence.
+      await alice.sendRaw(remoteMessage(encodeOpaqueButtonPressMessage({ targetMessageId: "NOT-OURS", row: 0, index: 0 })));
+      await bot.waitFor((e) => e.event === "BOT_BUTTON_PRESS_IGNORED" && e.messageId === "NOT-OURS", { label: "the unknown press ignored" });
+      const enabled = await bot.waitFor((e) => e.event === "BOT_PROTOCOL_EXTENSION_ENABLED", { label: "evidence logged" });
+      assert.deepEqual([enabled.peer, enabled.kind], [alice.accountHex, "buttons"]);
+
+      // With evidence: ONE kind-242 message carries the text and the rows.
+      await alice.send(block);
+      const sent = await bot.waitFor((e) => e.event === "BOT_SENT_BUTTONS", { label: "the buttons message" });
+      assert.deepEqual([sent.buttons, sent.oneShot], [2, false]);
+
+      // A press on it runs a brain turn with the label and the payload.
+      await alice.sendRaw(remoteMessage(encodeOpaqueButtonPressMessage({ targetMessageId: sent.messageId, row: 0, index: 1, payload: Uint8Array.of(1, 2) })));
+      const press = await bot.waitFor((e) => e.event === "BOT_RECEIVED_BUTTON_PRESS", { label: "the press" });
+      assert.deepEqual([press.messageId, press.row, press.index], [sent.messageId, 0, 1]);
+      await alice.reply((m) => textOf(m) === "Echo: [button] Colour (payload: 0102)", { label: "the press answered" });
+
+      // The same message id pressed by another peer is foreign: no turn.
+      const bob = await startPersona(node, { name: "bob" });
+      await bob.open("bob opener");
+      await bob.reply((m) => textOf(m) === "Echo: bob opener");
+      await bob.sendRaw(remoteMessage(encodeOpaqueButtonPressMessage({ targetMessageId: sent.messageId, row: 0, index: 1 })));
+      await bot.waitFor((e) => e.event === "BOT_BUTTON_PRESS_IGNORED" && e.from === bob.accountHex, { label: "the foreign press ignored" });
+      await bob.send("bob still here");
+      await bob.reply((m) => textOf(m) === "Echo: bob still here");
+      assert.deepEqual((await bob.incoming()).map(textOf).filter((t) => t.startsWith("Echo:")), ["Echo: bob opener", "Echo: bob still here"]);
+
+      await bot.stop();
+      const state = JSON.parse(fs.readFileSync(path.join(stateDir, "session-state.json"), "utf8"));
+      const alicePeer = state.peers.find((p) => p.peerHex === alice.accountHex);
+      assert.deepEqual(alicePeer.x, ["buttons"], "the evidence survives a restart");
+      assert.equal(alicePeer.bp[0][0], sent.messageId, "the sent buttons survive a restart");
     } finally {
       await bot.stop();
       await node.close();

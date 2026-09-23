@@ -1079,6 +1079,102 @@ export function encodeOpaqueDeletedMessage({
   });
 }
 
+// Spec 0006 buttons (polkadot-chat-desktop docs/spec/0006-buttons.md).
+// Provisional kinds from the desktop spec set (kinds.md, range 240-249):
+//   buttons(ButtonsContent)         -> 242
+//   buttonPress(ButtonPressContent) -> 243
+// ButtonsContent { text: String, rows: Vec<Vec<Button>>, oneShot: bool }
+// Button { label: String, action: Action }
+// Action { command(String)=0 | callback(Bytes)=1 | url(String)=2 | tx(Bytes)=3 }
+// ButtonPressContent { messageId: String, row: u8, index: u8, payload: Bytes }
+// An action is one of { command }, { callback: Uint8Array }, { url },
+// { tx: Uint8Array }; `tx` is opaque here (its shape is RFC 0007).
+export const BUTTONS_CONTENT_KIND = 242;
+export const BUTTON_PRESS_CONTENT_KIND = 243;
+export const BUTTONS_MAX_ROWS = 8;
+export const BUTTONS_MAX_PER_ROW = 4;
+export const BUTTON_LABEL_MAX_CHARS = 40;
+export const BUTTON_PAYLOAD_MAX_BYTES = 256;
+const BUTTON_LABEL_MAX_BYTES = BUTTON_LABEL_MAX_CHARS * 4;
+const BUTTON_ACTIONS = ["command", "callback", "url", "tx"];
+
+function encodeButtonAction(action) {
+  const keys = Object.keys(action ?? {});
+  const tag = BUTTON_ACTIONS.indexOf(keys[0]);
+  if (keys.length !== 1 || tag < 0) throw new Error("button action must be one of command, callback, url, tx");
+  const value = action[keys[0]];
+  if (tag === 0 || tag === 2) {
+    if (typeof value !== "string" || value.length === 0) throw new Error(`button ${keys[0]} must be a non-empty string`);
+    return concatBytes(Uint8Array.of(tag), scaleEncodeString(value));
+  }
+  if (!(value instanceof Uint8Array)) throw new Error(`button ${keys[0]} must be bytes`);
+  if (tag === 1 && value.length > BUTTON_PAYLOAD_MAX_BYTES) throw new Error(`button callback exceeds ${BUTTON_PAYLOAD_MAX_BYTES} bytes`);
+  return concatBytes(Uint8Array.of(tag), scaleEncodeBytes(value));
+}
+
+export function encodeOpaqueButtonsMessage({
+  messageId = makeAppUuid(),
+  timestamp = chatTimestampNow(),
+  text,
+  rows,
+  oneShot = false,
+}) {
+  if (typeof text !== "string") throw new Error("buttons message needs text");
+  if (!Array.isArray(rows) || rows.length === 0 || rows.length > BUTTONS_MAX_ROWS) {
+    throw new Error(`buttons message needs 1 to ${BUTTONS_MAX_ROWS} rows`);
+  }
+  const encodedRows = rows.map((row) => {
+    if (!Array.isArray(row) || row.length === 0 || row.length > BUTTONS_MAX_PER_ROW) {
+      throw new Error(`a button row needs 1 to ${BUTTONS_MAX_PER_ROW} buttons`);
+    }
+    return scaleEncodeArray(row.map(({ label, action }) => {
+      if (typeof label !== "string" || label.length === 0 || [...label].length > BUTTON_LABEL_MAX_CHARS) {
+        throw new Error(`a button label needs 1 to ${BUTTON_LABEL_MAX_CHARS} characters`);
+      }
+      return concatBytes(scaleEncodeString(label), encodeButtonAction(action));
+    }));
+  });
+  return encodeOpaqueRemoteMessage({
+    messageId,
+    timestamp,
+    content: concatBytes(
+      Uint8Array.of(BUTTONS_CONTENT_KIND),
+      scaleEncodeString(text),
+      scaleEncodeArray(encodedRows),
+      Uint8Array.of(oneShot ? 1 : 0),
+    ),
+  });
+}
+
+export function encodeOpaqueButtonPressMessage({
+  messageId = makeAppUuid(),
+  timestamp = chatTimestampNow(),
+  targetMessageId,
+  row,
+  index,
+  payload = new Uint8Array(0),
+}) {
+  if (typeof targetMessageId !== "string" || targetMessageId.length === 0) {
+    throw new Error("button press needs the buttons message id");
+  }
+  for (const [name, value] of [["row", row], ["index", index]]) {
+    if (!Number.isInteger(value) || value < 0 || value > 255) throw new Error(`button press ${name} must be a u8`);
+  }
+  if (!(payload instanceof Uint8Array) || payload.length > BUTTON_PAYLOAD_MAX_BYTES) {
+    throw new Error(`button press payload must be at most ${BUTTON_PAYLOAD_MAX_BYTES} bytes`);
+  }
+  return encodeOpaqueRemoteMessage({
+    messageId,
+    timestamp,
+    content: concatBytes(
+      Uint8Array.of(BUTTON_PRESS_CONTENT_KIND),
+      scaleEncodeString(targetMessageId),
+      Uint8Array.of(row, index),
+      scaleEncodeBytes(payload),
+    ),
+  });
+}
+
 export function encodeOpaqueDataChannelClosedMessage({
   messageId = makeAppUuid(),
   timestamp = chatTimestampNow(),
@@ -1425,6 +1521,21 @@ export function decodeOpaqueMessageAt(bytes, offset, budget = newScaleVectorBudg
   return { value: decoded, offset: opaque.offset };
 }
 
+// One Button of spec 0006. An unknown action tag has no known length, so
+// the whole message is undecodable (the rest of the batch still decodes).
+function decodeButtonAt(bytes, offset) {
+  const label = scaleDecodeStringAt(bytes, offset, BUTTON_LABEL_MAX_BYTES, "button label");
+  const tag = bytes[label.offset];
+  const at = label.offset + 1;
+  let value;
+  if (tag === 0) value = scaleDecodeStringAt(bytes, at, MAX_TEXT_BYTES, "button command");
+  else if (tag === 1) value = scaleDecodeBytesAt(bytes, at, BUTTON_PAYLOAD_MAX_BYTES, "button callback");
+  else if (tag === 2) value = scaleDecodeStringAt(bytes, at, MAX_URL_BYTES, "button url");
+  else if (tag === 3) value = scaleDecodeBytesAt(bytes, at, MAX_SCALE_BYTES, "button tx");
+  else throw new Error(`unknown button action ${tag}`);
+  return { value: { label: label.value, action: { [BUTTON_ACTIONS[tag]]: value.value } }, offset: value.offset };
+}
+
 function decodeRemoteMessage(bytes, budget) {
   let offset = 0;
   const messageId = decodeIdAt(bytes, offset, "message id");
@@ -1623,6 +1734,43 @@ function decodeRemoteMessage(bytes, budget) {
       kind: "deleted",
       targetMessageId: targetMessageId.value,
       offset: targetMessageId.offset,
+    };
+  }
+  if (contentKind === BUTTONS_CONTENT_KIND) {
+    const text = scaleDecodeStringAt(bytes, offset);
+    const rows = scaleDecodeArrayAt(
+      bytes,
+      text.offset,
+      (b, rowOffset) => scaleDecodeArrayAt(b, rowOffset, decodeButtonAt, BUTTONS_MAX_PER_ROW, "button row", budget),
+      BUTTONS_MAX_ROWS,
+      "button rows",
+      budget,
+    );
+    const oneShot = bytes[rows.offset];
+    if (oneShot !== 0 && oneShot !== 1) throw new Error(`invalid buttons oneShot byte ${oneShot}`);
+    return {
+      messageId: messageId.value,
+      timestamp: Number(timestamp.value),
+      kind: "buttons",
+      text: text.value,
+      rows: rows.value,
+      oneShot: oneShot === 1,
+      offset: rows.offset + 1,
+    };
+  }
+  if (contentKind === BUTTON_PRESS_CONTENT_KIND) {
+    const targetMessageId = decodeIdAt(bytes, offset, "button press target id");
+    const position = fixedBytesAt(bytes, targetMessageId.offset, 2, "button press position");
+    const payload = scaleDecodeBytesAt(bytes, position.offset, BUTTON_PAYLOAD_MAX_BYTES, "button press payload");
+    return {
+      messageId: messageId.value,
+      timestamp: Number(timestamp.value),
+      kind: "buttonPress",
+      targetMessageId: targetMessageId.value,
+      row: position.value[0],
+      index: position.value[1],
+      payload: payload.value,
+      offset: payload.offset,
     };
   }
   if (contentKind === 13) {

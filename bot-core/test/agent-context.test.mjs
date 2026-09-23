@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildOperatorContext } from "../lib/agent-context.mjs";
+import { buildOperatorContext, BUTTONS_HINT } from "../lib/agent-context.mjs";
 import { commandCatalog } from "../lib/commands.mjs";
 
 const build = (overrides = {}) => buildOperatorContext({
@@ -55,4 +55,13 @@ test("the no-tools sentence appears only for an empty policy", () => {
 test("model switching facts distinguish open, locked, and engine-default states", () => {
   assert.match(build({ model: "", modelPolicy: null }), /Model: engine default; \/model switching is open/);
   assert.match(build({ modelPolicy: [] }), /\/model switching is locked by the operator/);
+});
+
+// Spec 0006: a peer without the extension gets the fallback text, so telling
+// the brain about buttons there only wastes context; the hint follows the gate.
+test("the buttons hint appears only when the peer can render buttons", () => {
+  assert.doesNotMatch(build(), /```buttons/);
+  const withButtons = build({ buttons: true });
+  assert.ok(withButtons.includes(BUTTONS_HINT));
+  assert.match(withButtons, /MAY end a reply with a ```buttons/);
 });

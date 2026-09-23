@@ -16,6 +16,10 @@ import {
   encodeOpaqueEditedMessage,
   encodeOpaqueDeletedMessage,
   DELETED_CONTENT_KIND,
+  encodeOpaqueButtonsMessage,
+  encodeOpaqueButtonPressMessage,
+  BUTTONS_CONTENT_KIND,
+  BUTTON_PRESS_CONTENT_KIND,
   encodeOpaqueDataChannelClosedMessage,
   scaleEncodeBytes,
   x25519PublicKeyFromPrivateKey,
@@ -220,6 +224,81 @@ test("deleted does not collide with deviceChatAccepted", () => {
   }));
   assert.equal(accept.kind, "deviceChatAccepted");
   assert.throws(() => encodeOpaqueDeletedMessage({ targetMessageId: "" }), /target message id/);
+});
+
+// Spec 0006 buttons. These two vectors are published to the desktop client
+// in polkadot-chat-desktop docs/spec/vectors-0006.md; the desktop codec must
+// decode them byte for byte, so a change here is a wire break, not a refactor.
+const BUTTONS_VECTOR = "45011442544e2d310030fd779001000000f2205069636b206f6e650808104563686f001c6563686f20686918436f6c6f7572010801020410446f6373025068747470733a2f2f706f6c6b61646f742e636f6d00";
+const BUTTON_PRESS_VECTOR = "6c145052532d31e833fd779001000000f31442544e2d310001080102";
+const vectorRows = [
+  [{ label: "Echo", action: { command: "echo hi" } }, { label: "Colour", action: { callback: Uint8Array.of(1, 2) } }],
+  [{ label: "Docs", action: { url: "https://polkadot.com" } }],
+];
+
+test("buttons: pinned vector A matches the spec 0006 SCALE layout", () => {
+  const opaque = encodeOpaqueButtonsMessage({ messageId: "BTN-1", timestamp: 1_720_000_000_000, text: "Pick one", rows: vectorRows, oneShot: false });
+  assert.equal(hexOf(opaque), BUTTONS_VECTOR);
+  // The same bytes built by hand from the spec: text, Vec<Vec<Button>>, bool.
+  const button = (label, tag, value) => concat(str(label), Uint8Array.of(tag), value);
+  const content = concat(
+    str("Pick one"),
+    compact(2),
+    compact(2), button("Echo", 0, str("echo hi")), button("Colour", 1, scaleEncodeBytes(Uint8Array.of(1, 2))),
+    compact(1), button("Docs", 2, str("https://polkadot.com")),
+    Uint8Array.of(0),
+  );
+  assert.equal(BUTTONS_CONTENT_KIND, 242);
+  assert.equal(hexOf(opaque), hexOf(opaqueMessage("BTN-1", 242, content)));
+  const m = decodeOne(hex(BUTTONS_VECTOR));
+  assert.deepEqual(
+    { kind: m.kind, messageId: m.messageId, timestamp: m.timestamp, text: m.text, rows: m.rows, oneShot: m.oneShot },
+    { kind: "buttons", messageId: "BTN-1", timestamp: 1_720_000_000_000, text: "Pick one", rows: vectorRows, oneShot: false },
+  );
+});
+
+test("buttonPress: pinned vector B matches the spec 0006 SCALE layout", () => {
+  const opaque = encodeOpaqueButtonPressMessage({ messageId: "PRS-1", timestamp: 1_720_000_001_000, targetMessageId: "BTN-1", row: 0, index: 1, payload: Uint8Array.of(1, 2) });
+  assert.equal(hexOf(opaque), BUTTON_PRESS_VECTOR);
+  assert.equal(BUTTON_PRESS_CONTENT_KIND, 243);
+  const m = decodeOne(hex(BUTTON_PRESS_VECTOR));
+  assert.deepEqual(
+    { kind: m.kind, messageId: m.messageId, timestamp: m.timestamp, targetMessageId: m.targetMessageId, row: m.row, index: m.index, payload: m.payload },
+    { kind: "buttonPress", messageId: "PRS-1", timestamp: 1_720_000_001_000, targetMessageId: "BTN-1", row: 0, index: 1, payload: Uint8Array.of(1, 2) },
+  );
+});
+
+test("round-trip: buttons with oneShot, an opaque tx action, and an empty press payload", () => {
+  const rows = [[{ label: "Sign", action: { tx: Uint8Array.of(9, 9, 9) } }]];
+  const m = decodeOne(encodeOpaqueButtonsMessage({ messageId: "B-2", text: "", rows, oneShot: true }));
+  assert.deepEqual([m.kind, m.text, m.rows, m.oneShot], ["buttons", "", rows, true]);
+  const p = decodeOne(encodeOpaqueButtonPressMessage({ targetMessageId: "B-2", row: 7, index: 3 }));
+  assert.deepEqual([p.kind, p.targetMessageId, p.row, p.index, p.payload.length], ["buttonPress", "B-2", 7, 3, 0]);
+});
+
+// The limits are the anti-abuse guards of spec 0006 (Drawbacks): the encoder
+// refuses to build what a client should never have to render.
+test("buttons encoder enforces rows, row width, label and callback limits", () => {
+  const b = (label = "ok", action = { command: "x" }) => ({ label, action });
+  const enc9 = () => encodeOpaqueButtonsMessage({ text: "t", rows: Array.from({ length: 9 }, () => [b()]) });
+  assert.throws(enc9, /1 to 8 rows/);
+  assert.throws(() => encodeOpaqueButtonsMessage({ text: "t", rows: [[b(), b(), b(), b(), b()]] }), /1 to 4 buttons/);
+  assert.throws(() => encodeOpaqueButtonsMessage({ text: "t", rows: [[b("x".repeat(41))]] }), /label/);
+  assert.doesNotThrow(() => encodeOpaqueButtonsMessage({ text: "t", rows: [[b("é".repeat(40))]] }));
+  assert.throws(() => encodeOpaqueButtonsMessage({ text: "t", rows: [[b("ok", { callback: new Uint8Array(257) })]] }), /256 bytes/);
+  assert.throws(() => encodeOpaqueButtonsMessage({ text: "t", rows: [[b("ok", { pay: "x" })]] }), /one of command/);
+  assert.throws(() => encodeOpaqueButtonPressMessage({ targetMessageId: "B", row: 256, index: 0 }), /u8/);
+});
+
+// A decoder bound: 9 rows on the wire is undecodable, and an unknown action
+// tag has no length, so the message is undecodable too; neither may break
+// the next message in the batch.
+test("buttons decoder rejects over-limit rows and unknown action tags", () => {
+  const row = concat(compact(1), str("a"), Uint8Array.of(0), str("x"));
+  const nine = opaqueMessage("B-9", 242, concat(str("t"), compact(9), ...Array.from({ length: 9 }, () => row), Uint8Array.of(0)));
+  assert.equal(decodeOne(nine).kind, "undecodable");
+  const unknown = opaqueMessage("B-U", 242, concat(str("t"), compact(1), compact(1), str("a"), Uint8Array.of(4), str("x"), Uint8Array.of(0)));
+  assert.match(decodeOne(unknown).error, /unknown button action 4/);
 });
 
 test("round-trip: dataChannelClosed carries offerId", () => {

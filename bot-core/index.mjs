@@ -77,6 +77,8 @@ import { commandCatalog, resolveModelPolicy } from "./lib/commands.mjs";
 import { splitMessageText } from "./lib/chunk.mjs";
 import { createOutboundLanes } from "./lib/outbound-lanes.mjs";
 import { createDeletionLedger, createExtensionGate, createMessageDeleter, parseProtocolExtensions } from "./lib/message-deletion.mjs";
+import { buttonsFallbackText, parseButtonsBlock } from "./lib/buttons-block.mjs";
+import { buttonPressText, createSentButtons } from "./lib/button-presses.mjs";
 import { createWorkspaces } from "./lib/workspaces.mjs";
 import { downloadP2PFile, uploadP2PFile, validateHopUrl } from "./lib/hop-client.mjs";
 import { createMediaStore } from "./lib/media-store.mjs";
@@ -123,6 +125,7 @@ import {
   encodeOpaqueReplyMessage,
   encodeOpaqueEditedMessage,
   encodeOpaqueDeletedMessage,
+  encodeOpaqueButtonsMessage,
   encodeOpaqueDataChannelClosedMessage,
   encodeOpaqueChatAcceptedMessage,
   encodeOpaqueDeviceChatAcceptedMessage,
@@ -1053,6 +1056,25 @@ const deleteMessage = async (peerHex, messageId) => {
   return retractOwn(k, messageId);
 };
 
+// ---------- spec 0006 buttons ----------
+// A brain ends its reply with a ```buttons block (lib/buttons-block.mjs). A
+// peer with the extension gets ONE kind-242 message; any other peer gets the
+// spec's fallback (the text, then the labels as a numbered list), so an old
+// phone never shows an "unsupported message" bubble. The same per-peer gate
+// as deletion; for buttons, any extension kind from the peer is evidence.
+// sentButtons remembers the bot's own buttons messages, so a buttonPress is
+// accepted only for one of them, from the peer it went to.
+const sentButtons = createSentButtons();
+const prepareReply = (peerHex, text, { allowButtons = true } = {}) => {
+  const parsed = parseButtonsBlock(text);
+  if (!parsed) return { text, buttons: null };
+  if (allowButtons && extensionGate.enabled(norm(peerHex), "buttons")) {
+    return { text: parsed.text, buttons: { rows: parsed.rows, oneShot: parsed.oneShot } };
+  }
+  log("BOT_BUTTONS_FALLBACK", { to: peerHex, buttons: parsed.rows.flat().length });
+  return { text: buttonsFallbackText(parsed.text, parsed.rows), buttons: null };
+};
+
 // ---------- send a reply to a peer ----------
 // Returns the outgoing envelope messageId (an app UUID) so callers — notably
 // POST /send — hand the brain an id it can later edit or that the peer can
@@ -1062,20 +1084,31 @@ const deleteMessage = async (peerHex, messageId) => {
 // slot (live-reply fallback). Sent during an owed turn, the message is that
 // inbound's answer and is journaled before the lane takes it (see
 // journalAnswer); `ephemeral` opts a placeholder/progress frame out.
-const submitMessage = async (peerHex, { text, replyTo = null, editOf = null, supersedes = [], ephemeral = false }) => {
+const submitMessage = async (peerHex, { text, replyTo = null, editOf = null, supersedes = [], ephemeral = false, buttons = null }) => {
   const k = norm(peerHex);
   if (sessions.get(k) == null) throw new Error("no active session for peer");
   const messageId = makeAppUuid();
   const timestamp = stamp(k);
-  const opaque = replyTo
-    ? encodeOpaqueReplyMessage({ messageId, timestamp, replyToMessageId: replyTo, text })
-    : editOf
-      ? encodeOpaqueEditedMessage({ messageId, timestamp, targetMessageId: editOf, text })
-      : encodeOpaqueTextMessage({ messageId, timestamp, text });
+  const opaque = buttons
+    ? encodeOpaqueButtonsMessage({ messageId, timestamp, text, rows: buttons.rows, oneShot: buttons.oneShot })
+    : replyTo
+      ? encodeOpaqueReplyMessage({ messageId, timestamp, replyToMessageId: replyTo, text })
+      : editOf
+        ? encodeOpaqueEditedMessage({ messageId, timestamp, targetMessageId: editOf, text })
+        : encodeOpaqueTextMessage({ messageId, timestamp, text });
+  // Recorded before the journal write, so the persisted state that holds
+  // this answer also holds the record a later press is checked against.
+  if (buttons) sentButtons.record(k, messageId, buttons.rows);
   if (!ephemeral) await journalAnswer(k, { messageId, opaque, supersedes });
   const { submitted, delivered } = outbound.enqueue(k, opaque, { messageId, supersedes });
   await submitted;
-  log("BOT_SENT_TEXT", { to: peerHex, chars: text.length, ...(replyTo ? { replyTo } : {}), ...(editOf ? { editOf } : {}) });
+  log(buttons ? "BOT_SENT_BUTTONS" : "BOT_SENT_TEXT", {
+    to: peerHex,
+    chars: text.length,
+    ...(buttons ? { messageId, buttons: buttons.rows.flat().length, oneShot: buttons.oneShot } : {}),
+    ...(replyTo ? { replyTo } : {}),
+    ...(editOf ? { editOf } : {}),
+  });
   return { messageId, delivered };
 };
 const sendMessage = async (peerHex, opts) => {
@@ -1211,22 +1244,28 @@ const sendReaction = async (peerHex, targetMessageId, emoji, removed = false) =>
 // placeholder left a locked-phone user unaware their answer had landed.
 // If the peer never fetched the placeholder it is superseded by the answer
 // instead: a status line for progress nobody saw is pure noise.
-const deliverToChat = async (peerHex, text, _deliveryContext = null, turnStats = null) => {
+const deliverToChat = async (peerHex, reply, _deliveryContext = null, turnStats = null) => {
+  // A trailing ```buttons block becomes spec 0006 buttons on the LAST part.
+  const { text, buttons } = prepareReply(peerHex, reply);
   const parts = splitMessageText(text, replyChunkBytes);
   if (parts.length > 1) log("BOT_REPLY_CHUNKED", { to: peerHex, parts: parts.length, chars: text.length });
   const lp = await takeLivePlaceholder(peerHex);
   // Only the unfetched-placeholder path consumes parts[0]; a finalize failure
-  // delivered nothing, so every part still has to go out.
+  // delivered nothing, so every part still has to go out. A placeholder slot
+  // carries text only, so with buttons it never takes the only part.
   let firstPartSent = false;
   if (lp) {
     const status = renderTurnStats({ elapsed: lp.tracker.elapsed(), steps: lp.tracker.step, usage: turnStats });
     try {
-      const { edited } = await lp.handle.finalize(status, { ifUnfetched: parts[0] });
-      firstPartSent = !edited;
+      const { edited } = await lp.handle.finalize(status, buttons && parts.length === 1 ? {} : { ifUnfetched: parts[0] });
+      firstPartSent = !edited && !(buttons && parts.length === 1);
       log("BOT_LIVE_STATUS", { to: peerHex, messageId: lp.handle.messageId, status, edited });
     } catch (e) { log("BOT_LIVE_FINALIZE_FAILED", { to: peerHex, error: String(e?.message ?? e) }); }
   }
-  for (const part of firstPartSent ? parts.slice(1) : parts) await sendText(peerHex, part);
+  const rest = firstPartSent ? parts.slice(1) : parts;
+  for (const [i, part] of rest.entries()) {
+    await sendMessage(peerHex, { text: part, ...(buttons && i === rest.length - 1 ? { buttons } : {}) });
+  }
 };
 
 // A turn is starting: anchor its progress tracker, arm the "thinking"
@@ -1285,6 +1324,8 @@ const agentRuntime = engine ? createAgentRuntime({
     transport: "polkadot-app",
     policy: aiToolPolicy,
     personaPath: path.join(aiWorkspace, "PERSONA.md"),
+    // Spec 0006: the ```buttons hint only for a peer that can render them.
+    buttons: (peerHex) => extensionGate.enabled(norm(peerHex), "buttons"),
   },
   chat: { sendText, deliver: deliverToChat, beginTurn: beginTurnProgress },
   username,
@@ -1300,6 +1341,9 @@ const bridgeOperatorContext = brain === "bridge" && aiContextEnabled
     model: aiModel,
     modelPolicy: aiAllowedModels,
     commands: commandCatalog({ allowedModels: aiAllowedModels }),
+    // One context for every peer: the hint only when the operator forces
+    // buttons on; peers without the extension still get the fallback text.
+    buttons: protocolExtensions.enabled.has("buttons"),
   })
   : "";
 
@@ -1356,7 +1400,8 @@ const handleInbound = async (peerHex, msg, owedId = null, { reservedBridge = fal
     return;
   }
   if (brain === "echo") {
-    await sendText(peerHex, `Echo: ${synthesizeText(msg.text, msg.attachments)}`).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
+    // Through deliverToChat, so an echoed ```buttons block exercises spec 0006.
+    await deliverToChat(peerHex, `Echo: ${synthesizeText(msg.text, msg.attachments)}`).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
     return;
   }
   if (agentRuntime) return agentRuntime.handleMessage(peerHex, msg);
@@ -1592,6 +1637,8 @@ const snapshotState = () => ({
     // RFC-0003: tombstones + pending deletions (dl), extension evidence (x).
     ...(deletions.snapshot(norm(peerHex)) ? { dl: deletions.snapshot(norm(peerHex)) } : {}),
     ...(extensionGate.snapshot(norm(peerHex)) ? { x: extensionGate.snapshot(norm(peerHex)) } : {}),
+    // Spec 0006: the bot's own recent buttons messages (bp), for press checks.
+    ...(sentButtons.snapshot(norm(peerHex)) ? { bp: sentButtons.snapshot(norm(peerHex)) } : {}),
   })),
   seen: [...seenRequests].slice(-SEEN_CAP),
   // An unresolved acceptance marker is paired with an owed entry, so its
@@ -1856,7 +1903,7 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
   const deletedNow = []; // RFC-0003 targets deleted by this batch
   let stateChanged = false;
   let undecodable = 0;
-  for (const m of decoded.messages ?? []) {
+  for (let m of decoded.messages ?? []) {
     peerClock.observe(norm(peerHex), m.timestamp);
     // Initiator side of an outgoing greeting: the peer's accept can advertise
     // their device encryption key — fold it into the session (and subscribe to
@@ -1903,8 +1950,38 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
       batchSeen.add(id); newlySeen.push(id); stops.push(id);
       continue;
     }
+    // Spec 0006 / the desktop spec set: any extension kind from this peer
+    // (buttons 242, buttonPress 243, or another provisional 240-249 kind) is
+    // evidence that its client renders kinds it did not ship with.
+    if (m.kind === "buttons" || m.kind === "buttonPress" || (m.kind === "unsupported" && m.contentKind >= 240 && m.contentKind <= 249)) {
+      const evidence = m.kind === "unsupported" ? "extension" : "buttons";
+      if (extensionGate.observe(norm(peerHex), evidence)) {
+        stateChanged = true;
+        log("BOT_PROTOCOL_EXTENSION_ENABLED", { peer: norm(peerHex), kind: evidence });
+      }
+    }
+    // A buttonPress runs a brain turn, but only for a buttons message this
+    // bot sent to THIS peer; a foreign or unknown press is logged and dropped.
+    if (m.kind === "buttonPress") {
+      if (!m.messageId) continue;
+      const id = messageDedupId(peerHex, decoded.requestId, `buttonPress:${m.targetMessageId}:${m.row}:${m.index}`, m.messageId);
+      if (seenRequests.has(id) || batchSeen.has(id)) continue;
+      batchSeen.add(id); newlySeen.push(id);
+      const press = { from: peerHex, messageId: m.targetMessageId, row: m.row, index: m.index };
+      const label = sentButtons.label(norm(peerHex), m.targetMessageId, m.row, m.index);
+      if (label == null) {
+        stateChanged = true;
+        log("BOT_BUTTON_PRESS_IGNORED", { ...press, reason: "not a button this bot sent to this peer" });
+        continue;
+      }
+      log("BOT_RECEIVED_BUTTON_PRESS", press);
+      fresh.push({ id, msg: { text: buttonPressText(label, m.payload), messageId: m.messageId, kind: "text" } });
+      continue;
+    }
     // Brain-run kinds. Text must be non-empty unless attachments carry the
-    // content (a caption-less photo).
+    // content (a caption-less photo). A buttons message from a peer reaches
+    // the brain as its fallback text (the brain cannot press buttons).
+    if (m.kind === "buttons") m = { ...m, kind: "text", text: buttonsFallbackText(m.text, m.rows) };
     const attachments = (m.richText?.attachments ?? []).filter((a) => a.kind === "p2pMixnetFile").map(toAttachmentMeta);
     const isBrainKind = (m.kind === "text" || m.kind === "richText" || m.kind === "reply" || m.kind === "edited")
       && typeof m.text === "string" && (m.text.length > 0 || attachments.length > 0);
@@ -2514,9 +2591,13 @@ const startBridge = () => {
           return json(200, { success: true, message_id: String(editOf), coalesced: true });
         }
         // Long harness answers are chunked like direct-engine ones; the
-        // outbound lane keeps the parts ordered on the wire.
-        const parts = splitMessageText(text, replyChunkBytes);
-        if (parts.length > 1) log("BOT_REPLY_CHUNKED", { to: chatId, parts: parts.length, chars: text.length });
+        // outbound lane keeps the parts ordered on the wire. A trailing
+        // ```buttons block rides the last part (spec 0006, see deliverToChat);
+        // a quoted answer is a reply, not a buttons message, so it gets the
+        // fallback text.
+        const { text: replyText, buttons } = prepareReply(chatId, text, { allowButtons: !replyTo });
+        const parts = splitMessageText(replyText, replyChunkBytes);
+        if (parts.length > 1) log("BOT_REPLY_CHUNKED", { to: chatId, parts: parts.length, chars: replyText.length });
         let firstId = null;
         const lp = await takeLivePlaceholder(chatId);
         if (lp) {
@@ -2529,15 +2610,20 @@ const startBridge = () => {
             lp.handle.finalize(status).catch((e) => log("BOT_LIVE_FINALIZE_FAILED", { to: chatId, error: String(e?.message ?? e) }));
           } else {
             try {
-              const { edited, messageId } = await lp.handle.finalize(status, { ifUnfetched: parts[0] });
-              if (!edited) firstId = messageId; // the unfetched slot holds parts[0]
+              const onlyPartHasButtons = buttons && parts.length === 1;
+              const { edited, messageId } = await lp.handle.finalize(status, onlyPartHasButtons ? {} : { ifUnfetched: parts[0] });
+              if (!edited && !onlyPartHasButtons) firstId = messageId; // the unfetched slot holds parts[0]
               log("BOT_LIVE_STATUS", { to: chatId, messageId: lp.handle.messageId, status, edited });
             } catch (e) { log("BOT_LIVE_FINALIZE_FAILED", { to: chatId, error: String(e?.message ?? e) }); }
           }
         }
         for (const [i, part] of parts.entries()) {
           if (i === 0 && firstId) continue;
-          const id = await sendMessage(chatId, { text: part, replyTo: i === 0 && replyTo ? String(replyTo) : null });
+          const id = await sendMessage(chatId, {
+            text: part,
+            replyTo: i === 0 && replyTo ? String(replyTo) : null,
+            ...(buttons && i === parts.length - 1 ? { buttons } : {}),
+          });
           if (i === 0) firstId = id;
         }
         return json(200, { success: true, message_id: firstId, ...(parts.length > 1 ? { parts: parts.length } : {}) });
@@ -2714,6 +2800,7 @@ for (const p of restored?.peers ?? []) {
     agentRuntime?.restorePeer(norm(p.peerHex), { rs: p.rs, mo: p.mo, pj: p.pj, br: p.br });
     deletions.restore(norm(p.peerHex), p.dl);
     extensionGate.restore(norm(p.peerHex), p.x);
+    sentButtons.restore(norm(p.peerHex), p.bp);
     restoredPeers += 1;
   } catch (e) { log("BOT_STATE_PEER_SKIPPED", { peer: p?.peerHex, error: String(e?.message ?? e) }); }
 }

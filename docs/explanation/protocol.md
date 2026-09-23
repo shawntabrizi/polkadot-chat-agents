@@ -165,10 +165,12 @@ with each inbound kind:
 | coinageSend (16), contactAdded (3), leftChat (13) | logged + bridge event; coinage is informational only (claiming needs the full Coinage stack) |
 | dataChannelOffer (8) | auto-declined with dataChannelClosed (11) after the ACK — the bot has no WebRTC stack, declining beats ringing forever |
 | deleted (21) | RFC-0003 tombstone, see [Message deletion](#message-deletion-rfc-0003) — never answered |
+| buttons (242) | answered like text: the brain gets the text and the labels as a numbered list, see [Buttons](#buttons-spec-0006) |
+| buttonPress (243) | a brain turn with `[button] <label>`, only for a buttons message this bot sent to that peer |
 | anything else | logged (`BOT_UNSUPPORTED_CONTENT` / `BOT_UNDECODABLE_MESSAGE`) and skipped |
 
 Outbound, the bot can send plain text, replies (quotes), edits of its own
-messages, reactions, and HOP-backed file attachments.
+messages, reactions, HOP-backed file attachments, and buttons (spec 0006).
 
 ### Message deletion (RFC-0003)
 
@@ -218,6 +220,73 @@ gate, nothing is sent (`BOT_DELETE_SKIPPED`). Live replies use it once: when a
 placeholder was never ACKed, the fallback answer already supersedes it, and
 the bot then also retracts it, in case the peer fetched it without the ACK
 arriving.
+
+### Buttons (spec 0006)
+
+Spec 0006 (`polkadot-chat-desktop/docs/spec/0006-buttons.md`) adds two
+provisional kinds from the desktop spec set (range 240–249):
+
+```
+buttons(ButtonsContent)         -> 242
+buttonPress(ButtonPressContent) -> 243
+ButtonsContent     { text: String, rows: Vec<Vec<Button>>, oneShot: bool }
+Button             { label: String, action: Action }
+Action             { command(String)=0 | callback(Bytes)=1 | url(String)=2 | tx(Bytes)=3 }
+ButtonPressContent { messageId: String, row: u8, index: u8, payload: Bytes }
+```
+
+The envelope is the usual one (messageId, timestamp u64 LE, version 0, kind
+byte). `tx` is opaque bytes until RFC 0007. Limits: 8 rows of 4 buttons,
+labels up to 40 characters, callback payloads up to 256 bytes. The codec is
+`encodeOpaqueButtonsMessage` / `encodeOpaqueButtonPressMessage` in
+`vendor/app-chat-codec.mjs`; two pinned byte vectors are in
+`polkadot-chat-desktop/docs/spec/vectors-0006.md` and in `test/codec.test.mjs`.
+An action tag above 3 has no known length, so such a message is undecodable
+(the rest of the batch still decodes).
+
+**A brain sends buttons** by ending its reply with a fenced block tagged
+`buttons` (parser: `lib/buttons-block.mjs`, shared with the desktop client):
+
+````
+Pick one
+```buttons
+{"rows": [[{"label": "Yes", "action": {"command": "yes"}},
+           {"label": "More", "action": {"callback": "page-2"}}],
+          [{"label": "Docs", "action": {"url": "https://polkadot.com"}}]],
+ "oneShot": false}
+```
+````
+
+- `command`: the client sends the string as the user's text.
+- `callback`: UTF-8 bytes, or raw bytes with a `base64:` prefix; the client
+  sends them back in a `buttonPress`.
+- `url`: `https://` or `polkadotapp://` only.
+- `oneShot` is optional (default false). `tx` is not offered to brains.
+
+The bot strips the block and sends the rest of the text plus the rows as ONE
+kind-242 message (a long text is chunked; the last part carries the rows).
+An invalid block (bad JSON, a broken limit, a block that does not end the
+reply) is left as plain text. A quoted bridge reply (`reply_to`) cannot be a
+buttons message, so it gets the fallback.
+
+**Sending is gated per peer**, with the same gate as deletion. A peer gets
+kind 242 only when it has sent the bot any extension kind (21, 242, 243, or
+another 240–249 kind; evidence persisted as `x`), or when the operator sets
+`BOT_PROTOCOL_EXTENSIONS=buttons`. Any other peer gets the spec's fallback: the
+text, then the labels as a numbered list (`BOT_BUTTONS_FALLBACK`). The operator
+context tells a brain about the block only for a peer that can render it (a
+bridge harness gets one context for every peer, so there the hint follows
+`BOT_PROTOCOL_EXTENSIONS=buttons`).
+
+**Receiving a press:** a `buttonPress` is accepted only for a buttons message
+this bot sent to that same peer (the bot keeps its last 50 per peer, persisted
+as `bp`). It then runs a brain turn with the text `[button] <label>`, plus
+` (payload: <hex>)` when the press carries bytes, and logs
+`BOT_RECEIVED_BUTTON_PRESS { from, messageId, row, index }`. A press for an
+unknown message, another peer's message, or a missing button is logged as
+`BOT_BUTTON_PRESS_IGNORED` and dropped. A `buttons` message from a peer reaches
+the brain as its fallback text. `command` presses arrive as normal text and
+`url` presses never reach the bot.
 
 ### Attachments (photos/videos/files)
 

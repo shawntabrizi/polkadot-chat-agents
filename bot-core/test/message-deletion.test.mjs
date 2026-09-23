@@ -99,6 +99,27 @@ test("BOT_PROTOCOL_EXTENSIONS forces an extension on for every peer", () => {
   assert.equal(gate.enabled("anyone", "deleted"), true);
 });
 
+// Spec 0006: a peer that sent ANY extension kind renders kinds its app did
+// not ship with, so buttons may go to it. Deletion keeps its own, narrower
+// rule: a typing indicator does not prove the peer applies deletions.
+test("buttons are enabled by any extension evidence; deletion only by a deletion", () => {
+  const gate = createExtensionGate();
+  assert.equal(gate.enabled("bob", "buttons"), false, "no evidence: the fallback text goes out");
+  gate.observe("bob", "extension"); // e.g. a typing (240) from bob
+  assert.equal(gate.enabled("bob", "buttons"), true);
+  assert.equal(gate.enabled("bob", "deleted"), false);
+  gate.observe("carol", "deleted");
+  assert.equal(gate.enabled("carol", "buttons"), true, "kind 21 is extension evidence too");
+  gate.observe("dave", "buttons");
+  assert.equal(gate.enabled("dave", "buttons"), true);
+  const restored = createExtensionGate();
+  restored.restore("bob", JSON.parse(JSON.stringify(gate.snapshot("bob"))));
+  assert.equal(restored.enabled("bob", "buttons"), true, "evidence survives a restart");
+  const forced = createExtensionGate({ forced: parseProtocolExtensions("buttons").enabled });
+  assert.equal(forced.enabled("anyone", "buttons"), true);
+  assert.equal(forced.enabled("anyone", "deleted"), false);
+});
+
 // ---------- sender path over real outbound lanes ----------
 
 // In-memory lanes as in outbound-lanes.test.mjs, but the slot holds the real
