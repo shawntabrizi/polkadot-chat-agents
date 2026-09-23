@@ -15,10 +15,11 @@ Priorities or boundaries:
 `;
 
 // Spec 0006; the block format is parsed by lib/buttons-block.mjs.
-export const BUTTONS_HINT = "Buttons: you MAY end a reply with a ```buttons fenced block holding JSON "
+export const BUTTONS_HINT = "Buttons: the chat app renders a trailing fenced ```buttons block in your reply as real clickable buttons. "
+  + "When the user asks for buttons, or should pick from a few choices, you MUST end the reply with exactly one block holding JSON "
   + "{\"rows\":[[{\"label\":\"Yes\",\"action\":{\"command\":\"yes\"}}]],\"oneShot\":false}; "
-  + "an action is {\"command\":text the user sends}, {\"callback\":string echoed back to you as \"[button] <label> (payload: <hex>)\"} "
-  + "or {\"url\":\"https://...\"}; at most 8 rows of 4 buttons, labels up to 40 characters.";
+  + "an action is {\"command\":text sent back to you as the user's next message}, {\"callback\":string echoed back to you as \"[button] <label> (payload: <hex>)\"} "
+  + "or {\"url\":\"https://...\"}; at most 8 rows of 4 buttons, labels up to 40 characters; put nothing after the block.";
 
 const modelPolicyText = (modelPolicy) => {
   if (modelPolicy == null) return "open";
