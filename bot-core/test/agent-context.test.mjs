@@ -63,5 +63,5 @@ test("the buttons hint appears only when the peer can render buttons", () => {
   assert.doesNotMatch(build(), /```buttons/);
   const withButtons = build({ buttons: true });
   assert.ok(withButtons.includes(BUTTONS_HINT));
-  assert.match(withButtons, /MAY end a reply with a ```buttons/);
+  assert.match(withButtons, /MUST end the reply with exactly one block/);
 });
