@@ -248,25 +248,24 @@ Named profiles are deliberately complete rather than aliases for one RPC:
 | Profile | People RPC | Identity backend | Bulletin / HOP |
 |---|---|---|---|
 | `devnet` (default) | `wss://people-paseo.rotko.net` (with the other Products Devnet community RPCs as fallbacks) | `https://polkadot-app.api.polkadotcommunity.foundation` | `wss://bullet.sik.rocks` plus the Products Devnet HOP node set |
-| `paseo` | `wss://paseo-people-next-system-rpc.polkadot.io` | `https://identity-backend-next.parity-testnet.parity.io` | `wss://paseo-bulletin-next-rpc.polkadot.io` and the two `paseo-hop-next-*` nodes |
+| `paseo` | `wss://paseo-people-next-system-rpc.polkadot.io` | `https://identity.dotspark.app` | `wss://paseo-bulletin-next-rpc.polkadot.io` and the two `paseo-hop-next-*` nodes |
 | `sandbox` | the daemon's store node (`pcs up`, read at create time) | the daemon's control API | the daemon's HOP node (`ws://` on loopback; saved as `hopUrl`, written as `BOT_HOP_UPLOAD_NODE`/`BOT_HOP_ALLOWED_NODES`; the bot's upload signer is registered for the sandbox's Bulletin allowance) |
 
-Devnet registration normally needs no environment credential: `pca` obtains a
+Devnet and Paseo registration normally need no environment credential: `pca` obtains a
 challenge and proves possession of the bot's `//wallet` key to mint the
 refreshable bearer session automatically. Two CLI-only override/fallback
 variables are supported; neither is passed to a running or deployed bot:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PCA_IDENTITY_VOUCHER` | — | Optional single-use, base64-encoded 32-byte Products Devnet enrollment voucher, used only as a fallback when automatic client-proof enrollment is rejected by a hard attestation gate. `pca` never saves it. |
+| `PCA_IDENTITY_VOUCHER` | — | Optional single-use, base64-encoded 32-byte enrollment voucher for the selected backend, used only as a fallback when automatic client-proof enrollment is rejected by a hard attestation gate. `pca` never saves it. |
 | `PCA_IDENTITY_TOKEN` | — | Existing identity-backend bearer token for controlled automation; overrides automatic session acquisition. |
 | `PCA_METADATA_CACHE_DIR` | `~/.pca/cache/metadata` | Where `pca`, the bot runtime and the sandbox cache each chain's runtime metadata (public, keyed by code hash). The public nodes take up to a minute to serve it; with the cache only the first run after a runtime upgrade pays. |
 
-If Devnet registration has not completed, `secret.json` temporarily stores the
+During Devnet or Paseo registration, `secret.json` temporarily stores the
 automatically issued access and refresh tokens so `pca register <name>` can
 retry or refresh without minting another session. The session is removed after
-the username claim succeeds. Paseo registration does not use this automatic
-session flow.
+the username claim succeeds.
 
 ### Access control
 

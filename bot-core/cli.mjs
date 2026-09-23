@@ -1239,7 +1239,7 @@ async function runRegistration(name, config, { secret, wantUsername, digits, wai
 }
 
 // The bearer a username claim carries: on a client-proof profile (Products
-// Devnet) a session minted with the bot's own wallet key — or the issued
+// Devnet or Paseo) a session minted with the bot's own wallet key — or the issued
 // PCA_IDENTITY_TOKEN, or the saved session, or the PCA_IDENTITY_VOUCHER
 // after a refusal (lib/register.mjs) — persisted in secret.json until the
 // claim is in; elsewhere only an issued token, when given.

@@ -31,9 +31,8 @@ const testnet = (profile) => Object.freeze({
   mock: false,
   peopleEndpoints: profile.peopleEndpoints,
   identityBackendUrl: profile.identityBackendUrl,
-  // How the identity backend admits a username claim: "none" (Paseo Next)
-  // or "client-proof" (Products Devnet: a bearer minted by proving the
-  // //wallet key, as `pca create` does).
+  // Both testnets require a bearer minted by proving the //wallet key,
+  // as `pca create` does. Keep the authentication policy with the endpoints.
   identityRegistrationAuth: profile.identityRegistrationAuth,
   // Uploads go to the first HOP node, as bot-core's profile does; every
   // node in the list is a trusted download host.

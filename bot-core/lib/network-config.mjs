@@ -33,8 +33,8 @@ export const PASEO = Object.freeze({
   peopleEndpoints: Object.freeze([
     "wss://paseo-people-next-system-rpc.polkadot.io",
   ]),
-  identityBackendUrl: "https://identity-backend-next.parity-testnet.parity.io",
-  identityRegistrationAuth: "none",
+  identityBackendUrl: "https://identity.dotspark.app",
+  identityRegistrationAuth: "client-proof",
   bulletin: Object.freeze({
     name: "Bulletin Paseo Next v2",
     rpcEndpoint: "wss://paseo-bulletin-next-rpc.polkadot.io",
