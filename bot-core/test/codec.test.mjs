@@ -14,6 +14,8 @@ import {
   encodeOpaqueReactionMessage,
   encodeOpaqueReplyMessage,
   encodeOpaqueEditedMessage,
+  encodeOpaqueDeletedMessage,
+  DELETED_CONTENT_KIND,
   encodeOpaqueDataChannelClosedMessage,
   scaleEncodeBytes,
   x25519PublicKeyFromPrivateKey,
@@ -181,6 +183,43 @@ test("round-trip: edited carries target id and new text", () => {
   assert.equal(m.kind, "edited");
   assert.equal(m.targetMessageId, "MSG-3");
   assert.equal(m.text, "fixed");
+});
+
+// RFC-0003: DeletedContent { messageId: UUID } is one SCALE string after the
+// content byte, the same shape as the edit and reply targets. A fixed vector
+// pins the layout a phone client would have to produce byte for byte.
+test("deleted: byte vector matches the SCALE layout of an edit target", () => {
+  const opaque = encodeOpaqueDeletedMessage({ messageId: "DEL-1", timestamp: 1_720_000_000_000, targetMessageId: "MSG-3" });
+  assert.equal(
+    hexOf(opaque),
+    "58" // compact length of the remote message (22 bytes)
+      + "14" + "44454c2d31" // messageId "DEL-1"
+      + "0030fd7790010000" // timestamp u64 LE
+      + "00" // version
+      + "15" // content kind 21 (deleted)
+      + "14" + "4d53472d33", // target "MSG-3"
+  );
+  assert.equal(hexOf(opaque), hexOf(opaqueMessage("DEL-1", DELETED_CONTENT_KIND, str("MSG-3"))));
+});
+
+test("round-trip: deleted carries its own id and the target id", () => {
+  const m = decodeOne(encodeOpaqueDeletedMessage({ messageId: "DEL-2", targetMessageId: "MSG-9" }));
+  assert.equal(m.kind, "deleted");
+  assert.equal(m.messageId, "DEL-2");
+  assert.equal(m.targetMessageId, "MSG-9");
+});
+
+// Index 20 is DeviceChatAccepted (mds.md). A deletion must never reuse it:
+// every accept would then read as a deletion, and a deletion as a broken accept.
+test("deleted does not collide with deviceChatAccepted", () => {
+  assert.notEqual(DELETED_CONTENT_KIND, 20);
+  const accept = decodeOne(encodeOpaqueDeviceChatAcceptedMessage({
+    acceptedRequestId: "REQ-1",
+    statementAccountId: new Uint8Array(32).fill(1),
+    encryptionPublicKey: x25519PublicKeyFromPrivateKey(new Uint8Array(32).fill(3)),
+  }));
+  assert.equal(accept.kind, "deviceChatAccepted");
+  assert.throws(() => encodeOpaqueDeletedMessage({ targetMessageId: "" }), /target message id/);
 });
 
 test("round-trip: dataChannelClosed carries offerId", () => {

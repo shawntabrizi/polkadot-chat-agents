@@ -75,8 +75,10 @@ Attachment rows carry
 `attachments: [{ id, kind, mime, size, width?, height?, duration_ms?, peaks?, media_id?, downloaded, url?, error? }]`,
 and a caption-less attachment message gets a synthesized text placeholder like
 `[photo, image/jpeg, 245 KB]`. With `&events=1`, non-message signals arrive
-with a `kind` of `reaction`, `coinageSend`, `leftChat`, or `contactAdded` —
-opt-in, because an unaware harness would chat-reply to a reaction.
+with a `kind` of `reaction`, `coinageSend`, `leftChat`, `contactAdded`, or
+`deleted` — opt-in, because an unaware harness would chat-reply to a reaction.
+A `deleted` event (RFC-0003) carries `target_message_id`: the peer retracted
+that message, so a harness that keeps history should drop it and never answer it.
 
 ## Allowlist, live replies, and long answers
 

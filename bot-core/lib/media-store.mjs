@@ -113,5 +113,18 @@ export const createMediaStore = ({ dir, ttlHours = 48, maxTotalMb = 512, log = (
     try { evictFor(); } catch { /* cache maintenance is best effort */ }
   };
 
-  return { dir, find, save, sweep };
+  // Discard every representation of one identifier (RFC-0003: a deleted
+  // message's downloaded attachment bytes must not outlive it).
+  const remove = (id) => {
+    if (!ID_PATTERN.test(id)) return 0;
+    let removed = 0;
+    for (const entry of entries()) {
+      if (!path.basename(entry.filePath).startsWith(`${id}.`)) continue;
+      fs.rmSync(entry.filePath, { force: true });
+      removed += 1;
+    }
+    return removed;
+  };
+
+  return { dir, find, save, sweep, remove };
 };

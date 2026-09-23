@@ -1056,6 +1056,29 @@ export function encodeOpaqueEditedMessage({
   });
 }
 
+// RFC-0003 message deletion: DeletedContent { messageId: UUID } — the
+// sender's own message being retracted. The RFC text claims index 20, but 20
+// is DeviceChatAccepted (mds.md; @novasamatech/host-chat) and 19 is reserved
+// for RFC-0002. The RFC's own rule (Unresolved Question 6: "whatever is next
+// free at merge time") gives 21. Change it here only, if the spec settles on
+// another number.
+export const DELETED_CONTENT_KIND = 21;
+
+export function encodeOpaqueDeletedMessage({
+  messageId = makeAppUuid(),
+  timestamp = chatTimestampNow(),
+  targetMessageId,
+}) {
+  if (typeof targetMessageId !== "string" || targetMessageId.length === 0) {
+    throw new Error("deletion needs a target message id");
+  }
+  return encodeOpaqueRemoteMessage({
+    messageId,
+    timestamp,
+    content: concatBytes(Uint8Array.of(DELETED_CONTENT_KIND), scaleEncodeString(targetMessageId)),
+  });
+}
+
 export function encodeOpaqueDataChannelClosedMessage({
   messageId = makeAppUuid(),
   timestamp = chatTimestampNow(),
@@ -1590,6 +1613,16 @@ function decodeRemoteMessage(bytes, budget) {
       text: richText.value.text ?? "",
       richText: richText.value,
       offset: richText.offset,
+    };
+  }
+  if (contentKind === DELETED_CONTENT_KIND) {
+    const targetMessageId = decodeIdAt(bytes, offset, "deletion target id");
+    return {
+      messageId: messageId.value,
+      timestamp: Number(timestamp.value),
+      kind: "deleted",
+      targetMessageId: targetMessageId.value,
+      offset: targetMessageId.offset,
     };
   }
   if (contentKind === 13) {

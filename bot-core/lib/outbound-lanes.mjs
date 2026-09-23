@@ -249,6 +249,25 @@ export const createOutboundLanes = ({
       return true;
     },
 
+    // RFC-0003 sender cases for one of our own messages. A QUEUED entry was
+    // never part of a submitted statement (case 1): remove it, and the peer
+    // never sees a trace. An entry in the CURRENT un-ACKed batch (case 2) is
+    // left alone here: the caller drops it by enqueueing its deletion with
+    // `supersedes`, which re-encodes the batch without it. Returns "queued",
+    // "current", or null (not held: never ours, ACKed, or taken over).
+    drop(peerHex, messageId) {
+      const lane = lanes.get(peerHex);
+      if (!lane || !messageId) return null;
+      const index = lane.queue.findIndex((e) => e.messageId === messageId);
+      if (index >= 0) {
+        const [entry] = lane.queue.splice(index, 1);
+        entry.submitted.resolve();
+        entry.delivered.resolve(false);
+        return "queued";
+      }
+      return lane.current?.entries.some((e) => e.messageId === messageId) ? "current" : null;
+    },
+
     hasPending(peerHex) {
       const lane = lanes.get(peerHex);
       return Boolean(lane?.pumping || lane?.current || lane?.queue.length);

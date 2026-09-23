@@ -21,6 +21,9 @@ import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
 import {
   deriveX25519PrivateKey,
   encodeAccountEcdhKey,
+  encodeOpaqueDeletedMessage,
+  encodeOpaqueEditedMessage,
+  encodeOpaqueTextMessage,
   x25519PublicKeyFromPrivateKey,
 } from "../vendor/app-chat-codec.mjs";
 
@@ -207,6 +210,10 @@ async function startPersona(node, { name = "alice", devices = 1 } = {}) {
     },
   };
 }
+
+// The codec's opaque form is SCALE bytes (compact length + remote message);
+// sendRaw takes the remote message itself, as the SDK adds the length.
+const remoteMessage = (opaque) => opaque.subarray([1, 2, 4][opaque[0] & 3]);
 
 const tmpState = () => fs.mkdtempSync(path.join(os.tmpdir(), "pca-e2e-"));
 const tmpFile = (dir, name, bytes) => { const file = path.join(dir, name); fs.writeFileSync(file, bytes); return file; };
@@ -922,6 +929,33 @@ describe("transport e2e", { concurrency: 8 }, () => {
       const rows = await alice.incoming();
       assert.ok(rows.every((m) => m.editedAt == null), `no edits may reach a non-ACKing peer: ${JSON.stringify(rows.map(versions))}`);
       assert.ok(rows.filter((m) => textOf(m).startsWith("live final answer")).length >= 1, "plain final missing");
+      // RFC-0003: this peer never sent a deletion, so the bot must not send one
+      // (an old phone would render it as an unsupported bubble).
+      const fallback = bot.events.find((e) => e.event === "BOT_LIVE_FALLBACK");
+      await bot.waitFor((e) => e.event === "BOT_DELETE_SKIPPED" && e.target === fallback.placeholder, { label: "the retraction skipped" });
+      assert.equal(bot.events.filter((e) => e.event === "BOT_SENT_DELETED").length, 0);
+    } finally {
+      await bot.stop();
+      await node.close();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  test("live reply: a peer that sent a deletion gets the unfetched placeholder retracted", async () => {
+    const node = await startSandbox();
+    const stateDir = tmpState();
+    const bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: liveBrainEnv });
+    try {
+      const alice = await startPersona(node);
+      await alice.open("silent question");
+      // Evidence: the peer itself speaks RFC-0003.
+      await alice.sendRaw(remoteMessage(encodeOpaqueDeletedMessage({ targetMessageId: crypto.randomUUID().toUpperCase() })));
+      await bot.waitFor((e) => e.event === "BOT_PROTOCOL_EXTENSION_ENABLED", { label: "evidence" });
+      await alice.neverAck();
+      await alice.send("still here");
+      const fallback = await bot.waitFor((e) => e.event === "BOT_LIVE_FALLBACK", { label: "BOT_LIVE_FALLBACK", timeoutMs: 40_000 });
+      await bot.waitFor((e) => e.event === "BOT_SENT_DELETED" && e.target === fallback.placeholder, { label: "the retraction", timeoutMs: 20_000 });
+      assert.equal(bot.events.filter((e) => e.event === "BOT_DELETE_SKIPPED").length, 0);
     } finally {
       await bot.stop();
       await node.close();
@@ -1221,6 +1255,68 @@ describe("transport e2e", { concurrency: 8 }, () => {
       await node.close();
       fs.rmSync(stateDir, { recursive: true, force: true });
       fs.rmSync(projDir, { recursive: true, force: true });
+    }
+  });
+
+  // RFC-0003 recipient rules through the real receive path. The persona's
+  // SDK has no `deleted` kind yet, so deletions go in as raw bytes.
+  test("message deletion: applied, duplicate, pending-then-arrival, edit ignored, evidence persisted", async () => {
+    const node = await startSandbox();
+    const stateDir = tmpState();
+    const bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: { BOT_SUBSCRIBE: "0" } });
+    try {
+      const alice = await startPersona(node);
+      await alice.open("deletion opener");
+      const echo = await alice.reply((m) => textOf(m) === "Echo: deletion opener");
+      const kept = await alice.send("delete me later");
+      await alice.reply((m) => textOf(m) === "Echo: delete me later");
+      const deletedEvents = () => bot.events.filter((e) => e.event === "BOT_RECEIVED_DELETED");
+
+      // A known target: applied, and the first deletion is the peer's evidence.
+      await alice.sendRaw(remoteMessage(encodeOpaqueDeletedMessage({ targetMessageId: kept.messageId })));
+      await bot.waitFor((e) => e.event === "BOT_RECEIVED_DELETED" && e.messageId === kept.messageId, { label: "the deletion" });
+      assert.equal(deletedEvents()[0].applied, true);
+      const enabled = await bot.waitFor((e) => e.event === "BOT_PROTOCOL_EXTENSION_ENABLED", { label: "evidence logged" });
+      assert.deepEqual([enabled.peer, enabled.kind], [alice.accountHex, "deleted"]);
+
+      // A second deletion of the same target (new envelope id): a no-op.
+      await alice.sendRaw(remoteMessage(encodeOpaqueDeletedMessage({ targetMessageId: kept.messageId })));
+      await waitFor(() => deletedEvents().length === 2, { label: "the duplicate deletion" });
+      assert.deepEqual([deletedEvents()[1].applied, deletedEvents()[1].duplicate], [false, true]);
+
+      // An edit of the deleted message must not revive it (no brain run, no echo).
+      await alice.sendRaw(remoteMessage(encodeOpaqueEditedMessage({ targetMessageId: kept.messageId, text: "revived?" })));
+      await bot.waitFor((e) => e.event === "BOT_DELETED_MESSAGE_DROPPED" && e.stage === "edit", { label: "the edit dropped" });
+
+      // Deletion first, target later: pending, then the target is dropped unanswered.
+      const lateId = crypto.randomUUID().toUpperCase();
+      await alice.sendRaw(remoteMessage(encodeOpaqueDeletedMessage({ targetMessageId: lateId })));
+      await waitFor(() => deletedEvents().length === 3, { label: "the early deletion" });
+      assert.equal(deletedEvents()[2].applied, "pending");
+      await alice.sendRaw(remoteMessage(encodeOpaqueTextMessage({ messageId: lateId, text: "never answer me" })));
+      await bot.waitFor((e) => e.event === "BOT_DELETED_MESSAGE_DROPPED" && e.messageId === lateId && e.stage === "arrival", { label: "the late target dropped" });
+
+      // The bot's own message is not the peer's to delete: never applied.
+      await alice.sendRaw(remoteMessage(encodeOpaqueDeletedMessage({ targetMessageId: echo.messageId })));
+      await waitFor(() => deletedEvents().length === 4, { label: "the foreign deletion" });
+      assert.equal(deletedEvents()[3].applied, "pending");
+
+      // A normal message still round-trips, so the bot is not wedged; and
+      // nothing above was answered.
+      await alice.send("still alive");
+      await alice.reply((m) => textOf(m) === "Echo: still alive");
+      const echoes = (await alice.incoming()).map(textOf).filter((t) => t.startsWith("Echo:"));
+      assert.deepEqual(echoes, ["Echo: deletion opener", "Echo: delete me later", "Echo: still alive"]);
+      assert.equal(bot.events.filter((e) => e.event === "BOT_UNSUPPORTED_CONTENT").length, 0);
+
+      await bot.stop();
+      const state = JSON.parse(fs.readFileSync(path.join(stateDir, "session-state.json"), "utf8"));
+      assert.deepEqual(state.peers[0].x, ["deleted"], "the evidence survives a restart");
+      assert.ok(state.peers[0].dl.d.includes(kept.messageId) && state.peers[0].dl.d.includes(lateId));
+    } finally {
+      await bot.stop();
+      await node.close();
+      fs.rmSync(stateDir, { recursive: true, force: true });
     }
   });
 

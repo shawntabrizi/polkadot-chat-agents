@@ -76,6 +76,7 @@ import { createPeerClock } from "./lib/peer-clock.mjs";
 import { commandCatalog, resolveModelPolicy } from "./lib/commands.mjs";
 import { splitMessageText } from "./lib/chunk.mjs";
 import { createOutboundLanes } from "./lib/outbound-lanes.mjs";
+import { createDeletionLedger, createExtensionGate, createMessageDeleter, parseProtocolExtensions } from "./lib/message-deletion.mjs";
 import { createWorkspaces } from "./lib/workspaces.mjs";
 import { downloadP2PFile, uploadP2PFile, validateHopUrl } from "./lib/hop-client.mjs";
 import { createMediaStore } from "./lib/media-store.mjs";
@@ -121,6 +122,7 @@ import {
   encodeOpaqueReactionMessage,
   encodeOpaqueReplyMessage,
   encodeOpaqueEditedMessage,
+  encodeOpaqueDeletedMessage,
   encodeOpaqueDataChannelClosedMessage,
   encodeOpaqueChatAcceptedMessage,
   encodeOpaqueDeviceChatAcceptedMessage,
@@ -1019,6 +1021,38 @@ const outbound = createOutboundLanes({
   log,
 });
 
+// ---------- RFC-0003 message deletion ----------
+// Receiving a deletion is always on. SENDING one is gated per peer: a phone
+// that predates the RFC renders the new kind as an "unsupported message"
+// bubble. A peer proves support by sending us a deletion itself (evidence,
+// persisted with its session); BOT_PROTOCOL_EXTENSIONS=deleted enables it for
+// every peer. See lib/message-deletion.mjs and docs/explanation/protocol.md.
+const protocolExtensions = parseProtocolExtensions(env.BOT_PROTOCOL_EXTENSIONS);
+if (protocolExtensions.unknown.length) log("BOT_PROTOCOL_EXTENSIONS_UNKNOWN", { names: protocolExtensions.unknown });
+for (const kind of protocolExtensions.enabled) log("BOT_PROTOCOL_EXTENSION_ENABLED", { peer: "*", kind, source: "BOT_PROTOCOL_EXTENSIONS" });
+const extensionGate = createExtensionGate({ forced: protocolExtensions.enabled });
+const deletions = createDeletionLedger();
+const retractOwn = createMessageDeleter({
+  outbound,
+  gate: extensionGate,
+  encode: encodeOpaqueDeletedMessage,
+  makeId: makeAppUuid,
+  stamp,
+  log,
+});
+// Retract one of the bot's own messages. A journaled owed answer holding it
+// is trimmed first, so a restart cannot re-send what the bot retracted.
+const deleteMessage = async (peerHex, messageId) => {
+  const k = norm(peerHex);
+  if (sessions.get(k) == null) throw new Error("no active session for peer");
+  for (const owed of owedReplies.values()) {
+    if (norm(owed.peerHex) !== k || !owed.answer?.some((a) => a.messageId === messageId)) continue;
+    owed.answer = owed.answer.filter((a) => a.messageId !== messageId);
+    persist();
+  }
+  return retractOwn(k, messageId);
+};
+
 // ---------- send a reply to a peer ----------
 // Returns the outgoing envelope messageId (an app UUID) so callers — notably
 // POST /send — hand the brain an id it can later edit or that the peer can
@@ -1099,6 +1133,7 @@ const sendAttachment = async (peerHex, { filePath, mime, size, text = null }) =>
 // ---------- live replies (one evolving message per slow turn) ----------
 const liveReplies = createLiveReplies({
   send: ({ peerHex, text, editOf, supersedes, ephemeral }) => submitMessage(peerHex, { text, editOf, supersedes, ephemeral }),
+  retract: (peerHex, messageId) => deleteMessage(peerHex, messageId),
   // The lane's delivered promise, bounded: a peer that never fetches the
   // placeholder must not gate the final answer forever.
   awaitAck: (delivered) => Promise.race([
@@ -1352,6 +1387,13 @@ const enqueueOwed = (peerHex, owedId, msg, requestId, { reservedBridge = false }
   queuedOwed.add(owedId);
   const k = norm(peerHex);
   enqueueWork(peerHex, async () => {
+    // The peer deleted it (RFC-0003) while it waited: drop it unanswered.
+    if (msg.messageId && deletions.isDeleted(k, msg.messageId) && !owedReplies.get(owedId)?.answer?.length) {
+      if (reservedBridge) releaseBridgeReservation();
+      settleOwed(owedId);
+      log("BOT_DELETED_MESSAGE_DROPPED", { from: k, messageId: msg.messageId, stage: "queued" });
+      return;
+    }
     const answer = owedReplies.get(owedId)?.answer;
     if (answer?.length) {
       // An earlier life already answered; at most the statement is missing.
@@ -1397,6 +1439,28 @@ const noteSeenStatement = (key) => { seenStatements.add(key); trimSet(seenStatem
 // to a hash of requestId:text so we never hold or persist conversation plaintext.
 const messageDedupId = (peerHex, requestId, text, messageId) =>
   `${norm(peerHex)}:${messageId || `h:${bytesToHex(blake2b(enc.encode(`${requestId}:${text}`), { dkLen: 16 }))}`}`;
+// "<peer>:<messageId>" -> attachment ids, so a deletion can discard the
+// downloaded bytes (RFC-0003). In memory only; the media cache TTL covers
+// a restart.
+const receivedAttachments = new Map();
+
+// RFC-0003: drop every copy the bot still holds of a message the peer
+// deleted. An owed entry that is queued is skipped by its work item; one not
+// yet queued is removed here; an unleased bridge delivery is withdrawn. Text
+// already handed to an engine or leased to a harness cannot be recalled: the
+// engine's native session owns it, and the harness gets a `deleted` event.
+const scrubDeleted = (peerHex, targetId) => {
+  const k = norm(peerHex);
+  const key = `${k}:${targetId}`;
+  const index = inboundQueue.findIndex((e) => e.owedId === key && e.leaseId == null && !e.acknowledging);
+  if (index >= 0) {
+    inboundQueue.splice(index, 1);
+    queuedOwed.delete(key);
+  }
+  if (!queuedOwed.has(key) && owedTurns.get(k) !== key && !owedReplies.get(key)?.answer?.length) removeOwed(key);
+  for (const id of receivedAttachments.get(key) ?? []) mediaStore.remove(id);
+  receivedAttachments.delete(key);
+};
 
 // ---------- owed replies (crash-durable at-least-once) ----------
 // A message is deduped and ACKed as soon as it is durably journaled. The record
@@ -1525,6 +1589,9 @@ const snapshotState = () => ({
     // lib/agent-runtime.mjs.
     ...(agentRuntime ? agentRuntime.peerSnapshot(norm(peerHex)) : {}),
     ...(lastActiveAt ? { la: lastActiveAt } : {}),
+    // RFC-0003: tombstones + pending deletions (dl), extension evidence (x).
+    ...(deletions.snapshot(norm(peerHex)) ? { dl: deletions.snapshot(norm(peerHex)) } : {}),
+    ...(extensionGate.snapshot(norm(peerHex)) ? { x: extensionGate.snapshot(norm(peerHex)) } : {}),
   })),
   seen: [...seenRequests].slice(-SEEN_CAP),
   // An unresolved acceptance marker is paired with an owed entry, so its
@@ -1786,6 +1853,7 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
   const stops = [];
   const newlySeen = [];
   const batchSeen = new Set();
+  const deletedNow = []; // RFC-0003 targets deleted by this batch
   let stateChanged = false;
   let undecodable = 0;
   for (const m of decoded.messages ?? []) {
@@ -1845,6 +1913,19 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
       const alreadySeen = seenRequests.has(id) || batchSeen.has(id);
       if (alreadySeen) continue;
       batchSeen.add(id); newlySeen.push(id);
+      // RFC-0003: never answer a message the peer already deleted (the
+      // deletion can arrive first), and never let an edit revive one.
+      const k = norm(peerHex);
+      const editOfDeleted = m.kind === "edited" && deletions.isDeleted(k, m.targetMessageId);
+      if ((m.messageId && deletions.arrived(k, m.messageId)) || editOfDeleted) {
+        stateChanged = true;
+        log("BOT_DELETED_MESSAGE_DROPPED", { from: k, messageId: m.messageId ?? null, stage: editOfDeleted ? "edit" : "arrival" });
+        continue;
+      }
+      if (m.messageId && attachments.length) {
+        receivedAttachments.set(`${k}:${m.messageId}`, attachments.map((a) => a.id));
+        trimMap(receivedAttachments, SEEN_CAP);
+      }
       fresh.push({
         id,
         msg: {
@@ -1883,10 +1964,32 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
       // ringing forever. Log the purpose byte to learn its values in the wild.
       log("BOT_CALL_OFFER", { from: peerHex, purpose: m.purpose, sdpLength: m.sdpLength });
       declines.push(m.messageId);
+    } else if (m.kind === "deleted") {
+      // RFC-0003: applied only to a message this peer sent us (the receive
+      // record is keyed by peer). Never rendered, never answered.
+      const k = norm(peerHex);
+      if (extensionGate.observe(k, "deleted")) log("BOT_PROTOCOL_EXTENSION_ENABLED", { peer: k, kind: "deleted" });
+      stateChanged = true;
+      if (!m.targetMessageId) continue;
+      const key = `${k}:${m.targetMessageId}`;
+      const outcome = deletions.record(k, m.targetMessageId, { known: seenRequests.has(key) || batchSeen.has(key) });
+      if (outcome === "applied") deletedNow.push(m.targetMessageId);
+      log("BOT_RECEIVED_DELETED", {
+        from: peerHex,
+        messageId: m.targetMessageId,
+        applied: outcome === "applied" ? true : outcome === "pending" ? "pending" : false,
+        ...(outcome === "duplicate" ? { duplicate: true } : {}),
+      });
+      if (outcome === "applied") enqueueEvent({ chat_id: peerHex, kind: "deleted", message_id: m.messageId, target_message_id: m.targetMessageId, text: "[user deleted one of their messages]" });
     } else if (m.kind === "unsupported") {
       log("BOT_UNSUPPORTED_CONTENT", { from: peerHex, contentKind: m.contentKind });
     }
     // chatAccepted / dataChannelClosed: nothing to do.
+  }
+  if (deletedNow.length) {
+    const gone = new Set(deletedNow);
+    for (let i = fresh.length - 1; i >= 0; i -= 1) if (gone.has(fresh[i].msg.messageId)) fresh.splice(i, 1);
+    for (const target of deletedNow) scrubDeleted(peerHex, target);
   }
   if (fresh.length && !reserveAdmission(peerHex, fresh.length)) return "deferred";
   const addedOwed = [];
@@ -2609,6 +2712,8 @@ for (const p of restored?.peers ?? []) {
     if (entry && Number.isSafeInteger(p.la) && p.la > 0) entry.lastActiveAt = p.la;
     addSessionWatch(p.peerHex);
     agentRuntime?.restorePeer(norm(p.peerHex), { rs: p.rs, mo: p.mo, pj: p.pj, br: p.br });
+    deletions.restore(norm(p.peerHex), p.dl);
+    extensionGate.restore(norm(p.peerHex), p.x);
     restoredPeers += 1;
   } catch (e) { log("BOT_STATE_PEER_SKIPPED", { peer: p?.peerHex, error: String(e?.message ?? e) }); }
 }

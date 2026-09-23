@@ -402,6 +402,7 @@ session. Claude delivers the same facts through its system-prompt option.
 | `BOT_LIVE_TTL_MS` | 600000 | A placeholder never finalized resolves to a timeout note. |
 | `BOT_LIVE_TIMEOUT_TEXT` | auto | That timeout note's text. |
 | `BOT_OUTBOUND_ACK_GRACE_MS` | 60000 | How long an un-ACKed statement holds the channel slot before a queued one takes over. |
+| `BOT_PROTOCOL_EXTENSIONS` | empty | Comma list of protocol extensions to send to every peer (`deleted` = RFC-0003). Without it, the bot sends an extension only to a peer that has sent it that kind first. |
 
 T3ams uses the same placeholder, progress, final-wait, timeout, and chunk
 settings. Unlike the default transport, it has native typing, edit, and reaction

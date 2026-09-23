@@ -39,9 +39,15 @@ const defaultTimers = {
 //   not the turn's answer, so the transport must not journal them as one (a
 //   restart would then re-send a placeholder instead of running the brain).
 // awaitAck(delivered) -> Promise<boolean> (false on timeout)
+// retract(peerHex, messageId) -> Promise (optional): RFC-0003 deletion of a
+//   placeholder the fallback replaced. `supersedes` only removes it from the
+//   un-ACKed statement; a peer may have fetched that statement without its
+//   ACK reaching us, and retract covers that case (the transport decides
+//   whether this peer can receive a deletion at all).
 export const createLiveReplies = ({
   send,
   awaitAck,
+  retract = null,
   minIntervalMs = 3_000,
   maxIntervalMs = 15_000,
   finalAckWaitMs = 10_000,
@@ -178,6 +184,11 @@ export const createLiveReplies = ({
       log("BOT_LIVE_FALLBACK", { to: lane.peerHex, placeholder: lane.messageId });
       const fallback = ifUnfetched ?? text;
       const sent = await send({ peerHex: lane.peerHex, text: fallback, supersedes: [lane.messageId], guard });
+      if (retract) {
+        void Promise.resolve()
+          .then(() => retract(lane.peerHex, lane.messageId))
+          .catch((e) => log("BOT_LIVE_RETRACT_FAILED", { to: lane.peerHex, error: String(e?.message ?? e) }));
+      }
       return { messageId: sent.messageId, edited: false };
     } catch (error) {
       // An ordinary terminal transport failure remains retryable through the

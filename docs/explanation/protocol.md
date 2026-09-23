@@ -164,10 +164,60 @@ with each inbound kind:
 | reacted / reactionRemoved (4/5) | recorded: logged, and delivered to `/inbound?events=1` bridge pollers — never answered (a chat reply to a reaction is bizarre UX) |
 | coinageSend (16), contactAdded (3), leftChat (13) | logged + bridge event; coinage is informational only (claiming needs the full Coinage stack) |
 | dataChannelOffer (8) | auto-declined with dataChannelClosed (11) after the ACK — the bot has no WebRTC stack, declining beats ringing forever |
+| deleted (21) | RFC-0003 tombstone, see [Message deletion](#message-deletion-rfc-0003) — never answered |
 | anything else | logged (`BOT_UNSUPPORTED_CONTENT` / `BOT_UNDECODABLE_MESSAGE`) and skipped |
 
 Outbound, the bot can send plain text, replies (quotes), edits of its own
 messages, reactions, and HOP-backed file attachments.
+
+### Message deletion (RFC-0003)
+
+chat-spec RFC-0003 (`rfcs/0003-message-deletion.md`) adds `deleted(DeletedContent { messageId: UUID })`: the sender retracts one of
+its own messages. The layout is one SCALE string after the content byte, like
+an edit target (`encodeOpaqueDeletedMessage` in `vendor/app-chat-codec.mjs`).
+
+**Content kind 21, not 20.** The RFC text says 20, but 20 is
+`DeviceChatAccepted` (`mds.md`, and `@novasamatech/host-chat`), and 19 is held
+for RFC-0002. The RFC's own rule for a clash ("whatever is next free at merge
+time") gives 21. `DELETED_CONTENT_KIND` is the only place to change it.
+
+**Receiving is always on** (`lib/message-deletion.mjs`, wired in `index.mjs`):
+
+- A deletion applies only to a message the bot received from that same peer.
+  The receive record is keyed by peer, so a peer cannot touch another peer's
+  message or the bot's own. An unknown target goes into that peer's pending
+  set (500 per peer; eviction is safe) and applies if the target arrives later.
+- An applied deletion drops every copy the bot still holds: an owed message
+  not yet handed to the brain is never answered, an unleased bridge delivery
+  is withdrawn, and downloaded attachment bytes are removed. Text that an
+  engine already received stays in the engine's native session (no engine
+  lets pca edit its history); bridge pollers get a `deleted` event with
+  `target_message_id` so a harness can drop it from its own history.
+- Deletion is terminal: an `edited` for a deleted message is ignored. A second
+  deletion of the same target is a no-op.
+- Tombstones and pending deletions persist with the peer's session (`dl`).
+- Log: `BOT_RECEIVED_DELETED { from, messageId, applied: true | false | "pending" }`
+  (`false` with `duplicate: true` for a repeat), and
+  `BOT_DELETED_MESSAGE_DROPPED` when a message or edit is dropped for it.
+
+**Sending is gated per peer.** A phone that predates the RFC renders kind 21 as
+an "Unsupported message content" bubble, so the bot sends a deletion to a peer
+only when:
+
+- that peer has sent the bot a deletion itself (evidence; persisted with the
+  session as `x`, logged once as `BOT_PROTOCOL_EXTENSION_ENABLED { peer, kind }`), or
+- the operator sets `BOT_PROTOCOL_EXTENSIONS=deleted` (comma list, default
+  empty), which enables it for every peer.
+
+`deleteMessage(peerHex, messageId)` follows the RFC's sender cases on top of
+the outbound lane: a message still queued and never submitted is removed with
+no wire trace; otherwise, when the gate allows it, the deletion is enqueued
+with `supersedes: [messageId]`, so a target still in the un-ACKed statement
+leaves the slot in the same re-encode that carries the deletion. Without the
+gate, nothing is sent (`BOT_DELETE_SKIPPED`). Live replies use it once: when a
+placeholder was never ACKed, the fallback answer already supersedes it, and
+the bot then also retracts it, in case the peer fetched it without the ACK
+arriving.
 
 ### Attachments (photos/videos/files)
 

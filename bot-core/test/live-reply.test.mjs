@@ -31,7 +31,7 @@ const makeClock = () => {
 };
 
 // Harness: capture sends; ACK resolution controlled by the test.
-const makeHarness = ({ minIntervalMs = 1000, maxIntervalMs = 8000, finalAckWaitMs = 5000 } = {}) => {
+const makeHarness = ({ minIntervalMs = 1000, maxIntervalMs = 8000, finalAckWaitMs = 5000, retract = null } = {}) => {
   const clock = makeClock();
   const sent = []; // {peerHex, text, editOf, messageId}
   let nextMsg = 1;
@@ -44,6 +44,7 @@ const makeHarness = ({ minIntervalMs = 1000, maxIntervalMs = 8000, finalAckWaitM
       return { messageId, delivered: token };
     },
     awaitAck: (token) => new Promise((resolve) => acks.set(token, resolve)),
+    retract,
     minIntervalMs,
     maxIntervalMs,
     finalAckWaitMs,
@@ -183,6 +184,35 @@ test("finalize falls back to a plain message when the ACK never comes", async ()
   assert.equal(last.text, "answer");
   assert.deepEqual(last.supersedes, [handle.messageId], "fallback must supersede the unfetched placeholder");
   assert.equal(h.sent.filter((s) => s.editOf).length, 0, "no progress edits without ACK");
+});
+
+// RFC-0003 case 3: `supersedes` drops the placeholder from the un-ACKed
+// statement, but the peer may have fetched it without the ACK reaching us.
+// The fallback therefore also asks the transport to retract it (the
+// transport sends a deletion only to a peer that supports one).
+test("the no-ACK fallback retracts the placeholder; an ACKed finalize does not", async () => {
+  const retracted = [];
+  const h = makeHarness({ finalAckWaitMs: 5000, retract: async (peerHex, messageId) => { retracted.push([peerHex, messageId]); } });
+  const handle = await h.live.begin("peer", "thinking…");
+  const finalizeP = handle.finalize("answer");
+  await h.clock.advance(5001);
+  await finalizeP;
+  await Promise.resolve();
+  assert.deepEqual(retracted, [["peer", handle.messageId]]);
+
+  const acked = await h.live.begin("peer", "thinking…");
+  await h.ack(`REQ-${h.sent.length}`);
+  await acked.finalize("edited in place");
+  await Promise.resolve();
+  assert.equal(retracted.length, 1, "a fetched placeholder is edited, never deleted");
+});
+
+test("a failing retract never fails the fallback answer", async () => {
+  const h = makeHarness({ finalAckWaitMs: 5000, retract: async () => { throw new Error("no session"); } });
+  const handle = await h.live.begin("peer", "thinking…");
+  const finalizeP = handle.finalize("answer");
+  await h.clock.advance(5001);
+  assert.equal((await finalizeP).edited, false);
 });
 
 test("failed ACK drops progress frames entirely", async () => {
