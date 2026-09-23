@@ -24,7 +24,9 @@ import {
   encodeOpaqueButtonPressMessage,
   encodeOpaqueDeletedMessage,
   encodeOpaqueEditedMessage,
+  encodeOpaqueSeenMessage,
   encodeOpaqueTextMessage,
+  encodeOpaqueTypingMessage,
   x25519PublicKeyFromPrivateKey,
 } from "../vendor/app-chat-codec.mjs";
 
@@ -865,6 +867,9 @@ describe("transport e2e", { concurrency: 8 }, () => {
     // The no-ACK scenarios must not wait the production-length outbound grace
     // before the placeholder/final can take the channel slot.
     BOT_OUTBOUND_ACK_GRACE_MS: "2000",
+    // These tests cover the placeholder path, which starts after 1 s only when
+    // typing (spec 0005) is off; with typing on it waits 20 s.
+    BOT_PROTOCOL_EXTENSIONS: "none",
   };
   // Every text a row ever showed, oldest first: the persona keeps the edit
   // history of a row, so progress frames that a later edit replaced are
@@ -930,8 +935,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
       const rows = await alice.incoming();
       assert.ok(rows.every((m) => m.editedAt == null), `no edits may reach a non-ACKing peer: ${JSON.stringify(rows.map(versions))}`);
       assert.ok(rows.filter((m) => textOf(m).startsWith("live final answer")).length >= 1, "plain final missing");
-      // RFC-0003: this peer never sent a deletion, so the bot must not send one
-      // (an old phone would render it as an unsupported bubble).
+      // RFC-0003: the `deleted` extension is off here, so no deletion goes out.
       const fallback = bot.events.find((e) => e.event === "BOT_LIVE_FALLBACK");
       await bot.waitFor((e) => e.event === "BOT_DELETE_SKIPPED" && e.target === fallback.placeholder, { label: "the retraction skipped" });
       assert.equal(bot.events.filter((e) => e.event === "BOT_SENT_DELETED").length, 0);
@@ -942,16 +946,13 @@ describe("transport e2e", { concurrency: 8 }, () => {
     }
   });
 
-  test("live reply: a peer that sent a deletion gets the unfetched placeholder retracted", async () => {
+  test("live reply: with the deleted extension on, the unfetched placeholder is retracted", async () => {
     const node = await startSandbox();
     const stateDir = tmpState();
-    const bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: liveBrainEnv });
+    const bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: { ...liveBrainEnv, BOT_PROTOCOL_EXTENSIONS: "deleted" } });
     try {
       const alice = await startPersona(node);
       await alice.open("silent question");
-      // Evidence: the peer itself speaks RFC-0003.
-      await alice.sendRaw(remoteMessage(encodeOpaqueDeletedMessage({ targetMessageId: crypto.randomUUID().toUpperCase() })));
-      await bot.waitFor((e) => e.event === "BOT_PROTOCOL_EXTENSION_ENABLED", { label: "evidence" });
       await alice.neverAck();
       await alice.send("still here");
       const fallback = await bot.waitFor((e) => e.event === "BOT_LIVE_FALLBACK", { label: "BOT_LIVE_FALLBACK", timeoutMs: 40_000 });
@@ -977,6 +978,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
         BOT_THINKING_AFTER_MS: "1000",
         BOT_LIVE_EDIT_MIN_MS: "300",
         BOT_LIVE_FINAL_ACK_WAIT_MS: "4000",
+        BOT_PROTOCOL_EXTENSIONS: "none", // the placeholder path (typing off)
       },
     });
     const base = `http://127.0.0.1:${bot.bridgePort}`;
@@ -1045,6 +1047,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
         BOT_LIVE_EDIT_MIN_MS: "300",
         BOT_LIVE_TTL_MS: "4000",
         BOT_LIVE_TIMEOUT_TEXT: "timed out, resend please",
+        BOT_PROTOCOL_EXTENSIONS: "none", // the placeholder path (typing off)
       },
     });
     try {
@@ -1103,6 +1106,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
         // A turn that never finishes on its own (until killed).
         BOT_AI_ARGS: JSON.stringify(["-c", "printf '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"S1\"}\\n'; sleep 120"]),
         BOT_THINKING_TEXT: "⏳ thinking…", BOT_THINKING_AFTER_MS: "1000", BOT_LIVE_EDIT_MIN_MS: "300",
+        BOT_PROTOCOL_EXTENSIONS: "none", // the placeholder path (typing off)
       },
     });
     try {
@@ -1115,6 +1119,91 @@ describe("transport e2e", { concurrency: 8 }, () => {
       const stop = await bot.waitFor((e) => e.event === "BOT_STOP", { label: "BOT_STOP" });
       assert.equal(stop.stopped, true, "a running turn should have been stopped");
       await waitFor(async () => textOf((await alice.row(placeholder.messageId)) ?? { content: {} }) === "⏹ Stopped.", { label: "the stop edit on the placeholder" });
+    } finally {
+      await bot.stop();
+      await node.close();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  // Spec 0005 with the default extensions (all on): the typing indicator
+  // replaces the early placeholder, seen follows each consumed message, and
+  // the peer's own typing/seen are never answered or stored.
+  test("typing and seen: sent per turn, no early placeholder, received ones ignored", async () => {
+    const node = await startSandbox();
+    const stateDir = tmpState();
+    const bot = await startBot({
+      endpoint: node.url, apiUrl: node.apiUrl,
+      stateDir,
+      extraEnv: {
+        BOT_SUBSCRIBE: "0", BOT_BRAIN: "claude", BOT_AI_CMD: "sh",
+        BOT_AI_ARGS: JSON.stringify(["-c", "sleep 2; printf '{\"type\":\"result\",\"result\":\"typed answer\"}\\n'"]),
+        // Without typing this would post a placeholder after 1 s.
+        BOT_THINKING_TEXT: "⏳ thinking…", BOT_THINKING_AFTER_MS: "1000",
+        BOT_LOG_LEVEL: "debug",
+      },
+    });
+    try {
+      const isAnswer = (m) => textOf(m).startsWith("typed answer");
+      const alice = await startPersona(node);
+      await alice.open("typing opener");
+      await alice.reply(isAnswer, { label: "the first answer" });
+      const second = await alice.send("second question");
+      const seen = await bot.waitFor((e) => e.event === "BOT_SENT_SEEN" && e.upTo === second.messageId, { label: "the seen for the second question" });
+      assert.equal(seen.to, alice.accountHex);
+      await waitFor(async () => (await alice.incoming()).filter(isAnswer).length === 2, { label: "the second answer" });
+      const typing = bot.events.filter((e) => e.event === "BOT_SENT_TYPING");
+      assert.deepEqual(typing.map((e) => e.kind), ["working", "working"], "one typing log per turn; a reply needs no `stopped`");
+      assert.equal(bot.events.filter((e) => e.event === "BOT_LIVE_PLACEHOLDER").length, 0, "a 2 s turn shows typing, not a placeholder");
+
+      // The peer's own typing and seen: logged at debug level, nothing else.
+      const typingId = crypto.randomUUID().toUpperCase();
+      await alice.sendRaw(remoteMessage(encodeOpaqueTypingMessage({ messageId: typingId, until: Date.now() + 6000, kind: 0 })));
+      await alice.sendRaw(remoteMessage(encodeOpaqueSeenMessage({ upTo: (await alice.incoming()).at(-1).messageId, at: Date.now() })));
+      const got = await bot.waitFor((e) => e.event === "BOT_RECEIVED_TYPING", { label: "BOT_RECEIVED_TYPING" });
+      assert.deepEqual([got.level, got.kind], ["debug", 0]);
+      await bot.waitFor((e) => e.event === "BOT_RECEIVED_SEEN", { label: "BOT_RECEIVED_SEEN" });
+      await alice.send("still here");
+      await waitFor(async () => (await alice.incoming()).filter(isAnswer).length === 3, { label: "the third answer" });
+      assert.equal(bot.events.filter((e) => e.event === "BOT_RECEIVED_TEXT").length, 2, "typing and seen never run a turn");
+      assert.equal(bot.events.filter((e) => e.event === "BOT_UNSUPPORTED_CONTENT").length, 0);
+
+      await bot.stop();
+      const state = fs.readFileSync(path.join(stateDir, "session-state.json"), "utf8");
+      assert.equal(state.includes(typingId), false, "a received typing is not stored, not even for dedup");
+      assert.deepEqual(JSON.parse(state).owed ?? [], [], "nothing owed: typing and seen are never journaled");
+    } finally {
+      await bot.stop();
+      await node.close();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  // With typing on, a turn past 20 s still gets progress frames, and the
+  // first frame is the status line, not a "thinking" text next to the
+  // typing indicator.
+  test("typing on: a turn past 20 s gets a placeholder whose first frame is the status", async () => {
+    const node = await startSandbox();
+    const stateDir = tmpState();
+    const bot = await startBot({
+      endpoint: node.url, apiUrl: node.apiUrl,
+      stateDir,
+      extraEnv: {
+        BOT_SUBSCRIBE: "0", BOT_BRAIN: "claude", BOT_AI_CMD: "sh",
+        BOT_AI_ARGS: JSON.stringify(["-c", "sleep 23; printf '{\"type\":\"result\",\"result\":\"slow typed answer\"}\\n'"]),
+        BOT_THINKING_TEXT: "⏳ thinking…", BOT_THINKING_AFTER_MS: "1000",
+      },
+    });
+    try {
+      const alice = await startPersona(node);
+      const started = Date.now();
+      await alice.open("slow typing question");
+      const placeholder = await bot.waitFor((e) => e.event === "BOT_LIVE_PLACEHOLDER", { label: "BOT_LIVE_PLACEHOLDER", timeoutMs: 40_000 });
+      assert.ok(Date.now() - started >= 19_000, "the placeholder waited for the 20 s mark");
+      await alice.reply((m) => textOf(m).startsWith("slow typed answer"), { label: "the answer", timeoutMs: 40_000 });
+      const frames = versions(await alice.row(placeholder.messageId));
+      assert.match(frames[0], /^⏳ working · 2\ds/, `the first frame is the status: ${JSON.stringify(frames)}`);
+      assert.ok(!frames.includes("⏳ thinking…"), "no thinking text while the typing indicator shows");
     } finally {
       await bot.stop();
       await node.close();
@@ -1261,7 +1350,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
 
   // RFC-0003 recipient rules through the real receive path. The persona's
   // SDK has no `deleted` kind yet, so deletions go in as raw bytes.
-  test("message deletion: applied, duplicate, pending-then-arrival, edit ignored, evidence persisted", async () => {
+  test("message deletion: applied, duplicate, pending-then-arrival, edit ignored, tombstones persisted", async () => {
     const node = await startSandbox();
     const stateDir = tmpState();
     const bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: { BOT_SUBSCRIBE: "0" } });
@@ -1273,12 +1362,12 @@ describe("transport e2e", { concurrency: 8 }, () => {
       await alice.reply((m) => textOf(m) === "Echo: delete me later");
       const deletedEvents = () => bot.events.filter((e) => e.event === "BOT_RECEIVED_DELETED");
 
-      // A known target: applied, and the first deletion is the peer's evidence.
+      // A known target: applied, and the peer's first deletion is logged (a log only).
       await alice.sendRaw(remoteMessage(encodeOpaqueDeletedMessage({ targetMessageId: kept.messageId })));
       await bot.waitFor((e) => e.event === "BOT_RECEIVED_DELETED" && e.messageId === kept.messageId, { label: "the deletion" });
       assert.equal(deletedEvents()[0].applied, true);
-      const enabled = await bot.waitFor((e) => e.event === "BOT_PROTOCOL_EXTENSION_ENABLED", { label: "evidence logged" });
-      assert.deepEqual([enabled.peer, enabled.kind], [alice.accountHex, "deleted"]);
+      const observed = await bot.waitFor((e) => e.event === "BOT_PROTOCOL_EXTENSION_OBSERVED", { label: "the extension logged" });
+      assert.deepEqual([observed.peer, observed.kind], [alice.accountHex, "deleted"]);
 
       // A second deletion of the same target (new envelope id): a no-op.
       await alice.sendRaw(remoteMessage(encodeOpaqueDeletedMessage({ targetMessageId: kept.messageId })));
@@ -1312,7 +1401,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
 
       await bot.stop();
       const state = JSON.parse(fs.readFileSync(path.join(stateDir, "session-state.json"), "utf8"));
-      assert.deepEqual(state.peers[0].x, ["deleted"], "the evidence survives a restart");
+      assert.equal(state.peers[0].x, undefined, "no evidence is kept: it gates nothing");
       assert.ok(state.peers[0].dl.d.includes(kept.messageId) && state.peers[0].dl.d.includes(lateId));
     } finally {
       await bot.stop();
@@ -1324,31 +1413,47 @@ describe("transport e2e", { concurrency: 8 }, () => {
   // Spec 0006 through the real receive and send paths. The echo brain echoes
   // the persona's ```buttons block, so the bot's reply ends with one. The
   // persona's SDK has no buttonPress kind yet, so presses go in as raw bytes.
-  test("buttons: fallback without evidence, buttons with it, press runs a turn, foreign press ignored", async () => {
+  const buttonsBlock = "Pick one\n```buttons\n" + JSON.stringify({ rows: [[
+    { label: "Echo", action: { command: "echo hi" } },
+    { label: "Colour", action: { callback: "base64:AQI=" } },
+  ]] }) + "\n```";
+
+  test("buttons: with the extension off, the reply is the fallback text", async () => {
+    const node = await startSandbox();
+    const stateDir = tmpState();
+    const bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: { BOT_SUBSCRIBE: "0", BOT_PROTOCOL_EXTENSIONS: "none" } });
+    try {
+      const alice = await startPersona(node);
+      await alice.open("buttons opener");
+      await alice.reply((m) => textOf(m) === "Echo: buttons opener");
+      await alice.send(buttonsBlock);
+      await alice.reply((m) => textOf(m) === "Echo: Pick one\n\n1. Echo\n2. Colour", { label: "the fallback list" });
+      assert.equal(bot.events.filter((e) => e.event === "BOT_SENT_BUTTONS").length, 0);
+    } finally {
+      await bot.stop();
+      await node.close();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  test("buttons: kind 242 by default, press runs a turn, foreign press ignored", async () => {
     const node = await startSandbox();
     const stateDir = tmpState();
     const bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: { BOT_SUBSCRIBE: "0" } });
     try {
-      const block = "Pick one\n```buttons\n" + JSON.stringify({ rows: [[
-        { label: "Echo", action: { command: "echo hi" } },
-        { label: "Colour", action: { callback: "base64:AQI=" } },
-      ]] }) + "\n```";
+      const block = buttonsBlock;
       const alice = await startPersona(node);
       await alice.open("buttons opener");
       await alice.reply((m) => textOf(m) === "Echo: buttons opener");
 
-      // No evidence yet: an old phone must get readable text, not kind 242.
-      await alice.send(block);
-      await alice.reply((m) => textOf(m) === "Echo: Pick one\n\n1. Echo\n2. Colour", { label: "the fallback list" });
-      assert.equal(bot.events.filter((e) => e.event === "BOT_SENT_BUTTONS").length, 0);
-
-      // A press for a message the bot never sent: ignored, but it is evidence.
+      // A press for a message the bot never sent: ignored, and logged as the
+      // peer's extension (a log only).
       await alice.sendRaw(remoteMessage(encodeOpaqueButtonPressMessage({ targetMessageId: "NOT-OURS", row: 0, index: 0 })));
       await bot.waitFor((e) => e.event === "BOT_BUTTON_PRESS_IGNORED" && e.messageId === "NOT-OURS", { label: "the unknown press ignored" });
-      const enabled = await bot.waitFor((e) => e.event === "BOT_PROTOCOL_EXTENSION_ENABLED", { label: "evidence logged" });
-      assert.deepEqual([enabled.peer, enabled.kind], [alice.accountHex, "buttons"]);
+      const observed = await bot.waitFor((e) => e.event === "BOT_PROTOCOL_EXTENSION_OBSERVED", { label: "the extension logged" });
+      assert.deepEqual([observed.peer, observed.kind], [alice.accountHex, "buttonPress"]);
 
-      // With evidence: ONE kind-242 message carries the text and the rows.
+      // No evidence needed: ONE kind-242 message carries the text and the rows.
       await alice.send(block);
       const sent = await bot.waitFor((e) => e.event === "BOT_SENT_BUTTONS", { label: "the buttons message" });
       assert.deepEqual([sent.buttons, sent.oneShot], [2, false]);
@@ -1372,7 +1477,6 @@ describe("transport e2e", { concurrency: 8 }, () => {
       await bot.stop();
       const state = JSON.parse(fs.readFileSync(path.join(stateDir, "session-state.json"), "utf8"));
       const alicePeer = state.peers.find((p) => p.peerHex === alice.accountHex);
-      assert.deepEqual(alicePeer.x, ["buttons"], "the evidence survives a restart");
       assert.equal(alicePeer.bp[0][0], sent.messageId, "the sent buttons survive a restart");
     } finally {
       await bot.stop();

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   DELETION_CAP_PER_PEER,
   createDeletionLedger,
-  createExtensionGate,
+  createExtensionObserver,
   createMessageDeleter,
   parseProtocolExtensions,
 } from "../lib/message-deletion.mjs";
@@ -73,58 +73,35 @@ test("tombstones and pending deletions survive a restart", () => {
   assert.equal(after.snapshot("carol"), null);
 });
 
-// ---------- extension gate ----------
+// ---------- extension switch (development-mode rule) ----------
 
-test("sending an extension needs evidence from that peer, once per peer", () => {
-  const gate = createExtensionGate();
-  assert.equal(gate.enabled("bob", "deleted"), false);
-  assert.equal(gate.observe("bob", "deleted"), true, "first evidence is reported (logged once)");
-  assert.equal(gate.observe("bob", "deleted"), false);
-  assert.equal(gate.enabled("bob", "deleted"), true);
-  assert.equal(gate.enabled("alice", "deleted"), false, "evidence is per peer");
-  const restored = createExtensionGate();
-  restored.restore("bob", gate.snapshot("bob"));
-  assert.equal(restored.enabled("bob", "deleted"), true, "evidence survives a restart");
-  restored.restore("carol", ["not-an-extension"]);
-  assert.equal(restored.snapshot("carol"), null);
-});
-
-test("BOT_PROTOCOL_EXTENSIONS forces an extension on for every peer", () => {
-  assert.deepEqual([...parseProtocolExtensions("").enabled], []);
-  assert.deepEqual([...parseProtocolExtensions(undefined).enabled], []);
-  const parsed = parseProtocolExtensions(" deleted , bogus ");
-  assert.deepEqual([...parsed.enabled], ["deleted"]);
+// Owner decision 2026-09-23: every client is in development, so each
+// extension goes to every peer unless the operator turns it off. A peer's own
+// extension kinds are logged, never required.
+test("BOT_PROTOCOL_EXTENSIONS: unset is all, none is none, a list restricts", () => {
+  const all = ["deleted", "buttons", "typing", "seen"];
+  assert.deepEqual([...parseProtocolExtensions(undefined).enabled], all);
+  assert.deepEqual([...parseProtocolExtensions("").enabled], all);
+  assert.deepEqual([...parseProtocolExtensions(" none ").enabled], []);
+  const parsed = parseProtocolExtensions(" deleted , bogus ,typing");
+  assert.deepEqual([...parsed.enabled], ["deleted", "typing"]);
   assert.deepEqual(parsed.unknown, ["bogus"]);
-  const gate = createExtensionGate({ forced: parsed.enabled });
-  assert.equal(gate.enabled("anyone", "deleted"), true);
 });
 
-// Spec 0006: a peer that sent ANY extension kind renders kinds its app did
-// not ship with, so buttons may go to it. Deletion keeps its own, narrower
-// rule: a typing indicator does not prove the peer applies deletions.
-test("buttons are enabled by any extension evidence; deletion only by a deletion", () => {
-  const gate = createExtensionGate();
-  assert.equal(gate.enabled("bob", "buttons"), false, "no evidence: the fallback text goes out");
-  gate.observe("bob", "extension"); // e.g. a typing (240) from bob
-  assert.equal(gate.enabled("bob", "buttons"), true);
-  assert.equal(gate.enabled("bob", "deleted"), false);
-  gate.observe("carol", "deleted");
-  assert.equal(gate.enabled("carol", "buttons"), true, "kind 21 is extension evidence too");
-  gate.observe("dave", "buttons");
-  assert.equal(gate.enabled("dave", "buttons"), true);
-  const restored = createExtensionGate();
-  restored.restore("bob", JSON.parse(JSON.stringify(gate.snapshot("bob"))));
-  assert.equal(restored.enabled("bob", "buttons"), true, "evidence survives a restart");
-  const forced = createExtensionGate({ forced: parseProtocolExtensions("buttons").enabled });
-  assert.equal(forced.enabled("anyone", "buttons"), true);
-  assert.equal(forced.enabled("anyone", "deleted"), false);
+test("the extension observer reports each peer's kind once and enables nothing", () => {
+  const observer = createExtensionObserver();
+  assert.equal(observer.observe("bob", "typing"), true);
+  assert.equal(observer.observe("bob", "typing"), false);
+  assert.equal(observer.observe("bob", "deleted"), true);
+  assert.equal(observer.observe("alice", "typing"), true, "per peer");
+  assert.equal("enabled" in observer, false, "no gate: sending does not depend on it");
 });
 
 // ---------- sender path over real outbound lanes ----------
 
 // In-memory lanes as in outbound-lanes.test.mjs, but the slot holds the real
 // opaque bytes, so a test can decode which content kinds went on the wire.
-const makeSender = ({ forced = new Set(), maxPayloadBytes = 10_000 } = {}) => {
+const makeSender = ({ enabled = true, maxPayloadBytes = 10_000 } = {}) => {
   const submits = [];
   let rid = 0;
   let mid = 0;
@@ -136,11 +113,10 @@ const makeSender = ({ forced = new Set(), maxPayloadBytes = 10_000 } = {}) => {
     maxPayloadBytes,
     ackGraceMs: 3_600_000,
   });
-  const gate = createExtensionGate({ forced });
   const events = [];
   const deleteMessage = createMessageDeleter({
     outbound,
-    gate,
+    enabled,
     encode: encodeOpaqueDeletedMessage,
     makeId: () => `DEL-${++mid}`,
     log: (event, extra) => events.push({ event, ...extra }),
@@ -150,27 +126,26 @@ const makeSender = ({ forced = new Set(), maxPayloadBytes = 10_000 } = {}) => {
   const wire = () => submits.flatMap(decoded);
   const slot = () => decoded(submits.at(-1));
   const text = (messageId) => outbound.enqueue("bob", encodeOpaqueTextMessage({ messageId, text: messageId }), { messageId });
-  return { outbound, gate, deleteMessage, events, settle, wire, slot, text, submits };
+  return { outbound, deleteMessage, events, settle, wire, slot, text, submits };
 };
 
-test("no deletion goes out to a peer without evidence", async () => {
-  const s = makeSender();
+test("no deletion goes out when the deleted extension is off", async () => {
+  const s = makeSender({ enabled: parseProtocolExtensions("none").enabled.has("deleted") });
   s.text("M1");
   await s.settle();
   const result = await s.deleteMessage("bob", "M1");
   await s.settle();
   assert.equal(result.outcome, "unsupported");
-  assert.ok(s.wire().every((m) => m.kind !== "deleted"), "an old phone would show an unsupported bubble");
+  assert.ok(s.wire().every((m) => m.kind !== "deleted"), "the operator turned the extension off");
   assert.deepEqual(s.slot().map((m) => m.messageId), ["M1"], "the slot is left as it was");
   assert.equal(s.events.at(-1).event, "BOT_DELETE_SKIPPED");
 });
 
-test("after evidence, an un-ACKed target leaves the slot and the deletion replaces it", async () => {
+test("an un-ACKed target leaves the slot and the deletion replaces it", async () => {
   const s = makeSender();
   s.text("M1");
   s.text("M2");
   await s.settle();
-  s.gate.observe("bob", "deleted");
   const result = await s.deleteMessage("bob", "M1");
   await s.settle();
   assert.equal(result.outcome, "sent");
@@ -187,7 +162,6 @@ test("after the target was ACKed, only the deletion goes out", async () => {
   s.text("M1");
   await s.settle();
   s.outbound.onAck("bob", s.submits.at(-1).requestId);
-  s.gate.observe("bob", "deleted");
   await s.deleteMessage("bob", "M1");
   await s.settle();
   assert.deepEqual(s.slot().map((m) => [m.kind, m.targetMessageId]), [["deleted", "M1"]]);
@@ -195,7 +169,7 @@ test("after the target was ACKed, only the deletion goes out", async () => {
 
 test("a queued message that was never submitted is removed with no wire trace", async () => {
   // A tiny payload cap: M2 cannot extend M1's statement, so it waits in the queue.
-  const s = makeSender({ forced: new Set(["deleted"]), maxPayloadBytes: 90 });
+  const s = makeSender({ maxPayloadBytes: 90 });
   s.text("M1");
   await s.settle();
   const queued = s.text("M2");
@@ -209,8 +183,8 @@ test("a queued message that was never submitted is removed with no wire trace", 
   assert.ok(s.wire().every((m) => m.messageId !== "M2" && m.kind !== "deleted"), "RFC case 1: no deletion is emitted");
 });
 
-test("the env override sends a deletion without evidence", async () => {
-  const s = makeSender({ forced: parseProtocolExtensions("deleted").enabled });
+test("by default a deletion goes out with no evidence from the peer", async () => {
+  const s = makeSender({ enabled: parseProtocolExtensions(undefined).enabled.has("deleted") });
   s.text("M1");
   await s.settle();
   const result = await s.deleteMessage("bob", "M1");

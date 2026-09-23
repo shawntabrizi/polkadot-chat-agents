@@ -20,6 +20,11 @@ import {
   encodeOpaqueButtonPressMessage,
   BUTTONS_CONTENT_KIND,
   BUTTON_PRESS_CONTENT_KIND,
+  encodeOpaqueTypingMessage,
+  encodeOpaqueSeenMessage,
+  TYPING_CONTENT_KIND,
+  SEEN_CONTENT_KIND,
+  TYPING_KINDS,
   encodeOpaqueDataChannelClosedMessage,
   scaleEncodeBytes,
   x25519PublicKeyFromPrivateKey,
@@ -299,6 +304,57 @@ test("buttons decoder rejects over-limit rows and unknown action tags", () => {
   assert.equal(decodeOne(nine).kind, "undecodable");
   const unknown = opaqueMessage("B-U", 242, concat(str("t"), compact(1), compact(1), str("a"), Uint8Array.of(4), str("x"), Uint8Array.of(0)));
   assert.match(decodeOne(unknown).error, /unknown button action 4/);
+});
+
+// Spec 0005 typing and seen. Published to the desktop client in
+// polkadot-chat-desktop docs/spec/vectors-0005.md: a change here is a wire
+// break, not a refactor.
+const TYPING_VECTOR = "64145459502d310030fd779001000000f07047fd779001000001";
+const SEEN_VECTOR = "781453454e2d31d037fd779001000000f1144d53472d33d037fd7790010000";
+
+test("typing: pinned vector matches the spec 0005 SCALE layout", () => {
+  const opaque = encodeOpaqueTypingMessage({ messageId: "TYP-1", timestamp: 1_720_000_000_000, until: 1_720_000_006_000, kind: TYPING_KINDS.working });
+  assert.equal(hexOf(opaque), TYPING_VECTOR);
+  assert.equal(TYPING_CONTENT_KIND, 240);
+  // By hand: until u64 LE, then kind u8.
+  assert.equal(hexOf(opaque), hexOf(opaqueMessage("TYP-1", 240, concat(u64(1_720_000_006_000), Uint8Array.of(1)))));
+  const m = decodeOne(hex(TYPING_VECTOR));
+  assert.deepEqual(
+    { kind: m.kind, messageId: m.messageId, timestamp: m.timestamp, until: m.until, typingKind: m.typingKind },
+    { kind: "typing", messageId: "TYP-1", timestamp: 1_720_000_000_000, until: 1_720_000_006_000, typingKind: 1 },
+  );
+});
+
+test("seen: pinned vector matches the spec 0005 SCALE layout", () => {
+  const opaque = encodeOpaqueSeenMessage({ messageId: "SEN-1", timestamp: 1_720_000_002_000, upTo: "MSG-3", at: 1_720_000_002_000 });
+  assert.equal(hexOf(opaque), SEEN_VECTOR);
+  assert.equal(SEEN_CONTENT_KIND, 241);
+  const content = concat(str("MSG-3"), u64(1_720_000_002_000));
+  assert.equal(hexOf(opaque), hexOf(scaleEncodeBytes(concat(str("SEN-1"), u64(1_720_000_002_000), Uint8Array.of(0), Uint8Array.of(241), content))));
+  const m = decodeOne(hex(SEEN_VECTOR));
+  assert.deepEqual(
+    { kind: m.kind, messageId: m.messageId, timestamp: m.timestamp, upTo: m.upTo, at: m.at },
+    { kind: "seen", messageId: "SEN-1", timestamp: 1_720_000_002_000, upTo: "MSG-3", at: 1_720_000_002_000 },
+  );
+});
+
+test("round-trip: every typing kind and a seen with a UUID target", () => {
+  for (const kind of [0, 1, 2]) {
+    const m = decodeOne(encodeOpaqueTypingMessage({ until: 123_456, kind }));
+    assert.deepEqual([m.kind, m.until, m.typingKind], ["typing", 123_456, kind]);
+  }
+  const upTo = globalThis.crypto.randomUUID().toUpperCase();
+  const s = decodeOne(encodeOpaqueSeenMessage({ upTo, at: 99n }));
+  assert.deepEqual([s.kind, s.upTo, s.at], ["seen", upTo, 99]);
+});
+
+test("typing and seen encoders refuse values the spec does not define", () => {
+  assert.throws(() => encodeOpaqueTypingMessage({ until: 1, kind: 3 }), /typing kind/);
+  assert.throws(() => encodeOpaqueTypingMessage({ until: -1, kind: 0 }), /u64/);
+  assert.throws(() => encodeOpaqueSeenMessage({ upTo: "", at: 1 }), /upTo/);
+  // A truncated typing (no kind byte) makes only that message undecodable.
+  const truncated = decodeOne(scaleEncodeBytes(hex(TYPING_VECTOR.slice(2, -2))));
+  assert.equal(truncated.kind, "undecodable");
 });
 
 test("round-trip: dataChannelClosed carries offerId", () => {

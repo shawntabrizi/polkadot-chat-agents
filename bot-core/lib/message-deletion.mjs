@@ -1,27 +1,20 @@
 // RFC-0003 message deletion (chat-spec rfcs/0003-message-deletion.md).
 //
-// Three small pieces, kept apart from index.mjs so the rules are unit-tested:
+// Small pieces, kept apart from index.mjs so the rules are unit-tested:
 //  - createDeletionLedger: the recipient's per-peer tombstones and pending
 //    deletions (a deletion may arrive before its target).
-//  - createExtensionGate: may the bot SEND a protocol extension to a peer?
-//    Phone clients that predate an extension render its kind as an
-//    "unsupported message" bubble, so the bot sends one only to a peer that
-//    has proven support by sending that kind itself (buttons: any extension
-//    kind), or when the operator enables it for everyone
-//    (BOT_PROTOCOL_EXTENSIONS).
+//  - parseProtocolExtensions: which extension kinds the bot SENDS
+//    (BOT_PROTOCOL_EXTENSIONS). Development-mode rule of the desktop spec set
+//    (polkadot-chat-desktop docs/spec/README.md): every client is in
+//    development, so extensions go to every peer without gating; an old client
+//    shows the base spec's "unsupported message" for a kind it does not know.
+//  - createExtensionObserver: which peers have sent an extension kind. A log
+//    only; it enables nothing.
 //  - createMessageDeleter: the sender side of one retraction, on top of the
 //    outbound lanes.
 
-// Extensions the operator may force on with BOT_PROTOCOL_EXTENSIONS.
-export const PROTOCOL_EXTENSIONS = Object.freeze(["deleted", "buttons"]);
-// Evidence names the gate records: an extension's own kind, or "extension"
-// for any other provisional kind (240-249) the peer sent.
-export const EXTENSION_EVIDENCE = Object.freeze(["deleted", "buttons", "extension"]);
-// Which evidence enables SENDING an extension. `deleted` keeps its RFC-0003
-// rule (the peer sent a deletion). `buttons` follows the desktop spec set's
-// rule (spec 0006): any extension kind from that peer (21 or 240+) proves the
-// client renders kinds it did not ship with.
-const ENABLED_BY = Object.freeze({ deleted: ["deleted"], buttons: EXTENSION_EVIDENCE });
+// Extensions the bot can send. BOT_PROTOCOL_EXTENSIONS unset = all of them.
+export const PROTOCOL_EXTENSIONS = Object.freeze(["deleted", "buttons", "typing", "seen"]);
 
 // The RFC lets an implementation bound the pending set per peer; eviction is
 // safe (a deletion whose target never arrives has no effect).
@@ -92,35 +85,28 @@ export const createDeletionLedger = ({ cap = DELETION_CAP_PER_PEER, maxPeers = 1
   };
 };
 
-// "deleted,foo" -> { enabled: Set(["deleted"]), unknown: ["foo"] }
+// unset or "" -> every extension; "none" -> no extension; "deleted,foo" ->
+// { enabled: Set(["deleted"]), unknown: ["foo"] }.
 export const parseProtocolExtensions = (raw) => {
-  const names = String(raw ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  const value = String(raw ?? "").trim();
+  if (value === "") return { enabled: new Set(PROTOCOL_EXTENSIONS), unknown: [] };
+  if (value === "none") return { enabled: new Set(), unknown: [] };
+  const names = value.split(",").map((s) => s.trim()).filter(Boolean);
   return {
     enabled: new Set(names.filter((n) => PROTOCOL_EXTENSIONS.includes(n))),
     unknown: names.filter((n) => !PROTOCOL_EXTENSIONS.includes(n)),
   };
 };
 
-export const createExtensionGate = ({ forced = new Set(), maxPeers = 10_000 } = {}) => {
-  const evidence = new Map(); // peerHex -> Set<extension>
+// observe(peerHex, name) is true the first time a peer sends that extension
+// (in this process), so the caller logs it once. Not persisted: it gates nothing.
+export const createExtensionObserver = ({ maxPeers = 10_000 } = {}) => {
+  const seen = new Map(); // peerHex -> Set<name>
   return {
-    enabled: (peerHex, extension) => forced.has(extension)
-      || (ENABLED_BY[extension] ?? []).some((name) => evidence.get(peerHex)?.has(name)),
-    // The peer sent us this extension's kind. True only the first time, so
-    // the caller logs and persists once.
-    observe(peerHex, extension) {
-      if (evidence.get(peerHex)?.has(extension)) return false;
-      boundedMap(evidence, peerHex, () => new Set(), maxPeers).add(extension);
+    observe(peerHex, name) {
+      if (seen.get(peerHex)?.has(name)) return false;
+      boundedMap(seen, peerHex, () => new Set(), maxPeers).add(name);
       return true;
-    },
-    snapshot: (peerHex) => {
-      const set = evidence.get(peerHex);
-      return set?.size ? [...set] : null;
-    },
-    restore(peerHex, saved) {
-      for (const extension of ids(saved, EXTENSION_EVIDENCE.length)) {
-        if (EXTENSION_EVIDENCE.includes(extension)) boundedMap(evidence, peerHex, () => new Set(), maxPeers).add(extension);
-      }
     },
   };
 };
@@ -130,19 +116,18 @@ export const createExtensionGate = ({ forced = new Set(), maxPeers = 10_000 } = 
 //  2. in the un-ACKed statement      -> the deletion rides a re-encoded batch
 //     that no longer carries it (lane `supersedes`);
 //  3. possibly fetched               -> send `deleted` to the peer.
-// Cases 2 and 3 need the deletion message, so they happen only when the gate
-// allows the extension for this peer. Otherwise nothing is sent: an
-// unsupported bubble on the phone is worse than a message left in place.
+// Cases 2 and 3 need the deletion message, so they happen only when the
+// `deleted` extension is on (BOT_PROTOCOL_EXTENSIONS). Otherwise nothing is sent.
 // Resolves { outcome: "unsent" | "sent" | "unsupported", messageId?, delivered? }.
-export const createMessageDeleter = ({ outbound, gate, encode, makeId, stamp = () => Date.now(), log = () => {} }) =>
+export const createMessageDeleter = ({ outbound, enabled = true, encode, makeId, stamp = () => Date.now(), log = () => {} }) =>
   async (peerHex, targetId) => {
     const where = outbound.drop(peerHex, targetId);
     if (where === "queued") {
       log("BOT_DELETE_UNSENT", { to: peerHex, target: targetId });
       return { outcome: "unsent" };
     }
-    if (!gate.enabled(peerHex, "deleted")) {
-      log("BOT_DELETE_SKIPPED", { to: peerHex, target: targetId, reason: "peer has not shown RFC-0003 support" });
+    if (!enabled) {
+      log("BOT_DELETE_SKIPPED", { to: peerHex, target: targetId, reason: "the deleted extension is off (BOT_PROTOCOL_EXTENSIONS)" });
       return { outcome: "unsupported" };
     }
     const messageId = makeId();

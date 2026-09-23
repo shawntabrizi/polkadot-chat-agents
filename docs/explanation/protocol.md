@@ -202,21 +202,26 @@ time") gives 21. `DELETED_CONTENT_KIND` is the only place to change it.
   (`false` with `duplicate: true` for a repeat), and
   `BOT_DELETED_MESSAGE_DROPPED` when a message or edit is dropped for it.
 
-**Sending is gated per peer.** A phone that predates the RFC renders kind 21 as
-an "Unsupported message content" bubble, so the bot sends a deletion to a peer
-only when:
-
-- that peer has sent the bot a deletion itself (evidence; persisted with the
-  session as `x`, logged once as `BOT_PROTOCOL_EXTENSION_ENABLED { peer, kind }`), or
-- the operator sets `BOT_PROTOCOL_EXTENSIONS=deleted` (comma list, default
-  empty), which enables it for every peer.
+**Sending extensions is not gated.** The desktop spec set's development-mode
+rule (owner decision, 2026-09-23; `polkadot-chat-desktop/docs/spec/README.md`)
+holds: every client is in development, so the bot sends every enabled
+extension kind (deleted, buttons, typing, seen) to every peer. There is no
+per-peer evidence and no advertisement. A client that does not know a kind
+shows the base spec's unsupported-message row, and that is accepted while the
+kinds iterate. `BOT_PROTOCOL_EXTENSIONS` is the operator's switch: unset means
+all, `none` means none, a comma list keeps only the named ones. When a peer
+sends an extension kind, the bot logs `BOT_PROTOCOL_EXTENSION_OBSERVED
+{ peer, kind }` once per peer. That is a log only; it enables nothing and is
+not persisted. (An earlier version of this page described a "send only after
+evidence" gate. The spec set keeps that rule as an option for the upstream
+submission, when legacy clients exist.)
 
 `deleteMessage(peerHex, messageId)` follows the RFC's sender cases on top of
 the outbound lane: a message still queued and never submitted is removed with
-no wire trace; otherwise, when the gate allows it, the deletion is enqueued
-with `supersedes: [messageId]`, so a target still in the un-ACKed statement
-leaves the slot in the same re-encode that carries the deletion. Without the
-gate, nothing is sent (`BOT_DELETE_SKIPPED`). Live replies use it once: when a
+no wire trace; otherwise, with the `deleted` extension on, the deletion is
+enqueued with `supersedes: [messageId]`, so a target still in the un-ACKed
+statement leaves the slot in the same re-encode that carries the deletion.
+With the extension off, nothing is sent (`BOT_DELETE_SKIPPED`). Live replies use it once: when a
 placeholder was never ACKed, the fallback answer already supersedes it, and
 the bot then also retracts it, in case the peer fetched it without the ACK
 arriving.
@@ -269,14 +274,11 @@ An invalid block (bad JSON, a broken limit, a block that does not end the
 reply) is left as plain text. A quoted bridge reply (`reply_to`) cannot be a
 buttons message, so it gets the fallback.
 
-**Sending is gated per peer**, with the same gate as deletion. A peer gets
-kind 242 only when it has sent the bot any extension kind (21, 242, 243, or
-another 240–249 kind; evidence persisted as `x`), or when the operator sets
-`BOT_PROTOCOL_EXTENSIONS=buttons`. Any other peer gets the spec's fallback: the
-text, then the labels as a numbered list (`BOT_BUTTONS_FALLBACK`). The operator
-context tells a brain about the block only for a peer that can render it (a
-bridge harness gets one context for every peer, so there the hint follows
-`BOT_PROTOCOL_EXTENSIONS=buttons`).
+**Sending** follows the extension switch above: with `buttons` on (the
+default) every peer gets kind 242. With it off, every peer gets the spec's
+fallback: the text, then the labels as a numbered list
+(`BOT_BUTTONS_FALLBACK`), and the operator context does not tell the brain
+about the block.
 
 **Receiving a press:** a `buttonPress` is accepted only for a buttons message
 this bot sent to that same peer (the bot keeps its last 50 per peer, persisted
@@ -287,6 +289,72 @@ unknown message, another peer's message, or a missing button is logged as
 `BOT_BUTTON_PRESS_IGNORED` and dropped. A `buttons` message from a peer reaches
 the brain as its fallback text. `command` presses arrive as normal text and
 `url` presses never reach the bot.
+
+### Typing and seen (spec 0005)
+
+Spec 0005 (`polkadot-chat-desktop/docs/spec/0005-typing-and-seen.md`) adds two
+provisional kinds:
+
+```
+typing(TypingContent) -> 240   TypingContent { until: u64, kind: u8 }   // 0 composing, 1 working, 2 stopped
+seen(SeenContent)     -> 241   SeenContent   { upTo: String, at: u64 }  // unix ms
+```
+
+The envelope is the usual one. The codec is `encodeOpaqueTypingMessage` /
+`encodeOpaqueSeenMessage` in `vendor/app-chat-codec.mjs`; two pinned byte
+vectors are in `polkadot-chat-desktop/docs/spec/vectors-0005.md` and in
+`test/codec.test.mjs`.
+
+Both kinds are **ephemeral**. The bot puts them straight into the peer's
+outbound lane: they are never journaled as an owed answer, never re-sent after
+a restart, and never recorded anywhere once the lane settles them. The sender
+logic is `lib/typing-seen.mjs`.
+
+**Typing (the bot sends `working`).**
+
+- A brain turn starts (a direct engine's turn, or a bridge hand-off): the bot
+  sends `typing{working, until: now + 6 s}` and refreshes it every 4 s while
+  the turn runs. Never more than one `typing` per 4 s per peer, across turns
+  too. A refresh is skipped while the previous hint is still un-ACKed: a peer
+  that has not fetched it gains nothing from the next one, and each in-slot
+  replacement spends one of the lane's extensions.
+- The real reply supersedes (`supersedes` on the lane entry) every typing the
+  peer has not ACKed, so an unfetched hint leaves the slot in the same
+  re-encode that carries the answer. After a reply no `stopped` is sent: the
+  recipient clears the indicator on any real message.
+- A turn that ends with no reply (for example a failed delivery, or `/stop`
+  that only edits the placeholder) sends `typing{stopped}`, when the 4 s rate
+  limit allows. A bridge harness that never answers stops the refresh after
+  `BOT_LIVE_TTL_MS` and sends `stopped`.
+- Log: `BOT_SENT_TYPING { to, kind: "working" }` once per turn (not per
+  refresh), and `{ kind: "stopped" }` when a stop is sent.
+
+**Seen (the bot sends read receipts).** When the brain consumes a peer's
+message (its turn starts), the bot sends `seen{upTo: <that message id>, at:
+now}`. At most one per 2 s per peer: messages consumed inside the window
+share one `seen` with the latest id, and an unfetched older `seen` is
+superseded (`upTo` covers it). Log: `BOT_SENT_SEEN { to, upTo }`. The spec's
+default for a bot is "on", because the bot's `seen` makes its typing
+indicator credible.
+
+**Receiving.** A peer's `typing` and `seen` are decoded and logged at debug
+level only (`BOT_RECEIVED_TYPING { from, kind, until }`, `BOT_RECEIVED_SEEN
+{ from, upTo, at }`, printed with `BOT_LOG_LEVEL=debug`). They are never
+answered, never fed to the brain, never stored as messages, and not even
+added to the dedup set (a repeat only logs again). The bot keeps no
+per-message delivery state, so a `seen` changes nothing on the bot's side.
+
+**Live placeholders with typing on.** The typing indicator covers the wait, so
+the bot does not post the "thinking" placeholder at the start of a turn. A
+client must not show a thinking row and a typing indicator for the same wait.
+The placeholder appears only when a turn runs past 20 s
+(`max(BOT_THINKING_AFTER_MS, 20 s)`), and its first frame is the progress
+status (`⏳ working · 20s · step N` and the recent `▸` action lines), not
+`BOT_THINKING_TEXT`. After that the frames and the terminal status line work
+as before. With `typing` off, the placeholder follows `BOT_THINKING_AFTER_MS`
+and `BOT_THINKING_TEXT` as before. The bridge's `GET /health` reports the
+delay in use as `live.placeholderAfterMs`. (Decision 2026-09-23, with spec
+0005.)
 
 ### Attachments (photos/videos/files)
 
@@ -466,7 +534,8 @@ remains the framework's responsibility. Deployed engines run in a non-root
 container that is the sandbox for their tools (see
 [Agent frameworks](/guide/harnesses#safety-model-for-containerized-agents)).
 
-If no reply has gone out within `BOT_THINKING_AFTER_MS` (default 5s) of
+If no reply has gone out within `BOT_THINKING_AFTER_MS` (default 5s; 20 s
+while the typing extension is on, see [Typing and seen](#typing-and-seen-spec-0005)) of
 receiving a message, the bot posts a "thinking" placeholder — a LIVE message
 that is then edited in place (elapsed clock, compact `▸ action` lines from
 claude's stream-json tool events) until the answer finalizes it. Edits are

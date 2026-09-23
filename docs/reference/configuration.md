@@ -393,7 +393,7 @@ session. Claude delivers the same facts through its system-prompt option.
 |---|---|---|
 | `BOT_REPLY_CHUNK_BYTES` | 4000 | Long answers are split into parts ≤ this many UTF-8 bytes (paragraph/code-fence aware). |
 | `BOT_THINKING_TEXT` | "🤔 One moment — thinking…" | Placeholder text; empty disables it. |
-| `BOT_THINKING_AFTER_MS` | 5000 | Post the placeholder if no reply within this delay. |
+| `BOT_THINKING_AFTER_MS` | 5000 | Post the placeholder if no reply within this delay. While the `typing` extension is on, the delay is at least 20000 and the first frame is the progress status instead of `BOT_THINKING_TEXT` (spec 0005). |
 | `BOT_LIVE_EDIT_MIN_MS` / `BOT_LIVE_EDIT_MAX_MS` | 3000 / 15000 | Live-edit throttle (escalating). |
 | `BOT_LIVE_HEARTBEAT_MS` | 5000 | Typing refresh and elapsed-clock frame cadence; stays below the T3ams client's 6-second typing expiry. |
 | `BOT_LIVE_ACK_TIMEOUT_MS` | 60000 | Give up gating edits on the peer's ACK after this. |
@@ -402,7 +402,8 @@ session. Claude delivers the same facts through its system-prompt option.
 | `BOT_LIVE_TTL_MS` | 600000 | A placeholder never finalized resolves to a timeout note. |
 | `BOT_LIVE_TIMEOUT_TEXT` | auto | That timeout note's text. |
 | `BOT_OUTBOUND_ACK_GRACE_MS` | 60000 | How long an un-ACKed statement holds the channel slot before a queued one takes over. |
-| `BOT_PROTOCOL_EXTENSIONS` | empty | Comma list of protocol extensions to send to every peer (`deleted` = RFC-0003, `buttons` = spec 0006). Without it, the bot sends `deleted` only to a peer that has sent it a deletion first, and `buttons` only to a peer that has sent it any extension kind (21 or 240–249); other peers get the buttons as a numbered text list. |
+| `BOT_PROTOCOL_EXTENSIONS` | all | Protocol extensions the bot sends, to every peer, with no per-peer gating: `deleted` (RFC-0003), `buttons` (spec 0006), `typing` and `seen` (spec 0005). Unset = all four; `none` = none; a comma list = only those named. With `buttons` off, buttons go out as a numbered text list. Receiving every extension is always on. |
+| `BOT_LOG_LEVEL` | unset | `debug` also prints debug events (`BOT_RECEIVED_TYPING`, `BOT_RECEIVED_SEEN`), marked `level: "debug"`. |
 
 T3ams uses the same placeholder, progress, final-wait, timeout, and chunk
 settings. Unlike the default transport, it has native typing, edit, and reaction

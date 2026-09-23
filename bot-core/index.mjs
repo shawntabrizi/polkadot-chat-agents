@@ -76,7 +76,8 @@ import { createPeerClock } from "./lib/peer-clock.mjs";
 import { commandCatalog, resolveModelPolicy } from "./lib/commands.mjs";
 import { splitMessageText } from "./lib/chunk.mjs";
 import { createOutboundLanes } from "./lib/outbound-lanes.mjs";
-import { createDeletionLedger, createExtensionGate, createMessageDeleter, parseProtocolExtensions } from "./lib/message-deletion.mjs";
+import { createDeletionLedger, createExtensionObserver, createMessageDeleter, parseProtocolExtensions } from "./lib/message-deletion.mjs";
+import { TYPING_PLACEHOLDER_AFTER_MS, createTypingAndSeen } from "./lib/typing-seen.mjs";
 import { buttonsFallbackText, parseButtonsBlock } from "./lib/buttons-block.mjs";
 import { buttonPressText, createSentButtons } from "./lib/button-presses.mjs";
 import { createWorkspaces } from "./lib/workspaces.mjs";
@@ -126,6 +127,8 @@ import {
   encodeOpaqueEditedMessage,
   encodeOpaqueDeletedMessage,
   encodeOpaqueButtonsMessage,
+  encodeOpaqueTypingMessage,
+  encodeOpaqueSeenMessage,
   encodeOpaqueDataChannelClosedMessage,
   encodeOpaqueChatAcceptedMessage,
   encodeOpaqueDeviceChatAcceptedMessage,
@@ -948,6 +951,10 @@ const disarmThinking = (peerHex) => {
   // takeLivePlaceholder instead.
   if (!livePlaceholders.has(k)) disposeProgressTracker(k);
 };
+// Spec 0005: with typing on, the typing indicator covers the wait, so the
+// placeholder appears only for a turn longer than TYPING_PLACEHOLDER_AFTER_MS,
+// and its first frame is the progress status, not the "thinking" text.
+const placeholderAfterMs = () => (extensionOn("typing") ? Math.max(thinkingAfterMs, TYPING_PLACEHOLDER_AFTER_MS) : thinkingAfterMs);
 const armThinking = (peerHex) => {
   const k = norm(peerHex);
   if (!thinkingText || !(thinkingAfterMs > 0) || thinkingTimers.has(k)) return;
@@ -961,7 +968,7 @@ const armThinking = (peerHex) => {
     // The placeholder is a LIVE message: it is edited through progress frames
     // and finally collapses to a short status receipt for the turn.
     livePlaceholders.set(k, (async () => {
-      const handle = await liveReplies.begin(k, thinkingText);
+      const handle = await liveReplies.begin(k, extensionOn("typing") ? progressTrackerFor(k).render() : thinkingText);
       // Already counting since turn start; attaching lets any pre-placeholder
       // work show up in the first visible frame.
       const tracker = progressTrackerFor(k);
@@ -987,7 +994,7 @@ const armThinking = (peerHex) => {
       log("BOT_THINKING_FAILED", { error: String(e?.message ?? e) });
       return null;
     }));
-  }, thinkingAfterMs));
+  }, placeholderAfterMs()));
 };
 
 // ---------- outbound lanes (one statement per peer channel slot) ----------
@@ -1024,20 +1031,47 @@ const outbound = createOutboundLanes({
   log,
 });
 
-// ---------- RFC-0003 message deletion ----------
-// Receiving a deletion is always on. SENDING one is gated per peer: a phone
-// that predates the RFC renders the new kind as an "unsupported message"
-// bubble. A peer proves support by sending us a deletion itself (evidence,
-// persisted with its session); BOT_PROTOCOL_EXTENSIONS=deleted enables it for
-// every peer. See lib/message-deletion.mjs and docs/explanation/protocol.md.
+// ---------- protocol extensions (RFC-0003, specs 0005 and 0006) ----------
+// Receiving every extension kind is always on. SENDING follows the desktop
+// spec set's development-mode rule: every client is in development, so the
+// bot sends each enabled extension to every peer, with no per-peer evidence.
+// BOT_PROTOCOL_EXTENSIONS: unset = all (deleted, buttons, typing, seen),
+// "none" = none, or a comma list. See docs/explanation/protocol.md.
 const protocolExtensions = parseProtocolExtensions(env.BOT_PROTOCOL_EXTENSIONS);
+const extensionOn = (name) => protocolExtensions.enabled.has(name);
 if (protocolExtensions.unknown.length) log("BOT_PROTOCOL_EXTENSIONS_UNKNOWN", { names: protocolExtensions.unknown });
-for (const kind of protocolExtensions.enabled) log("BOT_PROTOCOL_EXTENSION_ENABLED", { peer: "*", kind, source: "BOT_PROTOCOL_EXTENSIONS" });
-const extensionGate = createExtensionGate({ forced: protocolExtensions.enabled });
+log("BOT_PROTOCOL_EXTENSIONS", { enabled: [...protocolExtensions.enabled] });
+// Which peers sent an extension kind: logged once per peer, gates nothing.
+const extensionObserver = createExtensionObserver();
+const observeExtension = (peerHex, kind) => {
+  if (extensionObserver.observe(norm(peerHex), kind)) log("BOT_PROTOCOL_EXTENSION_OBSERVED", { peer: norm(peerHex), kind });
+};
+// Only receive-side debug events use this: a composing peer sends a typing
+// every few seconds, too noisy for the default log.
+const logDebug = env.BOT_LOG_LEVEL === "debug" ? (event, extra = {}) => log(event, { level: "debug", ...extra }) : () => {};
+
+// ---------- spec 0005 typing and seen (sender side) ----------
+// Ephemeral: straight into the outbound lane, never journaled as an answer
+// (see lib/typing-seen.mjs). The reply supersedes an un-ACKed typing in
+// submitMessage.
+const typingAndSeen = createTypingAndSeen({
+  typing: extensionOn("typing"),
+  seen: extensionOn("seen"),
+  enqueue: (peerHex, opaque, options) => outbound.enqueue(norm(peerHex), opaque, options),
+  encodeTyping: encodeOpaqueTypingMessage,
+  encodeSeen: encodeOpaqueSeenMessage,
+  makeId: makeAppUuid,
+  stamp,
+  maxTurnMs: liveTtlMs,
+  log,
+});
+
+// ---------- RFC-0003 message deletion ----------
+// Receiving a deletion is always on; sending one needs the `deleted` extension.
 const deletions = createDeletionLedger();
 const retractOwn = createMessageDeleter({
   outbound,
-  gate: extensionGate,
+  enabled: extensionOn("deleted"),
   encode: encodeOpaqueDeletedMessage,
   makeId: makeAppUuid,
   stamp,
@@ -1059,16 +1093,15 @@ const deleteMessage = async (peerHex, messageId) => {
 // ---------- spec 0006 buttons ----------
 // A brain ends its reply with a ```buttons block (lib/buttons-block.mjs). A
 // peer with the extension gets ONE kind-242 message; any other peer gets the
-// spec's fallback (the text, then the labels as a numbered list), so an old
-// phone never shows an "unsupported message" bubble. The same per-peer gate
-// as deletion; for buttons, any extension kind from the peer is evidence.
+// spec's fallback (the text, then the labels as a numbered list). Kind 242
+// goes out whenever the `buttons` extension is on (the default).
 // sentButtons remembers the bot's own buttons messages, so a buttonPress is
 // accepted only for one of them, from the peer it went to.
 const sentButtons = createSentButtons();
 const prepareReply = (peerHex, text, { allowButtons = true } = {}) => {
   const parsed = parseButtonsBlock(text);
   if (!parsed) return { text, buttons: null };
-  if (allowButtons && extensionGate.enabled(norm(peerHex), "buttons")) {
+  if (allowButtons && extensionOn("buttons")) {
     return { text: parsed.text, buttons: { rows: parsed.rows, oneShot: parsed.oneShot } };
   }
   log("BOT_BUTTONS_FALLBACK", { to: peerHex, buttons: parsed.rows.flat().length });
@@ -1100,7 +1133,11 @@ const submitMessage = async (peerHex, { text, replyTo = null, editOf = null, sup
   // this answer also holds the record a later press is checked against.
   if (buttons) sentButtons.record(k, messageId, buttons.rows);
   if (!ephemeral) await journalAnswer(k, { messageId, opaque, supersedes });
-  const { submitted, delivered } = outbound.enqueue(k, opaque, { messageId, supersedes });
+  // Spec 0005: a real message ends the turn's typing and drops any typing the
+  // peer has not fetched yet from the slot. Not journaled: after a restart
+  // those typing entries are gone anyway.
+  const typingIds = ephemeral ? [] : typingAndSeen.replyGoingOut(k);
+  const { submitted, delivered } = outbound.enqueue(k, opaque, { messageId, supersedes: [...supersedes, ...typingIds] });
   await submitted;
   log(buttons ? "BOT_SENT_BUTTONS" : "BOT_SENT_TEXT", {
     to: peerHex,
@@ -1156,7 +1193,7 @@ const sendAttachment = async (peerHex, { filePath, mime, size, text = null }) =>
   // The envelope holds the claim ticket; journaled, it lands in the 0600
   // state file like an inbound attachment's ticket does (see snapshotState).
   await journalAnswer(k, { messageId, opaque, supersedes: [] });
-  const { submitted, delivered } = outbound.enqueue(k, opaque, { messageId });
+  const { submitted, delivered } = outbound.enqueue(k, opaque, { messageId, supersedes: typingAndSeen.replyGoingOut(k) });
   await submitted;
   disarmThinking(peerHex);
   log("BOT_SENT_FILE", { to: peerHex, mime, bytes: size });
@@ -1276,6 +1313,7 @@ const deliverToChat = async (peerHex, reply, _deliveryContext = null, turnStats 
 // terminal status line still reports how many steps the turn took.
 const beginTurnProgress = (peerHex) => {
   const tracker = progressTrackerFor(peerHex);
+  typingAndSeen.turnStarted(norm(peerHex));
   armThinking(peerHex);
   return (title) => tracker.add(title);
 };
@@ -1324,8 +1362,8 @@ const agentRuntime = engine ? createAgentRuntime({
     transport: "polkadot-app",
     policy: aiToolPolicy,
     personaPath: path.join(aiWorkspace, "PERSONA.md"),
-    // Spec 0006: the ```buttons hint only for a peer that can render them.
-    buttons: (peerHex) => extensionGate.enabled(norm(peerHex), "buttons"),
+    // Spec 0006: the ```buttons hint only when buttons go out as kind 242.
+    buttons: () => extensionOn("buttons"),
   },
   chat: { sendText, deliver: deliverToChat, beginTurn: beginTurnProgress },
   username,
@@ -1390,6 +1428,8 @@ const renderForBrain = (msg) => {
 
 // msg: { text, messageId, kind, attachments?, replyTo?, editOf? }
 const handleInbound = async (peerHex, msg, owedId = null, { reservedBridge = false } = {}) => {
+  // Spec 0005: the brain consumes this message now.
+  typingAndSeen.consumed(norm(peerHex), msg.messageId);
   await fetchAttachments(msg.attachments);
   const fileResult = await handleFileCommand(peerHex, msg);
   if (fileResult?.handled) {
@@ -1404,9 +1444,17 @@ const handleInbound = async (peerHex, msg, owedId = null, { reservedBridge = fal
     await deliverToChat(peerHex, `Echo: ${synthesizeText(msg.text, msg.attachments)}`).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
     return;
   }
-  if (agentRuntime) return agentRuntime.handleMessage(peerHex, msg);
+  if (agentRuntime) {
+    // A turn that ends with no reply (a failed delivery, /stop) closes its
+    // typing hint with typing{stopped}; after a reply this is a no-op.
+    try { return await agentRuntime.handleMessage(peerHex, msg); }
+    finally { typingAndSeen.turnEnded(norm(peerHex)); }
+  }
   // bridge: hand off to an external agent via the HTTP bridge.
-  // The agent replies via POST /send -> sendMessage, which disarms the ack.
+  // The agent replies via POST /send -> sendMessage, which disarms the ack
+  // and ends the typing hint. A harness that never answers stops the hint
+  // after BOT_LIVE_TTL_MS.
+  typingAndSeen.turnStarted(norm(peerHex));
   armThinking(peerHex);
   try {
     enqueueInbound({
@@ -1634,9 +1682,8 @@ const snapshotState = () => ({
     // lib/agent-runtime.mjs.
     ...(agentRuntime ? agentRuntime.peerSnapshot(norm(peerHex)) : {}),
     ...(lastActiveAt ? { la: lastActiveAt } : {}),
-    // RFC-0003: tombstones + pending deletions (dl), extension evidence (x).
+    // RFC-0003: tombstones + pending deletions (dl).
     ...(deletions.snapshot(norm(peerHex)) ? { dl: deletions.snapshot(norm(peerHex)) } : {}),
-    ...(extensionGate.snapshot(norm(peerHex)) ? { x: extensionGate.snapshot(norm(peerHex)) } : {}),
     // Spec 0006: the bot's own recent buttons messages (bp), for press checks.
     ...(sentButtons.snapshot(norm(peerHex)) ? { bp: sentButtons.snapshot(norm(peerHex)) } : {}),
   })),
@@ -1950,15 +1997,21 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
       batchSeen.add(id); newlySeen.push(id); stops.push(id);
       continue;
     }
-    // Spec 0006 / the desktop spec set: any extension kind from this peer
-    // (buttons 242, buttonPress 243, or another provisional 240-249 kind) is
-    // evidence that its client renders kinds it did not ship with.
-    if (m.kind === "buttons" || m.kind === "buttonPress" || (m.kind === "unsupported" && m.contentKind >= 240 && m.contentKind <= 249)) {
-      const evidence = m.kind === "unsupported" ? "extension" : "buttons";
-      if (extensionGate.observe(norm(peerHex), evidence)) {
-        stateChanged = true;
-        log("BOT_PROTOCOL_EXTENSION_ENABLED", { peer: norm(peerHex), kind: evidence });
-      }
+    // Which extension kinds this peer sends: a log, it gates nothing.
+    if (m.kind === "buttons" || m.kind === "buttonPress" || m.kind === "typing" || m.kind === "seen"
+      || (m.kind === "unsupported" && m.contentKind >= 240 && m.contentKind <= 249)) {
+      observeExtension(peerHex, m.kind === "unsupported" ? "extension" : m.kind);
+    }
+    // Spec 0005: typing and seen are ephemeral signals. Never answered, never
+    // fed to the brain, never stored or deduped (a duplicate only logs twice).
+    // The bot keeps no per-message delivery state, so a seen changes nothing.
+    if (m.kind === "typing") {
+      logDebug("BOT_RECEIVED_TYPING", { from: peerHex, kind: m.typingKind, until: m.until });
+      continue;
+    }
+    if (m.kind === "seen") {
+      logDebug("BOT_RECEIVED_SEEN", { from: peerHex, upTo: m.upTo, at: m.at });
+      continue;
     }
     // A buttonPress runs a brain turn, but only for a buttons message this
     // bot sent to THIS peer; a foreign or unknown press is logged and dropped.
@@ -2045,7 +2098,7 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
       // RFC-0003: applied only to a message this peer sent us (the receive
       // record is keyed by peer). Never rendered, never answered.
       const k = norm(peerHex);
-      if (extensionGate.observe(k, "deleted")) log("BOT_PROTOCOL_EXTENSION_ENABLED", { peer: k, kind: "deleted" });
+      observeExtension(k, "deleted");
       stateChanged = true;
       if (!m.targetMessageId) continue;
       const key = `${k}:${m.targetMessageId}`;
@@ -2451,7 +2504,7 @@ const startBridge = () => {
           },
           // Capability advertisement for harness adapters (OpenClaw-style
           // supportsEdit gating): edits exist and are throttled server-side.
-          live: { supportsEdit: true, minEditMs: liveMinEditMs, placeholderAfterMs: thinkingText ? thinkingAfterMs : null },
+          live: { supportsEdit: true, minEditMs: liveMinEditMs, placeholderAfterMs: thinkingText && thinkingAfterMs > 0 ? placeholderAfterMs() : null },
         });
       }
       if (req.method === "GET" && url.pathname === "/inbound") {
@@ -2799,7 +2852,6 @@ for (const p of restored?.peers ?? []) {
     addSessionWatch(p.peerHex);
     agentRuntime?.restorePeer(norm(p.peerHex), { rs: p.rs, mo: p.mo, pj: p.pj, br: p.br });
     deletions.restore(norm(p.peerHex), p.dl);
-    extensionGate.restore(norm(p.peerHex), p.x);
     sentButtons.restore(norm(p.peerHex), p.bp);
     restoredPeers += 1;
   } catch (e) { log("BOT_STATE_PEER_SKIPPED", { peer: p?.peerHex, error: String(e?.message ?? e) }); }

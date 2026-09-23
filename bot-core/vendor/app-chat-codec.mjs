@@ -1175,6 +1175,57 @@ export function encodeOpaqueButtonPressMessage({
   });
 }
 
+// Spec 0005 typing and seen (polkadot-chat-desktop docs/spec/0005-typing-and-seen.md).
+// Provisional kinds from the desktop spec set (kinds.md, range 240-249):
+//   typing(TypingContent) -> 240   TypingContent { until: u64, kind: u8 }
+//   seen(SeenContent)     -> 241   SeenContent { upTo: String, at: u64 }
+// Both are ephemeral: never stored, never answered, never shown as a bubble.
+export const TYPING_CONTENT_KIND = 240;
+export const SEEN_CONTENT_KIND = 241;
+export const TYPING_KINDS = Object.freeze({ composing: 0, working: 1, stopped: 2 });
+
+const assertU64 = (value, name) => {
+  const big = typeof value === "bigint" ? value : Number.isSafeInteger(value) ? BigInt(value) : null;
+  if (big == null || big < 0n || big >= 1n << 64n) throw new Error(`${name} must be a u64`);
+  return big;
+};
+
+export function encodeOpaqueTypingMessage({
+  messageId = makeAppUuid(),
+  timestamp = chatTimestampNow(),
+  until,
+  kind,
+}) {
+  if (!Object.values(TYPING_KINDS).includes(kind)) throw new Error("typing kind must be 0 (composing), 1 (working) or 2 (stopped)");
+  return encodeOpaqueRemoteMessage({
+    messageId,
+    timestamp,
+    content: concatBytes(
+      Uint8Array.of(TYPING_CONTENT_KIND),
+      scaleEncodeUInt64(assertU64(until, "typing until")),
+      Uint8Array.of(kind),
+    ),
+  });
+}
+
+export function encodeOpaqueSeenMessage({
+  messageId = makeAppUuid(),
+  timestamp = chatTimestampNow(),
+  upTo,
+  at,
+}) {
+  if (typeof upTo !== "string" || upTo.length === 0) throw new Error("seen needs the upTo message id");
+  return encodeOpaqueRemoteMessage({
+    messageId,
+    timestamp,
+    content: concatBytes(
+      Uint8Array.of(SEEN_CONTENT_KIND),
+      scaleEncodeString(upTo),
+      scaleEncodeUInt64(assertU64(at, "seen at")),
+    ),
+  });
+}
+
 export function encodeOpaqueDataChannelClosedMessage({
   messageId = makeAppUuid(),
   timestamp = chatTimestampNow(),
@@ -1734,6 +1785,30 @@ function decodeRemoteMessage(bytes, budget) {
       kind: "deleted",
       targetMessageId: targetMessageId.value,
       offset: targetMessageId.offset,
+    };
+  }
+  if (contentKind === TYPING_CONTENT_KIND) {
+    const until = scaleDecodeUInt64At(bytes, offset);
+    const typingKind = fixedBytesAt(bytes, until.offset, 1, "typing kind");
+    return {
+      messageId: messageId.value,
+      timestamp: Number(timestamp.value),
+      kind: "typing",
+      until: Number(until.value),
+      typingKind: typingKind.value[0],
+      offset: typingKind.offset,
+    };
+  }
+  if (contentKind === SEEN_CONTENT_KIND) {
+    const upTo = decodeIdAt(bytes, offset, "seen upTo id");
+    const at = scaleDecodeUInt64At(bytes, upTo.offset);
+    return {
+      messageId: messageId.value,
+      timestamp: Number(timestamp.value),
+      kind: "seen",
+      upTo: upTo.value,
+      at: Number(at.value),
+      offset: at.offset,
     };
   }
   if (contentKind === BUTTONS_CONTENT_KIND) {
