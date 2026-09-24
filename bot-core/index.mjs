@@ -1363,6 +1363,15 @@ const groupsV2 = createGroupsV2({
     walletPair: wallet, channel, topics: [topic], scaleEncodedPayload: scaleEncodeBytes(data), expiryFactory: groupExpiry,
   }),
   sendControl: sendGroupControl,
+  // 0011 ruling 8: the same botInfo the bot sends in DMs rides its first
+  // group statement. A group has no single payer, so no pending debit.
+  botInfo: () => {
+    const info = currentBotInfo();
+    return info ? { version: info.version, opaque: encodeOpaqueBotInfoMessage({
+      timestamp: Date.now(), kind: info.kind, name: info.name, description: info.description, greeting: info.greeting,
+      commands: info.commands, version: info.version, balance: info.balance ? { ...info.balance, pending: null } : null,
+    }) } : null;
+  },
   log,
 });
 // The session key a group turn runs under: v1 and v2 share the scheme.

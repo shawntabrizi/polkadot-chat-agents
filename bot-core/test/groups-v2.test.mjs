@@ -14,6 +14,7 @@ import { PERMISSIONS, ROLES, decodeGroupData, decodeGroupMessages, decodeGroupSt
 import { deriveEpoch, joinProof, makeRekeyEntry, open, pairwiseSecret, seal } from "../lib/group-keys.mjs";
 import {
   decodeOpaqueMessageAt,
+  encodeOpaqueBotInfoMessage,
   encodeOpaqueGroupControlMessage,
   encodeOpaqueGroupLeaveMessage,
   encodeOpaqueTextMessage,
@@ -34,7 +35,7 @@ const makeWorld = ({ start = 1_790_000_000_000 } = {}) => {
   const keys = new Map();  // account -> { priv, pub }
   const people = {};
   let n = 0;
-  const person = (name, { allowed = () => true } = {}) => {
+  const person = (name, { allowed = () => true, botInfo } = {}) => {
     const account = ACCOUNTS[name];
     const priv = fill(0x10 + Object.keys(ACCOUNTS).indexOf(name), 32);
     keys.set(account, { priv, pub: x25519PublicKeyFromPrivateKey(priv) });
@@ -43,6 +44,7 @@ const makeWorld = ({ start = 1_790_000_000_000 } = {}) => {
       selfHex: account,
       now: () => clock.t,
       isAllowed: allowed,
+      ...(botInfo ? { botInfo } : {}),
       pairwiseKey: async (peer) => (keys.has(peer) ? pairwiseSecret(priv, keys.get(peer).pub) : null),
       submit: async ({ topic, channel, data }) => {
         const st = { topicHex: hex(topic), channelHex: hex(channel), signerHex: account, data, seq: ++n };
@@ -86,11 +88,11 @@ const texts = (res) => res.flatMap((r) => r.messages ?? []).map((x) => x.message
 
 // alice creates the group with bob and the bot; both accept the welcome and
 // read the state from the topic.
-const setup = async ({ bot = {}, state = {} } = {}) => {
+const setup = async ({ bot = {}, state = {}, botInfo } = {}) => {
   const w = makeWorld();
   const alice = w.person("alice");
   const bob = w.person("bob");
-  const b = w.person("bot");
+  const b = w.person("bot", { botInfo });
   const welcome = await alice.groups.create({
     groupId: GROUP, name: "Test group", createdAt: w.clock.t,
     members: [{ account: bob.account }, { account: b.account, ...bot }], ...state,
@@ -152,6 +154,53 @@ test("one message = one submission; the bot's reply is ONE statement on its ChMs
   assert.equal(last.channelHex, hex(ep.channels.msgs), "on ChMsgs_1");
   assert.deepEqual(texts(await alice.sync()), ["part one", "part two", "part three"]);
   assert.deepEqual(texts(await bob.sync()), ["hello bot", "part one", "part two", "part three"]);
+});
+
+// 0011 ruling 8: the desktop shows a bot's badge, description and `/`
+// commands in a group only from a botInfo it read on the group topic. The bot
+// must not pay a standalone statement for it, and must not repeat it in every
+// carrier (4 KB is shared with the replies), but a new version must reach
+// the group.
+test("botInfo rides the bot's first group statement with the reply; later statements repeat it only after a version change", async () => {
+  let version = 3;
+  const botInfo = () => ({
+    version,
+    opaque: encodeOpaqueBotInfoMessage({ timestamp: 1, kind: 1, name: "Bot", description: "A bot", commands: [{ name: "help", description: "Help" }], version }),
+  });
+  const { w, alice, bot } = await setup({ botInfo });
+  // The carrier the bot holds now, decoded to kinds, newest first.
+  const carrierKinds = () => {
+    const st = [...w.slots.values()].find((s) => s.signerHex === bot.account && decodeGroupData(s.data).kind === "messages");
+    const plain = open(bot.groups.get(GROUP).epochs.get(1).msgKey, { signer: Buffer.from(bot.account, "hex"), epoch: 1, variant: 0, sealed: decodeGroupData(st.data).sealed });
+    return decodeGroupMessages(plain).messages.map((o) => decodeOpaqueMessageAt(o, 0).value);
+  };
+  const before = w.submissions.length;
+  assert.equal(w.submissions.filter((s) => s.who === "bot").length, 0, "joining alone submits nothing: no standalone botInfo statement");
+
+  assert.equal((await bot.groups.send(GROUP, [text("B-1", w.clock.t, "first reply")])).botInfo, 3);
+  assert.equal(w.submissions.length - before, 1, "botInfo + reply is ONE submission");
+  const first = carrierKinds();
+  assert.deepEqual(first.map((m) => m.kind), ["text", "botInfo"], "the reply, then the botInfo as the oldest message");
+  assert.equal(first[1].version, 3);
+  assert.deepEqual(first[1].commands.map((c) => c.name), ["help"]);
+  const got = await alice.sync();
+  assert.deepEqual(got.flatMap((r) => r.messages ?? []).map((x) => x.message.kind), ["botInfo", "text"], "a member reads the botInfo before the reply");
+
+  w.clock.t += 5000;
+  assert.equal((await bot.groups.send(GROUP, [text("B-2", w.clock.t, "second reply")])).botInfo, undefined);
+  assert.deepEqual(carrierKinds().map((m) => m.kind), ["text", "text"], "the next statement carries the replies, not the botInfo again");
+
+  w.clock.t += 5000;
+  version = 4; // the operator edited botinfo.json
+  await bot.groups.send(GROUP, [text("B-3", w.clock.t, "third reply")]);
+  const third = carrierKinds();
+  assert.deepEqual(third.map((m) => m.kind), ["text", "botInfo", "text", "text"], "a new version rides the next statement once");
+  assert.equal(third[1].version, 4);
+  // It survives a restart: the restored state does not announce again.
+  const restored = w.person("bot", { botInfo });
+  restored.groups.restore(bot.groups.snapshot());
+  w.clock.t += 5000;
+  assert.equal((await restored.groups.send(GROUP, [text("B-4", w.clock.t, "after restart")])).botInfo, undefined);
 });
 
 test("the carry: the bot's next statement replaces the previous one and still carries its last 24 h; readers dedup", async () => {

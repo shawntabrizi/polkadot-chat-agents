@@ -22,6 +22,10 @@
 //     its own messages of the last 24 h, newest first, <= 4096 bytes
 //     plaintext, at most one per second, and for role 0 at most one per
 //     `slowModeSecs` (a refusal says when to retry; the caller merges);
+//   - botInfo (0011 ruling 8): the bot's first statement after it joins
+//     carries its botInfo inline, oldest, ahead of the reply; a later
+//     statement carries it again only when its version changed. It is not
+//     carried for 24 h and not kept as history;
 //   - history: any member may ask; pages of <= 4 KB, newest first, <= 100
 //     messages, never older than the asker's join unless historyShare > 0;
 //   - as an admin (role >= 1 with the flag): answer keyRequest with a
@@ -61,6 +65,7 @@ export const createGroupsV2 = ({
   pairwiseKey,        // async (peerHex) -> K(self, peer) | null
   submit,             // async ({ groupId, topic, channel, data }) -> void; data = encoded GroupData
   sendControl,        // async (peerHex, control) -> void; one kind-249 message over the DM session
+  botInfo = () => null, // () -> { version, opaque } | null; the bot's own botInfo message
   isAllowed = () => true,
   now = () => Date.now(),
   random = (n) => new Uint8Array(crypto.randomBytes(n)),
@@ -92,6 +97,7 @@ export const createGroupsV2 = ({
     groupId, epoch: 0, epochs: new Map(), state: null, stateSigner: null, stateBytes: null, pendingWelcome: null,
     status: "pending", locked: false, carry: [], lastSentAt: 0, seen: [], seenSet: new Set(), senders: new Set(), gaps: new Set(),
     lastArrival: new Map(), history: [], joinedAt: now(), forks: new Map(), pending: [], keyRequestedAt: 0, rotateAt: null,
+    botInfoVersion: 0, // the botInfo version last sent to this group (0 = none)
   });
   const addKey = (g, epoch, key, extra = {}) => {
     g.epochs.set(epoch, { ...deriveEpoch(key, g.groupId, epoch), openedAt: now(), erasesAt: null, ...extra });
@@ -139,6 +145,7 @@ export const createGroupsV2 = ({
     const was = g.status;
     g.status = me ? "member" : "removed";
     if (g.status === "removed") { g.carry = []; reindex(); }
+    if (was !== "member" && g.status === "member") g.botInfoVersion = 0; // a (re)join announces again
     if (was !== g.status) log(g.status === "member" ? "BOT_GROUP2_JOINED" : "BOT_GROUP2_REMOVED", { group: g.groupId, epoch: state.epoch, version: state.version, members: state.members.length });
     else log("BOT_GROUP2_STATE", { group: g.groupId, epoch: state.epoch, version: state.version, members: state.members.length, by: signer });
   };
@@ -396,6 +403,16 @@ export const createGroupsV2 = ({
       const size = (items) => encodeGroupMessages({ from: self, messages: items.map((c) => c.opaque) }).length;
       if (size(newestFirst) > GROUP_BOUNDS.plaintext) return { ok: false, reason: "too-large" };
       const items = [...newestFirst];
+      // Ruling 8: botInfo rides the first statement after the join (and the
+      // first after a version change), as the oldest message in it. When it
+      // does not fit next to the reply, it waits for the next statement.
+      const leaveOnly = decoded.every(({ m }) => m.kind === "groupLeave");
+      const info = leaveOnly ? null : botInfo();
+      let announced = null;
+      if (info && info.version !== g.botInfoVersion) {
+        if (size([...items, info]) <= GROUP_BOUNDS.plaintext) { items.push(info); announced = info; }
+        else log("BOT_GROUP2_BOTINFO_DEFERRED", { group: groupId, version: info.version });
+      }
       for (const c of [...g.carry].reverse()) {
         if (size([...items, c]) > GROUP_BOUNDS.plaintext) break;
         items.push(c);
@@ -404,13 +421,15 @@ export const createGroupsV2 = ({
       const sealed = seal(ep.msgKey, { signer: self, epoch: ep.epoch, variant: GROUP_DATA.messages, plaintext, nonce: random(12) });
       await submitData(g, ep, ep.channels.msgs, { messages: sealed });
       g.lastSentAt = t;
+      if (announced) g.botInfoVersion = announced.version;
       g.carry.push(...fresh);
       for (const f of fresh) {
         remember(g, `${self}:${f.messageId}`);
         keepHistory(g, { from: self, messageId: f.messageId, timestamp: f.timestamp, opaque: f.opaque });
       }
-      log("BOT_GROUP2_SENT", { group: groupId, epoch: ep.epoch, messages: fresh.length, carried: items.length - fresh.length, bytes: plaintext.length });
-      return { ok: true, epoch: ep.epoch, carried: items.length - fresh.length, bytes: plaintext.length };
+      const carried = items.length - fresh.length - (announced ? 1 : 0);
+      log("BOT_GROUP2_SENT", { group: groupId, epoch: ep.epoch, messages: fresh.length, carried, bytes: plaintext.length, ...(announced ? { botInfo: announced.version } : {}) });
+      return { ok: true, epoch: ep.epoch, carried, bytes: plaintext.length, ...(announced ? { botInfo: announced.version } : {}) };
     },
 
     // A history request from a member: the pages to send (History controls),
@@ -586,6 +605,7 @@ export const createGroupsV2 = ({
       h: g.history.slice(-100).map((x) => ({ f: x.from, i: x.messageId, t: x.timestamp, o: hexOf(x.opaque) })),
       ids: g.seen.slice(-SEEN_IDS),
       j: g.joinedAt,
+      bv: g.botInfoVersion,
     })),
 
     restore(list) {
@@ -602,6 +622,7 @@ export const createGroupsV2 = ({
           g.locked = !!s.lk;
           g.carry = (s.c ?? []).map((c) => ({ opaque: bytesOf(c.o), messageId: c.i, timestamp: c.t, sentAt: c.at, epoch: c.e }));
           g.lastSentAt = Number(s.ls ?? 0);
+          g.botInfoVersion = Number(s.bv ?? 0);
           g.history = (s.h ?? []).map((x) => ({ from: x.f, messageId: x.i, timestamp: x.t, opaque: bytesOf(x.o) }));
           for (const id of s.ids ?? []) remember(g, id);
           groups.set(s.id, g);
