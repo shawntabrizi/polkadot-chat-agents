@@ -185,7 +185,10 @@ export const createOutboundLanes = ({
           // An extension refreshes the window: the statement in the slot is new.
           submittedAt: now(),
         };
-        if (extending) log("BOT_OUTBOUND_EXTENDED", { to: peerHex, messages: batch.entries.length, extensions: lane.current.extensions });
+        // One of these two per statement submission (the budget unit of
+        // efficiency.md); `added` counts the messages this submission first carried.
+        if (extending) log("BOT_OUTBOUND_EXTENDED", { to: peerHex, messages: batch.entries.length, added: newEntries.length, extensions: lane.current.extensions });
+        else log("BOT_OUTBOUND_SUBMITTED", { to: peerHex, messages: batch.entries.length });
       }
     } finally {
       lane.pumping = false;

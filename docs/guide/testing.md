@@ -351,7 +351,7 @@ bot-core logs one JSON line per event. The ones worth grepping:
 | `BOT_REJECTED_UNLISTED` | sender not on the allowlist |
 | `BOT_SESSION_DECODE_FAILED` | follow-up arrived but could not be decrypted |
 | `BOT_PEER_DEVICE_ADDED` / `BOT_PEER_DEVICE_REMOVED` | the peer's device roster changed (`deviceChatAccepted`, `deviceAdded`, `deviceRemoved`) |
-| `BOT_OUTBOUND_EXTENDED` / `BOT_OUTBOUND_TAKEOVER` | the un-ACKed statement grew losslessly / the liveness backstop replaced it (a peer that never ACKs) |
+| `BOT_OUTBOUND_SUBMITTED` / `BOT_OUTBOUND_EXTENDED` / `BOT_OUTBOUND_TAKEOVER` | a new request statement went out (`messages` it carries) / the un-ACKed statement grew losslessly (`added` new messages) / the liveness backstop replaced it (a peer that never ACKs). One `SUBMITTED` or `EXTENDED` line is one Statement Store submission. |
 | `BOT_SENT_TEXT` | reply published (carries `replyTo`/`editOf` when quoting/editing) |
 | `BOT_MEDIA_DOWNLOADED` / `BOT_MEDIA_DOWNLOAD_FAILED` | attachment fetched from the HOP node (or not — the brain gets a failure note) |
 | `BOT_RECEIVED_REACTION` / `BOT_SENT_REACTION` | emoji reaction in / out |

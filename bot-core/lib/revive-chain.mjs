@@ -20,6 +20,13 @@ import { metadataCache } from "./chain-client.mjs";
 export const PLANCKS_PER_PAS = 10_000_000_000n;
 /** A best-block inclusion that takes longer than this is reported as a failure. */
 export const INCLUSION_TIMEOUT_MS = 90_000;
+/**
+ * Spec 0007 client rule 3 (revision 2026-09-23): one transactionReference per
+ * transaction. Status 0 (submitted) goes out only when no best block holds the
+ * extrinsic this long after the submit; otherwise the only reference is status
+ * 1 or 3. Status 2 (finalized) is never sent: a receiver tracks it from the chain.
+ */
+export const REFERENCE_PENDING_AFTER_MS = 30_000;
 /** Dry-run weight and deposit are raised by this percentage before signing. */
 const MARGIN_PERCENT = 20n;
 
@@ -98,6 +105,20 @@ export const flipCalldata = {
 };
 export const eventTopic = (signature) => toHex(keccak_256(new TextEncoder().encode(signature)));
 
+/**
+ * Runs async jobs one at a time, in call order. The bot's own submits from one
+ * account go through one queue: two extrinsics signed at the same best block
+ * would get the same nonce, and one of them would be lost.
+ */
+export const serialQueue = () => {
+  let tail = Promise.resolve();
+  return (job) => {
+    const run = tail.then(job, job);
+    tail = run.catch(() => {});
+    return run;
+  };
+};
+
 const withMargin = (value) => value + (value * MARGIN_PERCENT) / 100n;
 const chargeOf = (deposit) => (deposit?.type === "Charge" ? BigInt(deposit.value) : 0n);
 
@@ -117,15 +138,19 @@ export function createReviveChain({ endpoints, cacheDir, inclusionTimeoutMs = IN
 
   // Sign, submit, and resolve at the first best block that holds the
   // extrinsic: { hash, block, ok, error }. A drop or timeout rejects.
-  const submit = (tx, pair) => new Promise((resolve, reject) => {
+  // onSlow(hash): called once when no best block holds it after
+  // REFERENCE_PENDING_AFTER_MS (the caller may post a status 0 reference).
+  const submit = (tx, pair, { onSlow = null } = {}) => new Promise((resolve, reject) => {
     let hash = null;
     let settled = false;
     let sub = null;
     const timer = setTimeout(() => finish(null, new Error(`not in a best block after ${inclusionTimeoutMs} ms${hash ? ` (${hash})` : ""}`)), inclusionTimeoutMs);
+    const slowTimer = onSlow ? setTimeout(() => { if (!settled && hash) onSlow(hash); }, REFERENCE_PENDING_AFTER_MS) : null;
     const finish = (value, error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(slowTimer);
       sub?.unsubscribe();
       if (error) reject(error); else resolve(value);
     };
@@ -194,7 +219,7 @@ export function createReviveChain({ endpoints, cacheDir, inclusionTimeoutMs = IN
       return true;
     },
     /** Dry-run, then sign a `Revive.call` with the dry-run's weight and deposit plus a margin. */
-    async callContract(pair, { dest, calldata, value = 0n }) {
+    async callContract(pair, { dest, calldata, value = 0n, onSlow = null }) {
       const dry = await self.dryRunCall({ origin: pair.publicKey, dest, calldata, value });
       if (!dry.ok) return { ok: false, dryRun: true, error: dry.revert, hash: null, block: null };
       const tx = api.tx.Revive.call({
@@ -204,7 +229,7 @@ export function createReviveChain({ endpoints, cacheDir, inclusionTimeoutMs = IN
         storage_deposit_limit: withMargin(dry.deposit),
         data: Binary.fromHex(calldata),
       });
-      return submit(tx, pair);
+      return submit(tx, pair, { onSlow });
     },
     /** Dry-run, then sign a `Revive.instantiate_with_code`; resolves with the new contract address. */
     async instantiateWithCode(pair, { code, data, value = 0n }) {
@@ -287,9 +312,9 @@ export function createReviveChain({ endpoints, cacheDir, inclusionTimeoutMs = IN
       return () => { stopped = true; sub?.unsubscribe(); };
     },
     /** `Balances.transfer_keep_alive` of `amount` plancks to a 32-byte account. */
-    async transfer(pair, { to, amount }) {
+    async transfer(pair, { to, amount, onSlow = null }) {
       const tx = api.tx.Balances.transfer_keep_alive({ dest: { type: "Id", value: ss58.dec(to) }, value: BigInt(amount) });
-      return submit(tx, pair);
+      return submit(tx, pair, { onSlow });
     },
     destroy() { client.destroy(); },
   };

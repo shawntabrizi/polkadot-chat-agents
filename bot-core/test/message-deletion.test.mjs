@@ -77,11 +77,14 @@ test("tombstones and pending deletions survive a restart", () => {
 
 // Owner decision 2026-09-23: every client is in development, so each
 // extension goes to every peer unless the operator turns it off. A peer's own
-// extension kinds are logged, never required.
-test("BOT_PROTOCOL_EXTENSIONS: unset is all, none is none, a list restricts", () => {
-  const all = ["deleted", "buttons", "typing", "seen", "botinfo", "txref", "groups"];
-  assert.deepEqual([...parseProtocolExtensions(undefined).enabled], all);
-  assert.deepEqual([...parseProtocolExtensions("").enabled], all);
+// extension kinds are logged, never required. Typing is the exception: every
+// standalone signal is one Statement Store submission, so a bot sends no
+// typing unless the operator names it (spec 0005 revision, efficiency.md).
+test("BOT_PROTOCOL_EXTENSIONS: unset is all but typing, none is none, a list restricts", () => {
+  const defaults = ["deleted", "buttons", "seen", "botinfo", "txref", "groups"];
+  assert.deepEqual([...parseProtocolExtensions(undefined).enabled], defaults);
+  assert.deepEqual([...parseProtocolExtensions("").enabled], defaults);
+  assert.equal(parseProtocolExtensions(undefined).enabled.has("typing"), false, "a bot never sends typing by default");
   assert.deepEqual([...parseProtocolExtensions(" none ").enabled], []);
   const parsed = parseProtocolExtensions(" deleted , bogus ,typing");
   assert.deepEqual([...parsed.enabled], ["deleted", "typing"]);

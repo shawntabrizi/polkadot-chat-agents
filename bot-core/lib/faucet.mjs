@@ -1,13 +1,17 @@
 // A devnet faucet (spec 0007 companion): `/drip <address>` sends
 // BOT_FAUCET_AMOUNT (default 1 PAS) with `Balances.transfer_keep_alive` from
 // an account of the PUBLIC Substrate dev phrase (BOT_FAUCET_KEY is only a
-// derivation path such as //Alice), then posts a transactionReference with
-// the note "Dripped 1 PAS". One drip per target account per 10 minutes.
+// derivation path such as //Alice), then posts ONE transactionReference
+// (spec 0007 client rule 3): status 1 with the note "Dripped 1 PAS" when a
+// best block holds the transfer, or status 3 when it failed; status 0 only if
+// no block holds it after 30 s. Drips go out one at a time (serialQueue): two
+// drips signed at the same best block would share a nonce. The per-account
+// cooldown is off by default (BOT_FAUCET_COOLDOWN_MS).
 //
 // The key is never configurable as a phrase or a seed: a faucet bot that
 // held a real key would hand out real funds to anyone who asks.
 
-import { parseAccountId, PLANCKS_PER_PAS } from "./revive-chain.mjs";
+import { parseAccountId, PLANCKS_PER_PAS, serialQueue } from "./revive-chain.mjs";
 import { formatPas } from "./meter.mjs";
 import { deriveSr25519PairFromMnemonic } from "../vendor/lib/wallet-keys.mjs";
 
@@ -34,6 +38,7 @@ export function faucetPairFromPath(path) {
 export function createFaucet({ chain, pair, amount = DEFAULT_FAUCET_AMOUNT, cooldownMs = FAUCET_COOLDOWN_MS, send, log = () => {}, now = Date.now, maxEntries = 10_000 }) {
   if (amount <= 0n) throw new Error("BOT_FAUCET_AMOUNT must be above zero");
   const lastDrip = new Map(); // target account hex -> ms of the last drip (or the one in flight)
+  const queue = serialQueue(); // one faucet account: one transfer at a time
   return {
     /** true when the message was a /drip command (handled here, not for the brain). */
     async handle(peerHex, msg) {
@@ -62,15 +67,24 @@ export function createFaucet({ chain, pair, amount = DEFAULT_FAUCET_AMOUNT, cool
       lastDrip.set(key, now());
       while (lastDrip.size > maxEntries) lastDrip.delete(lastDrip.keys().next().value);
       let result;
+      let chainId;
+      let pendingHash = null; // set when a status 0 reference went out
       try {
-        result = await chain.transfer(pair, { to: account, amount });
+        chainId = await chain.genesisHash();
+        const onSlow = (hash) => {
+          pendingHash = hash;
+          send.reference(peerHex, { chainId, hash, status: 0, block: null, note: `Dripping ${formatPas(amount)}` })
+            .catch((error) => log("BOT_FAUCET_REFERENCE_FAILED", { peer: peerHex, error: String(error?.message ?? error) }));
+        };
+        result = await queue(() => chain.transfer(pair, { to: account, amount, onSlow }));
       } catch (error) {
         lastDrip.delete(key);
         log("BOT_FAUCET_FAILED", { peer: peerHex, to: `0x${key}`, error: String(error?.message ?? error) });
-        await send.text(peerHex, "The transfer did not go through. Please try again later.");
+        // A status 0 is closed with status 3, or the peer's bubble stays pending.
+        if (pendingHash) await send.reference(peerHex, { chainId, hash: pendingHash, status: 3, block: null, note: "Drip not included" });
+        else await send.text(peerHex, "The transfer did not go through. Please try again later.");
         return true;
       }
-      const chainId = await chain.genesisHash();
       if (!result.ok) {
         lastDrip.delete(key);
         log("BOT_FAUCET_FAILED", { peer: peerHex, to: `0x${key}`, hash: result.hash, block: result.block, error: result.error });

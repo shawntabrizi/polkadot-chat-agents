@@ -13,8 +13,12 @@
 //  - createMessageDeleter: the sender side of one retraction, on top of the
 //    outbound lanes.
 
-// Extensions the bot can send. BOT_PROTOCOL_EXTENSIONS unset = all of them.
+// Extensions the bot can send. BOT_PROTOCOL_EXTENSIONS unset = the defaults.
 export const PROTOCOL_EXTENSIONS = Object.freeze(["deleted", "buttons", "typing", "seen", "botinfo", "txref", "groups"]);
+// Every extension but `typing` (spec 0005 revision 2026-09-23, efficiency.md):
+// a bot does not send typing; a client shows a local "working" state for a
+// known bot instead. Only an explicit list turns typing on.
+export const DEFAULT_PROTOCOL_EXTENSIONS = Object.freeze(PROTOCOL_EXTENSIONS.filter((name) => name !== "typing"));
 
 // The RFC lets an implementation bound the pending set per peer; eviction is
 // safe (a deletion whose target never arrives has no effect).
@@ -85,11 +89,11 @@ export const createDeletionLedger = ({ cap = DELETION_CAP_PER_PEER, maxPeers = 1
   };
 };
 
-// unset or "" -> every extension; "none" -> no extension; "deleted,foo" ->
-// { enabled: Set(["deleted"]), unknown: ["foo"] }.
+// unset or "" -> the defaults (all but typing); "none" -> no extension;
+// "deleted,foo" -> { enabled: Set(["deleted"]), unknown: ["foo"] }.
 export const parseProtocolExtensions = (raw) => {
   const value = String(raw ?? "").trim();
-  if (value === "") return { enabled: new Set(PROTOCOL_EXTENSIONS), unknown: [] };
+  if (value === "") return { enabled: new Set(DEFAULT_PROTOCOL_EXTENSIONS), unknown: [] };
   if (value === "none") return { enabled: new Set(), unknown: [] };
   const names = value.split(",").map((s) => s.trim()).filter(Boolean);
   return {

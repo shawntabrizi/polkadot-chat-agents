@@ -1131,10 +1131,11 @@ describe("transport e2e", { concurrency: 8 }, () => {
     }
   });
 
-  // Spec 0005 with the default extensions (all on): the typing indicator
-  // replaces the early placeholder, seen follows each consumed message, and
-  // the peer's own typing/seen are never answered or stored.
-  test("typing and seen: sent per turn, no early placeholder, received ones ignored", async () => {
+  // Spec 0005 (revision 2026-09-23) with the default extensions: no typing
+  // (a 1:1 message must cost one submission), the seen rides in the answer's
+  // statement, the client's own "working" state (botInfo) replaces the early
+  // placeholder, and the peer's own typing/seen are never answered or stored.
+  test("typing and seen: no typing, the seen rides the answer, no early placeholder, received ones ignored", async () => {
     const node = await startSandbox();
     const stateDir = tmpState();
     const bot = await startBot({
@@ -1143,7 +1144,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
       extraEnv: {
         BOT_SUBSCRIBE: "0", BOT_BRAIN: "claude", BOT_AI_CMD: "sh",
         BOT_AI_ARGS: JSON.stringify(["-c", "sleep 2; printf '{\"type\":\"result\",\"result\":\"typed answer\"}\\n'"]),
-        // Without typing this would post a placeholder after 1 s.
+        // Without botinfo (and typing) this would post a placeholder after 1 s.
         BOT_THINKING_TEXT: "⏳ thinking…", BOT_THINKING_AFTER_MS: "1000",
         BOT_LOG_LEVEL: "debug",
       },
@@ -1156,10 +1157,10 @@ describe("transport e2e", { concurrency: 8 }, () => {
       const second = await alice.send("second question");
       const seen = await bot.waitFor((e) => e.event === "BOT_SENT_SEEN" && e.upTo === second.messageId, { label: "the seen for the second question" });
       assert.equal(seen.to, alice.accountHex);
+      assert.equal(seen.withMessage, true, "a 2 s turn: the seen waited for the answer and rode with it");
       await waitFor(async () => (await alice.incoming()).filter(isAnswer).length === 2, { label: "the second answer" });
-      const typing = bot.events.filter((e) => e.event === "BOT_SENT_TYPING");
-      assert.deepEqual(typing.map((e) => e.kind), ["working", "working"], "one typing log per turn; a reply needs no `stopped`");
-      assert.equal(bot.events.filter((e) => e.event === "BOT_LIVE_PLACEHOLDER").length, 0, "a 2 s turn shows typing, not a placeholder");
+      assert.equal(bot.events.filter((e) => e.event === "BOT_SENT_TYPING").length, 0, "a bot sends no typing by default");
+      assert.equal(bot.events.filter((e) => e.event === "BOT_LIVE_PLACEHOLDER").length, 0, "a 2 s turn: the client's working state, not a placeholder");
 
       // The peer's own typing and seen: logged at debug level, nothing else.
       const typingId = crypto.randomUUID().toUpperCase();
@@ -1184,10 +1185,10 @@ describe("transport e2e", { concurrency: 8 }, () => {
     }
   });
 
-  // With typing on, a turn past 20 s still gets progress frames, and the
-  // first frame is the status line, not a "thinking" text next to the
-  // typing indicator.
-  test("typing on: a turn past 20 s gets a placeholder whose first frame is the status", async () => {
+  // With the default extensions (botinfo on: the client shows its own
+  // "working" state), a turn past 20 s still gets progress frames, and the
+  // first frame is the status line, not a "thinking" text next to it.
+  test("default extensions: a turn past 20 s gets a placeholder whose first frame is the status", async () => {
     const node = await startSandbox();
     const stateDir = tmpState();
     const bot = await startBot({
@@ -1208,7 +1209,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
       await alice.reply((m) => textOf(m).startsWith("slow typed answer"), { label: "the answer", timeoutMs: 40_000 });
       const frames = versions(await alice.row(placeholder.messageId));
       assert.match(frames[0], /^⏳ working · 2\ds/, `the first frame is the status: ${JSON.stringify(frames)}`);
-      assert.ok(!frames.includes("⏳ thinking…"), "no thinking text while the typing indicator shows");
+      assert.ok(!frames.includes("⏳ thinking…"), "no thinking text while the client's working state shows");
     } finally {
       await bot.stop();
       await node.close();
@@ -1739,8 +1740,8 @@ describe("transport e2e", { concurrency: 8 }, () => {
   });
 
   // The direct-engine path (what a claude bot runs): the prompt carries the
-  // group context, typing fans out while the turn runs, the answer reaches
-  // both members as one envelope.
+  // group context, typing (opted in here; off by default) fans out while the
+  // turn runs, the answer reaches both members as one envelope.
   test("groups: a direct-engine turn sees the group context and fans typing and the answer out (spec 0009)", async () => {
     const node = await startSandbox();
     const stateDir = tmpState();
@@ -1748,6 +1749,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
       endpoint: node.url, apiUrl: node.apiUrl, stateDir,
       extraEnv: {
         BOT_SUBSCRIBE: "0",
+        BOT_PROTOCOL_EXTENSIONS: "deleted,buttons,typing,seen,botinfo,txref,groups",
         BOT_LOG_LEVEL: "debug",
         BOT_BRAIN: "claude",
         BOT_AI_CMD: process.execPath,
@@ -1775,7 +1777,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
       assert.equal(reply.seq, 2);
       const prompts = fs.readFileSync(path.join(stateDir, "prompts.log"), "utf8");
       assert.match(prompts, /\[group Tea club\] alice: who is here\?/, "the brain sees the group and the sender");
-      assert.match(prompts, /You are in the group Tea club with 3 people; address the sender by name\./, "the persona hint rides the group turn");
+      assert.match(prompts, /You are in the group Tea club with 3 people; address the sender by name\. Do not send tx \(transaction\) buttons in a group\./, "the persona hint rides the group turn");
       assert.equal(prompts.split("You are in the group").length - 1, 1, "and only the group turn");
       // The answer went to the group, not to alice 1:1 (only her opener's answer did).
       assert.equal(bot.events.filter((e) => e.event === "BOT_SENT_TEXT" && e.to === alice.accountHex).length, 1);

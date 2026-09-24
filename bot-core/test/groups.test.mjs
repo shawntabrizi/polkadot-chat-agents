@@ -244,7 +244,7 @@ test("a delivery failure to one member does not stop the others", async () => {
 });
 
 test("persona hint: a group turn tells the model the room and to address the sender", () => {
-  assert.equal(groupHint({ name: "Test group", size: 3 }), "You are in the group Test group with 3 people; address the sender by name.");
+  assert.equal(groupHint({ name: "Test group", size: 3 }), "You are in the group Test group with 3 people; address the sender by name. Do not send tx (transaction) buttons in a group.");
   const ctx = buildOperatorContext({ username: "pcdguide.70", transport: "polkadot-app", group: { name: "Test group", size: 3 } });
   assert.ok(ctx.includes("You are in the group Test group with 3 people"));
   assert.ok(!buildOperatorContext({ username: "pcdguide.70" }).includes("You are in the group"), "no hint in a 1:1 turn");

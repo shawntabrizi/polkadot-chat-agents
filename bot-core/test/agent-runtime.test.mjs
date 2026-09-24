@@ -222,7 +222,7 @@ test("a group turn gets the group hint, its own session, and a delivery context 
   await h.runtime.handleMessage("alice", { text: "[group Test group] alice.01: hi", commandText: "hi", messageId: "M1", kind: "text", sessionKey: "group:G-1", deliveryContext: { groupId: "G-1" } });
   await h.runtime.handleMessage("alice", { text: "hi", messageId: "M2", kind: "text" });
   await h.runtime.handleMessage("alice", { text: "[group Test group] alice.01: again", commandText: "again", messageId: "M3", kind: "text", sessionKey: "group:G-1", deliveryContext: { groupId: "G-1" } });
-  assert.match(turns[0].operatorContext, /You are in the group Test group with 3 people; address the sender by name\./);
+  assert.match(turns[0].operatorContext, /You are in the group Test group with 3 people; address the sender by name\. Do not send tx \(transaction\) buttons in a group\./);
   assert.doesNotMatch(turns[1].operatorContext, /You are in the group/, "no hint in the 1:1 turn");
   assert.equal(turns[1].resume, null, "the 1:1 chat does not resume the group's session");
   assert.equal(turns[2].resume, "S-1", "the group resumes its own session");

@@ -1,29 +1,41 @@
-// Spec 0005 typing and seen (polkadot-chat-desktop docs/spec/0005-typing-and-seen.md),
-// the sender side. Both signals are EPHEMERAL: they ride the peer's outbound
-// lane like any message, but they are never journaled as an owed answer, never
+// Spec 0005 typing and seen (polkadot-chat-desktop docs/spec/0005-typing-and-seen.md,
+// revision 2026-09-23 for submission cost, see docs/spec/efficiency.md), the
+// sender side. Both signals are EPHEMERAL: they ride the peer's outbound lane
+// like any message, but they are never journaled as an owed answer, never
 // re-sent after a restart, and never kept once the lane lets go of them.
 //
-//  - typing{working}: sent when a brain turn starts, refreshed while it runs
-//    (each hint lives TYPING_TTL_MS), superseded by the real reply while it is
-//    still un-ACKed, and closed by typing{stopped} only when the turn ends
-//    without a reply. Never more than one typing per TYPING_MIN_INTERVAL_MS
-//    per peer (the spec's rate limit).
-//  - seen{upTo}: sent when the brain consumes a peer's message, batched to at
-//    most one per SEEN_MIN_INTERVAL_MS per peer, carrying the latest id.
+// Every standalone signal is one Statement Store submission, and a 1:1
+// conversation must cost one submission per message. So:
 //
-// A refresh is skipped while an earlier typing to the peer is still un-ACKed:
-// a peer that has not fetched the last hint gains nothing from the next one,
-// and every in-slot replacement spends one of the lane's extensions, which a
-// non-ACKing peer would otherwise use up with hints alone.
+//  - typing: a bot does NOT send it. It is off by default
+//    (BOT_PROTOCOL_EXTENSIONS leaves it out); the client shows a local
+//    "working" state for a peer it knows is a bot. The code below runs only
+//    when an operator names `typing` explicitly: typing{working} when a brain
+//    turn starts, refreshed while it runs (each hint lives TYPING_TTL_MS, at
+//    most one per TYPING_MIN_INTERVAL_MS per peer, the spec's opt-in limit),
+//    superseded by the real reply while still un-ACKed, and closed by
+//    typing{stopped} only when the turn ends without a reply.
+//  - seen{upTo}: when the brain consumes a peer's message, the seen WAITS up
+//    to SEEN_INTERVAL_MS. A real message to that peer inside the window takes
+//    it along: the seen enters the lane in the same tick as the message, so
+//    both ride one request statement (one submission). Without a message, it
+//    goes out alone at the end of the window, carrying the latest id.
+//
+// A typing refresh is skipped while an earlier typing to the peer is still
+// un-ACKed: a peer that has not fetched the last hint gains nothing from the
+// next one, and every in-slot replacement spends one of the lane's extensions.
 
 import { TYPING_KINDS } from "../vendor/app-chat-codec.mjs";
 
-export const TYPING_TTL_MS = 6_000;
-export const TYPING_MIN_INTERVAL_MS = 4_000;
-export const SEEN_MIN_INTERVAL_MS = 2_000;
-// With typing on, the live placeholder waits this long before it appears: the
-// typing indicator covers a normal turn, and the client must not show a
-// thinking row and a typing indicator for the same wait.
+// The spec's opt-in limits: at most one typing per 10 s per peer, until = now + 12 s.
+export const TYPING_TTL_MS = 12_000;
+export const TYPING_MIN_INTERVAL_MS = 10_000;
+// A pending seen waits this long for a real message to ride on.
+export const SEEN_INTERVAL_MS = 5_000;
+// The live placeholder ("thinking" row) waits this long before it appears
+// when the client can show its own "working" state (it knows the bot from
+// botInfo, or typing is on): a client must not show a thinking row and a
+// working indicator for the same wait.
 export const TYPING_PLACEHOLDER_AFTER_MS = 20_000;
 
 const defaultTimers = {
@@ -58,7 +70,6 @@ export const createTypingAndSeen = ({
         typingAt: null, // when the last typing went to the lane
         typingTimer: null,
         typingIds: new Set(), // our typing entries the peer has not ACKed yet
-        seenAt: null,
         seenTimer: null,
         seenUpTo: null,
         seenIds: new Set(),
@@ -125,8 +136,9 @@ export const createTypingAndSeen = ({
     else close();
   };
 
-  const flushSeen = (peerHex, s) => {
-    s.seenTimer = null;
+  // piggyback: true when a real message enters the lane in this same tick.
+  const flushSeen = (peerHex, s, { piggyback = false } = {}) => {
+    if (s.seenTimer) { timers.clear(s.seenTimer); s.seenTimer = null; }
     const upTo = s.seenUpTo;
     s.seenUpTo = null;
     if (!upTo) return;
@@ -135,8 +147,7 @@ export const createTypingAndSeen = ({
     const opaque = encodeSeen({ messageId, timestamp: stamp(peerHex), upTo, at });
     // An older un-ACKed seen is redundant: upTo covers everything before it.
     put(peerHex, opaque, messageId, s.seenIds, "BOT_SEEN_FAILED");
-    s.seenAt = at;
-    log("BOT_SENT_SEEN", { to: peerHex, upTo });
+    log("BOT_SENT_SEEN", { to: peerHex, upTo, ...(piggyback ? { withMessage: true } : {}) });
   };
 
   return {
@@ -148,12 +159,15 @@ export const createTypingAndSeen = ({
       s.turn = { startedAt: now(), sent: false, logged: false };
       tick(peerHex, s);
     },
-    // A real message to peerHex is about to enter the lane. Ends the turn's
-    // typing (the message itself clears the indicator; no `stopped`) and
-    // returns our un-ACKed typing ids for the message to supersede.
+    // A real message to peerHex is about to enter the lane (the caller
+    // enqueues it synchronously after this call). A pending seen enters the
+    // lane now, so it rides the same statement. Ends the turn's typing (the
+    // message itself clears the indicator; no `stopped`) and returns our
+    // un-ACKed typing ids for the message to supersede.
     replyGoingOut(peerHex) {
       const s = peers.get(peerHex);
       if (!s) return [];
+      if (s.seenUpTo) flushSeen(peerHex, s, { piggyback: true });
       s.turn = null;
       clearTyping(s);
       return [...s.typingIds];
@@ -161,15 +175,14 @@ export const createTypingAndSeen = ({
     // The turn ended. Without a reply before it, the hint is closed with
     // typing{stopped} (once the rate limit allows).
     turnEnded(peerHex) { endTurn(peerHex); },
-    // The brain consumed the peer's message `messageId`.
+    // The brain consumed the peer's message `messageId`. The seen waits for
+    // a reply to ride on, or goes alone after SEEN_INTERVAL_MS.
     consumed(peerHex, messageId) {
       if (!seen || !messageId) return;
       const s = stateFor(peerHex);
       s.seenUpTo = messageId;
-      if (s.seenTimer) return; // the pending batch takes the latest id
-      const wait = s.seenAt == null ? 0 : s.seenAt + SEEN_MIN_INTERVAL_MS - now();
-      if (wait > 0) s.seenTimer = timers.set(() => flushSeen(peerHex, s), wait);
-      else flushSeen(peerHex, s);
+      if (s.seenTimer) return; // the pending seen takes the latest id
+      s.seenTimer = timers.set(() => { s.seenTimer = null; flushSeen(peerHex, s); }, SEEN_INTERVAL_MS);
     },
     // Introspection for tests.
     typingActive: (peerHex) => Boolean(peers.get(peerHex)?.turn),

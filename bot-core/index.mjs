@@ -93,7 +93,7 @@ import { RUNNERS, resolveEngine, ENGINES, assertEngineToolPolicy, toolPolicyEnfo
 import { ToolPolicyError, hasToolCapability, toolPolicyFromEnvironment, toolPolicySummary } from "./lib/tool-policy.mjs";
 import { createKeyedDispatcher } from "./lib/keyed-dispatcher.mjs";
 import { createReviveChain } from "./lib/revive-chain.mjs";
-import { createMeter, DEFAULT_METER_PRICE, parsePlancks } from "./lib/meter.mjs";
+import { createMeter, DEFAULT_METER_PRICE, METER_BATCH_MS, METER_BATCH_REPLIES, parsePlancks } from "./lib/meter.mjs";
 import { createFaucet, DEFAULT_FAUCET_AMOUNT, faucetPairFromPath } from "./lib/faucet.mjs";
 import { createFlip } from "./lib/flip.mjs";
 import { createClient as createPapiClient } from "polkadot-api";
@@ -961,10 +961,14 @@ const disarmThinking = (peerHex) => {
   // takeLivePlaceholder instead.
   if (!livePlaceholders.has(k)) disposeProgressTracker(k);
 };
-// Spec 0005: with typing on, the typing indicator covers the wait, so the
-// placeholder appears only for a turn longer than TYPING_PLACEHOLDER_AFTER_MS,
-// and its first frame is the progress status, not the "thinking" text.
-const placeholderAfterMs = () => (extensionOn("typing") ? Math.max(thinkingAfterMs, TYPING_PLACEHOLDER_AFTER_MS) : thinkingAfterMs);
+// Spec 0005 (revision 2026-09-23): a client that knows the bot (botInfo, spec
+// 0008) shows its own local "working" state from its send until the reply,
+// with no wire signal; with typing on, the typing indicator does the same. The
+// placeholder then appears only for a turn longer than
+// TYPING_PLACEHOLDER_AFTER_MS, and its first frame is the progress status, not
+// the "thinking" text. With neither, it follows BOT_THINKING_AFTER_MS.
+const clientShowsWorking = () => extensionOn("botinfo") || extensionOn("typing");
+const placeholderAfterMs = () => (clientShowsWorking() ? Math.max(thinkingAfterMs, TYPING_PLACEHOLDER_AFTER_MS) : thinkingAfterMs);
 const armThinking = (peerHex) => {
   const k = norm(peerHex);
   if (!thinkingText || !(thinkingAfterMs > 0) || thinkingTimers.has(k)) return;
@@ -978,7 +982,7 @@ const armThinking = (peerHex) => {
     // The placeholder is a LIVE message: it is edited through progress frames
     // and finally collapses to a short status receipt for the turn.
     livePlaceholders.set(k, (async () => {
-      const handle = await liveReplies.begin(k, extensionOn("typing") ? progressTrackerFor(k).render() : thinkingText);
+      const handle = await liveReplies.begin(k, clientShowsWorking() ? progressTrackerFor(k).render() : thinkingText);
       // Already counting since turn start; attaching lets any pre-placeholder
       // work show up in the first visible frame.
       const tracker = progressTrackerFor(k);
@@ -1045,8 +1049,8 @@ const outbound = createOutboundLanes({
 // Receiving every extension kind is always on. SENDING follows the desktop
 // spec set's development-mode rule: every client is in development, so the
 // bot sends each enabled extension to every peer, with no per-peer evidence.
-// BOT_PROTOCOL_EXTENSIONS: unset = all (deleted, buttons, typing, seen, botinfo, txref, groups),
-// "none" = none, or a comma list. See docs/explanation/protocol.md.
+// BOT_PROTOCOL_EXTENSIONS: unset = all but typing (deleted, buttons, seen, botinfo, txref, groups),
+// "none" = none, or a comma list (only a list can add typing). See docs/explanation/protocol.md.
 const protocolExtensions = parseProtocolExtensions(env.BOT_PROTOCOL_EXTENSIONS);
 const extensionOn = (name) => protocolExtensions.enabled.has(name);
 if (protocolExtensions.unknown.length) log("BOT_PROTOCOL_EXTENSIONS_UNKNOWN", { names: protocolExtensions.unknown });
@@ -1062,8 +1066,9 @@ const logDebug = env.BOT_LOG_LEVEL === "debug" ? (event, extra = {}) => log(even
 
 // ---------- spec 0005 typing and seen (sender side) ----------
 // Ephemeral: straight into the outbound lane, never journaled as an answer
-// (see lib/typing-seen.mjs). The reply supersedes an un-ACKed typing in
-// submitMessage.
+// (see lib/typing-seen.mjs). Typing is off unless the operator lists it. A
+// pending seen rides the next real message (submitMessage calls
+// replyGoingOut just before its enqueue), so a reply costs one submission.
 const typingAndSeen = createTypingAndSeen({
   typing: extensionOn("typing"),
   seen: extensionOn("seen"),
@@ -1198,9 +1203,9 @@ const submitMessage = async (peerHex, { text, replyTo = null, editOf = null, sup
   // this answer also holds the record a later press is checked against.
   if (buttons) sentButtons.record(k, messageId, buttons.rows);
   if (!ephemeral) await journalAnswer(k, { messageId, opaque, supersedes });
-  // Spec 0005: a real message ends the turn's typing and drops any typing the
-  // peer has not fetched yet from the slot. Not journaled: after a restart
-  // those typing entries are gone anyway.
+  // Spec 0005: a pending seen joins this message's statement; a real message
+  // ends the turn's typing and drops any typing the peer has not fetched yet
+  // from the slot. Not journaled: after a restart those entries are gone anyway.
   const typingIds = ephemeral ? [] : typingAndSeen.replyGoingOut(k);
   // Spec 0008: an edit follows a message that already carried the catch-up.
   if (!editOf) catchUpBotInfo(k);
@@ -1493,6 +1498,8 @@ const featureConfigError = (name, error) => {
 
 // Meter (lib/meter.mjs): BOT_METER_CONTRACT + BOT_METER_CHAIN turn it on.
 let meter = null;
+const meterBatchReplies = numberEnv("BOT_METER_BATCH_REPLIES", METER_BATCH_REPLIES, { min: 1, max: 1000 });
+const meterBatchMs = numberEnv("BOT_METER_BATCH_MS", METER_BATCH_MS, { min: 1000, max: 86_400_000 });
 if (env.BOT_METER_CONTRACT || env.BOT_METER_CHAIN) {
   if (!env.BOT_METER_CONTRACT || !env.BOT_METER_CHAIN) featureConfigError("BOT_METER_*", "set both BOT_METER_CONTRACT and BOT_METER_CHAIN");
   if (usesBridgeQueue) featureConfigError("BOT_METER_*", "the meter needs a direct brain (echo, claude, codex, ...): a bridge harness answers outside the turn it would charge");
@@ -1502,12 +1509,16 @@ if (env.BOT_METER_CONTRACT || env.BOT_METER_CHAIN) {
       contract: env.BOT_METER_CONTRACT.trim(),
       operator: wallet,
       price: parsePlancks(env.BOT_METER_PRICE, DEFAULT_METER_PRICE),
+      // One charge extrinsic per this many metered replies, or this long after
+      // the first pending one (efficiency.md), whichever comes first.
+      batchReplies: meterBatchReplies,
+      batchMs: meterBatchMs,
       name: username || "this bot",
       send: txSend,
       log,
     });
   } catch (error) { featureConfigError("BOT_METER_*", error); }
-  log("BOT_METER_ENABLED", { contract: env.BOT_METER_CONTRACT.trim(), chain: endpointList(env.BOT_METER_CHAIN)[0], pricePlancks: String(parsePlancks(env.BOT_METER_PRICE, DEFAULT_METER_PRICE)), operator: meter.userAddress(accountIdHex) });
+  log("BOT_METER_ENABLED", { contract: env.BOT_METER_CONTRACT.trim(), chain: endpointList(env.BOT_METER_CHAIN)[0], pricePlancks: String(parsePlancks(env.BOT_METER_PRICE, DEFAULT_METER_PRICE)), batchReplies: meterBatchReplies, batchMs: meterBatchMs, operator: meter.userAddress(accountIdHex) });
 }
 
 // Faucet (lib/faucet.mjs): BOT_FAUCET_KEY (a dev-phrase derivation path) turns it on.
@@ -1874,7 +1885,8 @@ const handleInbound = async (peerHex, msg, owedId = null, { reservedBridge = fal
     if (usesBridgeQueue && owedId) settleOwed(owedId);
     return;
   }
-  // Spec 0007 meter: the balance gates the turn; a turn that ran is charged after it.
+  // Spec 0007 meter: the balance (minus the pending debit) gates the turn; a
+  // turn that ran joins the pending debit, charged in batches (lib/meter.mjs).
   let meterGate = null;
   if (meter) {
     try { meterGate = await meter.beforeTurn(peerHex, msg); }
@@ -3275,6 +3287,14 @@ const gracefulShutdown = async (code = 0) => {
       new Promise((resolve) => setTimeout(resolve, 5000)),
     ]);
   } catch (e) { log("BOT_SHUTDOWN_AGENT_FAILED", { error: String(e?.message ?? e) }); }
+  // Meter: charge every pending debit before the process ends (it is kept in
+  // memory only). Bounded: a chain that does not include it cannot hold the exit.
+  if (meter) {
+    await Promise.race([
+      meter.flushAll("shutdown"),
+      new Promise((resolve) => setTimeout(resolve, 60_000)),
+    ]);
+  }
   try { await stateStore?.flush(); }
   catch (e) { log("BOT_SHUTDOWN_STATE_FAILED", { error: String(e?.message ?? e) }); }
   process.exit(code);

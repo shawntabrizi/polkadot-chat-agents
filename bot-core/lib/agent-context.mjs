@@ -22,9 +22,10 @@ export const BUTTONS_HINT = "Buttons: the chat app renders a trailing fenced ```
   + "or {\"url\":\"https://...\"}; at most 8 rows of 4 buttons, labels up to 40 characters; put nothing after the block.";
 
 // Spec 0009: one line when the turn comes from a group room. The message
-// itself arrives as "[group <name>] <sender>: <text>".
+// itself arrives as "[group <name>] <sender>: <text>". In v1 a bot SHOULD NOT
+// send tx buttons (spec 0007 intents) in a group (M12c ruling).
 export const groupHint = ({ name, size }) =>
-  `You are in the group ${name} with ${size} people; address the sender by name.`;
+  `You are in the group ${name} with ${size} people; address the sender by name. Do not send tx (transaction) buttons in a group.`;
 
 const modelPolicyText = (modelPolicy) => {
   if (modelPolicy == null) return "open";

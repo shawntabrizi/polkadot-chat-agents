@@ -268,8 +268,10 @@ Related settings:
   `/stop` is the user's cancel lever.
 - `BOT_THINKING_AFTER_MS` (default 5000) and `BOT_THINKING_TEXT` control the
   live placeholder posted when a reply is slow; setting the text empty disables
-  it. While the `typing` extension is on (the default), the chat shows a typing
-  indicator instead and the placeholder appears only after 20 s.
+  it. While the `botinfo` extension is on (the default), the client knows the
+  peer is a bot and shows its own "working" state, so the placeholder appears
+  only after 20 s. The bot sends no typing indicator unless `typing` is listed
+  in `BOT_PROTOCOL_EXTENSIONS`.
 - `--greet` on `run`/`deploy` (env `BOT_GREET=1`, text via `BOT_GREET_TEXT`): the
   bot messages each allowlisted owner it has never talked to on startup — once
   ever per owner, never into an existing thread. Works for any brain, including

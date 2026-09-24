@@ -448,6 +448,8 @@ Both features are off unless their variables are set. See
 | `BOT_METER_CONTRACT` | unset | 0x address (20 bytes) of a deployed Meter contract (`contracts/meter/`). With `BOT_METER_CHAIN`, turns on pay-as-you-go replies. The bot's wallet account must be the contract's operator and must hold funds for fees. Direct brains only (not `bridge`). |
 | `BOT_METER_CHAIN` | unset | wss endpoint(s) of the chain that holds the contract, comma-separated (fallbacks after the first), e.g. `wss://asset-hub-paseo-rpc.n.dwellir.com,wss://sys.turboflakes.io/asset-hub-paseo`. |
 | `BOT_METER_PRICE` | `1000000000` | Price of one reply in plancks (default 0.1 PAS). |
+| `BOT_METER_BATCH_REPLIES` | `5` | Charge a user's pending debit in one extrinsic when this many metered replies are pending (1 = one charge per reply). |
+| `BOT_METER_BATCH_MS` | `600000` | Charge a user's pending debit this long after the first pending reply (default 10 min), whatever the count. The bot also charges every pending debit on SIGINT/SIGTERM and before it refuses a reply. |
 | `BOT_FAUCET_KEY` | unset | Turns on `/drip`. A derivation path of the **public** Substrate dev phrase (`bottom drive obey lake curtain smoke basket hold race lonely fit walk`), e.g. `//Alice`. Only dev-phrase accounts are acceptable: the value can never be a phrase or a seed, because anyone can ask a public faucet for funds. |
 | `BOT_FAUCET_AMOUNT` (and `BOT_FAUCET_COOLDOWN_MS`, default 0 = no per-account cooldown) | `10000000000` | Plancks sent per drip (default 1 PAS). |
 | `BOT_FAUCET_CHAIN` | devnet Asset Hub | wss endpoint(s) for the faucet transfers, comma-separated. |
@@ -479,7 +481,7 @@ The `pcdmeter` hint, for example:
 |---|---|---|
 | `BOT_REPLY_CHUNK_BYTES` | 4000 | Long answers are split into parts ≤ this many UTF-8 bytes (paragraph/code-fence aware). |
 | `BOT_THINKING_TEXT` | "🤔 One moment — thinking…" | Placeholder text; empty disables it. |
-| `BOT_THINKING_AFTER_MS` | 5000 | Post the placeholder if no reply within this delay. While the `typing` extension is on, the delay is at least 20000 and the first frame is the progress status instead of `BOT_THINKING_TEXT` (spec 0005). |
+| `BOT_THINKING_AFTER_MS` | 5000 | Post the placeholder if no reply within this delay. While the `botinfo` or the `typing` extension is on (`botinfo` is on by default), the client shows its own "working" state, so the delay is at least 20000 and the first frame is the progress status instead of `BOT_THINKING_TEXT` (spec 0005). |
 | `BOT_LIVE_EDIT_MIN_MS` / `BOT_LIVE_EDIT_MAX_MS` | 3000 / 15000 | Live-edit throttle (escalating). |
 | `BOT_LIVE_HEARTBEAT_MS` | 5000 | Typing refresh and elapsed-clock frame cadence; stays below the T3ams client's 6-second typing expiry. |
 | `BOT_LIVE_ACK_TIMEOUT_MS` | 60000 | Give up gating edits on the peer's ACK after this. |
@@ -488,7 +490,7 @@ The `pcdmeter` hint, for example:
 | `BOT_LIVE_TTL_MS` | 600000 | A placeholder never finalized resolves to a timeout note. |
 | `BOT_LIVE_TIMEOUT_TEXT` | auto | That timeout note's text. |
 | `BOT_OUTBOUND_ACK_GRACE_MS` | 60000 | How long an un-ACKed statement holds the channel slot before a queued one takes over. |
-| `BOT_PROTOCOL_EXTENSIONS` | all | Protocol extensions the bot sends, to every peer, with no per-peer gating: `deleted` (RFC-0003), `buttons` (spec 0006), `typing` and `seen` (spec 0005), `botinfo` (spec 0008), `txref` (spec 0007 transaction references), `groups` (spec 0009 fan-out groups; off = every group kind is ignored). Unset = all seven; `none` = none; a comma list = only those named. With `buttons` off, buttons go out as a numbered text list. Receiving every extension is always on. |
+| `BOT_PROTOCOL_EXTENSIONS` | all but `typing` | Protocol extensions the bot sends, to every peer, with no per-peer gating: `deleted` (RFC-0003), `buttons` (spec 0006), `typing` and `seen` (spec 0005), `botinfo` (spec 0008), `txref` (spec 0007 transaction references), `groups` (spec 0009 fan-out groups; off = every group kind is ignored). Unset = every one except `typing` (a bot does not send typing: each signal is one Statement Store submission, and the client shows a local "working" state for a known bot); `none` = none; a comma list = only those named (the only way to turn `typing` on). With `buttons` off, buttons go out as a numbered text list. Receiving every extension is always on. |
 | `BOT_LOG_LEVEL` | unset | `debug` also prints debug events (`BOT_RECEIVED_TYPING`, `BOT_RECEIVED_SEEN`), marked `level: "debug"`. |
 
 T3ams uses the same placeholder, progress, final-wait, timeout, and chunk

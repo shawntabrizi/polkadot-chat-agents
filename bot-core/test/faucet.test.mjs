@@ -9,23 +9,29 @@ const ALICE_HEX = "0xd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56
 const BOB_HEX = "0x8eaf04151687736326c9fea17e25fc5287613693c912909cb226aa4794f26a48";
 const PEER = "ab".repeat(32);
 
-const setup = ({ fail = null } = {}) => {
+const setup = ({ fail = null, delayMs = 0, slow = false, cooldownMs = 10 * 60_000 } = {}) => {
   let clock = 1_000_000;
   const transfers = [];
+  const flight = { now: 0, max: 0 };
   const sent = [];
   const logs = [];
   const pair = { publicKey: new Uint8Array(32).fill(1) };
   const chain = {
     genesisHash: async () => GENESIS,
-    async transfer(p, { to, amount }) {
+    async transfer(p, { to, amount, onSlow }) {
       transfers.push({ pair: p, to: `0x${Buffer.from(to).toString("hex")}`, amount });
+      flight.now += 1;
+      flight.max = Math.max(flight.max, flight.now);
+      await new Promise((r) => setTimeout(r, delayMs));
+      flight.now -= 1;
+      if (slow) onSlow?.(`0x${"cd".repeat(32)}`);
       if (fail === "throw") throw new Error("socket down");
       if (fail === "dispatch") return { ok: false, hash: `0x${"ee".repeat(32)}`, block: 5, error: "Balances.InsufficientBalance" };
       return { ok: true, hash: `0x${"cd".repeat(32)}`, block: 77 };
     },
   };
   const faucet = createFaucet({
-    chain, pair, now: () => clock, cooldownMs: 10 * 60_000, // the test keeps the optional cooldown on
+    chain, pair, now: () => clock, cooldownMs, // most tests keep the optional cooldown on
     send: {
       text: async (peer, text) => { sent.push({ type: "text", text }); },
       reference: async (peer, ref) => { sent.push({ type: "reference", ref }); },
@@ -33,7 +39,7 @@ const setup = ({ fail = null } = {}) => {
     log: (event, extra) => logs.push({ event, ...extra }),
   });
   const drip = (arg) => faucet.handle(PEER, { kind: "text", text: `/drip ${arg}` });
-  return { faucet, drip, transfers, sent, logs, pair, tick: (ms) => { clock += ms; } };
+  return { faucet, drip, transfers, sent, logs, pair, flight, tick: (ms) => { clock += ms; } };
 };
 
 test("/drip sends 1 PAS from the faucet key and posts a reference", async () => {
@@ -66,6 +72,26 @@ test("a failed transfer does not use up the account's drip", async () => {
     if (fail === "dispatch") assert.equal(sent[0].ref.status, 3);
     else assert.equal(sent[0].type, "text");
   }
+});
+
+// M11b carry: two drips in the same second must not race on the faucet
+// account's nonce (both signed at one best block: one of them is lost).
+test("drips go out one at a time, in order", async () => {
+  const { drip, transfers, sent, flight } = setup({ delayMs: 20, cooldownMs: 0 });
+  await Promise.all([drip(ALICE_SS58), drip(BOB_HEX)]);
+  assert.equal(transfers.length, 2);
+  assert.equal(flight.max, 1, "the second transfer waits for the first to be in a block");
+  assert.deepEqual(transfers.map((t) => t.to), [ALICE_HEX, BOB_HEX]);
+  assert.deepEqual(sent.map((m) => m.ref.status), [1, 1]);
+});
+
+// Spec 0007 client rule 3: one reference per transaction, status 0 only when
+// no block holds it after 30 s (then status 1 or 3 closes it).
+test("a slow drip posts status 0, then status 1", async () => {
+  const { drip, sent } = setup({ slow: true });
+  await drip(ALICE_SS58);
+  assert.deepEqual(sent.map((m) => m.ref.status), [0, 1]);
+  assert.equal(sent[0].ref.hash, sent[1].ref.hash);
 });
 
 test("usage, bad addresses and other messages", async () => {

@@ -209,7 +209,8 @@ extension kind (deleted, buttons, typing, seen, botinfo, txref, groups) to every
 per-peer evidence and no advertisement. A client that does not know a kind
 shows the base spec's unsupported-message row, and that is accepted while the
 kinds iterate. `BOT_PROTOCOL_EXTENSIONS` is the operator's switch: unset means
-all, `none` means none, a comma list keeps only the named ones. When a peer
+all except `typing` (see [Typing and seen](#typing-and-seen-spec-0005)),
+`none` means none, a comma list keeps only the named ones. When a peer
 sends an extension kind, the bot logs `BOT_PROTOCOL_EXTENSION_OBSERVED
 { peer, kind }` once per peer. That is a log only; it enables nothing and is
 not persisted. (An earlier version of this page described a "send only after
@@ -310,11 +311,22 @@ outbound lane: they are never journaled as an owed answer, never re-sent after
 a restart, and never recorded anywhere once the lane settles them. The sender
 logic is `lib/typing-seen.mjs`.
 
-**Typing (the bot sends `working`).**
+**Submission budget (revision 2026-09-23).** Every standalone signal is one
+Statement Store submission, and a 1:1 conversation must cost one submission
+per message (`polkadot-chat-desktop/docs/spec/efficiency.md`). So the bot sends
+no `typing` by default, and its `seen` rides in the same request statement as
+its reply. Each statement the lane submits logs `BOT_OUTBOUND_SUBMITTED
+{ to, messages }` or `BOT_OUTBOUND_EXTENDED { to, messages, added }`; one line
+is one submission.
+
+**Typing: not sent by default.** `BOT_PROTOCOL_EXTENSIONS` unset leaves
+`typing` out. A client that has the bot's `botInfo` shows a local "working"
+state from its own send until the reply, with no wire signal. An operator who
+names `typing` in the list gets the spec's opt-in behavior:
 
 - A brain turn starts (a direct engine's turn, or a bridge hand-off): the bot
-  sends `typing{working, until: now + 6 s}` and refreshes it every 4 s while
-  the turn runs. Never more than one `typing` per 4 s per peer, across turns
+  sends `typing{working, until: now + 12 s}` and refreshes it every 10 s while
+  the turn runs. Never more than one `typing` per 10 s per peer, across turns
   too. A refresh is skipped while the previous hint is still un-ACKed: a peer
   that has not fetched it gains nothing from the next one, and each in-slot
   replacement spends one of the lane's extensions.
@@ -323,19 +335,22 @@ logic is `lib/typing-seen.mjs`.
   re-encode that carries the answer. After a reply no `stopped` is sent: the
   recipient clears the indicator on any real message.
 - A turn that ends with no reply (for example a failed delivery, or `/stop`
-  that only edits the placeholder) sends `typing{stopped}`, when the 4 s rate
+  that only edits the placeholder) sends `typing{stopped}`, when the 10 s rate
   limit allows. A bridge harness that never answers stops the refresh after
   `BOT_LIVE_TTL_MS` and sends `stopped`.
 - Log: `BOT_SENT_TYPING { to, kind: "working" }` once per turn (not per
   refresh), and `{ kind: "stopped" }` when a stop is sent.
 
-**Seen (the bot sends read receipts).** When the brain consumes a peer's
-message (its turn starts), the bot sends `seen{upTo: <that message id>, at:
-now}`. At most one per 2 s per peer: messages consumed inside the window
-share one `seen` with the latest id, and an unfetched older `seen` is
-superseded (`upTo` covers it). Log: `BOT_SENT_SEEN { to, upTo }`. The spec's
-default for a bot is "on", because the bot's `seen` makes its typing
-indicator credible.
+**Seen (the bot sends read receipts) rides the reply.** When the brain
+consumes a peer's message (its turn starts), the bot holds `seen{upTo: <that
+message id>, at}` for up to 5 s. If a real message to that peer goes out in
+the window (the reply, a meter or faucet answer, a greeting), the `seen`
+enters the lane in the same tick, so both ride one request statement: one
+submission. Otherwise the `seen` goes out alone at the end of the window (for
+example a message the brain does not answer, or a turn longer than 5 s).
+Messages consumed inside one window share one `seen` with the latest id, and
+an unfetched older `seen` is superseded (`upTo` covers it). Log:
+`BOT_SENT_SEEN { to, upTo }`, with `withMessage: true` when it rode a message.
 
 **Receiving.** A peer's `typing` and `seen` are decoded and logged at debug
 level only (`BOT_RECEIVED_TYPING { from, kind, until }`, `BOT_RECEIVED_SEEN
@@ -344,17 +359,18 @@ answered, never fed to the brain, never stored as messages, and not even
 added to the dedup set (a repeat only logs again). The bot keeps no
 per-message delivery state, so a `seen` changes nothing on the bot's side.
 
-**Live placeholders with typing on.** The typing indicator covers the wait, so
-the bot does not post the "thinking" placeholder at the start of a turn. A
-client must not show a thinking row and a typing indicator for the same wait.
-The placeholder appears only when a turn runs past 20 s
-(`max(BOT_THINKING_AFTER_MS, 20 s)`), and its first frame is the progress
-status (`⏳ working · 20s · step N` and the recent `▸` action lines), not
-`BOT_THINKING_TEXT`. After that the frames and the terminal status line work
-as before. With `typing` off, the placeholder follows `BOT_THINKING_AFTER_MS`
-and `BOT_THINKING_TEXT` as before. The bridge's `GET /health` reports the
-delay in use as `live.placeholderAfterMs`. (Decision 2026-09-23, with spec
-0005.)
+**Live placeholders.** A client that knows the bot (the `botinfo` extension,
+on by default) shows its own "working" state, and with `typing` on the typing
+indicator does the same, so the bot does not post the "thinking" placeholder
+at the start of a turn. A client must not show a thinking row and a working
+indicator for the same wait. The placeholder appears only when a turn runs
+past 20 s (`max(BOT_THINKING_AFTER_MS, 20 s)`), and its first frame is the
+progress status (`⏳ working · 20s · step N` and the recent `▸` action lines),
+not `BOT_THINKING_TEXT`. After that the frames and the terminal status line
+work as before. With both `botinfo` and `typing` off, the placeholder follows
+`BOT_THINKING_AFTER_MS` and `BOT_THINKING_TEXT` as before. The bridge's `GET
+/health` reports the delay in use as `live.placeholderAfterMs`. (Decisions
+2026-09-23, with spec 0005.)
 
 ### Bot info (spec 0008)
 
@@ -501,9 +517,15 @@ range leaves the whole block as text (`lib/buttons-block.mjs`, `toTxIntent`).
 
 **Sending references.** `BOT_PROTOCOL_EXTENSIONS` without `txref` stops them
 (`BOT_TX_REFERENCE_SKIPPED`). Log: `BOT_SENT_TX_REFERENCE { to, messageId,
-status, block, hash, note }`. The bot reports status 1 (in block) when its
-extrinsic is in a best block, or 3 when it failed on chain; it does not wait
-for finality.
+status, block, hash, note }`. One reference per transaction (spec 0007 client
+rule 3, revision 2026-09-23): status 1 (in block) when its extrinsic is in a
+best block, or 3 when it failed on chain. Status 0 (submitted) goes out only
+when no best block holds the extrinsic 30 s after the submit
+(`REFERENCE_PENDING_AFTER_MS` in `lib/revive-chain.mjs`); status 1 or 3
+follows it, and status 3 also closes a status 0 whose extrinsic never made a
+block. Status 2 (finalized) is never sent: a receiver tracks finality from the
+chain with the hash and block. The bot's own extrinsics from one account go
+out one at a time (`serialQueue`), so two of them never share a nonce.
 
 **Receiving references.** A peer's `transactionReference` is logged
 (`BOT_RECEIVED_TX_REFERENCE { from, status, block, hash, note,
@@ -524,22 +546,36 @@ by the runtime's `NativeToEthRatio` (1e8 on Asset Hub, so 1 PAS = 1e18).
 **Meter (pay-as-you-go replies).** `BOT_METER_CONTRACT` + `BOT_METER_CHAIN`
 turn it on for a direct brain (`lib/meter.mjs`; the contract is
 `contracts/meter/`). Before each brain turn the bot reads `balanceOf(user)` at
-the best block. Below `BOT_METER_PRICE` it answers with one buttons message:
-a line with the balance and a "Top up 1 PAS" `tx` button (a Revive call of
-`topUp()` with 1 PAS), and the brain does not run. Otherwise the brain runs;
-after the turn the bot calls `charge(user, price)` from its own wallet (the
-contract's operator) and sends a `transactionReference` with the note
-`balance: <remaining plancks>`. `/balance` answers the balance and a Top up
-button; `/topup` sends the button. Other slash commands are free. A failed
-balance read answers with a notice and runs no brain (fail closed). Logs:
-`BOT_METER_ENABLED`, `BOT_METER_BALANCE`, `BOT_METER_TOPUP_OFFERED`,
-`BOT_METER_CHARGED`, `BOT_METER_CHARGE_FAILED`, `BOT_METER_READ_FAILED`,
+the best block. Every balance the bot uses or shows is that balance minus the
+user's pending debit (below). Below `BOT_METER_PRICE` it answers with one
+buttons message: a line with the balance and a "Top up 1 PAS" `tx` button (a
+Revive call of `topUp()` with 1 PAS), and the brain does not run. Otherwise
+the brain runs, and the reply's price joins the user's pending debit
+(`BOT_METER_PENDING`). The bot charges the pending debit with ONE
+`charge(user, n × price)` from its own wallet (the contract's operator) when
+`BOT_METER_BATCH_REPLIES` replies are pending (default 5), when
+`BOT_METER_BATCH_MS` has passed since the first pending reply (default 10
+min), before it refuses a reply for a low balance, and on SIGINT/SIGTERM
+(bounded to 60 s). Each charge sends one `transactionReference` with the note
+`balance: <remaining plancks>` (efficiency.md: one Asset Hub extrinsic per 5
+metered replies or 10 min, not one per reply). The pending debit lives in
+memory only: a crash (not a clean stop) loses it, in the user's favor.
+`/balance` answers the balance and a Top up button; `/topup` sends the button.
+Other slash commands are free. A failed balance read answers with a notice
+and runs no brain (fail closed). The `botInfo` balance hint cannot show the
+pending debit: the client reads `balanceOf` from the chain itself. Logs:
+`BOT_METER_ENABLED { batchReplies, batchMs }`, `BOT_METER_BALANCE { pending
+}`, `BOT_METER_PENDING { replies, plancks }`, `BOT_METER_TOPUP_OFFERED`,
+`BOT_METER_CHARGED { on: "batch" | "timer" | "refusal" | "shutdown", replies
+}`, `BOT_METER_CHARGE_FAILED`, `BOT_METER_READ_FAILED`,
 `BOT_METER_OPERATOR_MAPPED`.
 
 **Faucet.** `BOT_FAUCET_KEY` turns it on (`lib/faucet.mjs`). `/drip <SS58 or
 0x account>` sends `BOT_FAUCET_AMOUNT` with `Balances.transfer_keep_alive`
-and posts a reference with the note "Dripped 1 PAS". One drip per target
-account per 10 minutes (in memory); a failed transfer does not use it up. The
+and posts a reference with the note "Dripped 1 PAS". Drips go out one at a
+time, so two `/drip` commands in the same second do not race on the faucet
+account's nonce. `BOT_FAUCET_COOLDOWN_MS` (off by default) limits drips per
+target account (in memory); a failed transfer does not use it up. The
 key is a derivation path of the public Substrate dev phrase only. Logs:
 `BOT_FAUCET_ENABLED`, `BOT_FAUCET_DRIPPED`, `BOT_FAUCET_REFUSED`,
 `BOT_FAUCET_FAILED`.
@@ -633,7 +669,8 @@ becomes one brain turn: the brain sees `[group <name>] <sender username>:
 the group has its own conversation history, separate from each member's 1:1
 history. Chat commands (`/help`, `/model` …) in a group apply to the group's
 session. The operator context gains one line: "You are in the group <name>
-with N people; address the sender by name." A `buttonPress` runs a turn only
+with N people; address the sender by name. Do not send tx (transaction)
+buttons in a group." (v1 groups carry no spec 0007 intents.) A `buttonPress` runs a turn only
 for a buttons message the bot sent to that group. Reactions, deletions,
 `botInfo` and transaction references inside a group are logged
 (`BOT_GROUP_RECEIVED { kind }`) and never answered. The group features that
@@ -651,9 +688,10 @@ one member is logged (`BOT_GROUP_SEND_FAILED`) and does not stop the others.
 A bridge harness gets a group turn with `group_id`, `group_name` and `sender`
 and answers with `POST /send { group_id, text }`.
 
-**Typing and seen.** `typing` fans out while a direct-engine turn runs
-(refreshed every 4 s); it carries the bot's current `seq` and does not advance
-it, so a client that does not store typing sees no gap. `seen` does not fan
+**Typing and seen.** With `typing` listed in `BOT_PROTOCOL_EXTENSIONS` (it is
+off by default), `typing` fans out while a direct-engine turn runs (refreshed
+every 10 s); it carries the bot's current `seq` and does not advance it, so a
+client that does not store typing sees no gap. `seen` does not fan
 out, and the bot sends no 1:1 `seen` for a group message.
 
 **Stopping.** A `groupLeave` from a member takes that member out of the
@@ -842,7 +880,7 @@ container that is the sandbox for their tools (see
 [Agent frameworks](/guide/harnesses#safety-model-for-containerized-agents)).
 
 If no reply has gone out within `BOT_THINKING_AFTER_MS` (default 5s; 20 s
-while the typing extension is on, see [Typing and seen](#typing-and-seen-spec-0005)) of
+while the botinfo or typing extension is on, see [Typing and seen](#typing-and-seen-spec-0005)) of
 receiving a message, the bot posts a "thinking" placeholder — a LIVE message
 that is then edited in place (elapsed clock, compact `▸ action` lines from
 claude's stream-json tool events) until the answer finalizes it. Edits are
