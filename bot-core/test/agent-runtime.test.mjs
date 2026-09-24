@@ -903,12 +903,119 @@ test("downloaded attachments are privately staged for a turn then cleaned up", a
   });
   const msg = { text: "look", messageId: "M1", kind: "richText", attachments: [{ id: "abc123", downloaded: true, path: blob, mime: "image/jpeg", size: 9, fileKind: "image" }] };
   await h.runtime.handleMessage("peer", msg);
-  assert.match(stagedPath, new RegExp(`^${h.workspace.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/\\.pca-attachment-.+/0-abc123\\.jpg$`));
+  // <staging root>/<peer>/<turn>/<file>: outside the workspace, so a
+  // workspace Read grant never covers it.
+  assert.match(stagedPath, /\/pca-staged-[^/]+\/h[0-9a-f]{32}\/turn-[^/]+\/0-abc123\.jpg$/);
+  assert.equal(stagedPath.startsWith(`${h.workspace}${path.sep}`), false, "staged files never live in the workspace");
   assert.equal(buildInput.attachmentDir, path.dirname(stagedPath), "runners receive only the temporary attachment directory for scoped permissions");
   assert.equal(buildInput.workingDirectory, h.workspace, "runners also receive the primary cwd to deny its implicit Read access");
   assert.equal(fs.existsSync(stagedPath), false, "per-turn attachment copy must be removed");
   assert.equal(fs.existsSync(buildInput.attachmentDir), false, "the scoped attachment directory must be removed after the turn");
   assert.equal(msg.attachments[0].path, blob, "message metadata must retain the cache path after cleanup");
+});
+
+test("two peers' concurrent turns never share a staging directory, and neither can read the other's", async () => {
+  // Public bots run read,web with workspace scope. Peer A's photo must never
+  // be readable in peer B's turn, even when the two turns overlap.
+  const PEER_A = "a".repeat(64);
+  const PEER_B = "b".repeat(64);
+  const mediaDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-media-"));
+  const blobA = path.join(mediaDir, "photo-a.jpg");
+  const blobB = path.join(mediaDir, "photo-b.jpg");
+  fs.writeFileSync(blobA, "peer-a-private");
+  fs.writeFileSync(blobB, "peer-b-private");
+  const seen = new Map(); // peer -> { attachmentDir, argv, filesInDir }
+  const h = makeRuntime({
+    buildArgs: (input) => {
+      const peer = input.prompt;
+      // The real Claude policy for this turn: what the brain may read.
+      const argv = RUNNERS.claude.buildArgs({ ...input, policy: { capabilities: "read,web", scope: "workspace" } });
+      seen.set(peer, { attachmentDir: input.attachmentDir, argv, filesInDir: fs.readdirSync(input.attachmentDir) });
+      // Both turns stay open at the same time.
+      return ["-c", `sleep 0.3; printf '{"type":"result","result":"done"}\\n'`];
+    },
+    renderMessage: (message) => message.text,
+  });
+  const attach = (blob) => [{ id: "x", downloaded: true, path: blob, mime: "image/jpeg", size: 14, fileKind: "image" }];
+  await Promise.all([
+    h.runtime.handleMessage(PEER_A, { text: PEER_A, messageId: "A1", kind: "richText", attachments: attach(blobA) }),
+    h.runtime.handleMessage(PEER_B, { text: PEER_B, messageId: "B1", kind: "richText", attachments: attach(blobB) }),
+  ]);
+  const a = seen.get(PEER_A);
+  const b = seen.get(PEER_B);
+  assert.notEqual(a.attachmentDir, b.attachmentDir);
+  assert.equal(path.basename(path.dirname(a.attachmentDir)), PEER_A, "layout is <root>/<peer>/<turn>");
+  assert.equal(path.basename(path.dirname(b.attachmentDir)), PEER_B);
+  assert.notEqual(path.dirname(a.attachmentDir), path.dirname(b.attachmentDir), "peers never share a directory");
+  assert.deepEqual(a.filesInDir, ["0-photo-a.jpg"], "a turn directory holds only its own peer's files");
+  assert.deepEqual(b.filesInDir, ["0-photo-b.jpg"]);
+
+  const allowedOf = (argv) => argv[argv.indexOf("--allowedTools") + 1];
+  const readRule = (dir) => `Read(//${dir.replace(/^\/+/, "")}/**)`;
+  // The workspace stays readable for the persona; only the own turn
+  // directory is added. The other peer's directory and the staging root are
+  // not named, so dontAsk refuses them.
+  for (const [own, other] of [[a, b], [b, a]]) {
+    const allowed = allowedOf(own.argv);
+    assert.ok(allowed.includes(readRule(h.workspace)), "workspace reads stay allowed");
+    assert.ok(allowed.includes(readRule(own.attachmentDir)));
+    assert.ok(!allowed.includes(other.attachmentDir), "never the other peer's turn directory");
+    assert.ok(!allowed.includes(path.dirname(path.dirname(own.attachmentDir)) + "/**"), "never the staging root");
+    assert.ok(!own.attachmentDir.startsWith(`${h.workspace}${path.sep}`), "a workspace read cannot reach staged files");
+  }
+  // After the turns, nothing is left for anyone to find.
+  for (const turn of [a, b]) {
+    assert.equal(fs.existsSync(turn.attachmentDir), false, "turn directory is wiped");
+    assert.equal(fs.existsSync(path.dirname(turn.attachmentDir)), false, "peer directory is wiped once its last turn ends");
+  }
+});
+
+test("a failed turn still wipes its staging directory", async () => {
+  const blob = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pca-media-")), "doc.pdf");
+  fs.writeFileSync(blob, "bytes");
+  let attachmentDir = null;
+  const h = makeRuntime({
+    buildArgs: (input) => {
+      attachmentDir = input.attachmentDir;
+      return ["-c", "echo boom >&2; exit 3"];
+    },
+  });
+  await h.runtime.handleMessage("c".repeat(64), { text: "read it", messageId: "M1", kind: "richText", attachments: [{ id: "d", downloaded: true, path: blob, mime: "application/pdf", size: 5, fileKind: "file" }] });
+  assert.match(h.delivered[0], /couldn't reach my agent/);
+  assert.ok(attachmentDir);
+  assert.equal(fs.existsSync(attachmentDir), false);
+  assert.equal(fs.existsSync(path.dirname(attachmentDir)), false);
+});
+
+test("a web-guarded turn runs behind its own proxy, and a guard that cannot start fails the turn closed", async () => {
+  const opened = [];
+  const closed = [];
+  const guard = {
+    openTurn: async (peer) => {
+      opened.push(peer);
+      return {
+        env: { HTTPS_PROXY: "http://127.0.0.1:9", PCA_WEB_GUARD: "http://127.0.0.1:9/token" },
+        close: async () => { closed.push(peer); },
+      };
+    },
+  };
+  const h = makeRuntime({
+    webGuard: guard,
+    script: `printf '{"type":"result","result":"%s"}\\n' "$HTTPS_PROXY"`,
+  });
+  await h.runtime.handleMessage("peer-a", { text: "search", messageId: "M1", kind: "text" });
+  assert.match(h.delivered[0], /^http:\/\/127\.0\.0\.1:9/, "the CLI sees the turn's proxy");
+  assert.deepEqual(opened, ["peer-a"]);
+  assert.deepEqual(closed, ["peer-a"], "the proxy closes with the turn");
+
+  let spawned = false;
+  const broken = makeRuntime({
+    webGuard: { openTurn: async () => { throw new Error("listen failed"); } },
+    buildArgs: () => { spawned = true; return ["-c", "true"]; },
+  });
+  await broken.runtime.handleMessage("peer-a", { text: "search", messageId: "M1", kind: "text" });
+  assert.equal(spawned, false, "no CLI runs with open egress");
+  assert.match(broken.delivered[0], /couldn't reach my agent/);
 });
 
 test("tool-call markup never reaches the peer; the peer learns tools are off", async () => {

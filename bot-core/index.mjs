@@ -101,6 +101,7 @@ import { createFileCommandHandler } from "./lib/file-commands.mjs";
 import { createDeferredProgressTracker, createLiveReplies, renderTurnStats } from "./lib/live-reply.mjs";
 import { RUNNERS, resolveEngine, ENGINES, assertEngineToolPolicy, toolPolicyEnforcement } from "./lib/runners.mjs";
 import { ToolPolicyError, hasToolCapability, toolPolicyFromEnvironment, toolPolicySummary } from "./lib/tool-policy.mjs";
+import { createWebGuard, DEFAULT_WEB_DAILY_BUDGET, DEFAULT_WEB_TURN_BUDGET } from "./lib/web-guard.mjs";
 import { createKeyedDispatcher } from "./lib/keyed-dispatcher.mjs";
 import { createReviveChain } from "./lib/revive-chain.mjs";
 import { createMeter, DEFAULT_METER_PRICE, METER_BATCH_MS, METER_BATCH_REPLIES, parsePlancks } from "./lib/meter.mjs";
@@ -2160,6 +2161,22 @@ const beginTurnProgress = (peerHex) => {
   return (title) => tracker.add(title);
 };
 
+function webGuardFor({ brain: engineBrain, customCmd: custom, policy, bridgePort: port, log: write }) {
+  if (!engineBrain || custom || !hasToolCapability(policy, "web")) return null;
+  if (engineBrain !== "claude") {
+    write("BOT_WEB_UNGUARDED", { engine: engineBrain, detail: "only the claude brain's web tools go through the pca egress guard" });
+    return null;
+  }
+  const guard = createWebGuard({
+    turnBudget: numberEnv("BOT_WEB_TURN_BUDGET", DEFAULT_WEB_TURN_BUDGET, { min: 0, max: 10_000 }),
+    dailyBudget: numberEnv("BOT_WEB_DAILY_BUDGET", DEFAULT_WEB_DAILY_BUDGET, { min: 0, max: 1_000_000 }),
+    bridgePort: port,
+    log: write,
+  });
+  write("BOT_WEB_GUARD", { turnBudget: guard.turnBudget, dailyBudget: guard.dailyBudget });
+  return guard;
+}
+
 // Project registry (BOT_AI_PROJECTS): validated aliases -> dirs, plus lazy
 // per-branch git worktrees. Only meaningful for direct engines.
 const workspaces = engine ? createWorkspaces({
@@ -2179,8 +2196,12 @@ if (engine && !customCmd) log("BOT_TOOL_POLICY", {
   ...toolPolicySummary(aiToolPolicy),
   enforcement: toolPolicyEnforcement(brain, aiToolPolicy),
 });
+// Claude's web tools go through a per-turn egress proxy that blocks private
+// addresses and meters fetches and searches (lib/web-guard.mjs).
+const webGuard = engine ? webGuardFor({ brain, customCmd, policy: aiToolPolicy, bridgePort, log }) : null;
 const agentRuntime = engine ? createAgentRuntime({
   engine,
+  webGuard,
   engineName: customCmd ? "custom" : brain,
   engineCommand,
   buildArgs: buildEngineArgs,

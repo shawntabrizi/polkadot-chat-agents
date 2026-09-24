@@ -1054,8 +1054,8 @@ approved set or explicit non-public open policy permits switching),
 opencode and kimi have none), `/project` (see workspaces below). Each turn's token/cost
 usage from the CLI's result event is logged as `BOT_AI_USAGE` and tallied
 in-memory for `/usage`. Ordinary downloaded attachments are staged in a
-private per-turn directory before the engine runs and removed after the turn,
-so the agent acts on files inside its own workspace. `/file put` is
+private per-peer, per-turn directory outside the workspace before the engine
+runs, and removed after the turn. The engine is granted only that directory. `/file put` is
 deliberately the separate explicit path for long-lived files; it copies the
 attachment into the peer vault before the message reaches any brain.
 

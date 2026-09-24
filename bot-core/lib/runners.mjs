@@ -7,6 +7,7 @@ import {
   createToolPolicy,
   hasToolCapability,
 } from "./tool-policy.mjs";
+import { CLAUDE_WEB_SEARCH_HOOK } from "./web-guard.mjs";
 
 // Agent-CLI runners. Each engine is a small config that knows how to invoke a
 // headless coding-agent CLI and normalize its JSONL event stream to one
@@ -220,7 +221,13 @@ export const toolPolicyEnforcement = (engineName, policyInput = DEFAULT_TOOL_POL
   // any of it, so an operator reading "path-scoped file-tool rules" would
   // otherwise be told a boundary that does not cover the granted web tools.
   const unscoped = [];
-  if (hasToolCapability(policy, "web")) unscoped.push("web tools reach any URL");
+  // Claude's web tools run behind the pca egress guard (lib/web-guard.mjs);
+  // the other engines' web tools are not routed through it.
+  if (hasToolCapability(policy, "web")) {
+    unscoped.push(engineName === "claude"
+      ? "web tools reach public addresses only, through the pca egress guard with per-turn and per-day budgets"
+      : "web tools reach any URL");
+  }
   if (hasToolCapability(policy, "subagents")) unscoped.push("subagents inherit this same policy");
   const withUnscoped = (result) => (unscoped.length
     ? { ...result, detail: `${result.detail} (${unscoped.join("; ")})`, unscoped: Object.freeze([...unscoped]) }
@@ -296,6 +303,15 @@ const claude = {
     const tools = claudeTools(policy);
     args.push("--permission-mode", "dontAsk", "--tools", tools.join(","));
     if (operatorContext) args.push("--append-system-prompt", operatorContext);
+    // WebFetch egress is bounded by the per-turn proxy (lib/web-guard.mjs).
+    // WebSearch never touches that proxy, so a flag-level PreToolUse hook asks
+    // the same guard before each search. Flag settings load even with
+    // `--setting-sources ""`, and nothing the agent can edit feeds them.
+    if (hasToolCapability(policy, "web")) {
+      args.push("--settings", JSON.stringify({
+        hooks: { PreToolUse: [{ matcher: "WebSearch", hooks: [{ type: "command", command: CLAUDE_WEB_SEARCH_HOOK }] }] },
+      }));
+    }
     if (tools.length) {
       const approvals = claudeApprovalRules(policy, scope);
       if (approvals.length) args.push("--allowedTools", approvals.join(","));

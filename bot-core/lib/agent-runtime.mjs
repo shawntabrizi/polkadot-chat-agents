@@ -32,7 +32,9 @@
 //                              progress callback or null
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { buildOperatorContext, OPERATOR_CONTEXT_MARKER } from "./agent-context.mjs";
 import { parseButtonsBlock } from "./buttons-block.mjs";
@@ -268,6 +270,10 @@ export const createAgentRuntime = ({
   agentUid = null,
   agentGid = null,
   agentEnv = {}, // explicit non-secret variables for a custom agent CLI
+  // lib/web-guard.mjs instance when the engine's web tools must go through the
+  // pca egress guard. Each turn gets its own proxy and budget; a turn whose
+  // guard cannot start fails instead of running with open egress.
+  webGuard = null,
   parentEnv = process.env,
   renderMessage, // (msg) -> verbatim prompt text (transport owns message shape)
   // Deterministic pca facts plus an optional operator-owned PERSONA.md. Direct
@@ -390,6 +396,10 @@ export const createAgentRuntime = ({
   }
 
   const cleanupPrivateStagingRoot = () => {
+    if (localStagingRoot) {
+      try { fs.rmSync(localStagingRoot, { recursive: true, force: true, maxRetries: 2 }); } catch { /* best effort */ }
+      localStagingRoot = null;
+    }
     if (!privateStagingRoot) return;
     try { fs.rmSync(privateStagingRoot, { recursive: true, force: true, maxRetries: 2 }); }
     catch (error) { log("BOT_ATTACHMENT_STAGING_ROOT_CLEANUP_FAILED", { error: String(error?.message ?? error) }); }
@@ -757,7 +767,7 @@ export const createAgentRuntime = ({
   // have (kimi: `Session "x" not found.` / a session from another directory;
   // claude: `No conversation found with session ID`).
   const STALE_RESUME_PATTERN = /session ["']?[^"'\n]*["']? not found|no conversation found|different directory/i;
-  const runEngine = (peerHex, userText, onAction = null, onPartial = null, cwd = workspace, job = null, outputDir = null, sessionKey = peerHex, attachmentDir = null) => new Promise((resolve) => {
+  const runEngine = (peerHex, userText, onAction = null, onPartial = null, cwd = workspace, job = null, outputDir = null, sessionKey = peerHex, attachmentDir = null, webTurn = null) => new Promise((resolve) => {
     const k = norm(sessionKey);
     if (job?.cancelled) { resolve({ stopped: true }); return; }
     let child;
@@ -806,6 +816,7 @@ export const createAgentRuntime = ({
         ...childEnv,
         ...(turnEnvironment ?? {}),
         ...(outputDir ? { PCA_OUTPUT_DIR: outputDir } : {}),
+        ...(webTurn?.env ?? {}),
       };
       const options = { stdio: ["ignore", "pipe", "pipe"], cwd, env, detached: true };
       if (childUid != null) options.uid = childUid;
@@ -915,7 +926,7 @@ export const createAgentRuntime = ({
         peerResume.delete(k);
         persist();
         log("BOT_AI_RESUME_DROPPED", { to: peerHex, stderr: err.trim().slice(-200) });
-        runEngine(peerHex, userText, onAction, onPartial, cwd, job, outputDir, sessionKey, attachmentDir).then(finish);
+        runEngine(peerHex, userText, onAction, onPartial, cwd, job, outputDir, sessionKey, attachmentDir, webTurn).then(finish);
         return;
       }
       // Classify the failure so the operator knows the remedy (re-auth vs. retry).
@@ -926,23 +937,68 @@ export const createAgentRuntime = ({
   });
 
   // Stage media only when a worker actually starts a turn. Doing it before the
-  // global queue would let queued requests duplicate the bounded media cache
-  // into the workspace. The per-turn directory is private and always removed
-  // after the CLI exits, including failures and /stop.
-  const stageAttachmentsForTurn = (turnCwd, attachments) => {
-    let stageDir = null;
+  // global queue would let queued requests duplicate the bounded media cache.
+  //
+  // Layout: <staging root>/<peer>/<turn>/. The staging root is never inside
+  // the workspace: a workspace-scoped Read grant would otherwise cover every
+  // peer's staged files, and concurrent turns of other peers could read them.
+  // The brain is named only its own turn directory (the runners grant exactly
+  // that path), and the turn directory is removed when the turn ends, on
+  // success, failure and /stop alike. In a privileged deployment the root and
+  // each peer directory are root-owned 0711, so the dropped agent can reach a
+  // path it was given but cannot list a sibling.
+  let localStagingRoot = null;
+  const attachmentStagingRoot = () => {
+    if (needsPrivilegedStaging) {
+      if (!privateStagingRoot) throw new Error("private attachment staging is unavailable");
+      return privateStagingRoot;
+    }
+    if (!localStagingRoot) {
+      localStagingRoot = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "pca-staged-"));
+      fs.chmodSync(localStagingRoot, 0o700);
+    }
+    return localStagingRoot;
+  };
+  // A peer key is an account hex in practice; anything else is hashed so it
+  // can never name a path outside the staging root.
+  const stagingPeerName = (peerHex) => {
+    const key = norm(peerHex);
+    return /^[0-9a-f]{1,128}$/.test(key)
+      ? key
+      : `h${createHash("sha256").update(String(peerHex)).digest("hex").slice(0, 32)}`;
+  };
+  const createTurnStagingDirectory = (peerHex) => {
+    const peerDir = path.join(attachmentStagingRoot(), stagingPeerName(peerHex));
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        fs.mkdirSync(peerDir, { mode: needsPrivilegedStaging ? 0o711 : 0o700 });
+      } catch (error) {
+        if (error?.code !== "EEXIST") throw error;
+      }
+      const stat = fs.lstatSync(peerDir);
+      if (!stat.isDirectory() || (needsPrivilegedStaging && !isRootOwnedNonWritableDirectory(stat))) {
+        throw new Error("peer staging directory is not a protected directory");
+      }
+      try {
+        // Keep root ownership until every source copy and metadata chmod/chown
+        // has completed. Handing ownership over early would let the agent race
+        // a predictable destination name with a symlink.
+        const turnDir = fs.mkdtempSync(path.join(peerDir, "turn-"));
+        fs.chmodSync(turnDir, 0o700);
+        return { peerDir, turnDir };
+      } catch (error) {
+        // Another turn of this peer removed the empty peer directory between
+        // our mkdir and mkdtemp. Create it again once.
+        if (error?.code !== "ENOENT" || attempt > 0) throw error;
+      }
+    }
+  };
+  const stageAttachmentsForTurn = (peerHex, attachments) => {
+    let staged = null;
     const originalPaths = [];
     const ensureDir = () => {
-      if (stageDir) return stageDir;
-      if (needsPrivilegedStaging && !privateStagingRoot) {
-        throw new Error("private attachment staging is unavailable");
-      }
-      // Keep root ownership until every source copy and metadata chmod/chown
-      // has completed. Handing ownership over early would let the agent race a
-      // predictable destination name with a symlink.
-      stageDir = fs.mkdtempSync(path.join(privateStagingRoot ?? turnCwd, ".pca-attachment-"));
-      fs.chmodSync(stageDir, 0o700);
-      return stageDir;
+      if (!staged) staged = createTurnStagingDirectory(peerHex);
+      return staged.turnDir;
     };
     for (const [index, attachment] of (attachments ?? []).entries()) {
       if (!attachment.downloaded || !attachment.path) continue;
@@ -960,17 +1016,20 @@ export const createAgentRuntime = ({
     }
     // With a privileged transport, only expose the complete directory after
     // all root-owned file operations have finished.
-    if (stageDir && childUid != null) {
-      try { fs.chownSync(stageDir, childUid, childGid ?? childUid); }
+    if (staged && childUid != null) {
+      try { fs.chownSync(staged.turnDir, childUid, childGid ?? childUid); }
       catch (error) { log("BOT_ATTACHMENT_STAGE_FAILED", { error: String(error?.message ?? error) }); }
     }
     return {
-      attachmentDir: stageDir,
+      attachmentDir: staged?.turnDir ?? null,
       cleanup: () => {
         for (const [attachment, source] of originalPaths) attachment.path = source;
-        if (!stageDir) return;
-        try { fs.rmSync(stageDir, { recursive: true, force: true, maxRetries: 2 }); }
+        if (!staged) return;
+        try { fs.rmSync(staged.turnDir, { recursive: true, force: true, maxRetries: 2 }); }
         catch (error) { log("BOT_ATTACHMENT_CLEANUP_FAILED", { error: String(error?.message ?? error) }); }
+        // The peer directory goes too once its last turn ends. A concurrent
+        // turn of the same peer keeps it (ENOTEMPTY).
+        try { fs.rmdirSync(staged.peerDir); } catch { /* still in use, or gone */ }
       },
     };
   };
@@ -1063,9 +1122,11 @@ export const createAgentRuntime = ({
       let artifactHandoff = null;
       try {
         const result = await queueEngineTurn(peerHex, async (job) => {
-          const stagedAttachments = stageAttachmentsForTurn(turnCwd, msg.attachments);
+          const stagedAttachments = stageAttachmentsForTurn(peerHex, msg.attachments);
           let outputDir = null;
+          let webTurn = null;
           try {
+            if (webGuard) webTurn = await webGuard.openTurn(peerHex);
             if (supportsArtifactDelivery) {
               try { outputDir = createTurnOutputDirectory(turnCwd); }
               catch (error) { log("BOT_ARTIFACT_OUTPUT_DIR_FAILED", { to: peerHex, error: String(error?.message ?? error) }); }
@@ -1088,6 +1149,7 @@ export const createAgentRuntime = ({
               outputDir,
               k,
               stagedAttachments.attachmentDir,
+              webTurn,
             );
             if (engineResult && !engineResult.stopped && outputDir) {
               // The callback must never receive a path still writable by the
@@ -1099,6 +1161,7 @@ export const createAgentRuntime = ({
           } finally {
             stagedAttachments.cleanup();
             cleanupTurnOutputDirectory(outputDir);
+            await webTurn?.close();
           }
         }, k);
         // A user /stop is a completed action, but a process-wide shutdown must

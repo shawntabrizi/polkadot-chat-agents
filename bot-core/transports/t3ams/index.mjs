@@ -19,6 +19,7 @@ import { createFileStore } from "../../lib/file-store.mjs";
 import { createFileCommandHandler } from "../../lib/file-commands.mjs";
 import { RUNNERS, resolveEngine, assertEngineToolPolicy, toolPolicyEnforcement } from "../../lib/runners.mjs";
 import { ToolPolicyError, hasToolCapability, toolPolicyFromEnvironment, toolPolicySummary } from "../../lib/tool-policy.mjs";
+import { createWebGuard, DEFAULT_WEB_DAILY_BUDGET, DEFAULT_WEB_TURN_BUDGET } from "../../lib/web-guard.mjs";
 import { deriveT3amsBulletinUploadSigner, deriveT3amsIdentity } from "./t3ams-identity.mjs";
 import { createT3amsProtocol, hexToBytes, bareHex } from "./t3ams-protocol.mjs";
 import { assertT3amsSdkContract } from "./t3ams-sdk-contract.mjs";
@@ -2988,8 +2989,25 @@ if (engine != null) {
     agentGid: aiAgentGid,
     log,
   });
+  // Claude's web tools go through a per-turn egress proxy that blocks private
+  // addresses and meters fetches and searches (lib/web-guard.mjs).
+  let webGuard = null;
+  if (!customCmd && hasToolCapability(aiToolPolicy, "web")) {
+    if (brain === "claude") {
+      webGuard = createWebGuard({
+        turnBudget: numberEnv("BOT_WEB_TURN_BUDGET", DEFAULT_WEB_TURN_BUDGET, { min: 0, max: 10_000 }),
+        dailyBudget: numberEnv("BOT_WEB_DAILY_BUDGET", DEFAULT_WEB_DAILY_BUDGET, { min: 0, max: 1_000_000 }),
+        bridgePort,
+        log,
+      });
+      log("BOT_WEB_GUARD", { turnBudget: webGuard.turnBudget, dailyBudget: webGuard.dailyBudget });
+    } else {
+      log("BOT_WEB_UNGUARDED", { engine: brain, detail: "only the claude brain's web tools go through the pca egress guard" });
+    }
+  }
   agentRuntime = createAgentRuntime({
     engine,
+    webGuard,
     engineName: customCmd ? "custom" : brain,
     engineCommand: customCmd || engine.command,
     buildArgs: ({ prompt, operatorContext, model, resume, effort, attachmentDir, outputDir, workingDirectory }) => customCmd

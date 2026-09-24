@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { RUNNERS, toolActionTitle, resolveEngine, ENGINES, toolPolicyEnforcement } from "../lib/runners.mjs";
+import { CLAUDE_WEB_SEARCH_HOOK } from "../lib/web-guard.mjs";
 
 const policy = (capabilities = [], scope = "workspace") => ({ capabilities, scope });
 
@@ -569,12 +570,14 @@ test("enforcement summaries admit what the file scope does not contain", () => {
   assert.match(files.detail, /path-scoped/);
   assert.equal(files.unscoped, undefined);
 
+  // Claude's web tools run behind the pca egress guard; other engines' do not.
   const web = toolPolicyEnforcement("claude", { capabilities: "read,web", scope: "workspace" });
-  assert.match(web.detail, /web tools reach any URL/);
-  assert.deepEqual([...web.unscoped], ["web tools reach any URL"]);
+  assert.match(web.detail, /public addresses only, through the pca egress guard/);
+  const codexWeb = toolPolicyEnforcement("codex", { capabilities: "read,web", scope: "workspace" });
+  assert.deepEqual([...codexWeb.unscoped], ["web tools reach any URL"]);
 
   const both = toolPolicyEnforcement("claude", { capabilities: "read,web,subagents", scope: "workspace" });
-  assert.match(both.detail, /web tools reach any URL; subagents inherit this same policy/);
+  assert.match(both.detail, /per-day budgets; subagents inherit this same policy/);
 
   // No capabilities at all stays the plain "disabled" summary.
   assert.equal(toolPolicyEnforcement("claude", { capabilities: "" }).kind, "none");
@@ -602,4 +605,20 @@ test("claude carries the complete operator context as a system prompt on every t
   const some = RUNNERS.claude.buildArgs({ prompt: "hi", policy: policy(["read"]), operatorContext: context });
   assert.equal(some[some.indexOf("--append-system-prompt") + 1], context, "tool access does not remove identity facts");
   assert.equal(RUNNERS.claude.buildArgs({ prompt: "hi" }).includes("--append-system-prompt"), false, "the runner does not invent context");
+});
+
+test("claude web turns ask the pca guard before every WebSearch; turns without web carry no hook", () => {
+  // WebSearch runs at the model provider, so the egress proxy cannot see it.
+  // Without this hook a public peer could run unlimited searches.
+  const args = RUNNERS.claude.buildArgs({ prompt: "p", policy: { capabilities: "read,web", scope: "workspace" }, workingDirectory: "/workspace" });
+  const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
+  const [entry] = settings.hooks.PreToolUse;
+  assert.equal(entry.matcher, "WebSearch");
+  assert.equal(entry.hooks[0].command, CLAUDE_WEB_SEARCH_HOOK);
+  // Project and user settings stay off, so nothing the agent writes can add
+  // a hook that approves a search.
+  assert.equal(args[args.indexOf("--setting-sources") + 1], "");
+
+  const noWeb = RUNNERS.claude.buildArgs({ prompt: "p", policy: { capabilities: "read", scope: "workspace" }, workingDirectory: "/workspace" });
+  assert.equal(noWeb.includes("--settings"), false);
 });

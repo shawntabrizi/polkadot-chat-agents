@@ -219,6 +219,28 @@ Do not publish the authenticated bridge port. The deploy container and resource
 limits help, but they cannot make a sensitive host mount or exposed bridge token
 safe.
 
+**Web egress guard (claude brain).** When `web` is granted, each turn gets its
+own forward proxy on `127.0.0.1`, and the CLI runs with `HTTPS_PROXY`,
+`HTTP_PROXY` and an empty `NO_PROXY`. The proxy resolves the host itself and
+connects only to an address it checked. It refuses 127/8, 10/8, 172.16/12,
+192.168/16, 169.254/16, 100.64/10, 0/8, multicast, ::1, fc00::/7, fe80::/10,
+IPv4-mapped forms of these, the container's own addresses, and the bridge port
+on any address. WebSearch runs at the model provider and opens no connection,
+so a flag-level `PreToolUse` hook asks the same guard before each search. Both
+share `BOT_WEB_TURN_BUDGET` and `BOT_WEB_DAILY_BUDGET`. Log events:
+`BOT_WEB_FETCH` (peer, host, port, bytes), `BOT_WEB_SEARCH`, and
+`BOT_WEB_BLOCKED` (peer, host or tool, reason: `private-address`,
+`own-address`, `bridge-port`, `dns-failed`, `turn-budget`, `daily-budget`).
+The model API host (`api.anthropic.com:443`) passes without a count. The guard
+does not bound `bash`, and the `codex`, `opencode` and `kimi` brains do not use
+it (`BOT_WEB_UNGUARDED`).
+
+**Attachment staging.** A turn's attachments are copied to
+`<staging root>/<peer>/<turn>/`, outside the workspace, and only that directory
+is granted to the brain. pca deletes it when the turn ends, on success,
+failure or `/stop`. In a deployed container, the staging root and each peer
+directory are root-owned and mode 0711, so the agent cannot list them.
+
 The dedicated bot container is the concrete isolation boundary. The transport
 keeps the chat seed, session state, and bridge token in `/state`, inaccessible to
 the non-root agent. Do not mount unrelated host repositories, credentials,
@@ -332,8 +354,10 @@ the directory is sensitive even if no model session has been created.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BOT_AI_TOOL_CAPABILITIES` | `""` | Comma-separated portable direct-agent outcomes: `read`, `write`, `bash`. Empty disables tools; `write` includes `read`, and `bash` includes both. **gen (run/deploy)** |
+| `BOT_AI_TOOL_CAPABILITIES` | `""` | Comma-separated portable direct-agent outcomes: `read`, `write`, `bash`, `web`, `subagents`. Empty disables tools; `write` includes `read`, and `bash` includes both. A public bot uses `read,web` only: never `write` or `bash`. **gen (run/deploy)** |
 | `BOT_AI_TOOL_SCOPE` | `workspace` | `workspace` scopes native file tools to the current project and staged attachments. `container` deliberately grants native file tools all files visible to the non-root agent account. Bash uses the agent process boundary in either scope. **gen (run/deploy)** |
+| `BOT_WEB_TURN_BUDGET` | 10 | `claude` brain with `web`: the most web fetches plus WebSearch calls in one turn. The next one is refused and logged as `BOT_WEB_BLOCKED` (`turn-budget`). |
+| `BOT_WEB_DAILY_BUDGET` | 50 | `claude` brain with `web`: the most web fetches plus WebSearch calls for one peer in one UTC day, across turns (`daily-budget`). Kept in memory; a restart resets it. |
 | `BOT_AI_AGENT_UID` / `BOT_AI_AGENT_GID` | unset | Drop the spawned agent to this uid/gid so it can't read `/state` or the seed. **gen (deploy: 1000)** |
 | `BOT_AI_IDLE_TIMEOUT_MS` | 600000 | Kill a turn that has emitted nothing for this long (wedge backstop). |
 | `BOT_AI_MAX_MS` | 3600000 | Hard per-turn wall-clock cap. |
@@ -362,7 +386,8 @@ intentionally returns a direct bot to the no-tools default.
 | `--allowed-tools read` | inspect staged/workspace files |
 | `--allowed-tools read,write` | normal file outcomes (`write` includes `read`) |
 | `--allowed-tools read,write,bash` | files plus command execution |
-| `--allowed-tools read,write,bash,web` | the above plus web search/fetch (unscoped egress) |
+| `--allowed-tools read,web` | **the public-bot profile:** read-only workspace and own staged attachments, plus web search/fetch through the egress guard (claude) |
+| `--allowed-tools read,write,bash,web` | files, commands and web; `bash` makes egress unbounded. Never for a public bot |
 | `--tool-scope workspace` | native file tools confined to the selected project and staged attachments |
 | `--tool-scope container` | native file tools see everything the non-root agent account can |
 | *(no tool flag)* | no-tools default, workspace scope |

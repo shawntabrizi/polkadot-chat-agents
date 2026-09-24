@@ -1380,7 +1380,9 @@ describe("transport e2e", { concurrency: 8 }, () => {
       // that copy is removed once the engine has completed.
       const m = /saved at (\S+)/.exec(textOf(answer));
       assert.ok(m, `no staged path in the engine prompt:\n${textOf(answer)}`);
-      assert.ok(m[1].includes(`${path.sep}.pca-attachment-`), `not staged into a private turn directory: ${m[1]}`);
+      // <staging root>/<peer>/<turn>/<file>, never inside the workspace.
+      assert.match(m[1], /\/pca-staged-[^/]+\/[0-9a-z]+\/turn-[^/]+\/[^/]+$/, `not staged into a private per-peer turn directory: ${m[1]}`);
+      assert.equal(fs.existsSync(path.dirname(m[1])), false, "the turn directory must be removed after the turn");
       assert.equal(fs.existsSync(m[1]), false, "staged attachment must be cleaned up after the turn");
     } finally {
       await bot.stop();

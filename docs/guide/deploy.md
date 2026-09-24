@@ -43,12 +43,52 @@ orthogonal: it neither implies nor is implied by the file capabilities, and **no
 `--tool-scope` bounds it** — a filesystem scope cannot limit where the internet
 is.
 
+On the `claude` brain, pca bounds `web` at the network instead. Each turn gets
+its own egress proxy on loopback, and the CLI runs with `HTTPS_PROXY` and
+`HTTP_PROXY` pointed at it. The proxy resolves each host itself and refuses
+private, loopback, link-local, CGNAT/Tailscale, and the container's own
+addresses, and the bridge port on any address. It counts every fetch, and a
+`PreToolUse` hook counts every WebSearch, against a per-turn budget
+(`BOT_WEB_TURN_BUDGET`, default 10) and a per-day budget for each peer
+(`BOT_WEB_DAILY_BUDGET`, default 50). The logs show `BOT_WEB_FETCH` with host
+and size, `BOT_WEB_SEARCH`, and `BOT_WEB_BLOCKED` with the reason. The
+`codex`, `opencode`, and `kimi` brains do not use this guard, and log
+`BOT_WEB_UNGUARDED` at startup.
+
 It is *not* the egress boundary, and it would be a mistake to treat it as one.
 `bash` already implies arbitrary egress: a shell reaches the network through the
 runtime that is necessarily present, so a bash-capable bot can fetch a URL with
 or without `web`. Withholding `web` narrows what the model reaches for, not what
 it is able to reach. **Granting `bash` means accepting egress**; grant `web` when
 you want the engine's own web tools to be part of how it works.
+
+### Safe tools for a public bot
+
+A public bot takes instructions from any sender. Use this configuration for a
+public `claude` bot:
+
+```bash
+BOT_AI_TOOL_CAPABILITIES=read,web
+BOT_AI_TOOL_SCOPE=workspace
+BOT_AI_AGENT_UID=1000   # pca deploy sets this; the agent cannot read the seed
+BOT_WEB_TURN_BUDGET=10  # optional; the default
+BOT_WEB_DAILY_BUDGET=50 # optional; the default
+```
+
+(`pca deploy <bot> --allowed-tools read,web --tool-scope workspace` writes the
+first two.) With this configuration:
+
+- `read` reaches the workspace (read-only) and the current turn's staged
+  attachments. Staged files live at `<staging root>/<peer>/<turn>/`, outside
+  the workspace. The brain is named only its own turn directory, and pca
+  deletes that directory when the turn ends, also after a failure or `/stop`.
+  One peer cannot read the files of another peer.
+- `web` goes through the egress guard above.
+
+**Never give `write` or `bash` to a public bot.** `write` lets any sender
+change the persona and the files every other peer reads. `bash` removes every
+boundary on this page: a shell can clear the proxy variables and reach the
+network, including private addresses.
 
 `subagents` grants the engine's delegation tool — `Agent` on claude,
 `features.multi_agent` on codex, the `task` tool on opencode, `Agent`/`AgentSwarm`
