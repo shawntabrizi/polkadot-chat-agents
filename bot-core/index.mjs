@@ -41,6 +41,11 @@
 //   BOT_FILE_MAX_PEER_ENTRIES (500). File delivery additionally needs
 //   BOT_HOP_UPLOAD_NODE (operator-pinned HOP URL) and a provisioned Bulletin
 //   allowance for the derived //allowance//bulletin//chat account.
+//   Bulletin attachments (spec 0012, kind 250): BOT_BULLETIN_ENDPOINT (default:
+//   the profile's Bulletin node; empty profile = off), BOT_BULLETIN_GATEWAY,
+//   BOT_BULLETIN_AUTHORIZER (named testnets only: a dev key path such as //Eve
+//   that grants the bot's //allowance//bulletin//chat account when it runs
+//   short), BOT_BULLETIN_BUDGET_MB (64) / BOT_BULLETIN_BUDGET_TXS (100) per UTC day.
 //   Durable backlog: BOT_MAX_OWED_REPLIES (2000), BOT_MAX_OWED_BYTES (16MB).
 //   Replies: BOT_REPLY_CHUNK_BYTES (4000) — long answers are split into parts
 //   of at most this many UTF-8 bytes (paragraph/code-fence aware).
@@ -87,6 +92,8 @@ import { createGroupsV2 } from "./lib/groups-v2.mjs";
 import { groupExpiryFactory, pairwiseSecret } from "./lib/group-keys.mjs";
 import { createWorkspaces } from "./lib/workspaces.mjs";
 import { downloadP2PFile, uploadP2PFile, validateHopUrl } from "./lib/hop-client.mjs";
+import { bulletinConfig, createBulletin, createUploadBudget } from "./lib/bulletin.mjs";
+import { makePng, pngDimensions } from "./lib/png.mjs";
 import { createMediaStore } from "./lib/media-store.mjs";
 import { createFileStore } from "./lib/file-store.mjs";
 import { createFileCommandHandler } from "./lib/file-commands.mjs";
@@ -146,6 +153,8 @@ import {
   encodeOpaqueChatAcceptedMessage,
   encodeOpaqueDeviceChatAcceptedMessage,
   encodeOpaqueGroupControlMessage,
+  encodeOpaqueAttachmentMessage,
+  ATTACHMENT_LIMITS,
   encodeSessionRequestPayload,
   encodeSessionResponsePayload,
   submitAppStatement,
@@ -495,6 +504,43 @@ const toAttachmentMeta = (a) => ({
   ...(a.width != null ? { width: a.width, height: a.height } : {}),
   ...(a.duration != null ? { duration: a.duration } : {}),
 });
+// Spec 0012: a decoded kind-250 item -> the same journal-able metadata. The
+// id is the first chunk's content hash (unique per ciphertext). "bulletin"
+// holds the key: key material, like ticketHex — never logged or bridged.
+const hexOf = (b) => norm(bytesToHex(b));
+const toBulletinAttachmentMeta = (item) => ({
+  id: hexOf(item.chunks[0]),
+  source: "bulletin",
+  mime: item.mime,
+  size: item.size,
+  fileKind: item.media.kind === "file" ? "general" : item.media.kind,
+  ...(item.name ? { name: item.name } : {}),
+  ...(item.media.width != null ? { width: item.media.width, height: item.media.height } : {}),
+  ...(item.media.durationMs != null ? { duration: item.media.durationMs } : {}),
+  bulletin: {
+    key: hexOf(item.key), nonce: hexOf(item.nonce), chunkSize: item.chunkSize,
+    chunks: item.chunks.map(hexOf), genesis: hexOf(item.store.genesis),
+    mirror: item.store.mirror, expiresAt: item.expiresAt,
+  },
+});
+const bulletinItemOf = (a) => ({
+  size: a.size, key: hexToBytes(a.bulletin.key), nonce: hexToBytes(a.bulletin.nonce),
+  chunkSize: a.bulletin.chunkSize, chunks: a.bulletin.chunks.map(hexToBytes),
+  store: { kind: "bulletin", genesis: hexToBytes(a.bulletin.genesis), mirror: a.bulletin.mirror ?? null },
+  expiresAt: a.bulletin.expiresAt,
+});
+// Both attachment rails of one decoded message: base-spec richText (HOP) and
+// kind 250 (Bulletin). Kind 250's caption is the message text.
+const attachmentsOf = (m) => (m.kind === "attachment"
+  ? m.items.map(toBulletinAttachmentMeta)
+  : (m.richText?.attachments ?? []).filter((a) => a.kind === "p2pMixnetFile").map(toAttachmentMeta));
+const logAttachmentReceived = (from, m, extra = {}) => {
+  if (m.kind !== "attachment") return;
+  log("BOT_ATTACHMENT_RECEIVED", {
+    from, messageId: m.messageId, ...extra,
+    items: m.items.map((i) => ({ mime: i.mime, size: i.size, media: i.media.kind, chunks: i.chunks.length, ...(i.media.width != null ? { width: i.media.width, height: i.media.height } : {}) })),
+  });
+};
 // Every consumer of a message expects non-empty text, so caption-less
 // attachments get a synthesized placeholder.
 const synthesizeText = (caption, attachments) =>
@@ -570,6 +616,16 @@ const downloadAttachment = (attachment) => {
     // waiting for capacity.
     const present = cachedAttachmentPath(attachment.id, declaredSize);
     if (present) return present;
+    if (attachment.source === "bulletin") {
+      if (!bulletin) throw new Error("Bulletin attachments are not configured on this bot");
+      const got = await bulletin.download(bulletinItemOf(attachment));
+      const saved = mediaStore.save(attachment.id, got.plaintext, attachment.mime);
+      log("BOT_ATTACHMENT_FETCHED", {
+        id: attachment.id.slice(0, 16), mime: attachment.mime, bytes: got.plaintext.length,
+        ciphertextBytes: got.ciphertextBytes, chunks: got.sources.length, sources: got.sources, ms: got.ms, verified: true,
+      });
+      return saved;
+    }
     const bytes = await downloadP2PFile({
       wssUrl: attachment.wssUrl,
       identifier: hexToBytes(attachment.id),
@@ -653,6 +709,24 @@ if (hopUploadNode) {
     host: new URL(hopUploadNode).hostname,
     maxBytes: fileMaxBytes,
   });
+}
+
+// Spec 0012: the Bulletin client signs with the same allowance account HOP uses.
+let bulletin = null;
+try {
+  const cfg = bulletinConfig(env, networkProfile);
+  if (cfg) {
+    bulletin = createBulletin({
+      ...cfg,
+      signerPair: hopUploadPair,
+      budget: createUploadBudget({ limit: cfg.budgetLimit, file: path.join(env.BOT_STATE_DIR, "bulletin-budget.json") }),
+      log,
+    });
+    log("BOT_BULLETIN_CONFIGURED", { account: bulletin.address, host: new URL(cfg.endpoint).hostname, authorizer: cfg.authorizer, budgetBytes: cfg.budgetLimit.bytes, budgetTransactions: cfg.budgetLimit.transactions });
+  }
+} catch (error) {
+  console.error(`Bulletin attachments are misconfigured: ${String(error?.message ?? error)}`);
+  process.exit(2);
 }
 
 // ---------- chain clients ----------
@@ -1643,12 +1717,14 @@ const groupTurnFrom = (groupId, from, sender, c) => {
     return { ...base, text: buttonPressText(label, c.payload) };
   }
   const inner = c.kind === "buttons" ? { ...c, kind: "text", text: buttonsFallbackText(c.text, c.rows) } : c;
-  const attachments = (inner.richText?.attachments ?? []).filter((a) => a.kind === "p2pMixnetFile").map(toAttachmentMeta);
-  const isBrainKind = ["text", "richText", "reply", "edited"].includes(inner.kind)
-    && typeof inner.text === "string" && (inner.text.length > 0 || attachments.length > 0);
+  const attachments = attachmentsOf(inner);
+  logAttachmentReceived(from, inner, { group: groupId });
+  const text = inner.kind === "attachment" ? inner.caption ?? "" : inner.text;
+  const isBrainKind = ["text", "richText", "reply", "edited", "attachment"].includes(inner.kind)
+    && typeof text === "string" && (text.length > 0 || attachments.length > 0);
   // Reactions, deletions, botInfo, tx references: logged above, never answered.
   if (!isBrainKind) return null;
-  return { ...base, text: inner.text, ...(attachments.length ? { attachments } : {}) };
+  return { ...base, text, ...(attachments.length ? { attachments } : {}) };
 };
 // A group turn: the brain sees "[group <name>] <sender>: <text>" under the
 // group's own session key, and every reply goes to the whole group.
@@ -1805,12 +1881,39 @@ if (env.BOT_FLIP_CONTRACT) {
   } catch (error) { featureConfigError("BOT_FLIP_*", error); }
 }
 
+// Spec 0012: encrypt, store on Bulletin (ceil(size / 2 MB) feeless
+// transactions, Stored in a best block), then ONE kind-250 message on the
+// normal outbound lane: no extra statement. The message carries the key; it
+// is journaled like any answer (0600 state file) and never logged.
+const sendBulletinAttachment = async (peerHex, { bytes, mime, name = null, media = null, caption = null }) => {
+  const k = norm(peerHex);
+  if (sessions.get(k) == null) throw new Error("no active session for peer");
+  if (!bulletin) throw new Error("Bulletin attachments are not configured on this bot");
+  if (bytes.length < 1 || bytes.length > ATTACHMENT_LIMITS.size) throw new Error(`an attachment is 1 byte to ${ATTACHMENT_LIMITS.size} bytes`);
+  const dims = mime === "image/png" ? pngDimensions(bytes) : null;
+  const up = await bulletin.upload(bytes, { mime, name, media: media ?? (dims ? { kind: "image", ...dims } : { kind: "file" }) });
+  const messageId = makeAppUuid();
+  const opaque = encodeOpaqueAttachmentMessage({ messageId, timestamp: stamp(k), items: [up.item], caption });
+  await journalAnswer(k, { messageId, opaque, supersedes: [] });
+  catchUpBotInfo(k);
+  const { submitted, delivered } = outbound.enqueue(k, opaque, { messageId, supersedes: typingAndSeen.replyGoingOut(k) });
+  await submitted;
+  disarmThinking(peerHex);
+  log("BOT_ATTACHMENT_SENT", { to: k, messageId, mime, bytes: bytes.length, transactions: up.transactions, ciphertextBytes: up.ciphertextBytes, uploadMs: up.ms, statements: 1 });
+  return { messageId, delivered };
+};
+
 // HOP accepts the dedicated Bulletin allowance signer, not the bot's chat
 // wallet. The uploaded ticket is only embedded into the encrypted RichText
 // envelope; it is never logged or written to the durable vault.
 const sendAttachment = async (peerHex, { filePath, mime, size, text = null }) => {
   const k = norm(peerHex);
   if (sessions.get(k) == null) throw new Error("no active session for peer");
+  if (bulletin && (bulletinPeers.has(k) || !hopUploadNode)) {
+    const bytes = new Uint8Array(fs.readFileSync(filePath));
+    if (bytes.length !== size) throw new Error("saved file changed before delivery");
+    return sendBulletinAttachment(peerHex, { bytes, mime, name: path.basename(filePath), caption: text });
+  }
   if (!hopUploadNode) {
     throw new Error("file delivery is not configured; the operator must set BOT_HOP_UPLOAD_NODE and provision the bot's Bulletin allowance");
   }
@@ -2163,6 +2266,28 @@ const handleDirectInbound = async (peerHex, msg, owedId, { reservedBridge = fals
     await deliverToChat(peerHex, openerGreeting).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
     return;
   }
+  if (brain === "echo" && bulletin && msg.attachments?.some((a) => a.source === "bulletin")) {
+    // Spec 0012 echo: describe what was decrypted (a PNG's dimensions read
+    // from the plaintext, not from the sender's metadata) and answer with a
+    // generated image of our own: one statement plus one Bulletin transaction.
+    markAnswer();
+    const notes = msg.attachments.map((a) => {
+      if (!a.downloaded) return `[${attachmentNoun(a)} not fetched: ${a.error ?? "unknown error"}]`;
+      const dims = pngDimensions(fs.readFileSync(a.path));
+      return `[${attachmentNoun(a)}${dims ? ` ${dims.width}x${dims.height}` : ""}, ${a.mime}, ${a.size} bytes, verified]`;
+    });
+    const caption = `Echo: ${[msg.text, ...notes].filter(Boolean).join(" ")}`;
+    const png = makePng(32, 32, (x, y) => [x * 8, y * 8, 160]);
+    // No Bulletin authorization (a public bot): the description still goes out as text.
+    const delivered = await sendBulletinAttachment(peerHex, { bytes: png, mime: "image/png", caption })
+      .catch((e) => {
+        log("BOT_ATTACHMENT_SEND_FAILED", { to: norm(peerHex), error: String(e?.message ?? e) });
+        return deliverToChat(peerHex, caption);
+      })
+      .then(() => true, (e) => { log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }); return false; });
+    if (delivered) await chargeTurn();
+    return;
+  }
   if (brain === "echo") {
     markAnswer();
     // Through deliverToChat, so an echoed ```buttons block exercises spec 0006.
@@ -2273,6 +2398,10 @@ const messageDedupId = (peerHex, requestId, text, messageId) =>
 // downloaded bytes (RFC-0003). In memory only; the media cache TTL covers
 // a restart.
 const receivedAttachments = new Map();
+// Peers that sent a kind-250 attachment: their client reads 0012, so a file
+// for them goes through Bulletin even when HOP is configured (phone apps
+// read only HOP). In memory: a restart falls back to HOP until they send one.
+const bulletinPeers = new Set();
 
 // RFC-0003: drop every copy the bot still holds of a message the peer
 // deleted. An owed entry that is queued is skipped by its work item; one not
@@ -2460,6 +2589,7 @@ const snapshotState = () => ({
         i: x.id, ct: x.ticketHex, u: x.wssUrl, m: x.mime, s: x.size, kd: x.fileKind,
         ...(x.width != null ? { w: x.width, h: x.height } : {}),
         ...(x.duration != null ? { d: x.duration } : {}),
+        ...(x.source === "bulletin" ? { b: x.bulletin, ...(x.name ? { n: x.name } : {}) } : {}),
       })),
     } : {}),
     ...(o.answer?.length ? {
@@ -2873,8 +3003,12 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
     // content (a caption-less photo). A buttons message from a peer reaches
     // the brain as its fallback text (the brain cannot press buttons).
     if (m.kind === "buttons") m = { ...m, kind: "text", text: buttonsFallbackText(m.text, m.rows) };
-    const attachments = (m.richText?.attachments ?? []).filter((a) => a.kind === "p2pMixnetFile").map(toAttachmentMeta);
-    const isBrainKind = (m.kind === "text" || m.kind === "richText" || m.kind === "reply" || m.kind === "edited")
+    if (m.kind === "attachment") {
+      bulletinPeers.add(norm(peerHex));
+      m = { ...m, text: m.caption ?? "" };
+    }
+    const attachments = attachmentsOf(m);
+    const isBrainKind = (m.kind === "text" || m.kind === "richText" || m.kind === "reply" || m.kind === "edited" || m.kind === "attachment")
       && typeof m.text === "string" && (m.text.length > 0 || attachments.length > 0);
     if (isBrainKind) {
       const id = messageDedupId(peerHex, decoded.requestId, `${m.kind}:${m.text}`, m.messageId);
@@ -2894,6 +3028,7 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
         receivedAttachments.set(`${k}:${m.messageId}`, attachments.map((a) => a.id));
         trimMap(receivedAttachments, SEEN_CAP);
       }
+      logAttachmentReceived(k, m);
       fresh.push({
         id,
         msg: {
@@ -3773,6 +3908,7 @@ for (const o of restored?.owed ?? []) {
           id: x.i, ticketHex: x.ct, wssUrl: x.u, mime: x.m, size: x.s, fileKind: x.kd,
           ...(x.w != null ? { width: x.w, height: x.h } : {}),
           ...(x.d != null ? { duration: x.d } : {}),
+          ...(x.b ? { source: "bulletin", bulletin: x.b, ...(x.n ? { name: x.n } : {}) } : {}),
         })),
       } : {}),
     };

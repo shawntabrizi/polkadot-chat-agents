@@ -518,6 +518,21 @@ peer-ACK gate.
 | `BOT_HOP_UPLOAD_NODE` | `""` | Operator-pinned HOP endpoint for returning files. It must match `BOT_HOP_ALLOWED_NODES` in production and needs an active Bulletin allowance. |
 | `BOT_HOP_UPLOAD_TIMEOUT_MS` | 120000 | Whole-upload deadline. |
 
+### Attachments (Bulletin, spec 0012)
+
+Kind-250 attachments are on by default on the `devnet` and `paseo` profiles
+(the profile's Bulletin node and gateway); the `sandbox` profile has none
+unless `BOT_BULLETIN_ENDPOINT` is set. Downloads share the HOP limits above
+(`BOT_MEDIA_*`). See [Files & storage](/guide/files#bulletin-attachments-spec-0012).
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BOT_BULLETIN_ENDPOINT` | the profile's Bulletin node | Bulletin RPC node for stores and `bitswap_v1_get`. Its genesis must match the profile. |
+| `BOT_BULLETIN_GATEWAY` | the profile's IPFS gateway | HTTPS prefix ending in `/ipfs/`; the last fetch source. |
+| `BOT_BULLETIN_AUTHORIZER` | `""` | Named testnets only: a public dev key path (for example `//Eve`) that grants the bot's `//allowance//bulletin//chat` account when its authorization runs short. Refused on any other chain. |
+| `BOT_BULLETIN_BUDGET_MB` | 64 | Uploaded ciphertext per UTC day (ledger in `BOT_STATE_DIR/bulletin-budget.json`). |
+| `BOT_BULLETIN_BUDGET_TXS` | 100 | Bulletin store transactions per UTC day. |
+
 ### Durable files
 
 `/file put <path>` saves exactly one same-message attachment in the sender's

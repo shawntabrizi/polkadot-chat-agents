@@ -159,6 +159,84 @@ without submitting a transaction. Only use `recover --yes` after confirming an
 old transaction cannot still finalize; it clears the guard only, so run `grant`
 separately if the status still needs it.
 
+## Bulletin attachments (spec 0012)
+
+Clients that speak spec 0012 (the desktop client, pca) send an image or file
+as a kind-250 `attachment` message instead of a HOP `richText`. The sender
+encrypts the file with a fresh key (AES-256-GCM per 2,000,000-byte chunk),
+stores each encrypted chunk with a feeless `TransactionStorage.store` on the
+Bulletin chain, and sends one ordinary message with the key, the chunk hashes
+(which are also the IPFS CIDs), the media metadata and a caption. The message
+costs one statement; the file costs `ceil(size / 2 MB)` Bulletin
+transactions. The chain keeps the ciphertext 14 days, and any device of the
+recipient can fetch it, so it works for multi-device users and for groups.
+
+**Receive.** On devnet and Paseo every bot reads kind 250 without setup. The
+bot fetches each chunk by CID: `bitswap_v1_get` on its Bulletin node, then the
+message's mirror, then the network's gateway. It checks each chunk's
+BLAKE2b-256 hash, decrypts, checks the length, and stages the file for the
+brain exactly like a HOP attachment (same media cache, same
+`BOT_MEDIA_MAX_BYTES` cap, same per-turn directory). Logs:
+`BOT_ATTACHMENT_RECEIVED` (sizes, media, chunk count) and
+`BOT_ATTACHMENT_FETCHED` (bytes, sources, milliseconds). The key is never
+logged or passed over the bridge.
+
+**Send.** A file the bot returns (`/file get`, `POST /send` with `file_path`)
+goes through Bulletin when the peer has sent the bot a kind-250 message in this
+process, or when HOP upload is not configured. Phone users keep getting HOP.
+The store is signed by the bot's `//allowance//bulletin//chat` account, which
+needs a Bulletin authorization (`pca storage <bot> status`). On a named
+testnet an operator may set `BOT_BULLETIN_AUTHORIZER=//Eve` to let the bot
+grant itself when it runs short; the bot refuses that key on any other chain.
+`BOT_BULLETIN_BUDGET_MB` and `BOT_BULLETIN_BUDGET_TXS` cap the uploads per UTC
+day (the chain does not refuse a store over the authorization; it only lowers
+its priority). The `echo` brain answers a Bulletin image with an image of its
+own: the caption gives the dimensions read from the decrypted bytes.
+
+**Live proof.** `bot-core/scripts/e2e-attachments.mjs` drives a locally running
+echo bot from a registered test identity. It prints `CHAT_OK`, `AUTH_OK`,
+`STORED <cid>`, `SENT … statements=1`, `BOT_DESCRIBE_OK`, `BOT_FETCH_OK` and
+ends with `ATTACH_BOT_OK`:
+
+```bash
+PCA_BOTS_DIR=/tmp/pca-e2e BOT_BULLETIN_AUTHORIZER=//Eve node cli.mjs run <bot>   # a throwaway echo bot
+node scripts/e2e-attachments.mjs --sender /tmp/pca-e2e/<tester> --bot /tmp/pca-e2e/<bot>
+```
+
+### Devnet facts (measured 2026-09-24)
+
+Gating check for spec 0012 on `wss://bullet.sik.rocks` ("Bulletin Paseo",
+para 1010, genesis `0xe101f0fa…0a59`), with vector C1 of
+`polkadot-chat-desktop/docs/spec/vectors-0012.md`:
+
+| Step | Result |
+|---|---|
+| `authorize_account(5Fje7L52…dNQoY, 10 tx, 1,000,000 bytes)` signed by `//Eve` | accepted: tx `0x61aaaaad…2b92`, best block #970864; events `System.NewAccount`, `TransactionStorage.AccountAuthorized`, `SkipFeelessPayment.FeeSkipped`, `System.ExtrinsicSuccess`. Authorization: 10 transactions, 1,000,000 bytes, expires at block 1,172,464 (+201,600) |
+| `store(c_0)` (31 bytes) from that account | tx `0xdcd8112d…2eca`, best block #970865 (`0x051328de…4993`), extrinsic 2; `Stored { index: 0, content_hash: 0xd47b2b87…8a8a, cid: Some(0x0155a0e40220d47b…8a8a) }` |
+| content hash | equals `chunks[0]` of C1 |
+| `bitswap_v1_get(bafk2bzacedkhwk4hqr7cfe4526y7krkb7753jl7pycofql525ces2buc7sfiu)` | 31 bytes, equal to `c_0`, hash matches; 0.2 s after the best block |
+| `https://devnet-ipfs.api.polkadotcommunity.foundation/ipfs/<cid>` | HTTP 200, 31 bytes, hash matches; 0.5 s after the best block |
+
+So `//Eve` is an authorizer on devnet today, and a fresh account can store
+feelessly one block after the grant.
+
+Other measurements that shaped `lib/bulletin.mjs`:
+
+- `bitswap_v1_get` of a 2,000,016-byte chunk took 30–33 s (WebSocket and HTTP
+  alike; once 1 s). A 203 KB chunk took 2–3.6 s. The gateway served 2 MB in
+  6–8 s. With the spec's 30 s per source, a 2 MB chunk usually comes from the
+  gateway.
+- The node's HTTPS endpoint refuses a 2 MB request body (HTTP 413), so stores
+  go up the WebSocket; reads (`bitswap_v1_get`, `state_getStorage`) use HTTP.
+- papi's transaction watch missed some 2 MB stores that had landed. The bot
+  therefore confirms a store by polling `TransactionByContentHash` at the best
+  block (the entry the same extrinsic writes with the `Stored` event; it holds
+  the block and index). It never waits for finality.
+- A store submitted in the block right after a fresh grant was once refused
+  with `Invalid::Payment`; the retry (10 s later) stored it.
+- 2.1 MB (2 chunks, 2 transactions) stored in one best block about 10 s after
+  submit.
+
 ## What is deliberately not automatic
 
 For the default Polkadot-app transport, the automatic allowance is limited to

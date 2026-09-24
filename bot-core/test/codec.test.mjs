@@ -1142,3 +1142,88 @@ test("0011 group expiry: rises with every submission, even within one second", (
   assert.ok(a < b && b < c);
   assert.equal(a >> 32n, BigInt(1_790_000_000 + 14 * 86_400));
 });
+
+// ---------- spec 0012 attachments: the pinned vectors ----------
+// Every byte string below is in polkadot-chat-desktop docs/spec/vectors-0012.md.
+// The desktop codec must produce the same bytes; a change here is a wire
+// change for both clients, never a test fix.
+import {
+  ATTACHMENT_CONTENT_KIND,
+  ATTACHMENT_LIMITS,
+  encodeAttachmentContent,
+  encodeOpaqueAttachmentMessage,
+} from "../vendor/app-chat-codec.mjs";
+
+const v12 = (() => {
+  const genesis = hex("e101f0fa4627d29a257645e02be86d80378fea1a2bf8fa6a918d150ebc760a59");
+  const base = { key: new Uint8Array(32).fill(0x11), nonce: new Uint8Array(12).fill(0x22), store: { kind: "bulletin", genesis, mirror: null }, expiresAt: 1721209600000 };
+  const A = {
+    messageId: "ATT-1", timestamp: 1720000000000, caption: "Our cat",
+    items: [{ ...base, mime: "image/jpeg", name: null, size: 15, media: { kind: "image", width: 640, height: 480 }, blurhash: "LEHV6nWB2yk8", thumbnail: null, chunkSize: 2000000, chunks: [hex("d47b2b87847e22939dd7b1f54541fffbb4afefc09c582fbae8892d0682fc8a8a")] }],
+  };
+  const B = {
+    messageId: "ATT-2", timestamp: 1720000000000, caption: null,
+    items: [{
+      ...base, mime: "audio/ogg; codecs=opus", name: null, size: 13, media: { kind: "voice", durationMs: 4200, waveform: [0, 64, 128, 255] }, blurhash: null, thumbnail: null, chunkSize: 8,
+      chunks: [hex("f2413e6849beeed0945f57c6e2ad2123ff1fb177fa95f711eb0685786b434bb4"), hex("7e79076d84989135f84e2f00d739f3d071485f143ea485ede4cd2033f1ebb0a8")],
+      store: { kind: "bulletin", genesis, mirror: "https://devnet-ipfs.api.polkadotcommunity.foundation/ipfs/" },
+    }],
+  };
+  return {
+    A, B,
+    hexA: "0503144154542d310030fd779001000000fa0428696d6167652f6a706567000f000000000000000180020000e001000001304c454856366e574232796b3800111111111111111111111111111111111111111111111111111111111111111122222222222222222222222280841e0004d47b2b87847e22939dd7b1f54541fffbb4afefc09c582fbae8892d0682fc8a8a00e101f0fa4627d29a257645e02be86d80378fea1a2bf8fa6a918d150ebc760a5900003816c090010000011c4f757220636174",
+    hexB: "5104144154542d320030fd779001000000fa0458617564696f2f6f67673b20636f646563733d6f707573000d00000000000000036810000010004080ff000011111111111111111111111111111111111111111111111111111111111111112222222222222222222222220800000008f2413e6849beeed0945f57c6e2ad2123ff1fb177fa95f711eb0685786b434bb47e79076d84989135f84e2f00d739f3d071485f143ea485ede4cd2033f1ebb0a800e101f0fa4627d29a257645e02be86d80378fea1a2bf8fa6a918d150ebc760a5901e868747470733a2f2f6465766e65742d697066732e6170692e706f6c6b61646f74636f6d6d756e6974792e666f756e646174696f6e2f697066732f003816c09001000000",
+  };
+})();
+// Decoded items carry byte arrays and a normalized shape; compare as encoded.
+const reencode = (d) => encodeOpaqueAttachmentMessage({ messageId: d.messageId, timestamp: d.timestamp, items: d.items, caption: d.caption });
+
+test("0012 vector A: an image (C1) encodes to the pinned 195 bytes and decodes back", () => {
+  const bytes = encodeOpaqueAttachmentMessage(v12.A);
+  assert.equal(bytes.length, 195);
+  assert.equal(hexOf(bytes), v12.hexA);
+  const d = decodeOne(hex(v12.hexA));
+  assert.equal(d.kind, "attachment");
+  assert.equal(d.caption, "Our cat");
+  assert.deepEqual(d.items[0].media, { kind: "image", width: 640, height: 480 });
+  assert.equal(d.items[0].blurhash, "LEHV6nWB2yk8");
+  assert.equal(d.items[0].size, 15);
+  assert.equal(d.items[0].expiresAt, 1721209600000);
+  assert.equal(hexOf(reencode(d)), v12.hexA);
+  assert.equal(encodeAttachmentContent({ items: v12.A.items }).length, 169, "vectors-0012 Sizes: vector A without caption");
+});
+
+test("0012 vector B: a voice note (C2, a mirror) encodes to the pinned 278 bytes and decodes back", () => {
+  const bytes = encodeOpaqueAttachmentMessage(v12.B);
+  assert.equal(bytes.length, 278);
+  assert.equal(hexOf(bytes), v12.hexB);
+  const d = decodeOne(hex(v12.hexB));
+  assert.deepEqual(d.items[0].media, { kind: "voice", durationMs: 4200, waveform: [0, 64, 128, 255] });
+  assert.equal(d.items[0].store.mirror, "https://devnet-ipfs.api.polkadotcommunity.foundation/ipfs/");
+  assert.equal(d.items[0].chunks.length, 2);
+  assert.equal(d.caption, null);
+  assert.equal(hexOf(reencode(d)), v12.hexB);
+});
+
+test("0012 sizes: a photo with a name, a 2,048-byte thumbnail and a 100-byte caption is 2,334 bytes", () => {
+  const item = { ...v12.A.items[0], name: "IMG_0001.jpg", thumbnail: new Uint8Array(2048) };
+  assert.equal(encodeAttachmentContent({ items: [item], caption: "x".repeat(100) }).length, 2334);
+});
+
+test("0012 bounds: both sides refuse what does not fit the 4 KB message", () => {
+  const item = v12.A.items[0];
+  assert.throws(() => encodeOpaqueAttachmentMessage({ items: Array(5).fill(item) }), /1 to 4 items/);
+  assert.throws(() => encodeOpaqueAttachmentMessage({ items: [{ ...item, thumbnail: new Uint8Array(2049) }] }), /thumbnail/);
+  assert.throws(() => encodeOpaqueAttachmentMessage({ items: [{ ...item, chunks: Array(15).fill(item.chunks[0]) }] }), /1 to 14 chunks/);
+  assert.throws(() => encodeOpaqueAttachmentMessage({ items: [{ ...item, size: 0 }] }), /at least 1/);
+  // Two items with 2 KB thumbnails pass every per-field cap but not the 3,584-byte budget.
+  const big = { ...item, thumbnail: new Uint8Array(2048) };
+  assert.throws(() => encodeOpaqueAttachmentMessage({ items: [big, big] }), new RegExp(`limit is ${ATTACHMENT_LIMITS.contentBytes}`));
+  // An unknown media or store tag makes only that message undecodable.
+  const at = v12.hexA.indexOf("0180020000") / 2;
+  const badMedia = hex(v12.hexA); badMedia[at] = 9;
+  assert.equal(decodeOne(badMedia).kind, "undecodable");
+  const badStore = hex(v12.hexA.replace("8a8a00e101", "8a8a01e101"));
+  assert.equal(decodeOne(badStore).kind, "undecodable");
+  assert.equal(ATTACHMENT_CONTENT_KIND, 250);
+});

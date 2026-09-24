@@ -1763,6 +1763,136 @@ function decodeGroupControlAt(bytes, offset) {
   return { value, offset: at };
 }
 
+// Spec 0012 attachments on Bulletin (polkadot-chat-desktop
+// docs/spec/0012-attachments.md; bytes in docs/spec/vectors-0012.md).
+// Provisional kind:
+//   attachment(AttachmentContent) -> 250
+// AttachmentContent = { items: Vec<Attachment> (1..=4), caption: Option<String> }
+// Attachment = { mime: String, name: Option<String>, size: u64, media: Media,
+//   blurhash: Option<String>, thumbnail: Option<Vec<u8>>, key: [u8; 32],
+//   nonce: [u8; 12], chunkSize: u32, chunks: Vec<[u8; 32]> (1..=14),
+//   store: Store, expiresAt: u64 }
+// Media = enum { file = 0, image { width, height } = 1,
+//   video { width, height, durationMs } = 2, voice { durationMs, waveform: Vec<u8> } = 3 }
+// Store = enum { bulletin { genesis: [u8; 32], mirror: Option<String> } = 0 }
+// In JS: media = { kind: "file" | "image" | "video" | "voice", ...fields },
+// store = { kind: "bulletin", genesis, mirror }. The key is key material:
+// callers must never log it.
+export const ATTACHMENT_CONTENT_KIND = 250;
+export const ATTACHMENT_LIMITS = Object.freeze({
+  items: 4, captionBytes: 1024, mimeBytes: 64, nameBytes: 128, blurhashBytes: 64,
+  thumbnailBytes: 2048, chunks: 14, chunkSize: 2_000_000, waveform: 64,
+  size: 25 * 1024 * 1024, contentBytes: 3584,
+});
+export const ATTACHMENT_MEDIA = Object.freeze({ file: 0, image: 1, video: 2, voice: 3 });
+const boundedString = (value, maxBytes, name) => {
+  const bytes = textEncoder.encode(String(value));
+  if (bytes.length > maxBytes) throw new Error(`${name} is longer than ${maxBytes} bytes`);
+  return scaleEncodeBytes(bytes);
+};
+const optionalString = (value, maxBytes, name) => scaleEncodeOption(value == null ? null : boundedString(value, maxBytes, name));
+const encodeAttachmentMedia = (media) => {
+  const tag = ATTACHMENT_MEDIA[media?.kind];
+  if (tag == null) throw new Error("attachment media must be file, image, video or voice");
+  if (media.kind === "file") return Uint8Array.of(tag);
+  if (media.kind === "image") return concatBytes(Uint8Array.of(tag), scaleEncodeUInt32(media.width), scaleEncodeUInt32(media.height));
+  if (media.kind === "video") return concatBytes(Uint8Array.of(tag), scaleEncodeUInt32(media.width), scaleEncodeUInt32(media.height), scaleEncodeUInt32(media.durationMs));
+  const waveform = Uint8Array.from(media.waveform ?? []);
+  if (waveform.length > ATTACHMENT_LIMITS.waveform) throw new Error(`a waveform has at most ${ATTACHMENT_LIMITS.waveform} samples`);
+  return concatBytes(Uint8Array.of(tag), scaleEncodeUInt32(media.durationMs), scaleEncodeBytes(waveform));
+};
+const encodeAttachmentItem = (a) => {
+  const size = assertU64(a.size, "attachment size");
+  if (size < 1n) throw new Error("attachment size must be at least 1");
+  if (!Number.isInteger(a.chunkSize) || a.chunkSize < 1 || a.chunkSize > ATTACHMENT_LIMITS.chunkSize) throw new Error("attachment chunkSize must be 1..=2000000");
+  if (!Array.isArray(a.chunks) || a.chunks.length < 1 || a.chunks.length > ATTACHMENT_LIMITS.chunks) throw new Error("an attachment has 1 to 14 chunks");
+  if (a.thumbnail != null && (!(a.thumbnail instanceof Uint8Array) || a.thumbnail.length > ATTACHMENT_LIMITS.thumbnailBytes)) {
+    throw new Error(`an attachment thumbnail is at most ${ATTACHMENT_LIMITS.thumbnailBytes} bytes`);
+  }
+  if (a.store?.kind !== "bulletin") throw new Error("attachment store must be bulletin");
+  return concatBytes(
+    boundedString(a.mime, ATTACHMENT_LIMITS.mimeBytes, "attachment mime"),
+    optionalString(a.name, ATTACHMENT_LIMITS.nameBytes, "attachment name"),
+    scaleEncodeUInt64(size),
+    encodeAttachmentMedia(a.media),
+    optionalString(a.blurhash, ATTACHMENT_LIMITS.blurhashBytes, "attachment blurhash"),
+    scaleEncodeOption(a.thumbnail == null ? null : scaleEncodeBytes(a.thumbnail)),
+    fixedLength(a.key, 32, "attachment key"),
+    fixedLength(a.nonce, 12, "attachment nonce"),
+    scaleEncodeUInt32(a.chunkSize),
+    scaleEncodeArray(a.chunks.map((c) => fixedLength(c, 32, "attachment chunk hash"))),
+    Uint8Array.of(0),
+    fixedLength(a.store.genesis, 32, "attachment store genesis"),
+    optionalString(a.store.mirror, MAX_URL_BYTES, "attachment mirror"),
+    scaleEncodeUInt64(assertU64(a.expiresAt, "attachment expiresAt")),
+  );
+};
+// The encoded AttachmentContent (no kind byte): what the 3,584-byte budget counts.
+export function encodeAttachmentContent({ items, caption = null }) {
+  if (!Array.isArray(items) || items.length < 1 || items.length > ATTACHMENT_LIMITS.items) throw new Error("an attachment message has 1 to 4 items");
+  return concatBytes(
+    scaleEncodeArray(items.map(encodeAttachmentItem)),
+    optionalString(caption, ATTACHMENT_LIMITS.captionBytes, "attachment caption"),
+  );
+}
+export function encodeOpaqueAttachmentMessage({ messageId = makeAppUuid(), timestamp = chatTimestampNow(), items, caption = null }) {
+  const content = encodeAttachmentContent({ items, caption });
+  if (content.length > ATTACHMENT_LIMITS.contentBytes) throw new Error(`attachment content is ${content.length} bytes; the limit is ${ATTACHMENT_LIMITS.contentBytes}`);
+  return encodeOpaqueRemoteMessage({ messageId, timestamp, content: concatBytes(Uint8Array.of(ATTACHMENT_CONTENT_KIND), content) });
+}
+function decodeAttachmentMediaAt(bytes, offset) {
+  const tag = bytes[offset];
+  const at = offset + 1;
+  if (tag === ATTACHMENT_MEDIA.file) return { value: { kind: "file" }, offset: at };
+  if (tag === ATTACHMENT_MEDIA.image) {
+    const width = scaleDecodeUInt32At(bytes, at);
+    const height = scaleDecodeUInt32At(bytes, width.offset);
+    return { value: { kind: "image", width: width.value, height: height.value }, offset: height.offset };
+  }
+  if (tag === ATTACHMENT_MEDIA.video) {
+    const width = scaleDecodeUInt32At(bytes, at);
+    const height = scaleDecodeUInt32At(bytes, width.offset);
+    const durationMs = scaleDecodeUInt32At(bytes, height.offset);
+    return { value: { kind: "video", width: width.value, height: height.value, durationMs: durationMs.value }, offset: durationMs.offset };
+  }
+  if (tag === ATTACHMENT_MEDIA.voice) {
+    const durationMs = scaleDecodeUInt32At(bytes, at);
+    const waveform = scaleDecodeBytesAt(bytes, durationMs.offset, ATTACHMENT_LIMITS.waveform, "attachment waveform");
+    return { value: { kind: "voice", durationMs: durationMs.value, waveform: Array.from(waveform.value) }, offset: waveform.offset };
+  }
+  throw new Error(`unknown attachment media ${tag}`);
+}
+function decodeAttachmentItemAt(bytes, offset, budget) {
+  const mime = scaleDecodeStringAt(bytes, offset, ATTACHMENT_LIMITS.mimeBytes, "attachment mime");
+  const name = scaleDecodeOptionAt(bytes, mime.offset, (b, o) => scaleDecodeStringAt(b, o, ATTACHMENT_LIMITS.nameBytes, "attachment name"));
+  const size = scaleDecodeUInt64At(bytes, name.offset);
+  if (size.value < 1n || size.value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("attachment size out of range");
+  const media = decodeAttachmentMediaAt(bytes, size.offset);
+  const blurhash = scaleDecodeOptionAt(bytes, media.offset, (b, o) => scaleDecodeStringAt(b, o, ATTACHMENT_LIMITS.blurhashBytes, "attachment blurhash"));
+  const thumbnail = scaleDecodeOptionAt(bytes, blurhash.offset, (b, o) => scaleDecodeBytesAt(b, o, ATTACHMENT_LIMITS.thumbnailBytes, "attachment thumbnail"));
+  const key = fixedBytesAt(bytes, thumbnail.offset, 32, "attachment key");
+  const nonce = fixedBytesAt(bytes, key.offset, 12, "attachment nonce");
+  const chunkSize = scaleDecodeUInt32At(bytes, nonce.offset);
+  if (chunkSize.value < 1 || chunkSize.value > ATTACHMENT_LIMITS.chunkSize) throw new Error("attachment chunkSize out of range");
+  const chunks = scaleDecodeArrayAt(bytes, chunkSize.offset, (b, o) => fixedBytesAt(b, o, 32, "attachment chunk hash"), ATTACHMENT_LIMITS.chunks, "attachment chunks", budget);
+  if (chunks.value.length < 1) throw new Error("an attachment has at least one chunk");
+  const storeTag = bytes[chunks.offset];
+  if (storeTag !== 0) throw new Error(`unknown attachment store ${storeTag}`);
+  const genesis = fixedBytesAt(bytes, chunks.offset + 1, 32, "attachment store genesis");
+  const mirror = scaleDecodeOptionAt(bytes, genesis.offset, (b, o) => scaleDecodeStringAt(b, o, MAX_URL_BYTES, "attachment mirror"));
+  const expiresAt = scaleDecodeUInt64At(bytes, mirror.offset);
+  return {
+    value: {
+      mime: mime.value, name: name.value, size: Number(size.value), media: media.value,
+      blurhash: blurhash.value, thumbnail: thumbnail.value, key: key.value, nonce: nonce.value,
+      chunkSize: chunkSize.value, chunks: chunks.value,
+      store: { kind: "bulletin", genesis: genesis.value, mirror: mirror.value },
+      expiresAt: Number(expiresAt.value),
+    },
+    offset: expiresAt.offset,
+  };
+}
+
 export function encodeOpaqueDataChannelClosedMessage({
   messageId = makeAppUuid(),
   timestamp = chatTimestampNow(),
@@ -2505,6 +2635,19 @@ function decodeRemoteMessage(bytes, budget) {
       kind: "groupControl",
       control: control.value,
       offset: control.offset,
+    };
+  }
+  if (contentKind === ATTACHMENT_CONTENT_KIND) {
+    const items = scaleDecodeArrayAt(bytes, offset, (b, o) => decodeAttachmentItemAt(b, o, budget), ATTACHMENT_LIMITS.items, "attachment items", budget);
+    if (items.value.length < 1) throw new Error("an attachment message has at least one item");
+    const caption = scaleDecodeOptionAt(bytes, items.offset, (b, o) => scaleDecodeStringAt(b, o, ATTACHMENT_LIMITS.captionBytes, "attachment caption"));
+    return {
+      messageId: messageId.value,
+      timestamp: Number(timestamp.value),
+      kind: "attachment",
+      items: items.value,
+      caption: caption.value,
+      offset: caption.offset,
     };
   }
   if (contentKind === 13) {
