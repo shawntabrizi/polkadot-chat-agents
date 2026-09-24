@@ -28,7 +28,7 @@
 //   BOT_THINKING_TEXT + BOT_THINKING_AFTER_MS (5000) — ack sent if no reply by then,
 //   BOT_GREET (0; 1 = message allowlisted owners on first start) + BOT_GREET_TEXT,
 //   BOT_SUBSCRIBE (1; 0 = poll-only), BOT_SWEEP_MS (30000, sweep cadence while the
-//   subscription is healthy), BOT_HEARTBEAT_MS (30000), BOT_PEER_IDENTIFIER_KEYS
+//   subscription is healthy), BOT_HEARTBEAT_MS (120000), BOT_PEER_IDENTIFIER_KEYS
 //   ("peerhex=containerhex,..." — pin 65-byte on-chain identifier-key
 //   containers in front of the directory lookup).
 //   Attachments: BOT_MEDIA_MAX_BYTES (32MB), BOT_MEDIA_TTL_HOURS (48),
@@ -1088,7 +1088,8 @@ const logDebug = env.BOT_LOG_LEVEL === "debug" ? (event, extra = {}) => log(even
 // Ephemeral: straight into the outbound lane, never journaled as an answer
 // (see lib/typing-seen.mjs). Typing is off unless the operator lists it. A
 // pending seen rides the next real message (submitMessage calls
-// replyGoingOut just before its enqueue), so a reply costs one submission.
+// replyGoingOut just before its enqueue), so a reply costs one submission,
+// however long the brain turn takes: handleInbound and a running turn hold it.
 const typingAndSeen = createTypingAndSeen({
   typing: extensionOn("typing"),
   seen: extensionOn("seen"),
@@ -2076,11 +2077,17 @@ const renderForBrain = (msg) => {
 };
 
 // msg: { text, messageId, kind, attachments?, replyTo?, editOf? }
-const handleInbound = async (peerHex, msg, owedId = null, { reservedBridge = false } = {}) => {
+const handleInbound = async (peerHex, msg, owedId = null, options = {}) => {
   // Spec 0009: a group message is a group turn (no seen, no 1:1 features).
-  if (msg.group) return handleGroupInbound(peerHex, msg, owedId, { reservedBridge });
-  // Spec 0005: the brain consumes this message now.
-  typingAndSeen.consumed(norm(peerHex), msg.messageId);
+  if (msg.group) return handleGroupInbound(peerHex, msg, owedId, options);
+  // Spec 0005: the bot consumes this message now. Its seen rides the reply;
+  // it goes alone only if handling ends with no reply and no running turn.
+  const releaseSeen = typingAndSeen.consumed(norm(peerHex), msg.messageId);
+  try { return await handleDirectInbound(peerHex, msg, owedId, options); }
+  finally { releaseSeen(); }
+};
+
+const handleDirectInbound = async (peerHex, msg, owedId, { reservedBridge = false }) => {
   await fetchAttachments(msg.attachments);
   const fileResult = await handleFileCommand(peerHex, msg);
   if (fileResult?.handled) {
@@ -3823,7 +3830,7 @@ if ((env.BOT_SUBSCRIBE ?? "1") !== "0") {
       resubscribe(true);
     },
     emit: ({ event, ...extra }) => log(event, extra),
-    heartbeatIntervalMs: numberEnv("BOT_HEARTBEAT_MS", 30_000, { min: 1000, max: 86_400_000 }),
+    heartbeatIntervalMs: numberEnv("BOT_HEARTBEAT_MS", 120_000, { min: 1000, max: 86_400_000 }),
   });
   // Keep subscription groups aligned with the current watch set (day rollover,
   // new peers/devices): chunked matchAny groups, replaced only when their
@@ -3858,7 +3865,7 @@ if ((env.BOT_SUBSCRIBE ?? "1") !== "0") {
   resubscribe(true);
   ingress = { supervisor, resubscribe };
   flip?.start();
-  log("BOT_SUBSCRIBED", { heartbeatMs: numberEnv("BOT_HEARTBEAT_MS", 30_000, { min: 1000, max: 86_400_000 }) });
+  log("BOT_SUBSCRIBED", { heartbeatMs: numberEnv("BOT_HEARTBEAT_MS", 120_000, { min: 1000, max: 86_400_000 }) });
 }
 
 // Greet mode: open the chat with each allowlisted owner we've never talked to.

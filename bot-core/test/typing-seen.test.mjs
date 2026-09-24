@@ -178,7 +178,7 @@ test("seen waits up to 5 s: a reply takes it along, else it goes alone with the 
   const s = makeSignals({ extensions: "" }) // "" = the defaults;
   const seens = () => s.sent.filter((e) => e.m.kind === "seen");
   // A reply inside the window: the seen enters the lane just before it.
-  s.signals.consumed("bob", "MSG-1");
+  s.signals.consumed("bob", "MSG-1")();
   assert.equal(seens().length, 0, "nothing goes out at once");
   s.clock.advance(3_000);
   s.signals.replyGoingOut("bob");
@@ -187,9 +187,9 @@ test("seen waits up to 5 s: a reply takes it along, else it goes alone with the 
   s.clock.advance(SEEN_INTERVAL_MS * 2);
   assert.equal(seens().length, 1, "the window's timer died with the piggyback");
   // No reply: one seen at the end of the window, for the latest message.
-  s.signals.consumed("bob", "MSG-2");
+  s.signals.consumed("bob", "MSG-2")();
   s.clock.advance(1_000);
-  s.signals.consumed("bob", "MSG-3");
+  s.signals.consumed("bob", "MSG-3")();
   s.clock.advance(SEEN_INTERVAL_MS - 1_001);
   assert.equal(seens().length, 1);
   s.clock.advance(1);
@@ -197,7 +197,7 @@ test("seen waits up to 5 s: a reply takes it along, else it goes alone with the 
   assert.equal(seens()[1].m.at, seens()[1].at);
   // upTo covers everything before it, so an unfetched older seen is dropped.
   assert.deepEqual(seens()[1].supersedes, [seens()[0].messageId]);
-  s.signals.consumed("carol", "MSG-9");
+  s.signals.consumed("carol", "MSG-9")();
   s.clock.advance(SEEN_INTERVAL_MS);
   assert.equal(seens().at(-1).peerHex, "carol", "the window is per peer");
   assert.equal(s.typings().length, 0);
@@ -231,7 +231,7 @@ test("submission budget: a question answered costs 1 submission; a question not 
     const settle = () => new Promise((r) => setTimeout(r, 5));
     const kinds = () => submits.map((x) => x.opaques.map((hex) => decode(Buffer.from(hex, "hex")).kind));
     // The question arrives; the brain turn starts.
-    signals.consumed("bob", "Q-1");
+    const release = signals.consumed("bob", "Q-1");
     signals.turnStarted("bob");
     await settle();
     clock.advance(2_000); // the brain thinks for 2 s
@@ -241,6 +241,7 @@ test("submission budget: a question answered costs 1 submission; a question not 
       outbound.enqueue("bob", encodeOpaqueTextMessage({ messageId: "ANSWER", text: "hi" }), { messageId: "ANSWER", supersedes });
     }
     signals.turnEnded("bob");
+    release();
     await settle();
     const early = kinds();
     clock.advance(SEEN_INTERVAL_MS);
@@ -289,4 +290,130 @@ test("the real reply supersedes an un-ACKed typing in the lane", async () => {
   signals.turnEnded("bob");
   await settle();
   assert.deepEqual(slot().map((m) => m.kind), ["seen", "text"], "no `stopped` after a reply");
+});
+
+// Seen 2026-09-24 in the desktop's M13 e2e with a real model: a reply takes
+// about 10 s, so a standalone seen at 5 s plus the reply at 10 s cost two
+// submissions per reply. Rule: while the message is handled or a brain turn
+// runs, the seen waits for the reply, whatever the delay.
+const realLanes = () => {
+  const clock = fakeClock();
+  const submits = [];
+  let rid = 0;
+  let id = 0;
+  const outbound = createOutboundLanes({
+    encodeBatch: (peerHex, requestId, opaques) =>
+      Buffer.from(JSON.stringify({ requestId, opaques: opaques.map((o) => Buffer.from(o).toString("hex")) })),
+    submitPayload: async (peerHex, payload) => { submits.push(JSON.parse(payload.toString())); },
+    makeRequestId: () => `RID-${++rid}`,
+    ackGraceMs: 3_600_000,
+  });
+  const signals = createTypingAndSeen({
+    enqueue: (peerHex, opaque, options) => outbound.enqueue(peerHex, opaque, options),
+    encodeTyping: encodeOpaqueTypingMessage,
+    encodeSeen: encodeOpaqueSeenMessage,
+    makeId: () => `SIG-${++id}`,
+    now: clock.now,
+    timers: clock.timers,
+    maxTurnMs: 60_000,
+    // The defaults (BOT_PROTOCOL_EXTENSIONS unset): seen on, typing off.
+    ...Object.fromEntries(["typing", "seen"].map((k) => [k, parseProtocolExtensions(undefined).enabled.has(k)])),
+  });
+  const settle = () => new Promise((r) => setTimeout(r, 5));
+  const kinds = () => submits.map((x) => x.opaques.map((hex) => decode(Buffer.from(hex, "hex")).kind));
+  const reply = (peerHex, messageId) => {
+    const supersedes = signals.replyGoingOut(peerHex);
+    outbound.enqueue(peerHex, encodeOpaqueTextMessage({ messageId, text: "answer" }), { messageId, supersedes });
+  };
+  return { clock, signals, settle, kinds, reply };
+};
+
+test("slow brain (12 s): the seen rides the reply, 1 submission per reply", async () => {
+  const l = realLanes();
+  const release = l.signals.consumed("bob", "Q-1");
+  l.signals.turnStarted("bob");
+  for (let i = 0; i < 12; i += 1) { l.clock.advance(1_000); await l.settle(); }
+  assert.deepEqual(l.kinds(), [], "no standalone seen while the turn runs");
+  l.reply("bob", "ANSWER");
+  l.signals.turnEnded("bob");
+  release();
+  await l.settle();
+  l.clock.advance(60_000);
+  await l.settle();
+  assert.deepEqual(l.kinds(), [["seen", "text"]]);
+});
+
+test("slow brain: the error fallback carries the seen, 1 submission", async () => {
+  const l = realLanes();
+  const release = l.signals.consumed("bob", "Q-1");
+  l.signals.turnStarted("bob");
+  l.clock.advance(30_000);
+  await l.settle();
+  l.reply("bob", "COULD-NOT-REACH-AGENT");
+  l.signals.turnEnded("bob");
+  release();
+  l.clock.advance(60_000);
+  await l.settle();
+  assert.deepEqual(l.kinds(), [["seen", "text"]]);
+});
+
+test("slow handling before the turn (attachments, meter): still held until the reply", async () => {
+  const l = realLanes();
+  const release = l.signals.consumed("bob", "Q-1");
+  l.clock.advance(8_000); // an attachment download, before the turn starts
+  await l.settle();
+  l.signals.turnStarted("bob");
+  l.clock.advance(4_000);
+  await l.settle();
+  assert.deepEqual(l.kinds(), []);
+  l.reply("bob", "ANSWER");
+  l.signals.turnEnded("bob");
+  release();
+  await l.settle();
+  assert.deepEqual(l.kinds(), [["seen", "text"]]);
+});
+
+test("a message that starts no turn and gets no reply: one seen alone, only after 5 s", async () => {
+  const l = realLanes();
+  l.signals.consumed("bob", "Q-1")(); // handled at once (e.g. a button press)
+  l.clock.advance(SEEN_INTERVAL_MS - 1);
+  await l.settle();
+  assert.deepEqual(l.kinds(), []);
+  l.clock.advance(1);
+  await l.settle();
+  assert.deepEqual(l.kinds(), [["seen"]]);
+  // Handling slower than the window and no reply: the seen goes at the release.
+  const release = l.signals.consumed("bob", "Q-2");
+  l.clock.advance(20_000);
+  await l.settle();
+  assert.equal(l.kinds().length, 1);
+  release();
+  await l.settle();
+  assert.equal(l.kinds().length, 2);
+});
+
+test("a turn that ends with no reply (/stop) sends the held seen alone at its end", async () => {
+  const l = realLanes();
+  const release = l.signals.consumed("bob", "Q-1");
+  l.signals.turnStarted("bob");
+  l.clock.advance(15_000);
+  await l.settle();
+  assert.deepEqual(l.kinds(), []);
+  l.signals.turnEnded("bob");
+  release();
+  await l.settle();
+  assert.deepEqual(l.kinds(), [["seen"]]);
+});
+
+test("a bridge turn that never ends holds the seen at most maxTurnMs", async () => {
+  const l = realLanes(); // maxTurnMs 60 s
+  const release = l.signals.consumed("bob", "Q-1");
+  l.signals.turnStarted("bob");
+  release(); // handed off to the harness; the turn holds the seen
+  l.clock.advance(59_000);
+  await l.settle();
+  assert.deepEqual(l.kinds(), []);
+  l.clock.advance(1_000);
+  await l.settle();
+  assert.deepEqual(l.kinds(), [["seen"]]);
 });

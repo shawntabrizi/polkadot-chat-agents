@@ -140,7 +140,11 @@ session topics, resubscribed when the watch set changes.
 
 Liveness is proven end-to-end — the bot submits a heartbeat statement on a
 private channel (channel replacement = one slot, ever) and expects it back
-through its own subscription; a miss resubscribes.
+through its own subscription; a miss resubscribes. Each heartbeat is one
+Statement Store submission, so `BOT_HEARTBEAT_MS` defaults to 120 s: 30
+submissions per hour per bot (it was 30 s, 120 per hour, more than an idle bot
+spends on chat). A dead subscription is found within about 130 s; until then
+the sweep below still reads new messages every `BOT_SWEEP_MS`.
 
 The poll loop remains as a slow reconciliation sweep (`BOT_SWEEP_MS`, 30s)
 that re-examines deferred statements, and falls back to full cadence
@@ -349,17 +353,23 @@ names `typing` in the list gets the spec's opt-in behavior:
 - Log: `BOT_SENT_TYPING { to, kind: "working" }` once per turn (not per
   refresh), and `{ kind: "stopped" }` when a stop is sent.
 
-**Seen (the bot sends read receipts) rides the reply.** When the brain
-consumes a peer's message (its turn starts), the bot holds `seen{upTo: <that
-message id>, at}` for up to 5 s. If a real message to that peer goes out in
-the window (the reply, a meter or faucet answer, a transaction reference,
-a greeting), the `seen`
-enters the lane in the same tick, so both ride one request statement: one
-submission. Otherwise the `seen` goes out alone at the end of the window (for
-example a message the brain does not answer, or a turn longer than 5 s).
-Messages consumed inside one window share one `seen` with the latest id, and
-an unfetched older `seen` is superseded (`upTo` covers it). Log:
-`BOT_SENT_SEEN { to, upTo }`, with `withMessage: true` when it rode a message.
+**Seen (the bot sends read receipts) rides the reply.** When the bot starts
+to handle a peer's message, it holds `seen{upTo: <that message id>, at}`. The
+next real message to that peer (the reply, an error fallback, a greeting, a
+command answer, a meter or faucet answer, a transaction reference) takes it
+along: the `seen` enters the lane in the same tick, so both ride one request
+statement, one submission. While the message is still being handled or a
+brain turn runs for the peer, no standalone `seen` goes out, whatever the
+delay: a real model takes about 10 s, and a `seen` alone at 5 s plus the
+reply at 10 s was two submissions per reply (desktop M13 e2e, 2026-09-24).
+The client's local "working" state covers the wait. A standalone `seen` goes
+out only for a message that got no reply and started no turn (or whose turn
+ended with no reply, for example `/stop`), and never sooner than 5 s after the
+message was consumed. A bridge turn whose harness never answers holds it at
+most `BOT_LIVE_TTL_MS`. Messages consumed before the `seen` goes out share one
+`seen` with the latest id, and an unfetched older `seen` is superseded (`upTo`
+covers it). Log: `BOT_SENT_SEEN { to, upTo }`, with `withMessage: true` when
+it rode a message.
 
 **Receiving.** A peer's `typing` and `seen` are decoded and logged at debug
 level only (`BOT_RECEIVED_TYPING { from, kind, until }`, `BOT_RECEIVED_SEEN

@@ -15,11 +15,18 @@
 //    most one per TYPING_MIN_INTERVAL_MS per peer, the spec's opt-in limit),
 //    superseded by the real reply while still un-ACKed, and closed by
 //    typing{stopped} only when the turn ends without a reply.
-//  - seen{upTo}: when the brain consumes a peer's message, the seen WAITS up
-//    to SEEN_INTERVAL_MS. A real message to that peer inside the window takes
-//    it along: the seen enters the lane in the same tick as the message, so
-//    both ride one request statement (one submission). Without a message, it
-//    goes out alone at the end of the window, carrying the latest id.
+//  - seen{upTo}: the seen of a peer's message RIDES THE REPLY. It enters the
+//    lane in the same tick as the next real message to that peer (the reply,
+//    an error fallback, a greeting, a command answer), so both ride one
+//    request statement (one submission). While the message is being handled
+//    (the `release` that consumed() returns is not called yet) or a brain
+//    turn runs for the peer, no standalone seen goes out, whatever the delay:
+//    a real model takes about 10 s, and a seen alone at 5 s plus the reply at
+//    10 s was two submissions per reply. The client's local "working" state
+//    covers the wait. A standalone seen goes out only when the message
+//    started no turn and got no reply, and only SEEN_INTERVAL_MS after it was
+//    consumed (or when the handling or turn ends, if that is later). A turn
+//    that never ends holds the seen at most maxTurnMs.
 //
 // A typing refresh is skipped while an earlier typing to the peer is still
 // un-ACKed: a peer that has not fetched the last hint gains nothing from the
@@ -30,7 +37,8 @@ import { TYPING_KINDS } from "../vendor/app-chat-codec.mjs";
 // The spec's opt-in limits: at most one typing per 10 s per peer, until = now + 12 s.
 export const TYPING_TTL_MS = 12_000;
 export const TYPING_MIN_INTERVAL_MS = 10_000;
-// A pending seen waits this long for a real message to ride on.
+// A pending seen of a message that starts no turn waits this long for a real
+// message to ride on.
 export const SEEN_INTERVAL_MS = 5_000;
 // The live placeholder ("thinking" row) waits this long before it appears
 // when the client can show its own "working" state (it knows the bot from
@@ -72,12 +80,14 @@ export const createTypingAndSeen = ({
         typingIds: new Set(), // our typing entries the peer has not ACKed yet
         seenTimer: null,
         seenUpTo: null,
+        seenDue: false, // the window ended while the seen was held
+        holds: 0, // messages from the peer still being handled
         seenIds: new Set(),
       };
       peers.set(peerHex, s);
       if (peers.size > maxPeers) {
         for (const [k, v] of peers) {
-          if (k !== peerHex && !v.turn && !v.typingTimer && !v.seenTimer) { peers.delete(k); break; }
+          if (k !== peerHex && !v.turn && !v.typingTimer && !v.seenTimer && !v.holds && !v.seenDue) { peers.delete(k); break; }
         }
       }
     }
@@ -124,6 +134,7 @@ export const createTypingAndSeen = ({
     const { sent } = s.turn;
     s.turn = null;
     clearTyping(s);
+    releaseSeen(peerHex, s);
     if (!sent) return; // the peer never got a hint: nothing to close
     const close = () => {
       s.typingTimer = null;
@@ -139,6 +150,7 @@ export const createTypingAndSeen = ({
   // piggyback: true when a real message enters the lane in this same tick.
   const flushSeen = (peerHex, s, { piggyback = false } = {}) => {
     if (s.seenTimer) { timers.clear(s.seenTimer); s.seenTimer = null; }
+    s.seenDue = false;
     const upTo = s.seenUpTo;
     s.seenUpTo = null;
     if (!upTo) return;
@@ -150,14 +162,38 @@ export const createTypingAndSeen = ({
     log("BOT_SENT_SEEN", { to: peerHex, upTo, ...(piggyback ? { withMessage: true } : {}) });
   };
 
+  // The window of a pending seen ended. Held (a message still being handled,
+  // or a turn running): it waits for the reply or the release. A turn older
+  // than maxTurnMs is ended here, so a silent harness cannot hold it forever.
+  const seenWindowEnded = (peerHex, s) => {
+    s.seenTimer = null;
+    if (!s.seenUpTo) return;
+    s.seenDue = true;
+    if (s.holds > 0) return;
+    if (s.turn) {
+      const left = s.turn.startedAt + maxTurnMs - now();
+      if (left > 0) { s.seenTimer = timers.set(() => seenWindowEnded(peerHex, s), left); return; }
+      endTurn(peerHex); // releases the seen
+      return;
+    }
+    flushSeen(peerHex, s);
+  };
+  // The handling or the turn ended: a seen whose window already ended and
+  // that no reply took along goes out alone now (or, while a turn still
+  // runs, waits under the maxTurnMs guard).
+  const releaseSeen = (peerHex, s) => {
+    if (s.seenDue && !s.seenTimer) seenWindowEnded(peerHex, s);
+  };
+
   return {
-    // A brain turn for peerHex starts.
+    // A brain turn for peerHex starts. It holds the pending seen until the
+    // reply (typing or not); with typing on, it also sends the hints.
     turnStarted(peerHex) {
-      if (!typing) return;
+      if (!typing && !seen) return;
       const s = stateFor(peerHex);
       clearTyping(s); // also cancels a pending `stopped` of the previous turn
       s.turn = { startedAt: now(), sent: false, logged: false };
-      tick(peerHex, s);
+      if (typing) tick(peerHex, s);
     },
     // A real message to peerHex is about to enter the lane (the caller
     // enqueues it synchronously after this call). A pending seen enters the
@@ -168,6 +204,7 @@ export const createTypingAndSeen = ({
       const s = peers.get(peerHex);
       if (!s) return [];
       if (s.seenUpTo) flushSeen(peerHex, s, { piggyback: true });
+      else s.seenDue = false;
       s.turn = null;
       clearTyping(s);
       return [...s.typingIds];
@@ -175,16 +212,28 @@ export const createTypingAndSeen = ({
     // The turn ended. Without a reply before it, the hint is closed with
     // typing{stopped} (once the rate limit allows).
     turnEnded(peerHex) { endTurn(peerHex); },
-    // The brain consumed the peer's message `messageId`. The seen waits for
-    // a reply to ride on, or goes alone after SEEN_INTERVAL_MS.
+    // The bot starts to handle the peer's message `messageId`. The seen waits
+    // for a reply to ride on. Returns `release`: call it once when the
+    // handling ends (for a bridge, when the message is handed off; the turn
+    // then holds the seen). Without a reply or a turn, the seen goes alone
+    // at SEEN_INTERVAL_MS after this call or at the release, if later.
     consumed(peerHex, messageId) {
-      if (!seen || !messageId) return;
+      if (!seen || !messageId) return () => {};
       const s = stateFor(peerHex);
       s.seenUpTo = messageId;
-      if (s.seenTimer) return; // the pending seen takes the latest id
-      s.seenTimer = timers.set(() => { s.seenTimer = null; flushSeen(peerHex, s); }, SEEN_INTERVAL_MS);
+      s.holds += 1;
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        s.holds -= 1;
+        releaseSeen(peerHex, s);
+      };
+      // The pending seen takes the latest id; its window keeps running.
+      if (!s.seenTimer && !s.seenDue) s.seenTimer = timers.set(() => seenWindowEnded(peerHex, s), SEEN_INTERVAL_MS);
+      return release;
     },
     // Introspection for tests.
-    typingActive: (peerHex) => Boolean(peers.get(peerHex)?.turn),
+    typingActive: (peerHex) => typing && Boolean(peers.get(peerHex)?.turn),
   };
 };

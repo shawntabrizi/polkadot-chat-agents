@@ -105,6 +105,34 @@ pca run devagent --greet
 `pca info` shows the selected network and registered identity. Private Devnet
 bots also use the Devnet-specific test file-delivery allowance.
 
+## Statement allowance after registration
+
+A new identity cannot submit statements until the chain attests it. Measured
+on Products Devnet on 2026-09-24 with two throwaway identities registered
+through `lib/register.mjs`:
+
+- The node checks the storage key `":statement_allowance:" ++ accountId`.
+  Before registration it is empty, and every `statement_submit` returns
+  `{"status":"rejected","reason":"noAllowance"}`.
+- The identity backend's attestation (the `Resources.Consumers` entry) sets
+  it. After it: `0x3200000000d00700`, that is `max_count` 50 statements and
+  `max_size` 512000 bytes, per account. No People-chain grant or other step
+  is needed.
+- The refusal is transient. Run 1: registration POST at 05:12:09 UTC, refused
+  until 05:13:13, first `"new"` at 05:13:15 (65 s; the chain made no block for
+  about 45 s). Run 2: registration POST at 05:15:33, `Consumers` present at
+  05:15:52, first `"new"` at 05:15:52 (19 s). Every submission after the first
+  success was accepted.
+- `submitAppStatement` retries `noAllowance` three times over about 9 s. That
+  is shorter than the attestation delay, so a bot started right after a new
+  registration can lose its first submissions. `pca register` waits for the
+  attestation (`waitForAttestation`); a client that publishes an identity and
+  starts bot-core at once must wait for `Resources.Consumers` too.
+- The allowance limits live statements, not a rate. The ingress heartbeat
+  replaces its own channel, so it holds one of the 50 slots at all times. Its
+  cost is submissions (validation and gossip on every node): 30 per hour at
+  the default `BOT_HEARTBEAT_MS` of 120 s.
+
 ## After a devnet migration
 
 Products Devnet was migrated on 2026-09-08
