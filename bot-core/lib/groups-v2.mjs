@@ -11,7 +11,8 @@
 //   - a carrier is opened with MsgKey_e; its signer must be a posting account
 //     of `from` in the current state, `from` must hold `post` (a groupLeave
 //     is always allowed), a role-0 member's carrier that arrives sooner than
-//     `slowModeSecs` after its previous one is hidden, messages dedup by id;
+//     `slowModeSecs` minus a 2 s grace for network delay (0011 ruling 14)
+//     after its previous one is hidden, messages dedup by id;
 //   - a state applies by (epoch, version, lower signer) when its signer's
 //     role and flags allow the change;
 //   - a rekey out of the current epoch: the bot opens its entry with
@@ -56,6 +57,9 @@ export const FORK_KEEP_MS = DAY;
 export const ROTATION_MS = 7 * DAY;
 export const ROTATION_JITTER_MS = 3_600_000;
 export const HISTORY_PAGE_BYTES = 4096;
+// Receivers allow a slow-mode carrier this much early (0011 ruling 14); the
+// sender's own limit stays exact.
+export const SLOW_MODE_GRACE_MS = 2000;
 const SEEN_IDS = 1000;
 const PENDING_STATEMENTS = 64;
 const KEY_REQUEST_EVERY_MS = 60_000;
@@ -230,7 +234,7 @@ export const createGroupsV2 = ({
     const t = now();
     if (member.role === ROLES.member && g.state.slowModeSecs > 0 && !leaveOnly) {
       const last = g.lastArrival.get(member.account);
-      if (last != null && t - last < g.state.slowModeSecs * 1000) return { outcome: "slow-mode" };
+      if (last != null && t - last < g.state.slowModeSecs * 1000 - SLOW_MODE_GRACE_MS) return { outcome: "slow-mode" };
     }
     g.lastArrival.set(member.account, t);
     const fresh = [];

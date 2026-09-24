@@ -199,8 +199,8 @@ say("V2_CREATED", `group=${groupId} policy=1 bot=admin(0xff)`);
 await delay(8000); // the bot reads the state from the topic
 
 // 3. /invite: a link that names the bot, held in the state.
-const inviteReply = await command("INVITE_OK", "/invite", /g#[A-Za-z0-9_-]+/);
-const link = decodeInviteLink(inviteLinkFromBase64Url(/g#([A-Za-z0-9_-]+)/.exec(inviteReply.text)[1]));
+const inviteReply = await command("INVITE_OK", "/invite", /polkadot-chat:\/\/g#[A-Za-z0-9_-]+/);
+const link = decodeInviteLink(inviteLinkFromBase64Url(/polkadot-chat:\/\/g#([A-Za-z0-9_-]+)/.exec(inviteReply.text)[1]));
 if (link.groupId !== groupId || link.admins[0] !== BOT.account) fail("INVITE_OK", JSON.stringify(link.admins));
 await waitFor("INVITE_OK(state)", async () => { await sync(groupsA); return stateA().invites.some((i) => i.inviteId === link.inviteId); });
 say("INVITE_OK", `admins=${link.admins.length} bot-first=true state-version=${stateA().version}`);

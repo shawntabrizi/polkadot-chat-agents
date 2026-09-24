@@ -821,8 +821,9 @@ already in (`BOT_GROUP2_WELCOME`); the bot then reads the topic at once and
 applies the state only if its hash matches the welcome (`BOT_GROUP2_JOINED`).
 A carrier counts only when its signer is `from` or one of `from`'s posting
 accounts, `from` holds `post` (a `groupLeave` always passes) and, for role 0
-under slow mode, it did not arrive sooner than `slowModeSecs` after the
-previous one. Messages dedup by id; a text becomes one turn under
+under slow mode, it did not arrive sooner than `slowModeSecs` minus a 2 s
+grace for network delay after the previous one (the bot's own sends keep the
+exact limit). Messages dedup by id; a text becomes one turn under
 `group:<groupId>`, as in v1 (the sender shows as an account prefix: v2 states
 carry no usernames). Carried messages older than the bot's join are history,
 never turns. The answer is ONE statement on the bot's `ChMsgs_e`: the new
@@ -852,7 +853,11 @@ when the proof matches one of its groups' invites, then admits the
 pending; anything invalid: rejected); it removes a member that posted
 `groupLeave` (rekey on the old topic + state on the new one, two statements,
 `BOT_GROUP2_EPOCH_OPENED`); and it rotates the epoch after 7 days (plus up
-to an hour of jitter). The cap for v2 is 256 members.
+to an hour of jitter). The cap for v2 is 256 members. An admin's `/invite`
+over DM answers `polkadot-chat://g#<InviteLink base64url>` (0011 ruling 9,
+amended: not `polkadotapp://`, which would capture the phone app's pairing
+links); `/revoke-invite` also accepts a bare `g#<b64>` and, for one release,
+the old `polkadotapp://g#<b64>`.
 
 **Live proof.** `scripts/e2e-groups-v2.mjs` (two registered test identities
 and a local bot): `CHAT_OK V2_CREATED ONE_SUBMISSION BOT_REPLY_OK REMOVED

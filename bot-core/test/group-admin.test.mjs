@@ -154,7 +154,10 @@ test("/invite gives a link naming the bot first, held in the state; it admits by
   const { w, alice, bob, bot, admin } = await adminWorld({ state: { joinPolicy: 2 } });
   assert.equal(await admin.command(bob.account, "/invite"), "Refused: only an admin can do that.");
   const reply = await admin.command(alice.account, "/invite");
-  const b64 = /\ng#([A-Za-z0-9_-]+)\n/.exec(reply)?.[1];
+  // Ruling 9 (amended): its own scheme, never polkadotapp://, which would
+  // make the desktop capture the phone app's pairing links.
+  const b64 = /\npolkadot-chat:\/\/g#([A-Za-z0-9_-]+)\n/.exec(reply)?.[1];
+  assert.doesNotMatch(reply, /polkadotapp:/);
   assert.ok(b64, reply);
   assert.match(reply, /Anyone with the link joins at once\.$/);
   const link = decodeInviteLink(inviteLinkFromBase64Url(b64));
@@ -186,10 +189,23 @@ test("/invite on a group whose policy is 'admins add only' says links are refuse
   const first = await admin.command(alice.account, "/invite");
   assert.match(first, /the join policy is "admins add only"/);
   await admin.command(alice.account, "/invite");
-  const link = /g#([A-Za-z0-9_-]+)/.exec(first)[0];
+  const link = /polkadot-chat:\/\/g#([A-Za-z0-9_-]+)/.exec(first)[0];
   assert.equal(await admin.command(alice.account, `/revoke-invite ${link}`), "Revoked 1 invite of Test group. Those links no longer work.");
   assert.equal(state(bot).invites.length, 1);
   assert.equal(await admin.command(alice.account, "/revoke-invite 00"), "No invite of this group matches that.");
+});
+
+test("/revoke-invite takes the link as polkadot-chat://g#, bare g#, or (one release) the old polkadotapp://g#; any other scheme is not a link", async () => {
+  // Links already shared in the old form must still be revocable for one release.
+  const { alice, bot, admin } = await adminWorld();
+  const b64s = [];
+  for (let i = 0; i < 4; i++) b64s.push(/polkadot-chat:\/\/g#([A-Za-z0-9_-]+)/.exec(await admin.command(alice.account, "/invite"))[1]);
+  assert.equal(await admin.command(alice.account, `/revoke-invite https://evil.example/g#${b64s[3]}`), "No invite of this group matches that.");
+  const forms = [`polkadot-chat://g#${b64s[0]}`, `g#${b64s[1]}`, `polkadotapp://g#${b64s[2]}`];
+  for (const [i, form] of forms.entries()) {
+    assert.equal(await admin.command(alice.account, `/revoke-invite ${form}`), "Revoked 1 invite of Test group. Those links no longer work.", form);
+    assert.equal(state(bot).invites.length, 3 - i);
+  }
 });
 
 test("policy 1: the request is pending, the owner gets Approve/Reject over DM, and only the owner's Approve admits (state + welcome + history)", async () => {

@@ -207,6 +207,26 @@ test("slow mode: the bot (role 0) refuses a second send inside slowModeSecs and 
   assert.equal((await bot.groups.receive(bobCarrier("fast-3"))).outcome, "accepted");
 });
 
+test("slow mode receive: a 2 s grace for network delay (0011 ruling 14); the sender's own limit stays exact", async () => {
+  // An honest sender that waited the full 30 s can land a little early at the
+  // receiver; hiding it would drop a real message. Past the grace it is forged.
+  const { w, bot } = await setup({ state: { slowModeSecs: 30 } });
+  const ep = bot.groups.get(GROUP).epochs.get(1);
+  const bobCarrier = (id) => {
+    const plaintext = encodeGroupMessages({ from: Buffer.from(ACCOUNTS.bob, "hex"), messages: [text(id, w.clock.t, id)] });
+    return { topicHex: hex(ep.topic), channelHex: hex(ep.channels.msgs), signerHex: ACCOUNTS.bob, data: encodeGroupData({ messages: seal(ep.msgKey, { signer: Buffer.from(ACCOUNTS.bob, "hex"), epoch: 1, variant: 0, plaintext }) }) };
+  };
+  assert.equal((await bot.groups.receive(bobCarrier("g-1"))).outcome, "accepted");
+  w.clock.t += 28_000; // exactly slowModeSecs - grace
+  assert.equal((await bot.groups.receive(bobCarrier("g-2"))).outcome, "accepted", "inside the grace: shown");
+  w.clock.t += 27_999; // 1 ms short of slowModeSecs - grace
+  assert.equal((await bot.groups.receive(bobCarrier("g-3"))).outcome, "slow-mode", "past the grace: hidden");
+  // The bot's own send is not given the grace.
+  assert.equal((await bot.groups.send(GROUP, [text("B-1", w.clock.t, "one")])).ok, true);
+  w.clock.t += 29_000;
+  assert.deepEqual(await bot.groups.send(GROUP, [text("B-2", w.clock.t, "two")]), { ok: false, reason: "slow-mode", retryInMs: 1000 });
+});
+
 test("at most one statement per second: the second send in the same second is refused with the wait (the caller merges)", async () => {
   const { w, bot } = await setup();
   assert.equal((await bot.groups.send(GROUP, [text("R-1", w.clock.t, "a")])).ok, true);

@@ -9,6 +9,7 @@
 //   /slowmode <seconds>          0 turns it off
 //   /promote <username>          a member becomes an admin
 //   /invite                      a fresh invite link, held in the state
+//                                (polkadot-chat://g#<InviteLink base64url>, ruling 9)
 //   /revoke-invite [link or id]  drop that invite, or every invite
 //
 // Each command takes an optional trailing "in <group name>"; it is needed
@@ -27,6 +28,12 @@
 // Pure logic over injected I/O, so every path runs in memory in the tests.
 import crypto from "node:crypto";
 import { PERMISSIONS, ROLES, GROUP_BOUNDS, encodeInviteLink, inviteLinkFromBase64Url, inviteLinkToBase64Url, decodeInviteLink } from "./group-codec.mjs";
+
+// Spec 0011 ruling 9 (amended 2026-09-24): invite links use their own scheme,
+// not polkadotapp:// (that would capture the phone app's pairing links).
+export const INVITE_SCHEME = "polkadot-chat://g#";
+// TODO(next release): drop polkadotapp:// (accepted for one release only).
+const INVITE_PREFIX = /^(?:(?:polkadot-chat|polkadotapp):\/\/)?g#/;
 
 export const JOIN_REQUEST_TTL_MS = 86_400_000;
 export const MAX_SLOW_MODE_SECS = 86_400;
@@ -176,7 +183,7 @@ export const createGroupAdmin = ({
       const policy = g.state.joinPolicy === 0
         ? "\nNote: the join policy is \"admins add only\", so requests by link are refused until an admin allows links."
         : g.state.joinPolicy === 1 ? "\nThe owner approves each request." : "\nAnyone with the link joins at once.";
-      return `Invite link for ${groupName(g)}. Anyone who has it can ask to join; /revoke-invite stops it.\ng#${link}${policy}`;
+      return `Invite link for ${groupName(g)}. Anyone who has it can ask to join; /revoke-invite stops it.\n${INVITE_SCHEME}${link}${policy}`;
     },
     async "revoke-invite"(peer, g, rest) {
       if (!g.state.invites.length) return `${groupName(g)} has no invites.`;
@@ -193,9 +200,11 @@ export const createGroupAdmin = ({
     },
   };
 
-  // An invite link (g#<b64>), a bare base64url link, or an inviteId (hex or base64url).
+  // An invite link (polkadot-chat://g#<b64>, bare g#<b64>, or for one release
+  // the old polkadotapp://g#<b64>), a bare base64url link, or an inviteId
+  // (hex or base64url).
   const inviteIdFrom = (text) => {
-    const s = String(text).trim().replace(/^.*g#/, "");
+    const s = String(text).trim().replace(INVITE_PREFIX, "");
     try { return decodeInviteLink(inviteLinkFromBase64Url(s)).inviteId; } catch { /* not a link */ }
     if (/^[0-9a-f]{32}$/i.test(s)) return s.toLowerCase();
     const b = Buffer.from(s, "base64url");
