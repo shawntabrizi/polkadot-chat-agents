@@ -21,6 +21,7 @@
     "@polkadot-api/descriptors": "file:.papi/descriptors",
     "@polkadot-labs/hdkd-helpers": "0.0.30",
     "@scure/sr25519": "2.2.0",
+    "jpeg-js": "0.4.4",
     "polkadot-api": "2.1.7"
   },
   "engines": {

@@ -4,6 +4,8 @@
 // path sends ONE message (the attachment, or the text fallback when Bulletin
 // is unavailable). No image model: the swatch is drawn pixel by pixel and
 // encoded by lib/png.mjs; the dominant colour of an image is a histogram.
+// A JPEG is decoded by jpeg-js (pure JavaScript, owner-approved dependency).
+import jpeg from "jpeg-js";
 import { decodePng, makePng } from "./png.mjs";
 
 // ---------- hex codes ----------
@@ -143,8 +145,14 @@ export function dominantColor({ width, height, channels, data }) {
   };
 }
 
-export const PNG_ONLY_REPLY = "Please send a PNG image (8-bit RGB or RGBA). I can't read JPEG or other formats yet.";
+export const UNSUPPORTED_IMAGE_REPLY = "Please send a PNG or JPEG image.";
 const isPng = (b) => b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47;
+const isJpeg = (b) => b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff;
+// RGBA pixels; the 50 MP cap matches decodePng's limit.
+const decodeJpeg = (bytes) => {
+  const { width, height, data } = jpeg.decode(bytes, { useTArray: true, formatAsRGBA: true, maxResolutionInMP: 50 });
+  return { width, height, channels: 4, data };
+};
 
 // ---------- the feature ----------
 /**
@@ -167,9 +175,10 @@ export function createColorSwatch({ sendImage, sendText, readFile, log = () => {
   const describeImage = (a) => {
     if (!a.downloaded) return { text: `I could not fetch that image: ${a.error ?? "unknown error"}` };
     const bytes = readFile(a.path);
-    if (!isPng(bytes)) return { text: PNG_ONLY_REPLY };
+    const decode = isPng(bytes) ? decodePng : isJpeg(bytes) ? decodeJpeg : null;
+    if (!decode) return { text: UNSUPPORTED_IMAGE_REPLY };
     let colors;
-    try { colors = dominantColor(decodePng(bytes)); } catch { return { text: PNG_ONLY_REPLY }; }
+    try { colors = dominantColor(decode(bytes)); } catch { return { text: UNSUPPORTED_IMAGE_REPLY }; }
     if (!colors) return { text: "That image is fully transparent: there is no colour to read." };
     return { hex: colors.dominant, caption: `Dominant ${colors.dominant} · average ${colors.average}` };
   };

@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import zlib from "node:zlib";
-import { PNG_ONLY_REPLY, colorName, createColorSwatch, dominantColor, parseHexColor, swatchPng, textColorFor } from "../lib/color.mjs";
+import jpeg from "jpeg-js";
+import { UNSUPPORTED_IMAGE_REPLY, colorName, createColorSwatch, dominantColor, parseHexColor, swatchPng, textColorFor } from "../lib/color.mjs";
 import { decodePng, makePng } from "../lib/png.mjs";
 
 // The pcdcolor bot (BOT_COLOR_SWATCH=1): a hex code or an image is answered
@@ -239,20 +240,41 @@ test("without Bulletin the reply falls back to ONE text message", async () => {
   assert.equal(sent.length, 1);
 });
 
-test("an image gets a swatch of its dominant colour; a JPEG or a failed fetch gets one text reply", async () => {
+test("an image gets a swatch of its dominant colour; a GIF or a failed fetch gets one text reply", async () => {
   const png = makePng(40, 40, (x) => (x < 30 ? [0, 128, 128] : [255, 255, 255]));
-  const { f, sent } = feature({ files: { "/m/a.png": png, "/m/b.jpg": new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4, 5]) } });
+  const gif = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 0, 1, 0]);
+  const { f, sent } = feature({ files: { "/m/a.png": png, "/m/b.gif": gif } });
   let brainTurns = 0;
   const turn = async (msg) => { if (!(await f.handleInbound("peer", msg))) brainTurns += 1; };
   // An image with a caption that holds a hex code: the image wins.
   await turn({ text: "#ff0000", attachments: [{ fileKind: "image", mime: "image/png", downloaded: true, path: "/m/a.png" }] });
-  await turn({ text: "", attachments: [{ fileKind: "image", mime: "image/jpeg", downloaded: true, path: "/m/b.jpg" }] });
+  await turn({ text: "", attachments: [{ fileKind: "image", mime: "image/gif", downloaded: true, path: "/m/b.gif" }] });
   await turn({ text: "", attachments: [{ fileKind: "image", mime: "image/png", downloaded: false, error: "gateway timeout" }] });
   assert.equal(brainTurns, 0);
   assert.equal(sent.length, 3);
   assert.equal(sent[0].kind, "image");
   assert.match(sent[0].caption, /^Dominant #008080 · average #[0-9A-F]{6}$/);
   assert.equal(centre(sent[0].bytes), "#008080");
-  assert.deepEqual(sent[1], { kind: "text", peer: "peer", text: PNG_ONLY_REPLY });
+  assert.deepEqual(sent[1], { kind: "text", peer: "peer", text: UNSUPPORTED_IMAGE_REPLY });
   assert.deepEqual(sent[2], { kind: "text", peer: "peer", text: "I could not fetch that image: gateway timeout" });
+});
+
+// Phone photos are JPEG: the bot must read them, not refuse them. The photo
+// is mostly teal on a white page, so the page must not win and the teal must
+// survive lossy compression close enough to land in the same colour.
+test("a JPEG photo gets a swatch of its dominant colour", async () => {
+  const width = 64, height = 48;
+  const data = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) data.set(x < 48 ? [0, 128, 128, 255] : [255, 255, 255, 255], (y * width + x) * 4);
+  }
+  const photo = jpeg.encode({ width, height, data }, 90).data;
+  const { f, sent } = feature({ files: { "/m/p.jpg": new Uint8Array(photo) } });
+  assert.equal(await f.handleInbound("peer", { text: "", attachments: [{ fileKind: "image", mime: "image/jpeg", downloaded: true, path: "/m/p.jpg" }] }), true);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, "image");
+  const [, dominant] = /^Dominant (#[0-9A-F]{6}) · average #[0-9A-F]{6}$/.exec(sent[0].caption);
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(dominant.slice(i, i + 2), 16));
+  assert.ok(r <= 8 && Math.abs(g - 128) <= 8 && Math.abs(b - 128) <= 8, `dominant ${dominant} is not teal`);
+  assert.equal(centre(sent[0].bytes), dominant);
 });
