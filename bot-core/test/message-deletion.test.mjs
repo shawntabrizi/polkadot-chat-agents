@@ -124,6 +124,8 @@ const makeSender = ({ enabled = true, maxPayloadBytes = 10_000 } = {}) => {
     makeId: () => `DEL-${++mid}`,
     log: (event, extra) => events.push({ event, ...extra }),
   });
+  // Only for checks that nothing MORE went out: a positive wait awaits the
+  // message's own `submitted` (deleteMessage awaits its own), never a timer.
   const settle = () => new Promise((r) => setTimeout(r, 5));
   const decoded = (statement) => statement.opaques.map((hex) => decodeOpaqueMessageAt(Buffer.from(hex, "hex"), 0).value);
   const wire = () => submits.flatMap(decoded);
@@ -134,10 +136,11 @@ const makeSender = ({ enabled = true, maxPayloadBytes = 10_000 } = {}) => {
 
 test("no deletion goes out when the deleted extension is off", async () => {
   const s = makeSender({ enabled: parseProtocolExtensions("none").enabled.has("deleted") });
-  s.text("M1");
-  await s.settle();
+  // Wait for M1's own submit, not a timer: a still-queued M1 would be
+  // dropped as "unsent" and never reach the extension check. A deletion
+  // that did go out is awaited inside deleteMessage (it awaits its submit).
+  await s.text("M1").submitted;
   const result = await s.deleteMessage("bob", "M1");
-  await s.settle();
   assert.equal(result.outcome, "unsupported");
   assert.ok(s.wire().every((m) => m.kind !== "deleted"), "the operator turned the extension off");
   assert.deepEqual(s.slot().map((m) => m.messageId), ["M1"], "the slot is left as it was");
@@ -146,11 +149,8 @@ test("no deletion goes out when the deleted extension is off", async () => {
 
 test("an un-ACKed target leaves the slot and the deletion replaces it", async () => {
   const s = makeSender();
-  s.text("M1");
-  s.text("M2");
-  await s.settle();
+  await Promise.all([s.text("M1").submitted, s.text("M2").submitted]);
   const result = await s.deleteMessage("bob", "M1");
-  await s.settle();
   assert.equal(result.outcome, "sent");
   // RFC case 2 + 3 in one statement: the target is gone, its deletion rides along.
   const slot = s.slot();
@@ -162,19 +162,16 @@ test("an un-ACKed target leaves the slot and the deletion replaces it", async ()
 
 test("after the target was ACKed, only the deletion goes out", async () => {
   const s = makeSender();
-  s.text("M1");
-  await s.settle();
+  await s.text("M1").submitted;
   s.outbound.onAck("bob", s.submits.at(-1).requestId);
   await s.deleteMessage("bob", "M1");
-  await s.settle();
   assert.deepEqual(s.slot().map((m) => [m.kind, m.targetMessageId]), [["deleted", "M1"]]);
 });
 
 test("a queued message that was never submitted is removed with no wire trace", async () => {
   // A tiny payload cap: M2 cannot extend M1's statement, so it waits in the queue.
   const s = makeSender({ maxPayloadBytes: 90 });
-  s.text("M1");
-  await s.settle();
+  await s.text("M1").submitted;
   const queued = s.text("M2");
   await s.settle();
   assert.equal(s.outbound.depth("bob"), 2);
@@ -188,10 +185,8 @@ test("a queued message that was never submitted is removed with no wire trace", 
 
 test("by default a deletion goes out with no evidence from the peer", async () => {
   const s = makeSender({ enabled: parseProtocolExtensions(undefined).enabled.has("deleted") });
-  s.text("M1");
-  await s.settle();
+  await s.text("M1").submitted;
   const result = await s.deleteMessage("bob", "M1");
-  await s.settle();
   assert.equal(result.outcome, "sent");
   assert.deepEqual(s.slot().map((m) => m.kind), ["deleted"]);
   assert.equal(s.slot()[0].messageId.startsWith("DEL-"), true);

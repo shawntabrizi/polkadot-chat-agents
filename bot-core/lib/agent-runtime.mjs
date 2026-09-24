@@ -1004,7 +1004,10 @@ export const createAgentRuntime = ({
     // `peerHex` is always the transport delivery target. A transport can give
     // a threaded message a distinct `sessionKey` so native model memory and
     // commands stay isolated without changing where replies are published.
-    async handleMessage(peerHex, msg) {
+    // `onAnswer` runs just before the brain's answer goes out, and never for
+    // a command, busy, error-fallback, /stop, or shutdown reply: a metered
+    // bot charges only the turns that call it.
+    async handleMessage(peerHex, msg, { onAnswer } = {}) {
       const k = norm(msg?.sessionKey ?? peerHex);
       const deliveryKey = norm(peerHex);
       // A transport may attach an opaque immutable delivery context (for
@@ -1116,6 +1119,7 @@ export const createAgentRuntime = ({
               ? [outgoing.slice(0, block).trimEnd(), tip, outgoing.slice(block)].filter(Boolean).join("\n\n")
               : `${outgoing}\n\n${tip}`;
           }
+          onAnswer?.();
           await sendTurn(
             peerHex,
             outgoing,

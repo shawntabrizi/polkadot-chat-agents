@@ -1,8 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { createMeter, formatPas, METER_BATCH_MS, METER_BATCH_REPLIES, parsePlancks } from "../lib/meter.mjs";
 import { meterCalldata, reviveAddress, selector } from "../lib/revive-chain.mjs";
 import { createOutboundLanes } from "../lib/outbound-lanes.mjs";
+import { createAgentRuntime } from "../lib/agent-runtime.mjs";
+import { RUNNERS } from "../lib/runners.mjs";
 import {
   decodeOpaqueMessageAt, decodeTxIntent, encodeOpaqueBotInfoMessage, encodeOpaqueButtonsMessage,
   encodeOpaqueSeenMessage, encodeOpaqueTextMessage, encodeOpaqueTransactionReferenceMessage,
@@ -379,4 +384,36 @@ test("botInfo with pending rides the reply's statement, and the charge's referen
   assert.deepEqual(submissions[2].map((m) => m.kind), ["transactionReference", "botInfo"]);
   assert.equal(submissions[2][0].status, 1);
   assert.equal(submissions[2][1].balance.pending, 0n, "charged: nothing pending");
+});
+
+// The index.mjs rule: a metered turn joins the pending debit only when the
+// brain answered (the runtime's onAnswer). A failed turn answers with an
+// apology ("couldn't reach my agent", BOT_AI_FAILED) and must cost nothing.
+test("a failed brain turn adds no pending debit; an answered turn adds one price", async () => {
+  const { meter, chain, user } = setup();
+  chain.state.balances.set(user, PAS * RATIO);
+  const turn = async (script) => {
+    const delivered = [];
+    const runtime = createAgentRuntime({
+      engine: RUNNERS.claude, engineName: "claude", engineCommand: "sh",
+      buildArgs: () => ["-c", script],
+      workspace: fs.mkdtempSync(path.join(os.tmpdir(), "pca-meter-")),
+      idleMs: 10_000, renderMessage: (m) => m.text,
+      chat: { sendText: async () => {}, deliver: async (p, t) => { delivered.push(t); }, beginTurn: () => () => {} },
+      username: "unit.00", log: () => {}, persist: () => {},
+    });
+    const gate = await meter.beforeTurn(PEER, text("what is staking?"));
+    assert.deepEqual(gate, { run: true, charge: true });
+    let answered = false;
+    await runtime.handleMessage(PEER, { text: "what is staking?", messageId: "M1", kind: "text" }, { onAnswer: () => { answered = true; } });
+    if (answered) await meter.afterTurn(PEER);
+    return delivered;
+  };
+  const failed = await turn("echo nope >&2; exit 1");
+  assert.match(failed[0], /couldn't reach my agent/);
+  assert.equal(meter.pendingDebit(PEER), 0n, "the failed turn is not charged");
+  assert.equal(meter.snapshot(PEER), null, "and leaves no pending reply to save");
+  const answered = await turn(`printf '{"type":"result","result":"staking is","usage":{"input_tokens":1,"output_tokens":1}}\\n'`);
+  assert.match(answered[0], /staking is/);
+  assert.equal(meter.pendingDebit(PEER), PAS / 10n, "the answered turn adds one price");
 });

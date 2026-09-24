@@ -433,6 +433,24 @@ test("an engine failure delivers the apology, not silence", async () => {
   assert.ok(h.events.some((e) => e.event === "BOT_AI_FAILED"));
 });
 
+// A metered bot charges a turn only when onAnswer runs (index.mjs). The
+// user pays for the brain's answer, never for our failure to produce one.
+test("onAnswer runs for the brain's answer only: not for an error fallback or a command", async () => {
+  const failed = makeRuntime({ script: "echo nope >&2; exit 1" });
+  let failedAnswers = 0;
+  assert.equal(await failed.runtime.handleMessage("peer", { text: "hi", messageId: "M1", kind: "text" }, { onAnswer: () => { failedAnswers += 1; } }), true);
+  assert.match(failed.delivered[0], /couldn't reach my agent/);
+  assert.equal(failedAnswers, 0, "the apology is not an answer");
+
+  const ok = makeRuntime();
+  const seenAtAnswer = [];
+  await ok.runtime.handleMessage("peer", { text: "/ping", messageId: "M1", kind: "text" }, { onAnswer: () => seenAtAnswer.push("command") });
+  assert.deepEqual(seenAtAnswer, [], "a command reply is not a brain answer");
+  await ok.runtime.handleMessage("peer", { text: "hi", messageId: "M2", kind: "text" }, { onAnswer: () => seenAtAnswer.push(ok.delivered.length) });
+  assert.deepEqual(seenAtAnswer, [0], "called once, before the answer goes out (so the answer can carry the pending debit)");
+  assert.match(ok.delivered[0], /the answer/);
+});
+
 test("/stop kills the running turn and the turn resolves without delivering", async () => {
   const h = makeRuntime({ script: "sleep 30" });
   const turn = h.runtime.handleMessage("peer", { text: "long job", messageId: "M1", kind: "text" });

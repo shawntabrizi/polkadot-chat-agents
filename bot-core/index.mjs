@@ -1914,14 +1914,16 @@ const handleInbound = async (peerHex, msg, owedId = null, { reservedBridge = fal
     catch (e) { log("BOT_METER_FAILED", { peer: peerHex, error: String(e?.message ?? e) }); return; }
     if (!meterGate.run) return;
   }
-  // Spec 0008 v3: the turn's first real message carries botInfo with the
-  // pending debit this reply adds (submitMessage takes the mark).
-  if (meterGate?.charge) meteredReplyDue.add(norm(peerHex));
+  // Spec 0008 v3: the brain's answer carries botInfo with the pending debit
+  // this reply adds (submitMessage takes the mark). The mark is set only when
+  // the brain answers, so an error fallback never claims a debit.
+  const markAnswer = () => { if (meterGate?.charge) meteredReplyDue.add(norm(peerHex)); };
   const chargeTurn = async () => {
     meteredReplyDue.delete(norm(peerHex));
     if (meterGate?.charge) await meter.afterTurn(peerHex);
   };
   if (brain === "echo") {
+    markAnswer();
     // Through deliverToChat, so an echoed ```buttons block exercises spec 0006.
     const delivered = await deliverToChat(peerHex, `Echo: ${synthesizeText(msg.text, msg.attachments)}`).then(() => true, (e) => { log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }); return false; });
     if (delivered) await chargeTurn();
@@ -1930,11 +1932,18 @@ const handleInbound = async (peerHex, msg, owedId = null, { reservedBridge = fal
   if (agentRuntime) {
     // A turn that ends with no reply (a failed delivery, /stop) closes its
     // typing hint with typing{stopped}; after a reply this is a no-op.
+    // A metered turn is charged only when the brain answered (onAnswer). An
+    // error fallback ("couldn't reach my agent"), a busy notice, a command,
+    // /stop, or a shutdown interruption (retried later) costs nothing.
     let result;
-    try { result = await agentRuntime.handleMessage(peerHex, msg); }
-    finally { typingAndSeen.turnEnded(norm(peerHex)); }
-    // false = shutdown interrupted the turn: it is retried later, so no charge now.
-    if (result !== false) await chargeTurn();
+    let answered = false;
+    try {
+      result = await agentRuntime.handleMessage(peerHex, msg, { onAnswer: () => { answered = true; markAnswer(); } });
+    } finally {
+      typingAndSeen.turnEnded(norm(peerHex));
+      meteredReplyDue.delete(norm(peerHex));
+    }
+    if (answered) await chargeTurn();
     return result;
   }
   // bridge: hand off to an external agent via the HTTP bridge.
@@ -3546,7 +3555,15 @@ if ((env.BOT_SUBSCRIBE ?? "1") !== "0") {
       const data = typeof st.data === "string" ? hexToBytes(st.data) : st.data;
       return bytesToHex(data).includes(bytesToHex(enc.encode(hb.id)));
     },
-    recover: () => resubscribe(true),
+    // A socket reconnect leaves every old subscription silently dead (no
+    // error, no pages). Recovery must replace the health subscription too, or
+    // every later heartbeat is missed while the groups keep receiving.
+    // recover must not throw: the supervisor would stay "in recovery" forever.
+    recover: () => {
+      try { supervisor.reconnect(); }
+      catch (e) { log("BOT_SUBSCRIBE_HEALTH_FAILED", { error: String(e?.message ?? e) }); }
+      resubscribe(true);
+    },
     emit: ({ event, ...extra }) => log(event, extra),
     heartbeatIntervalMs: numberEnv("BOT_HEARTBEAT_MS", 30_000, { min: 1000, max: 86_400_000 }),
   });
