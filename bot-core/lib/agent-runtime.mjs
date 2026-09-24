@@ -118,6 +118,9 @@ const norm = (hex) => String(hex).trim().replace(/^0x/i, "").toLowerCase();
 const TOOL_MARKUP_BLOCK = /<function_calls>[\s\S]*?<\/function_calls>|<invoke\b[\s\S]*?<\/invoke>|<\/?function_calls>/g;
 // Shown to the peer whenever markup was removed: the model wanted a tool, so
 // say why nothing happened and who can change that.
+// The engine turn for a chat request that arrived with no opener text.
+export const EMPTY_OPENER_PROMPT = "A new contact just opened a chat with you and said nothing yet. Greet them in one or two sentences in your persona.";
+
 export const TOOL_MARKUP_NOTE = "Tools are disabled for this bot, so I can't run commands or read files here. Its operator can enable them with --allowed-tools (for example: pca run <bot> --allowed-tools read,write,bash).";
 export const stripToolMarkup = (text) => {
   const value = String(text ?? "");
@@ -1007,7 +1010,11 @@ export const createAgentRuntime = ({
     // `onAnswer` runs just before the brain's answer goes out, and never for
     // a command, busy, error-fallback, /stop, or shutdown reply: a metered
     // bot charges only the turns that call it.
-    async handleMessage(peerHex, msg, { onAnswer } = {}) {
+    // `greeting` marks an empty chat-request opener: its turn runs on
+    // EMPTY_OPENER_PROMPT (so the greeting stays in the persona), never calls
+    // onAnswer (a synthetic greeting is free), and falls back to `greeting`
+    // itself if the engine fails. Any other empty prompt runs no turn.
+    async handleMessage(peerHex, msg, { onAnswer, greeting = null } = {}) {
       const k = norm(msg?.sessionKey ?? peerHex);
       const deliveryKey = norm(peerHex);
       // A transport may attach an opaque immutable delivery context (for
@@ -1015,7 +1022,7 @@ export const createAgentRuntime = ({
       // prompt, but follows every reply/progress callback so concurrent model
       // sessions sharing one delivery conversation cannot cross-route output.
       const deliveryContext = msg?.deliveryContext ?? null;
-      const { deliveryContext: _ignoredDeliveryContext, ...messageForPrompt } = msg ?? {};
+      let { deliveryContext: _ignoredDeliveryContext, ...messageForPrompt } = msg ?? {};
       // T3ams channel messages preserve their raw `@bot …` prompt for the
       // model, but may supply the slash-command suffix separately. Other
       // transports and DMs continue to use their raw text as before.
@@ -1025,6 +1032,14 @@ export const createAgentRuntime = ({
         log("BOT_COMMAND", { from: peerHex, command: commandInput.split(/\s/)[0] });
         await sendReply("sendText", peerHex, commandReply, deliveryContext);
         return true;
+      }
+      // An empty prompt never reaches the engine CLI (`claude -p ""` fails
+      // with "Input must be provided"). An empty opener is greeted instead.
+      const greetingTurn = !String(renderMessage(messageForPrompt) ?? "").trim();
+      if (greetingTurn) {
+        log("BOT_AI_SKIPPED_EMPTY", { to: peerHex, fallback: greeting ? "greeting" : "none" });
+        if (!greeting) return true;
+        messageForPrompt = { ...messageForPrompt, text: EMPTY_OPENER_PROMPT };
       }
       // The turn's cwd: shared workspace or the peer's chosen project/
       // worktree. Worktree prep can fail (not a repo, bad branch) — answer
@@ -1096,7 +1111,8 @@ export const createAgentRuntime = ({
         if (!result) {
           if (shuttingDown) return false;
           // Don't leave the user hanging after the "thinking" placeholder.
-          await sendReply("deliver", peerHex, "Sorry — I couldn't reach my agent just now. Please try again in a moment.", deliveryContext);
+          // A new contact's first sight is the greeting, not an apology.
+          await sendReply("deliver", peerHex, greetingTurn ? greeting : "Sorry — I couldn't reach my agent just now. Please try again in a moment.", deliveryContext);
           return true;
         }
         // A shutdown that happens after the child exits but before a reply
@@ -1119,7 +1135,7 @@ export const createAgentRuntime = ({
               ? [outgoing.slice(0, block).trimEnd(), tip, outgoing.slice(block)].filter(Boolean).join("\n\n")
               : `${outgoing}\n\n${tip}`;
           }
-          onAnswer?.();
+          if (!greetingTurn) onAnswer?.();
           await sendTurn(
             peerHex,
             outgoing,

@@ -1906,10 +1906,15 @@ const handleInbound = async (peerHex, msg, owedId = null, { reservedBridge = fal
     if (usesBridgeQueue && owedId) settleOwed(owedId);
     return;
   }
+  // A chat request with no opener text (the desktop can send one) gets the
+  // bot's greeting. It is not a question, so the meter never gates or
+  // charges it; a brain writes the greeting in its persona (agent-runtime).
+  const emptyOpener = msg.opener === true && !String(msg.text ?? "").trim() && !msg.attachments?.length;
+  const openerGreeting = emptyOpener ? (currentBotInfo()?.greeting || greetText) : null;
   // Spec 0007 meter: the balance (minus the pending debit) gates the turn; a
   // turn that ran joins the pending debit, charged in batches (lib/meter.mjs).
   let meterGate = null;
-  if (meter) {
+  if (meter && !emptyOpener) {
     try { meterGate = await meter.beforeTurn(peerHex, msg); }
     catch (e) { log("BOT_METER_FAILED", { peer: peerHex, error: String(e?.message ?? e) }); return; }
     if (!meterGate.run) return;
@@ -1922,6 +1927,10 @@ const handleInbound = async (peerHex, msg, owedId = null, { reservedBridge = fal
     meteredReplyDue.delete(norm(peerHex));
     if (meterGate?.charge) await meter.afterTurn(peerHex);
   };
+  if (brain === "echo" && emptyOpener) {
+    await deliverToChat(peerHex, openerGreeting).catch((e) => log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }));
+    return;
+  }
   if (brain === "echo") {
     markAnswer();
     // Through deliverToChat, so an echoed ```buttons block exercises spec 0006.
@@ -1938,7 +1947,7 @@ const handleInbound = async (peerHex, msg, owedId = null, { reservedBridge = fal
     let result;
     let answered = false;
     try {
-      result = await agentRuntime.handleMessage(peerHex, msg, { onAnswer: () => { answered = true; markAnswer(); } });
+      result = await agentRuntime.handleMessage(peerHex, msg, { onAnswer: () => { answered = true; markAnswer(); }, greeting: openerGreeting });
     } finally {
       typingAndSeen.turnEnded(norm(peerHex));
       meteredReplyDue.delete(norm(peerHex));
@@ -2210,6 +2219,7 @@ const snapshotState = () => ({
     ...(o.msg.kind && o.msg.kind !== "text" ? { k: o.msg.kind } : {}),
     ...(o.msg.replyTo ? { q: o.msg.replyTo } : {}),
     ...(o.msg.editOf ? { e: o.msg.editOf } : {}),
+    ...(o.msg.opener ? { op: 1 } : {}),
     // Spec 0009: a group turn (g.i group id, g.s sender username).
     ...(o.msg.group ? { g: { i: o.msg.group.id, s: o.msg.group.sender } } : {}),
     ...(o.msg.attachments?.length ? {
@@ -2322,6 +2332,7 @@ const handleOpener = async (data) => {
     text: decoded.text ?? "",
     messageId: decoded.messageId,
     kind: openerAttachments.length ? "richText" : "text",
+    opener: true, // an empty opener is greeted (handleInbound)
     ...(openerAttachments.length ? { attachments: openerAttachments } : {}),
   };
   if (isNew) {
@@ -3493,6 +3504,7 @@ for (const o of restored?.owed ?? []) {
       kind: o.k ?? "text",
       ...(o.q ? { replyTo: o.q } : {}),
       ...(o.e ? { editOf: o.e } : {}),
+      ...(o.op ? { opener: true } : {}),
       ...(typeof o.g?.i === "string" ? { group: { id: o.g.i, sender: String(o.g.s ?? "") } } : {}),
       ...(Array.isArray(o.a) && o.a.length ? {
         attachments: o.a.map((x) => ({

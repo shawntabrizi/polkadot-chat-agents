@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   buildAgentEnvironment,
   createAgentRuntime,
+  EMPTY_OPENER_PROMPT,
   isSafePrivateStagingRoot,
   isSafePrivilegedStagingParent,
   stripToolMarkup,
@@ -449,6 +450,57 @@ test("onAnswer runs for the brain's answer only: not for an error fallback or a 
   await ok.runtime.handleMessage("peer", { text: "hi", messageId: "M2", kind: "text" }, { onAnswer: () => seenAtAnswer.push(ok.delivered.length) });
   assert.deepEqual(seenAtAnswer, [0], "called once, before the answer goes out (so the answer can carry the pending debit)");
   assert.match(ok.delivered[0], /the answer/);
+});
+
+// Live 2026-09-24: a chat request with an empty opener ran `claude -p ""`,
+// which fails ("Input must be provided"), so a new user's first sight was
+// "couldn't reach my agent". An empty prompt must never reach the CLI.
+const OK_SCRIPT = `printf '{"type":"system","subtype":"init","session_id":"S1"}\\n{"type":"result","result":"Hi, welcome!","usage":{"input_tokens":1,"output_tokens":1}}\\n'`;
+const promptCapture = (script = OK_SCRIPT) => {
+  const prompts = [];
+  const h = makeRuntime({ buildArgs: (turn) => { prompts.push(turn.prompt); return ["-c", script]; } });
+  return { ...h, prompts };
+};
+
+for (const [label, text] of [["an empty", ""], ["a whitespace-only", "  \n\t "]]) {
+  test(`${label} opener runs the brain on the greeting prompt, is never charged, and never fails`, async () => {
+    const h = promptCapture();
+    let answers = 0;
+    assert.equal(await h.runtime.handleMessage("peer", { text, messageId: "M1", kind: "text", opener: true }, { onAnswer: () => { answers += 1; }, greeting: "Hello!" }), true);
+    assert.equal(h.prompts.length, 1);
+    assert.match(h.prompts[0], new RegExp(EMPTY_OPENER_PROMPT.replace(/[.]/g, "\\.")), "the brain greets in its persona, from a fixed prompt");
+    assert.equal(h.delivered.length, 1);
+    assert.match(h.delivered[0], /Hi, welcome!/);
+    assert.equal(answers, 0, "a synthetic greeting is not a paid answer");
+    assert.ok(!h.events.some((e) => e.event === "BOT_AI_FAILED"));
+    assert.ok(h.events.some((e) => e.event === "BOT_AI_SKIPPED_EMPTY" && e.fallback === "greeting"));
+  });
+}
+
+test("an empty opener whose greeting turn fails shows the greeting, not the apology", async () => {
+  const h = promptCapture("echo nope >&2; exit 1");
+  await h.runtime.handleMessage("peer", { text: "", messageId: "M1", kind: "text", opener: true }, { greeting: "Hello!" });
+  assert.deepEqual(h.delivered, ["Hello!"]);
+});
+
+test("any other empty prompt runs no engine turn and sends nothing", async () => {
+  const h = promptCapture();
+  let answers = 0;
+  assert.equal(await h.runtime.handleMessage("peer", { text: " ", messageId: "M1", kind: "text" }, { onAnswer: () => { answers += 1; } }), true);
+  assert.equal(h.prompts.length, 0, "the CLI is never spawned with empty input");
+  assert.deepEqual([h.delivered, h.sent, answers], [[], [], 0]);
+  assert.ok(h.events.some((e) => e.event === "BOT_AI_SKIPPED_EMPTY" && e.fallback === "none"));
+});
+
+test("a normal opener is unchanged: its text is the prompt and the answer is charged", async () => {
+  const h = promptCapture();
+  let answers = 0;
+  await h.runtime.handleMessage("peer", { text: "what is DOT?", messageId: "M1", kind: "text", opener: true }, { onAnswer: () => { answers += 1; }, greeting: null });
+  assert.equal(h.prompts.length, 1);
+  assert.match(h.prompts[0], /what is DOT\?/);
+  assert.doesNotMatch(h.prompts[0], /said nothing yet/);
+  assert.equal(answers, 1);
+  assert.ok(!h.events.some((e) => e.event === "BOT_AI_SKIPPED_EMPTY"));
 });
 
 test("/stop kills the running turn and the turn resolves without delivering", async () => {
