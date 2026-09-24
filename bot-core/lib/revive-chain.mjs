@@ -120,6 +120,37 @@ export const serialQueue = () => {
 };
 
 const withMargin = (value) => value + (value * MARGIN_PERCENT) / 100n;
+
+/** The smallest headroom a `tx` intent's storage deposit limit gets over its worst case: 0.1 PAS. */
+export const INTENT_DEPOSIT_HEADROOM = PLANCKS_PER_PAS / 10n;
+
+/**
+ * The limits a spec 0007 `tx` intent carries for one Revive call, from the
+ * call's WORST case over every path the contract can take: the largest
+ * storage deposit it can charge and the largest weight it can use.
+ *   storageDepositLimit = max(deposit × 1.5, deposit + 0.1 PAS)
+ *   gasRefTime, gasProofSize = weight × 1.5
+ * Why the worst case, not a dry-run: the client's dry-run takes the path of
+ * the state it reads, and the extrinsic can run in another state. A
+ * contract's paths differ a lot: Flip's first stake stores two slots (a
+ * charge), the settling stake clears them (a refund, so its dry-run says 0)
+ * but needs 2.3× the weight. Two players, a third one, or a reorg of the
+ * best block (seen 2026-09-24: a stake "in block #13630936" landed in
+ * #13630955) move the extrinsic to the other path, and a limit sized from
+ * the dry-run fails with `Revive.StorageDepositLimitExhausted` or
+ * `Revive.OutOfGas`. The limits are caps: the signer pays only what the call
+ * uses. The client signs with max(these limits, its own estimate + margin).
+ */
+export function reviveIntentLimits({ deposit, refTime, proofSize }) {
+  const half = (value) => BigInt(value) + BigInt(value) / 2n;
+  const byRatio = half(deposit);
+  const byHeadroom = BigInt(deposit) + INTENT_DEPOSIT_HEADROOM;
+  return {
+    gasRefTime: half(refTime),
+    gasProofSize: half(proofSize),
+    storageDepositLimit: byRatio > byHeadroom ? byRatio : byHeadroom,
+  };
+}
 const chargeOf = (deposit) => (deposit?.type === "Charge" ? BigInt(deposit.value) : 0n);
 
 /**

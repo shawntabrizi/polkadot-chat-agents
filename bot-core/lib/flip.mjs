@@ -15,11 +15,19 @@
 // looks the event's addresses up in that map. An address the bot has never
 // talked to (a stake from outside the chat) is logged and not notified.
 
-import { decodeUint256, eventTopic, flipCalldata, PLANCKS_PER_PAS, reviveAddress } from "./revive-chain.mjs";
+import { decodeUint256, eventTopic, flipCalldata, PLANCKS_PER_PAS, reviveAddress, reviveIntentLimits } from "./revive-chain.mjs";
 import { formatPas } from "./meter.mjs";
 
 export const FLIP_STAKE_PLANCKS = PLANCKS_PER_PAS / 2n; // 0.5 PAS; must equal Flip.STAKE / NativeToEthRatio
 export const FLIP_INTENT_TTL_MS = 10 * 60_000;
+/**
+ * The stake's worst case over its two paths (ReviveApi_call on devnet Asset
+ * Hub, 2026-09-24): the first stake stores player1 and openedAt and charges
+ * 52 800 000 plancks; the settling stake clears them (a refund) and uses the
+ * most weight. The intent's limits come from these (reviveIntentLimits), so
+ * a stake signed from a dry-run of one path still lands on the other.
+ */
+export const FLIP_STAKE_WORST = Object.freeze({ deposit: 52_800_000n, refTime: 1_515_302_851n, proofSize: 104_574n });
 export const FLIP_OFFER_TEXT = "Stake 0.5 PAS to flip. The second staker triggers the flip; the winner takes 1 PAS.";
 export const FLIP_TOPICS = Object.freeze({
   staked: eventTopic("Staked(uint256,address)"),
@@ -60,7 +68,7 @@ export function createFlip({ chain, contract, send, usernameOf = async () => nul
       tx: {
         version: 1,
         chainId: await chain.genesisHash(),
-        calls: [{ kind: 1, to: address, data: flipCalldata.stake(), value: FLIP_STAKE_PLANCKS }],
+        calls: [{ kind: 1, to: address, data: flipCalldata.stake(), value: FLIP_STAKE_PLANCKS, ...reviveIntentLimits(FLIP_STAKE_WORST) }],
         display: {
           title: "Coin flip stake",
           description: "Stakes 0.5 PAS in a coin flip. The second staker triggers the flip; the winner takes 1 PAS.",

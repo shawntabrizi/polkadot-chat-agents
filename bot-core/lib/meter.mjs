@@ -29,12 +29,20 @@
 // This module speaks plancks and converts at the contract boundary.
 
 import { COMMAND_RE } from "./commands.mjs";
-import { decodeUint256, meterCalldata, PLANCKS_PER_PAS, reviveAddress, serialQueue } from "./revive-chain.mjs";
+import { decodeUint256, meterCalldata, PLANCKS_PER_PAS, reviveAddress, reviveIntentLimits, serialQueue } from "./revive-chain.mjs";
 import { withTimeout } from "../vendor/lib/async-utils.mjs";
 
 export const DEFAULT_METER_PRICE = PLANCKS_PER_PAS / 10n; // 0.1 PAS
 export const METER_TOPUP_PLANCKS = PLANCKS_PER_PAS; // the Top up button adds 1 PAS
 export const METER_INTENT_TTL_MS = 10 * 60_000;
+/**
+ * topUp()'s worst case (ReviveApi_call on devnet Asset Hub, 2026-09-24): a
+ * user with no balance gets a new slot, 26 400 000 plancks and the most
+ * weight. A top-up signed from a dry-run with a balance can still land after
+ * a charge that took the balance to 0 (the slot is gone): the intent's limits
+ * come from the worst case (reviveIntentLimits).
+ */
+export const METER_TOPUP_WORST = Object.freeze({ deposit: 26_400_000n, refTime: 453_538_335n, proofSize: 45_218n });
 export const METER_BATCH_REPLIES = 5;
 export const METER_BATCH_MS = 10 * 60_000;
 const READ_TIMEOUT_MS = 20_000;
@@ -111,7 +119,7 @@ export function createMeter({
       tx: {
         version: 1,
         chainId: await chain.genesisHash(),
-        calls: [{ kind: 1, to: contract, data: meterCalldata.topUp(), value: METER_TOPUP_PLANCKS }],
+        calls: [{ kind: 1, to: contract, data: meterCalldata.topUp(), value: METER_TOPUP_PLANCKS, ...reviveIntentLimits(METER_TOPUP_WORST) }],
         display: {
           title: "Top up",
           description: `Adds ${formatPas(METER_TOPUP_PLANCKS)} to your prepaid balance with ${name}`,

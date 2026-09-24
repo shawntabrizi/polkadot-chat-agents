@@ -542,6 +542,33 @@ effect and the fee, and signs with the user's key. What the bot signs with
 its own wallet key (a meter charge, a faucet transfer) it reports with a
 `transactionReference`.
 
+**Limits of a Revive call (rule, 2026-09-24).** A `tx` intent that a bot
+feature builds (the flip's stake, the meter's top-up) sets `gasRefTime`,
+`gasProofSize` and `storageDepositLimit` on each kind 1 call, from the call's
+worst case over every path the contract can take (`reviveIntentLimits` in
+`lib/revive-chain.mjs`):
+
+```
+storageDepositLimit = max(deposit × 1.5, deposit + 0.1 PAS)
+gasRefTime          = refTime × 1.5
+gasProofSize        = proofSize × 1.5
+```
+
+`deposit`, `refTime` and `proofSize` are the largest a `ReviveApi_call` of
+the call shows on any path (measured on devnet, next to the intent:
+`FLIP_STAKE_WORST`, `METER_TOPUP_WORST`). Why not the client's dry-run: the
+dry-run takes the path of the state it reads, and the extrinsic can run in
+another state (another player's call lands first, or the best block that held
+an earlier call is reorged away). Flip's first stake charges 52 800 000
+plancks for two new slots; the settling stake refunds them, so its dry-run
+shows a deposit of 0, but it needs 2.3× the weight. On 2026-09-24 a second
+stake, dry-run with the first stake in the best block, ran as a first stake
+(the first stake had been "in block #13630936" and landed in #13630955) and
+failed with `Revive.StorageDepositLimitExhausted`; the mirror case fails with
+`Revive.OutOfGas`. The limits are caps: the signer pays only what the call
+uses. The client must sign with, per field, the larger of the intent's value
+and its own estimate plus margin.
+
 **From a brain.** The fenced ```buttons block (spec 0006) accepts
 `"action": { "tx": { "chainId", "calls", "display", "expiresAt", "dryRunRequired"? } }`,
 with `to` and `data` as 0x hex and `value` as a decimal string (u128).
@@ -624,7 +651,8 @@ is `contracts/flip/`, documented in
 opener after an accept, `/stake`, any other text) is answered with one
 buttons message, "Stake 0.5 PAS to flip. The second staker triggers the flip;
 the winner takes 1 PAS.", with one `tx` button "Stake 0.5 PAS": a Revive call
-of `stake()` with a value of 5 000 000 000 plancks, which expires after 10
+of `stake()` with a value of 5 000 000 000 plancks and the limits of the
+stake's worst path (see "Limits of a Revive call"), which expires after 10
 minutes. No brain turn runs (use the `echo` brain). The bot never signs a
 stake. The contract settles in the second player's own call: it takes a
 winner from `keccak256(abi.encode(blockhash(block.number - 1), player1,

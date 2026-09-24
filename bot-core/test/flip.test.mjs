@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createFlip, FLIP_OFFER_TEXT, FLIP_STAKE_PLANCKS, FLIP_TOPICS } from "../lib/flip.mjs";
-import { eventTopic, reviveAddress, selector } from "../lib/revive-chain.mjs";
+import { createFlip, FLIP_OFFER_TEXT, FLIP_STAKE_PLANCKS, FLIP_STAKE_WORST, FLIP_TOPICS } from "../lib/flip.mjs";
+import { eventTopic, reviveAddress, reviveIntentLimits, selector } from "../lib/revive-chain.mjs";
 import { decodeOpaqueMessageAt, decodeTxIntent, encodeOpaqueButtonsMessage } from "../vendor/app-chat-codec.mjs";
 
 const PAS = 10_000_000_000n;
@@ -72,7 +72,7 @@ test("any message is answered with a Stake 0.5 PAS tx button", async () => {
   assert.equal(button.label, "Stake 0.5 PAS");
   const intent = button.action.tx;
   assert.equal(intent.chainId, GENESIS);
-  assert.deepEqual(intent.calls, [{ kind: 1, to: CONTRACT, data: selector("stake()"), value: 5_000_000_000n }]);
+  assert.deepEqual(intent.calls, [{ kind: 1, to: CONTRACT, data: selector("stake()"), value: 5_000_000_000n, ...reviveIntentLimits(FLIP_STAKE_WORST) }]);
   assert.deepEqual([intent.display.amount, intent.display.asset], ["0.5", "PAS"]);
   assert.equal(intent.expiresAt, 1_720_000_000_000 + 10 * 60_000);
   assert.deepEqual(logs.filter((l) => l.event === "BOT_FLIP_OFFERED").map((l) => l.on), ["message", "command"]);
@@ -81,6 +81,38 @@ test("any message is answered with a Stake 0.5 PAS tx button", async () => {
   const decoded = decodeTxIntent(decodeOpaqueMessageAt(opaque, 0).value.rows[0][0].action.tx);
   assert.equal(decoded.calls[0].value, 5_000_000_000n);
   assert.equal(`0x${Buffer.from(decoded.calls[0].to).toString("hex")}`, CONTRACT);
+});
+
+// M12h, 2026-09-24: a second stake was dry-run while the first one waited
+// (the settling path: a refund, so the estimate's deposit was 0), then ran
+// as a FIRST stake (a reorg put it before the first one) and failed with
+// Revive.StorageDepositLimitExhausted. The mirror case (dry-run of a first
+// stake, run as the settling one) failed with Revive.OutOfGas. The intent's
+// limits must cover the worst path of the stake whatever path the client's
+// dry-run took. Values: ReviveApi_call on devnet Asset Hub, 2026-09-24.
+test("the stake intent's limits cover both paths of stake(), whatever the client's dry-run saw", async () => {
+  const { flip, sent } = setup();
+  await flip.handle(ALICE, { kind: "text", text: "hi" });
+  const opaque = encodeOpaqueButtonsMessage({ text: sent[0].text, rows: sent[0].rows });
+  const [call] = decodeTxIntent(decodeOpaqueMessageAt(opaque, 0).value.rows[0][0].action.tx).calls;
+  const firstStake = { deposit: 52_800_000n, refTime: 669_639_182n, proofSize: 76_080n };
+  const settlingStake = { deposit: 0n /* Refund 52 800 000 */, refTime: 1_515_302_851n, proofSize: 104_574n };
+  for (const path of [firstStake, settlingStake]) {
+    assert.ok(call.storageDepositLimit >= path.deposit + PAS / 10n, "at least 0.1 PAS over the deposit of either path");
+    assert.ok(call.gasRefTime >= path.refTime + path.refTime / 2n, "ref_time 1.5x either path");
+    assert.ok(call.gasProofSize >= path.proofSize + path.proofSize / 2n, "proof_size 1.5x either path");
+  }
+  // What the desktop signed with in the failed run: its estimate of the settling path + 20% + 1.
+  assert.ok(call.storageDepositLimit > 1n, "a limit from the settling dry-run (1 planck) is what failed");
+});
+
+// The rule (spec 0007 note for kind 1): a small deposit gets 0.1 PAS of
+// headroom (one more storage slot is ~0.0026 PAS, so x1.5 alone would not
+// cover a path that stores one slot more); a large one gets x1.5.
+test("reviveIntentLimits: deposit max(x1.5, +0.1 PAS), weight x1.5", () => {
+  assert.deepEqual(reviveIntentLimits({ deposit: 0n, refTime: 10n, proofSize: 4n }), { gasRefTime: 15n, gasProofSize: 6n, storageDepositLimit: PAS / 10n });
+  assert.equal(reviveIntentLimits({ deposit: 52_800_000n, refTime: 0n, proofSize: 0n }).storageDepositLimit, 52_800_000n + PAS / 10n);
+  assert.equal(reviveIntentLimits({ deposit: PAS, refTime: 0n, proofSize: 0n }).storageDepositLimit, (PAS * 3n) / 2n);
 });
 
 // Both players learn the result in their own chat, with the settling
