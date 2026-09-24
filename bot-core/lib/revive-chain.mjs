@@ -3,8 +3,8 @@
 // metadata-driven (unsafe) API. No descriptors are generated for Asset Hub:
 // the few calls used here are checked against the live metadata by papi.
 //
-// Used by the meter, faucet and flip features (lib/meter.mjs, lib/faucet.mjs,
-// lib/flip.mjs) and by contracts/*/deploy.mjs. Features take the object returned by
+// Used by the meter, faucet, flip and dao features (lib/meter.mjs, lib/faucet.mjs,
+// lib/flip.mjs, lib/dao.mjs) and by contracts/*/deploy.mjs. Features take the object returned by
 // createReviveChain, so tests pass a fake with the same methods.
 
 import { blake2b } from "@noble/hashes/blake2.js";
@@ -63,7 +63,7 @@ export function parseAccountId(input) {
   } catch { return null; }
 }
 
-// ---------- Solidity ABI: just what the meter and flip contracts need ----------
+// ---------- Solidity ABI: just what the meter, flip and dao contracts need ----------
 export const selector = (signature) => toHex(keccak_256(new TextEncoder().encode(signature)).subarray(0, 4));
 const word = (big) => BigInt(big).toString(16).padStart(64, "0");
 export const abiAddress = (h160) => {
@@ -101,6 +101,44 @@ export const flipCalldata = {
   stake: () => selector("stake()"),
   stakeOf: (player) => `${selector("stakeOf(address)")}${abiAddress(player)}`,
   pending: () => selector("pending()"),
+  constructor: () => "0x",
+};
+// Dao (contracts/dao): groups by keccak256(group id), proposals, staked votes.
+// Head/tail ABI encoding for the few argument types it takes.
+const pad32 = (hex) => hex.padEnd(Math.ceil(hex.length / 64) * 64, "0");
+const abiEncode = (types, values) => {
+  const heads = [];
+  const tails = [];
+  let tailBytes = types.length * 32;
+  for (const [i, type] of types.entries()) {
+    const v = values[i];
+    let tail = null;
+    if (type === "address") heads.push(abiAddress(v));
+    else if (type === "bytes32") heads.push(String(v).replace(/^0x/i, "").padStart(64, "0"));
+    else if (type === "bool") heads.push(word(v ? 1n : 0n));
+    else if (type === "uint256" || type === "uint64") heads.push(abiUint256(v));
+    else if (type === "string" || type === "bytes") {
+      const bytes = type === "string" ? new TextEncoder().encode(v) : typeof v === "string" ? fromHex(v) : v;
+      tail = word(bytes.length) + pad32(toHex(bytes).slice(2));
+    } else if (type === "address[]") tail = word(v.length) + v.map(abiAddress).join("");
+    else throw new Error(`abi type ${type} is not supported here`);
+    if (tail != null) { heads.push(word(tailBytes)); tails.push(tail); tailBytes += tail.length / 2; }
+  }
+  return heads.join("") + tails.join("");
+};
+/** The Dao's bytes32 for a chat group: keccak256 of the group id string. */
+export const daoGroupKey = (groupId) => toHex(keccak_256(new TextEncoder().encode(String(groupId))));
+export const daoCalldata = {
+  setMembers: (groupKey, add, remove) => `${selector("setMembers(bytes32,address[],address[])")}${abiEncode(["bytes32", "address[]", "address[]"], [groupKey, add, remove])}`,
+  fund: (groupKey) => `${selector("fund(bytes32)")}${abiEncode(["bytes32"], [groupKey])}`,
+  propose: ({ groupKey, title, target, value, data = "0x", deadline }) => `${selector("propose(bytes32,string,address,uint256,bytes,uint64)")}${abiEncode(["bytes32", "string", "address", "uint256", "bytes", "uint64"], [groupKey, title, target, value, data, deadline])}`,
+  vote: (id, support) => `${selector("vote(uint256,bool)")}${abiEncode(["uint256", "bool"], [id, support])}`,
+  execute: (id) => `${selector("execute(uint256)")}${abiEncode(["uint256"], [id])}`,
+  withdraw: (id) => `${selector("withdraw(uint256)")}${abiEncode(["uint256"], [id])}`,
+  isMember: (groupKey, account) => `${selector("isMember(bytes32,address)")}${abiEncode(["bytes32", "address"], [groupKey, account])}`,
+  groupAdmin: (groupKey) => `${selector("groupAdmin(bytes32)")}${abiEncode(["bytes32"], [groupKey])}`,
+  treasury: (groupKey) => `${selector("treasury(bytes32)")}${abiEncode(["bytes32"], [groupKey])}`,
+  count: () => selector("count()"),
   constructor: () => "0x",
 };
 export const eventTopic = (signature) => toHex(keccak_256(new TextEncoder().encode(signature)));
@@ -249,15 +287,24 @@ export function createReviveChain({ endpoints, cacheDir, inclusionTimeoutMs = IN
       if (!result.ok) throw new Error(`map_account failed: ${result.error}`);
       return true;
     },
-    /** Dry-run, then sign a `Revive.call` with the dry-run's weight and deposit plus a margin. */
-    async callContract(pair, { dest, calldata, value = 0n, onSlow = null }) {
+    /**
+     * Dry-run, then sign a `Revive.call` with the dry-run's weight and deposit
+     * plus a margin. `limits` (a spec 0007 intent's gasRefTime, gasProofSize,
+     * storageDepositLimit): the signer rule of 0007 "Limits of a Revive call",
+     * each field is the larger of the intent's value and the estimate + margin.
+     */
+    async callContract(pair, { dest, calldata, value = 0n, onSlow = null, limits = null }) {
       const dry = await self.dryRunCall({ origin: pair.publicKey, dest, calldata, value });
       if (!dry.ok) return { ok: false, dryRun: true, error: dry.revert, hash: null, block: null };
+      const atLeast = (estimate, cap) => (cap != null && BigInt(cap) > estimate ? BigInt(cap) : estimate);
       const tx = api.tx.Revive.call({
         dest,
         value,
-        weight_limit: { ref_time: withMargin(BigInt(dry.weight.ref_time)), proof_size: withMargin(BigInt(dry.weight.proof_size)) },
-        storage_deposit_limit: withMargin(dry.deposit),
+        weight_limit: {
+          ref_time: atLeast(withMargin(BigInt(dry.weight.ref_time)), limits?.gasRefTime),
+          proof_size: atLeast(withMargin(BigInt(dry.weight.proof_size)), limits?.gasProofSize),
+        },
+        storage_deposit_limit: atLeast(withMargin(dry.deposit), limits?.storageDepositLimit),
         data: Binary.fromHex(calldata),
       });
       return submit(tx, pair, { onSlow });

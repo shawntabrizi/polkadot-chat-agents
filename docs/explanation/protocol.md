@@ -693,6 +693,38 @@ startup. A player the bot never talked to is logged
 `BOT_FLIP_UNKNOWN_PLAYER`, `BOT_FLIP_REFUNDED`, `BOT_FLIP_REFERENCE`,
 `BOT_FLIP_WATCH_FAILED`, `BOT_FLIP_OFFER_FAILED`, `BOT_FLIP_USERNAME_FAILED`.
 
+**DAO chat (M14).** `BOT_DAO_CONTRACT` turns it on (`lib/dao.mjs`; the
+contract is `contracts/dao/`, documented in
+`polkadot-chat-desktop/docs/spec/contracts/dao.md`). It works in v2 groups
+(spec 0011) where the bot is an admin with the pin permission. A member's
+`/propose <title> | <amount> PAS to <username>` in the group makes the bot:
+register the group's members on the contract (`setMembers`, only when the
+roster changed since the last proposal; the group is keyed by
+`keccak256(group id)`), create the proposal (`propose`, deadline now +
+`BOT_DAO_VOTING_SECS`), post ONE buttons message with "Vote yes (stake 0.1
+PAS)" / "Vote no (stake 0.1 PAS)" `tx` buttons and a "View on Subscan" url
+button, and pin it (one state statement). A sender who is not a member gets
+"Refused". `/proposals` lists the group's open proposals. The command never
+runs a brain turn; with the `echo` brain the bot does not answer other group
+messages.
+
+The bot watches the contract at the best block. A `Voted` event of one of
+its proposals becomes one tally line, a reply to the proposal message
+("Tally #N: yes … (k votes), no …. <name> voted yes with 0.1 PAS."), in the
+bot's next group statement; a reorg that delivers the event again adds no
+line. Twelve seconds after the deadline the bot posts the result: "passed"
+with an "Execute" and a "Withdraw stake" `tx` button, or "rejected" with
+only "Withdraw stake" (valid for 7 days). An `Executed` event becomes one
+line; a `Withdrawn` event is only logged. Every intent carries the limits of
+its worst contract path (see "Limits of a Revive call"). Proposals and the
+registered roster are session state. Registering members writes their
+contract addresses next to the group key on a public chain. Logs:
+`BOT_DAO_ENABLED`, `BOT_DAO_WATCHING`, `BOT_DAO_MEMBERS_SET`,
+`BOT_DAO_PROPOSED`, `BOT_DAO_PINNED`, `BOT_DAO_VOTED`, `BOT_DAO_CLOSED`,
+`BOT_DAO_EXECUTED`, `BOT_DAO_WITHDRAWN`, `BOT_DAO_REFUSED`,
+`BOT_DAO_PROPOSE_FAILED`, `BOT_DAO_COMMAND_FAILED`, `BOT_DAO_POST_FAILED`,
+`BOT_DAO_WATCH_FAILED`. Live proof: `bot-core/scripts/e2e-dao.mjs`.
+
 ### Groups (spec 0009)
 
 Spec 0009 (`polkadot-chat-desktop/docs/spec/0009-groups.md`) adds small group

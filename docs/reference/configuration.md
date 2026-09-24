@@ -455,8 +455,11 @@ Both features are off unless their variables are set. See
 | `BOT_FAUCET_CHAIN` | devnet Asset Hub | wss endpoint(s) for the faucet transfers, comma-separated. |
 | `BOT_FLIP_CONTRACT` | unset | 0x address (20 bytes) of a deployed Flip contract (`contracts/flip/`). Turns on the coin flip: every message is answered with a "Stake 0.5 PAS" `tx` button, and settlements are posted to both players as references. Use the `echo` brain; no brain turn runs. The bot signs nothing, so its wallet needs no funds. |
 | `BOT_FLIP_CHAIN` | devnet Asset Hub | wss endpoint(s) of the chain that holds the Flip contract, comma-separated. |
+| `BOT_DAO_CONTRACT` | unset | 0x address (20 bytes) of a deployed Dao contract (`contracts/dao/`; devnet Asset Hub: `0x073f0e29750b26286befd15619d24ee77e014d87`). Turns on DAO chat in v2 groups where the bot is an admin: `/propose <title> \| <amount> PAS to <username>` and `/proposals`. The bot signs `setMembers` and `propose`, so its wallet needs funds on the chain (the live proof spent 0.032 PAS for the account mapping, three members and one proposal). With the `echo` brain, other group messages get no answer. |
+| `BOT_DAO_CHAIN` | devnet Asset Hub | wss endpoint(s) of the chain that holds the Dao contract, comma-separated. |
+| `BOT_DAO_VOTING_SECS` | `86400` | Voting period of a new proposal, 30 s to 30 days. |
 
-The meter, faucet and coin flip use the chain's metadata directly (papi's
+The meter, faucet, coin flip and DAO use the chain's metadata directly (papi's
 unsafe API), so no descriptors are generated for the chain. The meter's Top
 up button and the coin flip's Stake button expire 10 minutes after they are
 sent.

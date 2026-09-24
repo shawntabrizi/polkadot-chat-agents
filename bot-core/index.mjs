@@ -106,6 +106,7 @@ import { createReviveChain } from "./lib/revive-chain.mjs";
 import { createMeter, DEFAULT_METER_PRICE, METER_BATCH_MS, METER_BATCH_REPLIES, parsePlancks } from "./lib/meter.mjs";
 import { createFaucet, DEFAULT_FAUCET_AMOUNT, faucetPairFromPath } from "./lib/faucet.mjs";
 import { createFlip } from "./lib/flip.mjs";
+import { createDao, DEFAULT_DAO_VOTING_SECS } from "./lib/dao.mjs";
 import { createClient as createPapiClient } from "polkadot-api";
 import { getWsProvider, WsEvent } from "polkadot-api/ws";
 import { paseoPeopleNext, productsDevnetPeople } from "./lib/descriptors.mjs";
@@ -1566,6 +1567,22 @@ const actOnGroupResults = async (results) => {
     if (r.outcome !== "accepted") continue;
     for (const f of r.messages) {
       if (!f.answerable) continue;
+      // DAO chat (lib/dao.mjs): /propose and /proposals never reach the brain,
+      // and an echo brain stays quiet in the group (it would repeat every line).
+      if (dao) {
+        const c = f.message;
+        if ((c.kind === "text" || c.kind === "richText") && dao.isCommand(c.text)) {
+          const id = `g2:${r.groupId}:${f.from}:${c.messageId}`;
+          if (seenRequests.has(id)) continue;
+          seenRequests.add(id);
+          trimSet(seenRequests, SEEN_CAP);
+          log("BOT_GROUP2_RECEIVED", { group: r.groupId, from: f.from, messageId: c.messageId, kind: c.kind, dao: true });
+          // Chain calls take a few blocks: the ingress does not wait for them.
+          dao.command(r.groupId, f.from, c.text).catch(() => {}).finally(() => persist());
+          continue;
+        }
+        if (brain === "echo") continue;
+      }
       const turn = groupTurnFrom(r.groupId, f.from, f.from.slice(0, 8), f.message);
       if (!turn) continue;
       const id = `g2:${r.groupId}:${f.from}:${f.message.messageId}`;
@@ -1897,6 +1914,32 @@ if (env.BOT_FLIP_CONTRACT) {
     });
     log("BOT_FLIP_ENABLED", { contract: env.BOT_FLIP_CONTRACT.trim(), chain: (endpoints.length ? endpoints : DEFAULT_ASSET_HUB_ENDPOINTS)[0] });
   } catch (error) { featureConfigError("BOT_FLIP_*", error); }
+}
+
+// DAO chat (lib/dao.mjs, M14): BOT_DAO_CONTRACT turns it on. In a v2 group
+// where the bot is an admin, /propose creates a proposal on the Dao contract
+// (the bot signs and pays: its wallet needs funds on the chain) and posts it
+// with vote buttons, pinned; Voted events become tally lines. The watcher
+// starts with the ingress (below).
+let dao = null;
+if (env.BOT_DAO_CONTRACT) {
+  try {
+    const endpoints = endpointList(env.BOT_DAO_CHAIN);
+    dao = createDao({
+      chain: createReviveChain({ endpoints: endpoints.length ? endpoints : DEFAULT_ASSET_HUB_ENDPOINTS }),
+      contract: env.BOT_DAO_CONTRACT.trim(),
+      pair: wallet,
+      selfHex: accountIdHex,
+      groupsV2,
+      sendGroup: (groupId, opaques) => sendToGroupV2(groupId, opaques),
+      accountOf: async (name) => directory.usernameOwner(name),
+      usernameOf: async (peerHex) => (await directory.consumerOf(peerHex))?.username ?? null,
+      votingSecs: numberEnv("BOT_DAO_VOTING_SECS", DEFAULT_DAO_VOTING_SECS, { min: 30, max: 30 * 86_400 }),
+      log,
+      onChange: () => persist(),
+    });
+    log("BOT_DAO_ENABLED", { contract: env.BOT_DAO_CONTRACT.trim(), chain: (endpoints.length ? endpoints : DEFAULT_ASSET_HUB_ENDPOINTS)[0] });
+  } catch (error) { featureConfigError("BOT_DAO_*", error); }
 }
 
 // Spec 0012: encrypt, store on Bulletin (ceil(size / 2 MB) feeless
@@ -2632,6 +2675,7 @@ const snapshotState = () => ({
   groups: groups.snapshot(),
   groups2: groupsV2.snapshot(),
   groupJoins: groupAdmin.snapshot(),
+  ...(dao ? { dao: dao.snapshot() } : {}),
 });
 const greetedPeers = new Set(); // peers we've sent a first-contact greeting (once ever)
 const persist = () => { if (stateStore) stateStore.save(snapshotState()); };
@@ -3903,6 +3947,7 @@ agentRuntime?.noteRestoredAgent(restored?.agent ?? null);
 groups.restore(restored?.groups);
 groupsV2.restore(restored?.groups2);
 groupAdmin.restore(restored?.groupJoins);
+dao?.restore(restored?.dao);
 let restoredPeers = 0;
 // Peers refused by the current allowlist: a session and its owed entries
 // are one refused peer, not one refusal per record.
@@ -4072,6 +4117,7 @@ if ((env.BOT_SUBSCRIBE ?? "1") !== "0") {
   resubscribe(true);
   ingress = { supervisor, resubscribe };
   flip?.start();
+  dao?.start();
   log("BOT_SUBSCRIBED", { heartbeatMs: numberEnv("BOT_HEARTBEAT_MS", 120_000, { min: 1000, max: 86_400_000 }) });
 }
 
