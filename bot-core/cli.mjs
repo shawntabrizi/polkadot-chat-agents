@@ -1793,6 +1793,12 @@ function cmdRun(name, flags = {}) {
   child.stdout.on("data", (chunk) => { process.stdout.write(chunk); botLog.stream.write(chunk); });
   child.stderr.on("data", (chunk) => { process.stderr.write(chunk); botLog.stream.write(chunk); });
   child.on("exit", (code) => botLog.stream.end(() => process.exit(code ?? 0)));
+  // A signal to pca (Ctrl-C, or a supervisor's or `kill`'s SIGTERM) goes to
+  // the bot too, and pca exits only when the bot has: exiting first left the
+  // bot running with its pidfile, and the next run refused to start.
+  for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+    process.on(sig, () => { if (child.exitCode == null && child.signalCode == null) child.kill(sig); });
+  }
 }
 
 // Local bot log: append-only, private, rotated once so it can't grow without

@@ -30,9 +30,12 @@
 //     messages, never older than the asker's join unless historyShare > 0;
 //   - as an admin (role >= 1 with the flag): answer keyRequest with a
 //     welcome, admit join requests by invite (policy 2 at once, policy 1
-//     pending), remove a member (rekey on the old topic + state on the new
-//     one: two submissions), remove a member that posted groupLeave, and
-//     rotate the epoch after 7 days.
+//     pending until an approval, then state + welcome + the shared history),
+//     remove a member (rekey on the old topic + state on the new one: two
+//     submissions), remove a member that posted groupLeave, rotate the epoch
+//     after 7 days, and make a state change for a member who asked (the
+//     change must pass the 0011 rules for that member AND for the bot:
+//     lib/group-admin.mjs holds the DM commands).
 //
 // Kept apart from index.mjs so every rule runs in memory in the tests.
 import crypto from "node:crypto";
@@ -475,7 +478,8 @@ export const createGroupsV2 = ({
 
     // Remove a member: rekey on Topic_e (an entry per remaining member,
     // itself included) + the new state on Topic_{e+1}. Two submissions.
-    async remove(groupId, accountHex) { return rekeyGroup(groupId, { remove: norm(accountHex) }); },
+    // `by`: the member who asked (over DM); the same rules apply to it.
+    async remove(groupId, accountHex, { by = null } = {}) { return rekeyGroup(groupId, { remove: norm(accountHex), by: by == null ? null : norm(by) }); },
     // Timer rotation: a new epoch with the same roster.
     async rotate(groupId) { return rekeyGroup(groupId, {}); },
 
@@ -492,10 +496,12 @@ export const createGroupsV2 = ({
     },
 
     // A "Join request: <name> [grp:<inviteId>:<proof>]" opener from a stranger:
-    // accept the chat request when the bot admits for that invite.
+    // accept the chat request when the bot admits for that invite. Returns
+    // the join request the opener carries ({ groupId, inviteId, proof, note }),
+    // or null.
     acceptsJoinOpener(peerHex, text) {
       const m = /\[grp:([A-Za-z0-9_-]+):([A-Za-z0-9_-]+)\]/.exec(String(text ?? ""));
-      if (!m) return false;
+      if (!m) return null;
       const inviteId = Buffer.from(m[1], "base64url").toString("hex");
       const proof = Buffer.from(m[2], "base64url");
       for (const g of groups.values()) {
@@ -504,14 +510,17 @@ export const createGroupsV2 = ({
         if (!proof.equals(Buffer.from(joinProof(invite.secret, peerHex)))) continue;
         joinOpeners.set(norm(peerHex), g.groupId);
         while (joinOpeners.size > 500) joinOpeners.delete(joinOpeners.keys().next().value);
-        return true;
+        return { groupId: g.groupId, inviteId: Uint8Array.from(Buffer.from(inviteId, "hex")), proof: Uint8Array.from(proof), note: "" };
       }
-      return false;
+      return null;
     },
 
     // A joinRequest over the DM session. Policy 2 admits at once (state +
-    // welcome), policy 1 answers pending, anything invalid is rejected.
-    async joinRequest(fromHex, req) {
+    // welcome), policy 1 answers pending (lib/group-admin.mjs asks the owner),
+    // anything invalid is rejected. `approved`: an admin approved a policy-1
+    // request; every check runs again (the invite may be gone meanwhile).
+    // An admission also shares the last `historyShare` messages (0011).
+    async joinRequest(fromHex, req, { approved = false } = {}) {
       const from = norm(fromHex);
       const g = groups.get(req.groupId);
       const inviteId = hexOf(req.inviteId);
@@ -529,7 +538,7 @@ export const createGroupsV2 = ({
       if (invite.maxUses !== 0 && invite.uses >= invite.maxUses) return decide(1, "used-up");
       if (g.state.members.length >= GROUP_MEMBER_CAP) return decide(1, "full");
       if (g.state.joinPolicy === 0) return decide(1, "admins-add-only");
-      if (g.state.joinPolicy === 1) return decide(0, "pending");
+      if (g.state.joinPolicy === 1 && !approved) return decide(0, "pending");
       joinOpeners.delete(from);
       const state = {
         ...g.state,
@@ -539,8 +548,50 @@ export const createGroupsV2 = ({
       };
       await postState(g, current(g), state);
       await sendControl(from, welcomeFor(g));
-      log("BOT_GROUP2_ADMITTED", { group: g.groupId, member: from, version: state.version });
+      const pages = g.state.historyShare > 0 ? api.historyPages(from, { groupId: g.groupId, since: { timestamp: 0 }, limit: g.state.historyShare }) : [];
+      for (const page of pages) if (page.history.items.length) await sendControl(from, page);
+      log("BOT_GROUP2_ADMITTED", { group: g.groupId, member: from, version: state.version, ...(approved ? { approved: true } : {}), ...(pages.length ? { historyPages: pages.length } : {}) });
       return "admitted";
+    },
+
+    // A policy-1 request an admin rejected, or one that expired.
+    async rejectJoin(fromHex, req) {
+      await sendControl(norm(fromHex), { joinDecision: { groupId: req.groupId, inviteId: req.inviteId, status: 1 } });
+      log("BOT_GROUP2_JOIN_DECIDED", { group: req.groupId, from: norm(fromHex), status: "rejected", reason: "admin-or-expiry" });
+      return "rejected";
+    },
+
+    member: (groupId, accountHex) => memberOf(groups.get(groupId)?.state, accountHex),
+    // May this account use `flag` in this group? (Admin flags need role >= 1.)
+    can: (groupId, accountHex, flag) => can(memberOf(groups.get(groupId)?.state, accountHex), flag),
+
+    // A state change asked for by `actorHex` (a member, over DM): the next
+    // state must pass the 0011 rules for the actor AND for the bot, which
+    // signs it. One state statement. { ok, version? , reason?, who? }.
+    async changeState(groupId, actorHex, mutate) {
+      const g = groups.get(groupId);
+      if (!g?.state || g.status !== "member") return { ok: false, reason: "unknown-group" };
+      const next = { ...mutate(g.state), version: g.state.version + 1 };
+      const asActor = stateChangeAllowed(g.state, next, memberOf(g.state, actorHex));
+      if (asActor) return { ok: false, reason: asActor, who: "sender" };
+      const asBot = stateChangeAllowed(g.state, next, selfMember(g));
+      if (asBot) return { ok: false, reason: asBot, who: "bot" };
+      await postState(g, current(g), next);
+      return { ok: true, version: next.version };
+    },
+
+    // A message of this group the bot holds: by id, else the newest whose
+    // text holds `query` (case-insensitive). { messageId, from, text } | null.
+    findMessage(groupId, query) {
+      const g = groups.get(groupId);
+      const q = String(query ?? "").trim();
+      if (!g || !q) return null;
+      const textOf = (x) => { const m = decodeOpaqueMessageAt(x.opaque, 0).value; return typeof m.text === "string" ? m.text : ""; };
+      const byId = g.history.find((x) => x.messageId === q);
+      if (byId) return { messageId: byId.messageId, from: byId.from, text: textOf(byId) };
+      const low = q.toLowerCase();
+      const hit = [...g.history].reverse().find((x) => textOf(x).toLowerCase().includes(low));
+      return hit ? { messageId: hit.messageId, from: hit.from, text: textOf(hit) } : null;
     },
 
     // Create a group with this identity as owner (tests, scripts): epoch 1,
@@ -635,15 +686,21 @@ export const createGroupsV2 = ({
 
   // The admin's epoch change: K_{e+1}, an entry per remaining member with
   // K(admin, member), rekey on the old topic, the new state on the new one.
-  const rekeyGroup = async (groupId, { remove = null }) => {
+  const rekeyGroup = async (groupId, { remove = null, by = null }) => {
     const g = groups.get(groupId);
     const me = g?.state ? selfMember(g) : null;
-    if (!me || !can(me, PERMISSIONS.remove)) return { ok: false, reason: "not-allowed" };
+    if (by != null) {
+      const actor = memberOf(g?.state, by);
+      if (!actor || !can(actor, PERMISSIONS.remove)) return { ok: false, reason: "no-remove", who: "sender" };
+      const target = memberOf(g.state, remove);
+      if (target?.role >= ROLES.admin && actor.role !== ROLES.owner) return { ok: false, reason: "owner-only", who: "sender" };
+    }
+    if (!me || !can(me, PERMISSIONS.remove)) return { ok: false, reason: "no-remove", who: "bot" };
     if (remove) {
       const target = memberOf(g.state, remove);
       if (!target) return { ok: false, reason: "not-member" };
       if (target.role === ROLES.owner) return { ok: false, reason: "owner" };
-      if (target.role >= ROLES.admin && me.role !== ROLES.owner) return { ok: false, reason: "owner-only" };
+      if (target.role >= ROLES.admin && me.role !== ROLES.owner) return { ok: false, reason: "owner-only", who: "bot" };
     }
     const old = current(g);
     const newEpoch = g.epoch + 1;

@@ -950,6 +950,44 @@ test("pca logs reads the local bot.log that pca run keeps", () => {
   }
 });
 
+// A supervisor (or `kill`) stops pca run with SIGTERM. pca used to exit and
+// leave the bot child running with the identity's pidfile, so the next run
+// refused with "Another bot process already serves this identity".
+test("pca run forwards SIGTERM to the bot and exits only after it: the pidfile is free for the next run", async () => {
+  const botsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pca-cli-"));
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const waitUntil = async (fn, ms) => {
+    const until = Date.now() + ms;
+    while (Date.now() < until) { const v = fn(); if (v) return v; await new Promise((r) => setTimeout(r, 100)); }
+    return null;
+  };
+  let botPid = null;
+  try {
+    // An unreachable store node: the bot starts, takes the pidfile and keeps retrying.
+    writeBot(botsDir, "sigbot", { endpoint: "ws://127.0.0.1:9", bridgePort: 20_000 + Math.floor(Math.random() * 20_000) });
+    const pidfile = path.join(botsDir, "sigbot", "bot.pid");
+    const pca = spawn(process.execPath, [CLI, "run", "sigbot"], {
+      cwd: path.join(HERE, ".."),
+      env: { ...process.env, PCA_BOTS_DIR: botsDir, NO_COLOR: "1" },
+      stdio: "ignore",
+    });
+    const closed = new Promise((r) => pca.on("close", r));
+    botPid = await waitUntil(() => {
+      const pid = fs.existsSync(pidfile) ? Number.parseInt(fs.readFileSync(pidfile, "utf8"), 10) : NaN;
+      return Number.isInteger(pid) && pid > 0 ? pid : null;
+    }, 20_000);
+    assert.ok(botPid, "the bot took its pidfile");
+    assert.notEqual(botPid, pca.pid, "the bot is pca's child");
+    pca.kill("SIGTERM");
+    await closed;
+    assert.equal(alive(botPid), false, "the bot stopped before pca exited");
+    assert.equal(fs.existsSync(pidfile), false, "the pidfile is released");
+  } finally {
+    if (botPid && alive(botPid)) process.kill(botPid, "SIGKILL");
+    fs.rmSync(botsDir, { recursive: true, force: true });
+  }
+});
+
 // A requested number is checked through the backend's search route (the
 // single lookup is retired) and compared in the chain's padded form, so a
 // backend that renders `sandboxbot.7` still says `sandboxbot.07` is taken.

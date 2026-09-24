@@ -89,6 +89,7 @@ import { buttonPressText, createSentButtons } from "./lib/button-presses.mjs";
 import { createBotInfoSent, createPeerBotInfo, defaultBotInfo, loadBotInfo } from "./lib/bot-info.mjs";
 import { createGroups, groupSessionKey } from "./lib/groups.mjs";
 import { createGroupsV2 } from "./lib/groups-v2.mjs";
+import { createGroupAdmin, isGroupAdminCommand } from "./lib/group-admin.mjs";
 import { groupExpiryFactory, pairwiseSecret } from "./lib/group-keys.mjs";
 import { createWorkspaces } from "./lib/workspaces.mjs";
 import { downloadP2PFile, uploadP2PFile, validateHopUrl } from "./lib/hop-client.mjs";
@@ -1448,6 +1449,23 @@ const groupsV2 = createGroupsV2({
   },
   log,
 });
+// 0011 rulings 6 and 7: a bot admin driven over DM (lib/group-admin.mjs):
+// /remove, /pin, /unpin, /slowmode, /promote, /invite, /revoke-invite, and
+// policy-1 join requests forwarded to the owner with Approve / Reject.
+const groupAdmin = createGroupAdmin({
+  groupsV2,
+  selfHex: accountIdHex,
+  accountOf: async (name) => directory.usernameOwner(name),
+  usernameOf: async (peerHex) => (await directory.consumerOf(peerHex))?.username ?? null,
+  // A one-shot spec 0006 buttons message over DM (a chat request first when
+  // the owner never talked to the bot). The press comes back to groupAdmin.
+  sendButtons: async (peerHex, text, rows) => {
+    await ensureGroupSession(peerHex);
+    return (await submitMessage(peerHex, { text, buttons: { rows, oneShot: true }, ephemeral: true })).messageId;
+  },
+  log,
+});
+const isAdminCommandText = (m) => extensionOn("groups") && (m.kind === "text" || m.kind === "richText") && isGroupAdminCommand(m.text);
 // The session key a group turn runs under: v1 and v2 share the scheme.
 const groupV2ByKey = (groupIdOrKey) => {
   const key = String(groupIdOrKey ?? "").toLowerCase();
@@ -1597,7 +1615,7 @@ const handleGroupControl = async (peerHex, m) => {
       for (const page of pages) await sendGroupControl(from, page);
       log("BOT_GROUP2_HISTORY_SENT", { from, group: c.groupId, pages: pages.length, items: pages.reduce((n, p) => n + p.history.items.length, 0) });
     } else if (variant === "joinRequest") {
-      log("BOT_GROUP2_JOIN_REQUEST", { from, group: c.groupId, outcome: await groupsV2.joinRequest(from, c) });
+      log("BOT_GROUP2_JOIN_REQUEST", { from, group: c.groupId, outcome: await groupAdmin.joinRequest(from, c) });
       persist();
     } else {
       log("BOT_GROUP2_CONTROL_IGNORED", { from, group: c.groupId, variant });
@@ -2200,6 +2218,18 @@ const handleInbound = async (peerHex, msg, owedId = null, options = {}) => {
 };
 
 const handleDirectInbound = async (peerHex, msg, owedId, { reservedBridge = false }) => {
+  // 0011 ruling 7: a group admin command is answered here, never by the brain.
+  if (isAdminCommandText(msg) && !msg.attachments?.length) {
+    const reply = await groupAdmin.command(peerHex, msg.text);
+    persist();
+    // A /remove opened a new epoch: watch its topic now, not at the next sweep.
+    ingress?.resubscribe();
+    await fetchGroupTopics().catch((error) => log("BOT_GROUP2_FETCH_FAILED", { error: String(error?.message ?? error) }));
+    await sendText(peerHex, reply).catch((error) => log("BOT_REPLY_FAILED", { to: peerHex, error: String(error?.message ?? error) }));
+    if (reservedBridge) releaseBridgeReservation();
+    if (usesBridgeQueue && owedId) settleOwed(owedId);
+    return;
+  }
   await fetchAttachments(msg.attachments);
   const fileResult = await handleFileCommand(peerHex, msg);
   if (fileResult?.handled) {
@@ -2601,6 +2631,7 @@ const snapshotState = () => ({
   // Spec 0009: the rosters, own seq and recent envelope ids per group.
   groups: groups.snapshot(),
   groups2: groupsV2.snapshot(),
+  groupJoins: groupAdmin.snapshot(),
 });
 const greetedPeers = new Set(); // peers we've sent a first-contact greeting (once ever)
 const persist = () => { if (stateStore) stateStore.save(snapshotState()); };
@@ -2671,7 +2702,19 @@ const handleOpener = async (data) => {
   if (!verifyChatRequestIdentityProof(decoded, identityPrivateKey, hexToBytes(identifierKeyHex))) {
     log("BOT_OPENER_BAD_PROOF", { from: senderHex }); return;
   }
-  if (groupOnly || joinOpener) return acceptGroupMember(decoded, senderHex, identifierKeyHex);
+  if (groupOnly || joinOpener) {
+    const first = !seenRequests.has(messageDedupId(senderHex, decoded.messageId, "opener", decoded.messageId));
+    const accepted = await acceptGroupMember(decoded, senderHex, identifierKeyHex);
+    // The capability in the opener is a join request (0011 Joining): the
+    // first time only, and after the accept so a welcome has a session.
+    if (joinOpener && first && accepted === "handled") {
+      enqueueWork(senderHex, async () => {
+        log("BOT_GROUP2_JOIN_REQUEST", { from: senderHex, group: joinOpener.groupId, via: "opener", outcome: await groupAdmin.joinRequest(senderHex, joinOpener) });
+        persist();
+      });
+    }
+    return accepted;
+  }
   // App UUIDs are normally globally unique, but they are peer-controlled
   // input. Namespace opener dedup/owed records so one malicious peer cannot
   // suppress another peer's welcome by reusing its message id.
@@ -2878,6 +2921,7 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
   const fresh = [];   // messages that run the brain (journaled + owed)
   const declines = []; // call offers to auto-decline after the ACK
   const groupControls = []; // spec 0011 kind-249 controls, handled after the ACK
+  const joinPresses = []; // 0011 ruling 6: the owner's Approve / Reject, after the ACK
   const stops = [];
   const newlySeen = [];
   const batchSeen = new Set();
@@ -2921,7 +2965,10 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
       continue;
     }
     const groupKind = m.kind === "groupInfo" || m.kind === "groupMessage" || m.kind === "groupLeave" || m.kind === "groupControl";
-    if (groupOnly && !groupKind) {
+    // 0011 rulings 6 and 7: a group member outside the allowlist may still
+    // send the admin commands and press a forwarded join request's buttons.
+    const joinPress = m.kind === "buttonPress" && groupAdmin.ownsPress(peerHex, m.targetMessageId);
+    if (groupOnly && !groupKind && !joinPress && !isAdminCommandText(m)) {
       if (m.kind !== "chatAccepted" && m.kind !== "typing" && m.kind !== "seen") log("BOT_GROUP_ONLY_DROPPED", { from: peerHex, kind: m.kind });
       continue;
     }
@@ -2989,6 +3036,12 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
       if (seenRequests.has(id) || batchSeen.has(id)) continue;
       batchSeen.add(id); newlySeen.push(id);
       const press = { from: peerHex, messageId: m.targetMessageId, row: m.row, index: m.index };
+      if (joinPress) {
+        stateChanged = true;
+        log("BOT_RECEIVED_BUTTON_PRESS", { ...press, joinRequest: true });
+        joinPresses.push(m);
+        continue;
+      }
       const label = sentButtons.label(norm(peerHex), m.targetMessageId, m.row, m.index);
       if (label == null) {
         stateChanged = true;
@@ -3159,6 +3212,13 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
     })();
   }
   for (const m of groupControls) enqueueWork(peerHex, () => handleGroupControl(peerHex, m));
+  for (const m of joinPresses) {
+    enqueueWork(peerHex, async () => {
+      const reply = await groupAdmin.press(peerHex, m);
+      persist();
+      await sendText(peerHex, reply).catch((error) => log("BOT_REPLY_FAILED", { to: peerHex, error: String(error?.message ?? error) }));
+    });
+  }
   for (const offerId of declines) {
     enqueueWork(peerHex, async () => {
       try {
@@ -3832,6 +3892,7 @@ const normalizeRestoredState = (raw) => {
     intro: array(raw.intro, MAX_SESSIONS),
     groups: array(raw.groups, 200),
     groups2: array(raw.groups2, 200),
+    groupJoins: array(raw.groupJoins, 500),
   };
 };
 const restored = normalizeRestoredState(rawStoredState);
@@ -3841,6 +3902,7 @@ agentRuntime?.noteRestoredAgent(restored?.agent ?? null);
 // Groups first: an allowlisted bot admits a group member's session by them.
 groups.restore(restored?.groups);
 groupsV2.restore(restored?.groups2);
+groupAdmin.restore(restored?.groupJoins);
 let restoredPeers = 0;
 // Peers refused by the current allowlist: a session and its owed entries
 // are one refused peer, not one refusal per record.
@@ -4068,7 +4130,7 @@ const ingressHealthy = () => {
 for (;;) {
   try { await pollOnce(); } catch (error) { log("BOT_POLL_ERROR", { error: error instanceof Error ? error.message : String(error) }); }
   // 0011 timers: old keys erased after 14 days; an admin bot rotates at 7.
-  try { await groupsV2.tick(); } catch (error) { log("BOT_GROUP2_TICK_FAILED", { error: String(error?.message ?? error) }); }
+  try { await groupsV2.tick(); await groupAdmin.tick(); } catch (error) { log("BOT_GROUP2_TICK_FAILED", { error: String(error?.message ?? error) }); }
   ingress?.resubscribe(); // day rollover / watch-set changes
   // Back off on a sustained outage so we don't hammer a recovering node with the
   // full topic fan-out every tick; normal cadence resumes on the first success.
