@@ -1148,7 +1148,9 @@ const currentBotInfo = () => {
     return null;
   }
 };
-const encodeBotInfo = (peerHex, info) => encodeOpaqueBotInfoMessage({
+// Spec 0008 v3: a meter bot's hint carries the user's pending debit (what
+// the client subtracts from the chain balance); `pending` overrides it.
+const encodeBotInfo = (peerHex, info, pending = meter?.pendingHint(norm(peerHex)) ?? null) => encodeOpaqueBotInfoMessage({
   timestamp: stamp(peerHex),
   kind: info.kind,
   name: info.name,
@@ -1156,18 +1158,21 @@ const encodeBotInfo = (peerHex, info) => encodeOpaqueBotInfoMessage({
   greeting: info.greeting,
   commands: info.commands,
   version: info.version,
-  balance: info.balance ?? null,
+  balance: info.balance ? { ...info.balance, pending } : null,
 });
 // Spec 0008 catch-up: called in the same tick as a reply's enqueue, so the
 // botInfo rides the reply's statement, ahead of it. Marked before the send,
 // so two concurrent replies never both carry it; a failed send reverts.
-const catchUpBotInfo = (peerHex) => {
+// Spec 0008 v3: with `pending` (a metered reply or a charge's reference) a
+// hint-carrying botInfo goes out even at the same version, with that pending.
+const catchUpBotInfo = (peerHex, pending = null) => {
   const k = norm(peerHex);
   const info = currentBotInfo();
-  if (!info || !botInfoSent.needs(k, info.version)) return;
+  const withPending = pending != null && info?.balance != null;
+  if (!info || (!withPending && !botInfoSent.needs(k, info.version))) return;
   const previous = botInfoSent.mark(k, info.version);
-  outbound.enqueue(k, encodeBotInfo(k, info)).submitted.then(() => {
-    log("BOT_SENT_BOTINFO", { to: peerHex, version: info.version, on: "catch-up" });
+  outbound.enqueue(k, withPending ? encodeBotInfo(k, info, pending) : encodeBotInfo(k, info)).submitted.then(() => {
+    log("BOT_SENT_BOTINFO", { to: peerHex, version: info.version, on: withPending ? "pending" : "catch-up", ...(withPending ? { pending: String(pending) } : {}) });
     persist();
   }, (error) => {
     botInfoSent.revert(k, info.version, previous);
@@ -1211,7 +1216,10 @@ const submitMessage = async (peerHex, { text, replyTo = null, editOf = null, sup
   // from the slot. Not journaled: after a restart those entries are gone anyway.
   const typingIds = ephemeral ? [] : typingAndSeen.replyGoingOut(k);
   // Spec 0008: an edit follows a message that already carried the catch-up.
-  if (!editOf) catchUpBotInfo(k);
+  // v3: the first real message of a metered turn (an edit too: the final
+  // answer of a live placeholder) carries the pending debit with this reply.
+  const meteredPending = !ephemeral && meteredReplyDue.delete(k) ? meter?.pendingHint(k, 1) ?? null : null;
+  if (!editOf || meteredPending != null) catchUpBotInfo(k, meteredPending);
   const { submitted, delivered } = outbound.enqueue(k, opaque, { messageId, supersedes: [...supersedes, ...typingIds] });
   await submitted;
   log(buttons ? "BOT_SENT_BUTTONS" : "BOT_SENT_TEXT", {
@@ -1476,7 +1484,9 @@ const DEFAULT_ASSET_HUB_ENDPOINTS = ["wss://asset-hub-paseo-rpc.n.dwellir.com", 
 const endpointList = (raw) => String(raw ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 const PEER_TX_REFS_CAP = 20;
 const peerTxRefs = new Map(); // peerHex -> the peer's last references, oldest first (in memory)
-const sendTransactionReference = async (peerHex, ref) => {
+// `pending` (the meter, spec 0008 v3): a botInfo with that pending rides the
+// reference's statement.
+const sendTransactionReference = async (peerHex, ref, { pending = null } = {}) => {
   const k = norm(peerHex);
   if (!extensionOn("txref")) {
     log("BOT_TX_REFERENCE_SKIPPED", { to: k, reason: "txref extension off", hash: ref.hash });
@@ -1486,7 +1496,9 @@ const sendTransactionReference = async (peerHex, ref) => {
   const messageId = makeAppUuid();
   // A reference can be the whole answer (a /drip): a pending seen rides with it.
   const supersedes = typingAndSeen.replyGoingOut(k);
-  await outbound.enqueue(k, encodeOpaqueTransactionReferenceMessage({ messageId, timestamp: stamp(k), ...ref }), { messageId, supersedes }).submitted;
+  const sent = outbound.enqueue(k, encodeOpaqueTransactionReferenceMessage({ messageId, timestamp: stamp(k), ...ref }), { messageId, supersedes }).submitted;
+  if (pending != null) catchUpBotInfo(k, pending);
+  await sent;
   log("BOT_SENT_TX_REFERENCE", { to: k, messageId, status: ref.status, block: ref.block ?? null, hash: ref.hash, note: ref.note });
   return messageId;
 };
@@ -1503,6 +1515,8 @@ const featureConfigError = (name, error) => {
 
 // Meter (lib/meter.mjs): BOT_METER_CONTRACT + BOT_METER_CHAIN turn it on.
 let meter = null;
+// Peers whose metered turn has not sent its first real message yet (spec 0008 v3).
+const meteredReplyDue = new Set();
 const meterBatchReplies = numberEnv("BOT_METER_BATCH_REPLIES", METER_BATCH_REPLIES, { min: 1, max: 1000 });
 const meterBatchMs = numberEnv("BOT_METER_BATCH_MS", METER_BATCH_MS, { min: 1000, max: 86_400_000 });
 if (env.BOT_METER_CONTRACT || env.BOT_METER_CHAIN) {
@@ -1521,6 +1535,8 @@ if (env.BOT_METER_CONTRACT || env.BOT_METER_CHAIN) {
       name: username || "this bot",
       send: txSend,
       log,
+      // The pending replies are session state (a crash must not lose them).
+      onChange: () => persist(),
     });
   } catch (error) { featureConfigError("BOT_METER_*", error); }
   log("BOT_METER_ENABLED", { contract: env.BOT_METER_CONTRACT.trim(), chain: endpointList(env.BOT_METER_CHAIN)[0], pricePlancks: String(parsePlancks(env.BOT_METER_PRICE, DEFAULT_METER_PRICE)), batchReplies: meterBatchReplies, batchMs: meterBatchMs, operator: meter.userAddress(accountIdHex) });
@@ -1898,7 +1914,13 @@ const handleInbound = async (peerHex, msg, owedId = null, { reservedBridge = fal
     catch (e) { log("BOT_METER_FAILED", { peer: peerHex, error: String(e?.message ?? e) }); return; }
     if (!meterGate.run) return;
   }
-  const chargeTurn = async () => { if (meterGate?.charge) await meter.afterTurn(peerHex); };
+  // Spec 0008 v3: the turn's first real message carries botInfo with the
+  // pending debit this reply adds (submitMessage takes the mark).
+  if (meterGate?.charge) meteredReplyDue.add(norm(peerHex));
+  const chargeTurn = async () => {
+    meteredReplyDue.delete(norm(peerHex));
+    if (meterGate?.charge) await meter.afterTurn(peerHex);
+  };
   if (brain === "echo") {
     // Through deliverToChat, so an echoed ```buttons block exercises spec 0006.
     const delivered = await deliverToChat(peerHex, `Echo: ${synthesizeText(msg.text, msg.attachments)}`).then(() => true, (e) => { log("BOT_REPLY_FAILED", { error: String(e?.message ?? e) }); return false; });
@@ -2156,6 +2178,8 @@ const snapshotState = () => ({
     ...(peerBotInfo.snapshot(norm(peerHex)) ? { bi: peerBotInfo.snapshot(norm(peerHex)) } : {}),
     // Spec 0008: the version of our own botInfo last sent to this peer (bs).
     ...(botInfoSent.snapshot(norm(peerHex)) ? { bs: botInfoSent.snapshot(norm(peerHex)) } : {}),
+    // Spec 0007 meter: the replies not yet charged (md).
+    ...(meter?.snapshot(norm(peerHex)) ? { md: meter.snapshot(norm(peerHex)) } : {}),
   })),
   seen: [...seenRequests].slice(-SEEN_CAP),
   // An unresolved acceptance marker is paired with an owed entry, so its
@@ -3292,8 +3316,9 @@ const gracefulShutdown = async (code = 0) => {
       new Promise((resolve) => setTimeout(resolve, 5000)),
     ]);
   } catch (e) { log("BOT_SHUTDOWN_AGENT_FAILED", { error: String(e?.message ?? e) }); }
-  // Meter: charge every pending debit before the process ends (it is kept in
-  // memory only). Bounded: a chain that does not include it cannot hold the exit.
+  // Meter: charge every pending debit before the process ends (the session
+  // state also keeps it, for a crash). Bounded: a chain that does not include
+  // it cannot hold the exit.
   if (meter) {
     await Promise.race([
       meter.flushAll("shutdown"),
@@ -3432,6 +3457,7 @@ for (const p of restored?.peers ?? []) {
     sentButtons.restore(norm(p.peerHex), p.bp);
     peerBotInfo.restore(norm(p.peerHex), p.bi);
     botInfoSent.restore(norm(p.peerHex), p.bs);
+    meter?.restore(norm(p.peerHex), p.md);
     flip?.remember(p.peerHex);
     restoredPeers += 1;
   } catch (e) { log("BOT_STATE_PEER_SKIPPED", { peer: p?.peerHex, error: String(e?.message ?? e) }); }

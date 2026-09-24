@@ -439,7 +439,7 @@ version stops at 65535; it never wraps to a lower number. The logic is
   before an edit of `botinfo.json`, gets the current version once, without
   asking. A crash between the send and the next state save can send it once
   more.
-- Log: `BOT_SENT_BOTINFO { to, version, on: "accept" | "start" | "catch-up" }`.
+- Log: `BOT_SENT_BOTINFO { to, version, on: "accept" | "start" | "catch-up" | "pending", pending? }`.
   At startup the bot logs `BOT_BOTINFO { kind, version, commands }`, and
   `BOT_BOTINFO_VERSION { version }` each time the version goes up.
 - `BOT_PROTOCOL_EXTENSIONS` without `botinfo` turns all of this off.
@@ -451,7 +451,8 @@ field, appended after `version`:
 balance: Option<BalanceHint>
 BalanceHint = { chainId: String /* genesis hash, 0x hex */, contract: Bytes /* 20 */,
                 selector: Bytes /* 4 */, decimals: u8, unit: String,
-                perReply: Option<u128 LE>, label: String /* <= 40 */ }
+                perReply: Option<u128 LE>, label: String /* <= 40 */,
+                pending: Option<u128 LE> /* v3, appended */ }
 ```
 
 It tells a client where to read "your balance with this bot": the client
@@ -475,6 +476,29 @@ did before v2, so the upgrade did not bump any version. `BOT_BOTINFO` logs
 `balanceOf(address)` of its Meter with `perReply` 10^17 (0.1 PAS);
 `pcdflip` declares `stakeOf(address)` of its Flip contract, labelled
 "your stake", with no `perReply`.
+
+**Pending on the hint (spec 0008 v3).** `pending` is what the bot has
+metered but not yet charged, in the same units as the returned value (the
+Meter's 1e18 scale: 0.3 PAS = 3 × 10^17). The client shows one number,
+`value − pending`, the same number as the bot's `/balance`. A hint that ends
+after `label` (every v2 encoder) decodes as `pending = null` (0); `0x00`
+there is also `null`. The `pca` encoder writes nothing after `label` when
+`pending` is `null`, so a v2 hint keeps its v2 bytes (`vectors-0008b.md`
+still holds). A v2 `pca` decoder stops at `label`, so it ignores the field.
+The pinned vectors are in `polkadot-chat-desktop/docs/spec/vectors-0008c.md`
+and `test/codec.test.mjs`. `pending` is never in `botinfo.json`: the meter
+sets it, and it does not change the version. Resend rule (a meter bot whose
+`botinfo.json` has a `balance` hint):
+
+- The first real message of each metered turn (an edit of a live
+  placeholder too) carries a `botInfo` with the pending debit that includes
+  this reply, enqueued in the same tick, so it rides the reply's request
+  statement: no extra submission (`BOT_SENT_BOTINFO { on: "pending" }`).
+- The final reference of a charge (status 1, or 3) carries a `botInfo` with
+  the pending left after the charge (0 when no reply came in meanwhile), in
+  the same statement as the reference.
+- Every other `botInfo` (accept, `/start`, catch-up) carries the current
+  pending once the bot has read a balance, else no `pending`.
 
 **Receiving.** A peer's `botInfo` (the peer is another bot) is stored per peer
 in the session state (`bi`), and a lower version than the stored one is
@@ -568,12 +592,16 @@ the brain runs, and the reply's price joins the user's pending debit
 min), before it refuses a reply for a low balance, and on SIGINT/SIGTERM
 (bounded to 60 s). Each charge sends one `transactionReference` with the note
 `balance: <remaining plancks>` (efficiency.md: one Asset Hub extrinsic per 5
-metered replies or 10 min, not one per reply). The pending debit lives in
-memory only: a crash (not a clean stop) loses it, in the user's favor.
+metered replies or 10 min, not one per reply). The pending replies persist
+with the peer's session (`md: { r: replies, t: first reply ms }`): after a
+crash the bot restores them (`BOT_METER_PENDING_RESTORED { replies, chargeInMs
+}`) and charges them when the rest of the batch time ends. A charge in flight
+is not saved, so a crash during a charge never charges twice (a charge that
+did not land is lost, in the user's favor).
 `/balance` answers the balance and a Top up button; `/topup` sends the button.
 Other slash commands are free. A failed balance read answers with a notice
-and runs no brain (fail closed). The `botInfo` balance hint cannot show the
-pending debit: the client reads `balanceOf` from the chain itself. Logs:
+and runs no brain (fail closed). The `botInfo` balance hint shows the
+pending debit through its v3 `pending` field (above). Logs:
 `BOT_METER_ENABLED { batchReplies, batchMs }`, `BOT_METER_BALANCE { pending
 }`, `BOT_METER_PENDING { replies, plancks }`, `BOT_METER_TOPUP_OFFERED`,
 `BOT_METER_CHARGED { on: "batch" | "timer" | "refusal" | "shutdown", replies

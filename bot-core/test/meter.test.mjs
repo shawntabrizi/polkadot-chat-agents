@@ -2,7 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createMeter, formatPas, METER_BATCH_MS, METER_BATCH_REPLIES, parsePlancks } from "../lib/meter.mjs";
 import { meterCalldata, reviveAddress, selector } from "../lib/revive-chain.mjs";
-import { decodeOpaqueMessageAt, decodeTxIntent, encodeOpaqueButtonsMessage } from "../vendor/app-chat-codec.mjs";
+import { createOutboundLanes } from "../lib/outbound-lanes.mjs";
+import {
+  decodeOpaqueMessageAt, decodeTxIntent, encodeOpaqueBotInfoMessage, encodeOpaqueButtonsMessage,
+  encodeOpaqueSeenMessage, encodeOpaqueTextMessage, encodeOpaqueTransactionReferenceMessage,
+} from "../vendor/app-chat-codec.mjs";
 
 const PAS = 10_000_000_000n;
 const RATIO = 100_000_000n; // Asset Hub NativeToEthRatio: 1 PAS = 1e18 in the contract
@@ -63,6 +67,7 @@ const setup = (chainOptions = {}, meterOptions = {}) => {
   const timers = manualTimers();
   const sent = [];
   const logs = [];
+  const changes = { count: 0 };
   const meter = createMeter({
     chain,
     contract: CONTRACT,
@@ -72,13 +77,15 @@ const setup = (chainOptions = {}, meterOptions = {}) => {
     send: {
       text: async (peer, text) => { sent.push({ type: "text", peer, text }); },
       buttons: async (peer, text, rows) => { sent.push({ type: "buttons", peer, text, rows }); },
-      reference: async (peer, ref) => { sent.push({ type: "reference", peer, ref }); },
+      // Spec 0008 v3: a final reference also carries the pending hint.
+      reference: async (peer, ref, extra) => { sent.push({ type: "reference", peer, ref, ...(extra ? { pending: extra.pending } : {}) }); },
     },
     log: (event, extra) => logs.push({ event, ...extra }),
     timers,
+    onChange: () => { changes.count += 1; },
     ...meterOptions,
   });
-  return { chain, sent, logs, meter, timers, user: reviveAddress(`0x${PEER}`) };
+  return { chain, sent, logs, meter, timers, changes, user: reviveAddress(`0x${PEER}`) };
 };
 const text = (t) => ({ kind: "text", text: t });
 
@@ -137,7 +144,7 @@ test("replies are charged in one extrinsic per 5, with one reference that report
   assert.equal(chain.state.calls[0].pair, operator, "the bot's own wallet signs the charge");
   assert.equal(chain.state.calls[0].calldata, meterCalldata.charge(user, 5n * (PAS / 10n) * RATIO), "five prices, scaled into contract units");
   assert.equal(result.remaining, PAS / 2n);
-  assert.deepEqual(sent, [{ type: "reference", peer: PEER, ref: { chainId: GENESIS, hash: `0x${"cd".repeat(32)}`, status: 1, block: 123, note: `balance: ${PAS / 2n}` } }]);
+  assert.deepEqual(sent, [{ type: "reference", peer: PEER, ref: { chainId: GENESIS, hash: `0x${"cd".repeat(32)}`, status: 1, block: 123, note: `balance: ${PAS / 2n}` }, pending: 0n }]);
   assert.equal(meter.pendingDebit(PEER), 0n);
   assert.ok(logs.some((l) => l.event === "BOT_METER_CHARGED" && l.replies === 5 && l.on === "batch"));
   for (let i = 0; i < 5; i += 1) { await meter.beforeTurn(PEER, text("more")); await meter.afterTurn(PEER); }
@@ -267,4 +274,109 @@ test("config: contract address and price are validated; PAS formatting", () => {
   assert.equal(formatPas(PAS), "1 PAS");
   assert.equal(formatPas(8n * PAS / 10n), "0.8 PAS");
   assert.equal(formatPas(12_345_678_901n), "1.2345 PAS");
+});
+
+// Spec 0008 v3: the client shows balance - pending, the bot's own /balance
+// number. pendingHint is that pending in the hint's unit (the contract's 1e18
+// scale), so it must scale by NativeToEthRatio and follow every reply.
+test("pendingHint is the pending debit in the contract's unit; a final reference carries it", async () => {
+  const { meter, chain, user, sent } = setup();
+  chain.state.balances.set(user, PAS * RATIO);
+  assert.equal(meter.pendingHint(PEER), null, "no balance read yet: the ratio is unknown, so no hint");
+  await meter.beforeTurn(PEER, text("q1"));
+  assert.equal(meter.pendingHint(PEER), 0n);
+  assert.equal(meter.pendingHint(PEER, 1), (PAS / 10n) * RATIO, "the reply going out adds one price");
+  await meter.afterTurn(PEER);
+  await meter.beforeTurn(PEER, text("q2"));
+  await meter.afterTurn(PEER);
+  await meter.beforeTurn(PEER, text("q3"));
+  assert.equal(meter.pendingHint(PEER, 1), 3n * (PAS / 10n) * RATIO, "0.3 PAS = 3e17, the vectors-0008c value");
+  // A refusal flushes: the reference that closes the charge says pending 0.
+  chain.state.balances.set(user, (PAS / 10n) * 2n * RATIO); // 0.2 PAS on chain, 0.2 pending
+  await meter.beforeTurn(PEER, text("q4"));
+  const ref = sent.find((m) => m.type === "reference");
+  assert.equal(ref.ref.status, 1);
+  assert.equal(ref.pending, 0n, "after the charge lands nothing is pending");
+});
+
+// Crash safety (M12f): the pending replies live in the session state. A
+// restart restores them and charges them when the batch timer, counted from
+// the first reply, ends; nothing is lost and nothing is charged twice.
+test("the pending replies survive a restart through snapshot/restore", async () => {
+  const first = setup();
+  first.chain.state.balances.set(first.user, PAS * RATIO);
+  assert.equal(first.meter.snapshot(PEER), null);
+  for (let i = 0; i < 3; i += 1) { await first.meter.beforeTurn(PEER, text("q")); await first.meter.afterTurn(PEER); }
+  const saved = first.meter.snapshot(PEER);
+  assert.deepEqual(saved, { r: 3, t: 1_720_000_000_000 });
+  assert.equal(first.changes.count, 3, "each pending reply asks for a state save");
+
+  // The process dies; a new one restores 4 min later.
+  let clock = 1_720_000_000_000 + 240_000;
+  const second = setup({}, { now: () => clock });
+  second.chain.state.balances.set(second.user, PAS * RATIO);
+  second.meter.restore(PEER, saved);
+  second.meter.restore(PEER, { r: "3", t: 1 }); // malformed: ignored
+  assert.equal(second.meter.pendingDebit(PEER), 3n * PAS / 10n, "the restored debit gates and reports as before");
+  assert.deepEqual(second.meter.snapshot(PEER), saved);
+  const waits = second.timers.fire();
+  assert.deepEqual(waits, [360_000], "the charge waits only what was left of the 10 min");
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(second.chain.state.calls.length, 1, "one charge for the restored replies");
+  assert.equal(second.chain.state.calls[0].calldata, meterCalldata.charge(second.user, 3n * (PAS / 10n) * RATIO));
+  assert.equal(second.meter.snapshot(PEER), null, "a charge in flight is not saved: a crash now never charges twice");
+  assert.ok(second.changes.count >= 1);
+});
+
+// Efficiency budget (M12c ruling, M12f): the botInfo with the new pending
+// costs no submission of its own. On the real outbound lane, a metered reply,
+// its botInfo and the pending seen enqueued in one tick are ONE statement;
+// the charge's reference and its botInfo (pending 0) are one more.
+test("botInfo with pending rides the reply's statement, and the charge's reference, on the lane", async () => {
+  const submissions = [];
+  let lastRequestId = null;
+  const lanes = createOutboundLanes({
+    encodeBatch: (_peer, requestId, opaques) => ({ requestId, opaques, length: 0 }),
+    submitPayload: async (_peer, { requestId, opaques }) => {
+      lastRequestId = requestId;
+      submissions.push(opaques.map((o) => decodeOpaqueMessageAt(o, 0).value));
+    },
+    makeRequestId: (() => { let n = 0; return () => `r${(n += 1)}`; })(),
+  });
+  const ack = () => lanes.onAck(PEER, lastRequestId); // the client fetched it
+  const hint = { chainId: GENESIS, contract: CONTRACT, selector: "0x70a08231", decimals: 18, unit: "PAS", perReply: (PAS / 10n) * RATIO, label: "with Meter" };
+  const botInfo = (pending) => encodeOpaqueBotInfoMessage({ kind: 1, name: "Meter", version: 1, balance: { ...hint, pending } });
+  // As index.mjs sendTransactionReference does: the botInfo in the same tick.
+  const reference = async (peer, ref, { pending }) => {
+    const sent = lanes.enqueue(peer, encodeOpaqueTransactionReferenceMessage(ref)).submitted;
+    lanes.enqueue(peer, botInfo(pending));
+    await sent;
+  };
+  const { meter, chain, user } = setup({}, { batchReplies: 2, send: { reference } });
+  chain.state.balances.set(user, PAS * RATIO);
+  // As index.mjs submitMessage does: the pending seen, botInfo and the reply in one tick.
+  const reply = async (n) => {
+    await meter.beforeTurn(PEER, text(`q${n}`));
+    lanes.enqueue(PEER, encodeOpaqueSeenMessage({ upTo: `in-${n}`, at: 1 }));
+    lanes.enqueue(PEER, botInfo(meter.pendingHint(PEER, 1)));
+    await lanes.enqueue(PEER, encodeOpaqueTextMessage({ text: `answer ${n}` })).submitted;
+    ack();
+  };
+  await reply(1);
+  assert.equal(submissions.length, 1, "reply + botInfo + seen = 1 submission");
+  assert.deepEqual(submissions[0].map((m) => m.kind), ["seen", "botInfo", "text"]);
+  assert.equal(submissions[0][1].balance.pending, (PAS / 10n) * RATIO, "0.1 PAS pending after the first reply");
+  assert.equal(await meter.afterTurn(PEER), null);
+
+  await reply(2);
+  assert.equal(submissions.length, 2);
+  assert.equal(submissions[1][1].balance.pending, 2n * (PAS / 10n) * RATIO, "0.2 PAS pending after the second");
+  // The second reply fills the batch: the charge's reference and a botInfo
+  // with pending 0 are one more submission, not two.
+  const charged = await meter.afterTurn(PEER);
+  assert.equal(charged.ok, true);
+  assert.equal(submissions.length, 3, "reference + botInfo = 1 submission");
+  assert.deepEqual(submissions[2].map((m) => m.kind), ["transactionReference", "botInfo"]);
+  assert.equal(submissions[2][0].status, 1);
+  assert.equal(submissions[2][1].balance.pending, 0n, "charged: nothing pending");
 });

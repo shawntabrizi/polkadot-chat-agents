@@ -469,8 +469,49 @@ test("botInfo v2: pinned balance-hint vector matches the spec 0008 v2 SCALE layo
   assert.equal(m.version, 1);
   assert.deepEqual(
     { ...m.balance, contract: `0x${hexOf(m.balance.contract)}`, selector: `0x${hexOf(m.balance.selector)}` },
-    vectorBalance,
+    { ...vectorBalance, pending: null }, // v3: a v2 hint reads as pending null (0)
   );
+});
+
+// Spec 0008 v3: `pending` appended to the hint, published in
+// polkadot-chat-desktop docs/spec/vectors-0008c.md. The client shows
+// balance - pending, the same number as the bot's /balance, so a change here
+// is a wire break.
+const BOT_INFO_PENDING_VECTOR = "450414424f542d310030fd779001000000f40114477569646558506f6c6b61646f7420737570706f7274206775696465684869212041736b206d652061626f757420506f6c6b61646f742e081c7374616b696e67385374616b696e672062617369637328676f7665726e616e636544486f77204f70656e476f7620776f726b7301000109013078643665656332363133353330356138616432353761323064303033333537323834633861613033643062646232623335376162306132323337316531316566325030b0c001431a1addb8c11a060ada4d6a7033cf211070a08231120c5041530100008a5d7845630100000000000000002877697468204d657465720100009e1869d029040000000000000000";
+const PENDING = 300_000_000_000_000_000n; // 0.3 PAS in the hint's 1e18 unit (3e9 plancks x NativeToEthRatio 1e8)
+
+test("botInfo v3: pinned pending vector is the v2 vector plus Some(u128) after the label", () => {
+  const opaque = encodeOpaqueBotInfoMessage({ messageId: "BOT-1", timestamp: 1_720_000_000_000, ...vectorBotInfo, balance: { ...vectorBalance, pending: PENDING } });
+  assert.equal(hexOf(opaque), BOT_INFO_PENDING_VECTOR);
+  // The remote message is the v2 one with 17 bytes appended; only the outer
+  // compact length changes (256 -> 273).
+  const v2Remote = BOT_INFO_BALANCE_VECTOR.slice(4);
+  assert.equal(BOT_INFO_PENDING_VECTOR.slice(0, 4), "4504");
+  assert.equal(BOT_INFO_PENDING_VECTOR.slice(4), `${v2Remote}01${"00009e1869d029040000000000000000"}`);
+  const m = decodeOne(hex(BOT_INFO_PENDING_VECTOR));
+  assert.equal(m.kind, "botInfo");
+  assert.equal(m.balance.pending, PENDING);
+  assert.equal(m.balance.label, "with Meter");
+});
+
+// Compatibility both ways: a v2 hint keeps its bytes (pending null writes
+// nothing), pending 0 is sent as Some(0) (the bot's "charged, nothing owed"),
+// and an explicit None byte reads as null. A v2 pca decoder stopped at the
+// label, so the appended field never reached it.
+test("botInfo v3: pending null keeps the v2 bytes; Some(0) and None round-trip", () => {
+  const at = { messageId: "BOT-1", timestamp: 1_720_000_000_000, ...vectorBotInfo };
+  assert.equal(hexOf(encodeOpaqueBotInfoMessage({ ...at, balance: { ...vectorBalance, pending: null } })), BOT_INFO_BALANCE_VECTOR);
+  const zero = encodeOpaqueBotInfoMessage({ ...at, balance: { ...vectorBalance, pending: 0n } });
+  assert.ok(hexOf(zero).endsWith(`77697468204d6574657201${"00".repeat(16)}`));
+  assert.equal(decodeOne(zero).balance.pending, 0n);
+  const none = concat(hex(BOT_INFO_BALANCE_VECTOR.slice(4)), Uint8Array.of(0));
+  const m = decodeOne(concat(compact(none.length), none));
+  assert.equal(m.kind, "botInfo");
+  assert.equal(m.balance.pending, null);
+  assert.throws(() => encodeOpaqueBotInfoMessage({ ...at, balance: { ...vectorBalance, pending: -1n } }), /pending/);
+  // A bad option tag after the label is undecodable, alone in its batch.
+  const bad = concat(hex(BOT_INFO_BALANCE_VECTOR.slice(4)), Uint8Array.of(7));
+  assert.equal(decodeOne(concat(compact(bad.length), bad)).kind, "undecodable");
 });
 
 // The compatibility rule of v2: bytes from a v1 encoder (they end after

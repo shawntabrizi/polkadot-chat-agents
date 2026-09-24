@@ -12,6 +12,15 @@
 // Everything the bot says about a balance is the chain balance minus the
 // pending debit.
 //
+// Spec 0008 v3: the client's header shows the botInfo balance hint minus its
+// `pending`, so the bot tells the client its pending debit (pendingHint, in
+// the contract's unit): index.mjs resends botInfo with each metered reply and
+// with each charge's final reference (`send.reference`'s third argument), in
+// the same request statement. The pending replies are session state
+// (snapshot/restore, `onChange` saves it), so a crash does not lose them. A
+// charge in flight is not saved: after a crash it counts as charged, so a
+// restart never charges the same replies twice.
+//
 // Enabled by BOT_METER_CONTRACT + BOT_METER_CHAIN (index.mjs). Everything
 // chain-shaped goes through `chain` (lib/revive-chain.mjs or a test fake).
 //
@@ -60,30 +69,39 @@ const defaultTimers = {
  *             callContract(pair,{dest,calldata,value,onSlow}), ensureMapped(pair) }
  * operator: the bot's sr25519 wallet pair (the contract's operator)
  * send:     { text(peerHex, text), buttons(peerHex, text, rows), reference(peerHex, ref) }
+ *           reference(peerHex, ref, { pending }) gets the pending hint on a
+ *           charge's final (status 1 or 3) reference.
  * batchReplies, batchMs: charge after this many pending replies, or this long
  *           after the first one (BOT_METER_BATCH_REPLIES, BOT_METER_BATCH_MS).
+ * onChange: called when the pending replies change (save the session state).
  */
 
 export function createMeter({
   chain, contract, operator, price = DEFAULT_METER_PRICE, name = "the bot", send, log = () => {}, now = Date.now,
-  batchReplies = METER_BATCH_REPLIES, batchMs = METER_BATCH_MS, timers = defaultTimers,
+  batchReplies = METER_BATCH_REPLIES, batchMs = METER_BATCH_MS, timers = defaultTimers, onChange = () => {},
 }) {
   if (!/^0x[0-9a-fA-F]{40}$/.test(String(contract))) throw new Error("BOT_METER_CONTRACT must be a 20-byte 0x address");
   if (price <= 0n) throw new Error("BOT_METER_PRICE must be above zero");
   if (!(Number.isInteger(batchReplies) && batchReplies >= 1)) throw new Error("BOT_METER_BATCH_REPLIES must be an integer of 1 or more");
   let mapped = false;
   const queue = serialQueue(); // one operator account: one charge at a time
-  const pending = new Map(); // peerHex -> { replies, timer }: replies the next flush charges
+  const pending = new Map(); // peerHex -> { replies, since, timer }: replies the next flush charges
   const charging = new Map(); // peerHex -> plancks of a flush whose extrinsic is not in a block yet
   // What the user owes that the chain balance does not show yet.
   const pendingDebit = (peerHex) => price * BigInt(pending.get(peerHex)?.replies ?? 0) + (charging.get(peerHex) ?? 0n);
+  let ratio = null; // NativeToEthRatio, cached at the first balance read
+  // The pending debit (plus `extraReplies` not yet added) in the contract's
+  // unit, the unit of the botInfo balance hint. null until a balance read has
+  // learned the ratio.
+  const pendingHint = (peerHex, extraReplies = 0) => (ratio == null ? null : (pendingDebit(peerHex) + price * BigInt(extraReplies)) * ratio);
 
   const userAddress = (peerHex) => reviveAddress(`0x${String(peerHex).replace(/^0x/i, "")}`);
   const balanceOf = async (peerHex) => {
     const data = await withTimeout(
       chain.read({ origin: operator.publicKey, dest: contract, calldata: meterCalldata.balanceOf(userAddress(peerHex)) }),
       READ_TIMEOUT_MS, "meter balance read");
-    return decodeUint256(data) / (await chain.nativeToEthRatio());
+    ratio = await chain.nativeToEthRatio();
+    return decodeUint256(data) / ratio;
   };
   const replies = (balance) => balance / price;
 
@@ -114,6 +132,7 @@ export function createMeter({
     if (!entry) return Promise.resolve(null);
     pending.delete(peerHex);
     timers.clear(entry.timer);
+    onChange();
     const count = entry.replies;
     const plancks = price * BigInt(count);
     const note = (delta) => charging.set(peerHex, (charging.get(peerHex) ?? 0n) + delta);
@@ -144,14 +163,14 @@ export function createMeter({
         }
         if (!result.ok) {
           log("BOT_METER_CHARGE_FAILED", { peer: peerHex, on, replies: count, stage: "dispatch", hash: result.hash, block: result.block, error: result.error });
-          await send.reference(peerHex, { chainId, hash: result.hash, status: 3, block: result.block, note: `charge failed: ${String(result.error).slice(0, 120)}` });
+          await send.reference(peerHex, { chainId, hash: result.hash, status: 3, block: result.block, note: `charge failed: ${String(result.error).slice(0, 120)}` }, { pending: pendingHint(peerHex) });
           return result;
         }
         const balance = await balanceOf(peerHex);
         const debit = pendingDebit(peerHex);
         const remaining = balance > debit ? balance - debit : 0n;
         log("BOT_METER_CHARGED", { peer: peerHex, on, replies: count, plancks: String(plancks), remaining: String(remaining), hash: result.hash, block: result.block });
-        await send.reference(peerHex, { chainId, hash: result.hash, status: 1, block: result.block, note: `balance: ${remaining}` });
+        await send.reference(peerHex, { chainId, hash: result.hash, status: 1, block: result.block, note: `balance: ${remaining}` }, { pending: pendingHint(peerHex) });
         return { ...result, remaining };
       } catch (error) {
         settle();
@@ -173,6 +192,8 @@ export function createMeter({
     balanceOf,
     /** Plancks the user owes that the chain balance does not show yet. */
     pendingDebit,
+    pendingHint,
+    price,
     /**
      * Before a brain turn. { run: true } lets the brain answer; { run: false }
      * means the meter answered (a command, a top-up prompt, or a read error).
@@ -222,12 +243,25 @@ export function createMeter({
     async afterTurn(peerHex) {
       let entry = pending.get(peerHex);
       if (!entry) {
-        entry = { replies: 0, timer: timers.set(() => { void flush(peerHex, "timer"); }, batchMs) };
+        entry = { replies: 0, since: now(), timer: timers.set(() => { void flush(peerHex, "timer"); }, batchMs) };
         pending.set(peerHex, entry);
       }
       entry.replies += 1;
+      onChange();
       log("BOT_METER_PENDING", { peer: peerHex, replies: entry.replies, plancks: String(pendingDebit(peerHex)) });
       return entry.replies >= batchReplies ? flush(peerHex, "batch") : null;
+    },
+    /** The pending replies for the session state: { r: replies, t: first reply ms } or null. */
+    snapshot(peerHex) {
+      const entry = pending.get(peerHex);
+      return entry ? { r: entry.replies, t: entry.since } : null;
+    },
+    /** After a restart: the saved pending replies, charged when the batch timer ends. */
+    restore(peerHex, saved) {
+      if (!(Number.isSafeInteger(saved?.r) && saved.r >= 1 && Number.isSafeInteger(saved?.t)) || pending.has(peerHex)) return;
+      const wait = Math.max(0, saved.t + batchMs - now());
+      pending.set(peerHex, { replies: saved.r, since: saved.t, timer: timers.set(() => { void flush(peerHex, "timer"); }, wait) });
+      log("BOT_METER_PENDING_RESTORED", { peer: peerHex, replies: saved.r, chargeInMs: wait });
     },
     /** Charge every pending debit now (shutdown). Never throws. */
     flushAll(on = "shutdown") {

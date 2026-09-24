@@ -1238,7 +1238,8 @@ export function encodeOpaqueSeenMessage({
 // Command { name: String (no slash), description: String }
 // BalanceHint { chainId: String, contract: Bytes (20), selector: Bytes (4),
 //               decimals: u8, unit: String, perReply: Option<u128 LE>,
-//               label: String (<= 40) }
+//               label: String (<= 40),
+//               pending: Option<u128 LE> }             (v3, appended)
 // kind: 0 bot (automated), 1 agent (AI acting for a person), 2 person-operated.
 // Limits are in characters, as the spec states them.
 // v2 compatibility: a v1 encoder ends after `version`, so the decoder reads
@@ -1246,6 +1247,11 @@ export function encodeOpaqueSeenMessage({
 // nothing after `version` when there is no hint, so a document without one
 // keeps its v1 bytes (vectors-0008 still holds); with a hint it writes
 // Some (0x01) + the hint. A 0x00 byte there also decodes as None.
+// v3 (vectors-0008c): `pending` is the amount (in the balance's unit) the bot
+// has metered but not yet charged. A hint that ends after `label` (every v2
+// encoder) decodes with pending = null (0); this encoder writes nothing after
+// `label` when pending is null, so a v2 hint keeps its v2 bytes. It is the
+// last byte of the message, so the pca v2 decoder never read past `label`.
 export const BOT_INFO_CONTENT_KIND = 244;
 export const BOT_INFO_KINDS = Object.freeze({ bot: 0, agent: 1, service: 2 });
 export const BOT_INFO_LIMITS = Object.freeze({ name: 40, description: 280, greeting: 280, commands: 32, commandName: 32, commandDescription: 80, balanceLabel: 40, balanceUnit: 16 });
@@ -1301,7 +1307,7 @@ export function encodeOpaqueBotInfoMessage({
   });
 }
 
-function encodeBalanceHint({ chainId, contract, selector, decimals, unit, perReply = null, label }) {
+function encodeBalanceHint({ chainId, contract, selector, decimals, unit, perReply = null, label, pending = null }) {
   const L = BOT_INFO_LIMITS;
   const contractBytes = toBytes(contract, "bot info balance contract");
   if (contractBytes.length !== 20) throw new Error("bot info balance contract must be 20 bytes");
@@ -1316,6 +1322,7 @@ function encodeBalanceHint({ chainId, contract, selector, decimals, unit, perRep
     botInfoString(unit, L.balanceUnit, "balance unit", { empty: false }),
     scaleEncodeOption(perReply == null ? null : scaleEncodeUInt128(assertU128(perReply, "bot info balance perReply"))),
     botInfoString(label, L.balanceLabel, "balance label", { empty: false }),
+    pending == null ? new Uint8Array(0) : scaleEncodeOption(scaleEncodeUInt128(assertU128(pending, "bot info balance pending"))),
   );
 }
 
@@ -1330,6 +1337,10 @@ function decodeBalanceHintAt(bytes, offset) {
   const unit = scaleDecodeStringAt(bytes, decimals.offset, B.balanceUnit, "bot info balance unit");
   const perReply = scaleDecodeOptionAt(bytes, unit.offset, scaleDecodeUInt128At);
   const label = scaleDecodeStringAt(bytes, perReply.offset, B.balanceLabel, "bot info balance label");
+  // v3: a v2 hint ends at `label` (pending = null).
+  const pending = label.offset === bytes.length
+    ? { value: null, offset: label.offset }
+    : scaleDecodeOptionAt(bytes, label.offset, scaleDecodeUInt128At);
   return {
     value: {
       chainId: chainId.value,
@@ -1339,8 +1350,9 @@ function decodeBalanceHintAt(bytes, offset) {
       unit: unit.value,
       perReply: perReply.value,
       label: label.value,
+      pending: pending.value,
     },
-    offset: label.offset,
+    offset: pending.offset,
   };
 }
 
