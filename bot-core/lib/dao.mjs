@@ -103,7 +103,7 @@ export const emittedBy = (events, contract) => (events ?? []).flatMap((e) => {
 });
 
 /**
- * chain:     { genesisHash(), nativeToEthRatio(), ensureMapped(pair), read({origin,dest,calldata}),
+ * chain:     { genesisHash(), nativeToEthRatio(), isMapped(account), ensureMapped(pair), read({origin,dest,calldata}),
  *              callContract(pair, {dest,calldata,value}), watchContractEvents(contract, onBlock, {onError}) }
  * groupsV2:  lib/groups-v2.mjs (get, member, changeState)
  * sendGroup: async (groupId, opaques) -> void; ONE group statement for the opaques given
@@ -275,7 +275,21 @@ export function createDao({
     if (!amount) return say(g.groupId, "The amount must be more than 0 PAS.");
     const recipient = await resolveRecipient(g, m[3]);
     if (!recipient) return say(g.groupId, `I cannot find the user ${m[3]}.`);
+    // Execute pays reviveAddress(recipient). For an unmapped account that H160
+    // has no owner: the payment would land on a fallback account the person
+    // cannot reach (docs/spec/contracts/dao.md, "Recipient mapping").
+    if (!(await chain.isMapped(`0x${recipient}`))) {
+      log("BOT_DAO_REFUSED", { group: g.groupId, from, reason: "recipient-unmapped", to: recipient });
+      return say(g.groupId, `${await nameOf(recipient)} has not used a contract yet; ask them to open any contract chat (for example Meter) once, then propose again.`);
+    }
     if (!mapped) { await botTx(() => chain.ensureMapped(pair)); mapped = true; }
+    // Execute reverts with "treasury too low" when the treasury holds less than
+    // the amount; refuse before the bot pays for setMembers and propose.
+    const treasury = await toPlancks(decodeUint256(await chain.read({ origin: pair.publicKey, dest: address, calldata: daoCalldata.treasury(daoGroupKey(g.groupId)) })));
+    if (amount > treasury) {
+      log("BOT_DAO_REFUSED", { group: g.groupId, from, reason: "over-treasury", amount: String(amount), treasury: String(treasury) });
+      return say(g.groupId, `Refused: the treasury of ${groupName(g)} holds ${pas(treasury)}, less than ${pas(amount)}. Fund it first, then propose again.`);
+    }
     const synced = await syncMembers(g);
     if (!synced.ok) return say(g.groupId, `The proposal did not go through: ${synced.error}.`);
     const deadline = Math.floor(now() / 1000) + votingSecs;

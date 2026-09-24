@@ -10,7 +10,10 @@
 //   - the group sees the vote as it happens: one tally line per Voted event,
 //     never two for one vote (reorgs deliver an event again);
 //   - the statement budget: /propose is 2 statements (message + pin), each
-//     event 1, a withdrawal 0.
+//     event 1, a withdrawal 0;
+//   - a proposal that cannot pay out is refused before the bot spends fees:
+//     an unmapped recipient's H160 has no owner (the money would be lost), and
+//     an amount over the treasury can never execute ("treasury too low").
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -43,7 +46,7 @@ const voted = (id, who, support, yes, no) => ({
 const executed = (id) => ({ topics: [DAO_TOPICS.executed, `0x${word(id)}`, `0x${addrWord(h160("bob"))}`], data: bytesOf(word(2n * PAS / 10n * RATIO)), extrinsicHash: `0x${"e1".repeat(32)}` });
 const withdrawn = (id, who) => ({ topics: [DAO_TOPICS.withdrawn, `0x${word(id)}`, `0x${addrWord(h160(who))}`], data: bytesOf(word(DAO_STAKE_PLANCKS * RATIO)), extrinsicHash: `0x${"d7".repeat(32)}` });
 
-const daoWorld = async ({ members = ["carol"] } = {}) => {
+const daoWorld = async ({ members = ["carol"], unmapped = [], treasury = 100n * PAS } = {}) => {
   const world = await setup({ bot: { role: 1, permissions: 0x00ff } });
   const { w, alice, bot } = world;
   for (const name of members) await alice.groups.add(GROUP, ACCOUNTS[name]);
@@ -55,8 +58,10 @@ const daoWorld = async ({ members = ["carol"] } = {}) => {
   const chain = {
     genesisHash: async () => GENESIS,
     nativeToEthRatio: async () => RATIO,
+    isMapped: async (account) => !unmapped.some((name) => `0x${ACCOUNTS[name]}` === account),
     ensureMapped: async () => false,
     read: async ({ calldata }) => {
+      if (calldata === daoCalldata.treasury(daoGroupKey(GROUP))) return bytesOf(word(treasury * RATIO));
       if (calldata.startsWith(selector("groupAdmin(bytes32)"))) {
         const admin = admins.get(`0x${calldata.slice(10, 74)}`);
         return admin ? bytesOf(addrWord(admin)) : ZERO_WORD;
@@ -273,6 +278,27 @@ test("a bad /propose gets the usage; a group another account manages is refused"
   await dao.command(GROUP, ACCOUNTS.alice, "/propose Pay | 1 PAS to bob.02");
   assert.equal((await fromBot())[0].text, "The proposal did not go through: another account manages this group on the Dao contract.");
   assert.equal(calls.length, 0);
+});
+
+test("a recipient without a Revive mapping is refused: execute would pay an address nobody controls", async () => {
+  const { dao, calls, fromBot, logs } = await daoWorld({ unmapped: ["bob"] });
+  await dao.command(GROUP, ACCOUNTS.alice, "/propose Pay | 0.2 PAS to bob.02");
+  assert.equal((await fromBot())[0].text, "bob.02 has not used a contract yet; ask them to open any contract chat (for example Meter) once, then propose again.");
+  assert.equal(calls.length, 0, "no setMembers, no propose: the bot pays nothing");
+  assert.equal(logs.find((l) => l.event === "BOT_DAO_REFUSED")?.reason, "recipient-unmapped");
+  // A mapped recipient in the same group still goes through.
+  await dao.command(GROUP, ACCOUNTS.alice, "/propose Pay | 0.2 PAS to carol.04");
+  assert.equal(calls.length, 2);
+});
+
+test("an amount over the group's treasury is refused with the balance; the full treasury is allowed", async () => {
+  const { dao, calls, fromBot, logs } = await daoWorld({ treasury: 5n * PAS / 10n });
+  await dao.command(GROUP, ACCOUNTS.alice, "/propose Pay | 0.6 PAS to bob.02");
+  assert.equal((await fromBot())[0].text, "Refused: the treasury of Test group holds 0.5 PAS, less than 0.6 PAS. Fund it first, then propose again.");
+  assert.equal(calls.length, 0, "a proposal that can never execute costs no fees");
+  assert.equal(logs.find((l) => l.event === "BOT_DAO_REFUSED")?.reason, "over-treasury");
+  await dao.command(GROUP, ACCOUNTS.alice, "/propose Pay | 0.5 PAS to bob.02");
+  assert.equal(calls.length, 2, "exactly the treasury balance can execute");
 });
 
 test("proposals and the registered roster survive a restart", async () => {

@@ -455,9 +455,65 @@ Both features are off unless their variables are set. See
 | `BOT_FAUCET_CHAIN` | devnet Asset Hub | wss endpoint(s) for the faucet transfers, comma-separated. |
 | `BOT_FLIP_CONTRACT` | unset | 0x address (20 bytes) of a deployed Flip contract (`contracts/flip/`). Turns on the coin flip: every message is answered with a "Stake 0.5 PAS" `tx` button, and settlements are posted to both players as references. Use the `echo` brain; no brain turn runs. The bot signs nothing, so its wallet needs no funds. |
 | `BOT_FLIP_CHAIN` | devnet Asset Hub | wss endpoint(s) of the chain that holds the Flip contract, comma-separated. |
-| `BOT_DAO_CONTRACT` | unset | 0x address (20 bytes) of a deployed Dao contract (`contracts/dao/`; devnet Asset Hub: `0x073f0e29750b26286befd15619d24ee77e014d87`). Turns on DAO chat in v2 groups where the bot is an admin: `/propose <title> \| <amount> PAS to <username>` and `/proposals`. The bot signs `setMembers` and `propose`, so its wallet needs funds on the chain (the live proof spent 0.032 PAS for the account mapping, three members and one proposal). With the `echo` brain, other group messages get no answer. |
+| `BOT_DAO_CONTRACT` | unset | 0x address (20 bytes) of a deployed Dao contract (`contracts/dao/`; devnet Asset Hub: `0x073f0e29750b26286befd15619d24ee77e014d87`). Turns on DAO chat in v2 groups where the bot is an admin: `/propose <title> \| <amount> PAS to <username>` and `/proposals`. The bot signs `setMembers` and `propose`, so its wallet needs funds on the chain (the live proof spent 0.032 PAS for the account mapping, three members and one proposal). With the `echo` brain, other group messages get no answer. The bot refuses a `/propose` whose recipient's account has no Revive mapping (the payment would go to an address the person cannot reach) or whose amount is more than the group's treasury (see below). |
 | `BOT_DAO_CHAIN` | devnet Asset Hub | wss endpoint(s) of the chain that holds the Dao contract, comma-separated. |
 | `BOT_DAO_VOTING_SECS` | `86400` | Voting period of a new proposal, 30 s to 30 days. |
+
+#### DAO treasury: `fund()`
+
+Execution pays from the group's treasury on the Dao contract, not from the
+bot's wallet. Nobody fills it automatically:
+
+1. Get the group key: `keccak256(<group id>)` (`daoGroupKey` in
+   `bot-core/lib/revive-chain.mjs`).
+2. Any account calls `fund(groupKey)` (selector `0xbf14c119`) with a value
+   in PAS. The contract emits `Funded(groupId, from, amount)`.
+3. `treasury(groupKey)` returns the balance. The bot reads it on each
+   `/propose` and refuses an amount above it with the balance in the reply.
+
+Vote stakes never go into the treasury. A recipient must have a Revive
+mapping before a proposal to them: any contract call maps the account (for
+example one message to the Meter bot). See the contract spec,
+`docs/spec/contracts/dao.md` in polkadot-chat-desktop.
+
+#### The `pcddao` demo persona
+
+A group admin bot for DAO chat. Brain: `echo` (the DAO commands never reach
+a brain, and `echo` stays quiet in the group). Environment:
+`BOT_DAO_CONTRACT=0x073f0e29750b26286befd15619d24ee77e014d87` (devnet Asset
+Hub); fund the bot's wallet (about 0.05 PAS covers the mapping, the member
+list and a few proposals). Add the bot to a v2 group as an admin.
+
+`workspace/PERSONA.md`:
+
+```md
+You are pcddao, the treasury clerk of a group chat. You run proposals on the
+Dao contract. A member types /propose <title> | <amount> PAS to <username>;
+you post the proposal with Vote yes and Vote no buttons and pin it. Members
+stake 0.1 PAS to vote and get the stake back after the vote. When the vote
+closes you post the result; anyone can press Execute on a passed proposal.
+You never sign for a member. Be short and exact about amounts.
+```
+
+`workspace/botinfo.json`:
+
+```json
+{
+  "kind": 0,
+  "name": "pcddao",
+  "description": "Group treasury votes on Polkadot: propose a payment, members stake to vote, anyone executes a passed proposal.",
+  "greeting": "Add me to a group as an admin. Fund the group treasury, then type /propose <title> | <amount> PAS to <username>.",
+  "commands": [
+    { "name": "propose", "description": "<title> | <amount> PAS to <username>: propose a payment" },
+    { "name": "proposals", "description": "list the open and passed proposals" },
+    { "name": "help", "description": "list these commands" }
+  ]
+}
+```
+
+`/help` is answered by a direct engine (`claude`, `codex`, `opencode`,
+`kimi`), not by `echo`. With `echo`, remove the `help` line (a listed command
+must be one the bot answers).
 
 The meter, faucet, coin flip and DAO use the chain's metadata directly (papi's
 unsafe API), so no descriptors are generated for the chain. The meter's Top
