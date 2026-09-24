@@ -21,7 +21,7 @@ import { DEV_PHRASE, mnemonicToMiniSecret } from "@polkadot-labs/hdkd-helpers";
 import { createChainClient } from "./chain-client.mjs";
 import { bulletinPaseoNextV2, productsDevnetBulletin } from "./descriptors.mjs";
 import { PASEO, PRODUCTS_DEVNET } from "./network-config.mjs";
-import { describeTestnetFileAllowance } from "./testnet-file-allowance.mjs";
+import { DEVNET_FILE_ALLOWANCE_STEP, describeTestnetFileAllowance } from "./testnet-file-allowance.mjs";
 import { chunkCount, cidOf, contentHash, decryptAttachment, encryptAttachment } from "./attachment-crypto.mjs";
 import { withTimeout } from "../vendor/lib/async-utils.mjs";
 import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
@@ -175,13 +175,22 @@ export function createBulletin({
     const { api, genesis: actual } = await connect();
     if (!authorizer) throw new Error(`Bulletin storage is not authorized for ${address} (${status.remainingTransactions ?? 0} transactions, ${status.remainingBytes ?? 0n} bytes left)`);
     if (!TESTNET_GENESES[actual]) throw new Error("a dev authorizer may sign only on a named testnet Bulletin chain");
-    const grant = { transactions: Math.max(100, transactions), bytes: BigInt(Math.max(64 * 1024 * 1024, bytes)) };
-    const started = now();
-    const result = await untilBestBlock(
-      api.tx.TransactionStorage.authorize_account({ who: address, ...grant }),
-      devAuthorizerSigner(authorizer), {}, bestBlockTimeoutMs,
-    );
-    log("BOT_BULLETIN_AUTHORIZED", { account: address, authorizer, transactions: grant.transactions, bytes: String(grant.bytes), block: result.block.number, txHash: result.txHash, ms: now() - started });
+    // The devnet //Eve authorizer refuses a 64 MiB grant since 2026-09-24
+    // (InsufficientAuthorizerBudget): grant in 8 MiB steps, as many as the
+    // shortfall needs (authorize_account adds to an active grant).
+    const short = (have, need) => (status.active && have != null ? Math.max(0, Number(need) - Number(have)) : Number(need));
+    const steps = Math.max(1,
+      Math.ceil(short(status.remainingBytes, bytes) / Number(DEVNET_FILE_ALLOWANCE_STEP.bytes)),
+      Math.ceil(short(status.remainingTransactions, transactions) / DEVNET_FILE_ALLOWANCE_STEP.transactions));
+    let result = null;
+    for (let step = 1; step <= steps; step += 1) {
+      const started = now();
+      result = await untilBestBlock(
+        api.tx.TransactionStorage.authorize_account({ who: address, ...DEVNET_FILE_ALLOWANCE_STEP }),
+        devAuthorizerSigner(authorizer), {}, bestBlockTimeoutMs,
+      );
+      log("BOT_BULLETIN_AUTHORIZED", { account: address, authorizer, step, steps, transactions: DEVNET_FILE_ALLOWANCE_STEP.transactions, bytes: String(DEVNET_FILE_ALLOWANCE_STEP.bytes), block: result.block.number, txHash: result.txHash, ms: now() - started });
+    }
     return { action: "authorized", txHash: result.txHash, block: result.block.number, ...(await readAuthorization()) };
   };
 

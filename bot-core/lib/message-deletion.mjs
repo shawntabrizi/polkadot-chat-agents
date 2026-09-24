@@ -3,11 +3,10 @@
 // Small pieces, kept apart from index.mjs so the rules are unit-tested:
 //  - createDeletionLedger: the recipient's per-peer tombstones and pending
 //    deletions (a deletion may arrive before its target).
-//  - parseProtocolExtensions: which extension kinds the bot SENDS
-//    (BOT_PROTOCOL_EXTENSIONS). Development-mode rule of the desktop spec set
-//    (polkadot-chat-desktop docs/spec/README.md): every client is in
-//    development, so extensions go to every peer without gating; an old client
-//    shows the base spec's "unsupported message" for a kind it does not know.
+//  - parseProtocolExtensions: which extension kinds the bot MAY send
+//    (BOT_PROTOCOL_EXTENSIONS). Since spec 0013 (lib/capabilities.mjs) a kind
+//    also goes to a peer only after every device of the peer listed it; "none"
+//    makes the bot a baseline client that sends no capabilities at all.
 //  - createExtensionObserver: which peers have sent an extension kind. A log
 //    only; it enables nothing.
 //  - createMessageDeleter: the sender side of one retraction, on top of the
@@ -121,7 +120,8 @@ export const createExtensionObserver = ({ maxPeers = 10_000 } = {}) => {
 //     that no longer carries it (lane `supersedes`);
 //  3. possibly fetched               -> send `deleted` to the peer.
 // Cases 2 and 3 need the deletion message, so they happen only when the
-// `deleted` extension is on (BOT_PROTOCOL_EXTENSIONS). Otherwise nothing is sent.
+// `deleted` extension is on (BOT_PROTOCOL_EXTENSIONS) and, per spec 0013, the
+// peer listed kind 21: `enabled` may be (peerHex) => boolean. Otherwise nothing is sent.
 // Resolves { outcome: "unsent" | "sent" | "unsupported", messageId?, delivered? }.
 export const createMessageDeleter = ({ outbound, enabled = true, encode, makeId, stamp = () => Date.now(), log = () => {} }) =>
   async (peerHex, targetId) => {
@@ -130,8 +130,8 @@ export const createMessageDeleter = ({ outbound, enabled = true, encode, makeId,
       log("BOT_DELETE_UNSENT", { to: peerHex, target: targetId });
       return { outcome: "unsent" };
     }
-    if (!enabled) {
-      log("BOT_DELETE_SKIPPED", { to: peerHex, target: targetId, reason: "the deleted extension is off (BOT_PROTOCOL_EXTENSIONS)" });
+    if (!(typeof enabled === "function" ? enabled(peerHex) : enabled)) {
+      log("BOT_DELETE_SKIPPED", { to: peerHex, target: targetId, reason: "the deleted extension is off (BOT_PROTOCOL_EXTENSIONS) or the peer did not list it (spec 0013)" });
       return { outcome: "unsupported" };
     }
     const messageId = makeId();

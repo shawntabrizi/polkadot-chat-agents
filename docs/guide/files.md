@@ -162,7 +162,8 @@ separately if the status still needs it.
 ## Bulletin attachments (spec 0012)
 
 Clients that speak spec 0012 (the desktop client, pca) send an image or file
-as a kind-250 `attachment` message instead of a HOP `richText`. The sender
+through Bulletin, as a `richText` with `FileVariant` 1 (spec 0014; kind 250
+before it, still read). The sender
 encrypts the file with a fresh key (AES-256-GCM per 2,000,000-byte chunk),
 stores each encrypted chunk with a feeless `TransactionStorage.store` on the
 Bulletin chain, and sends one ordinary message with the key, the chunk hashes
@@ -171,7 +172,7 @@ costs one statement; the file costs `ceil(size / 2 MB)` Bulletin
 transactions. The chain keeps the ciphertext 14 days, and any device of the
 recipient can fetch it, so it works for multi-device users and for groups.
 
-**Receive.** On devnet and Paseo every bot reads kind 250 without setup. The
+**Receive.** On devnet and Paseo every bot reads variant 1 and kind 250 without setup. The
 bot fetches each chunk by CID: `bitswap_v1_get` on its Bulletin node, then the
 message's mirror, then the network's gateway. It checks each chunk's
 BLAKE2b-256 hash, decrypts, checks the length, and stages the file for the
@@ -182,8 +183,11 @@ brain exactly like a HOP attachment (same media cache, same
 logged or passed over the bridge.
 
 **Send.** A file the bot returns (`/file get`, `POST /send` with `file_path`)
-goes through Bulletin when the peer has sent the bot a kind-250 message in this
-process, or when HOP upload is not configured. Phone users keep getting HOP.
+goes on the rail every device of the peer reads (spec 0013 capabilities):
+Bulletin variant 1 when each device listed it, else HOP in the phones' format
+(ChaCha20-Poly1305, the V1 root envelope with a small file inline). Phone
+users, which send no capabilities, keep getting HOP. With no common rail the
+send is refused ("This contact's app cannot receive files from this app").
 The store is signed by the bot's `//allowance//bulletin//chat` account, which
 needs a Bulletin authorization (`pca storage <bot> status`). On a named
 testnet an operator may set `BOT_BULLETIN_AUTHORIZER=//Eve` to let the bot

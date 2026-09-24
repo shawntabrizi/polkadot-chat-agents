@@ -249,7 +249,8 @@ export function createPersona({ name, devices = 1, identity = mintIdentityKeys()
   let started = null;
 
   const recordEntries = (identifier, chunks, peer, messageId) => {
-    hopEntries.set(normHex(identifier), { role: "metadata", peer, messageId });
+    // The phones' envelope holds a small file inline in the root entry: no chunks.
+    hopEntries.set(normHex(identifier), { role: chunks.length ? "metadata" : "inline file", peer, messageId });
     chunks.forEach((hash, i) => hopEntries.set(normHex(hash), { role: `chunk ${i + 1}/${chunks.length}`, peer, messageId }));
   };
 

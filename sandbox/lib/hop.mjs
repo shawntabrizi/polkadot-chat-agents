@@ -10,7 +10,12 @@
 //   claim keypair = sr25519 from seed blake2b_256(key = ticket, "signer")
 //   entry hash    = blake2b_256(encrypted blob); the metadata entry's hash is
 //                   the message's `identifier`
-//   metadata      = SCALE UploadedFile { totalSize: u64, chunks: Vec<Vec<u8>> }
+//   root entry    = the phone apps' envelope (chat RFC 0001):
+//                   VersionedUploadedFile::V1(Inline(Vec<u8>) | Chunked(UploadedFile)),
+//                   a file of at most chunkSize - 64 bytes inline in the root;
+//                   or the spec text's plain UploadedFile { totalSize: u64,
+//                   chunks: Vec<Vec<u8>> }. A download reads both; an upload
+//                   writes the envelope, as the phones do.
 //
 // Every pool call is signed with a domain-separated payload (hop-submit-v1:,
 // hop-claim-v1:, hop-ack-v1:). Params are positional, as the spec writes them.
@@ -19,7 +24,7 @@ import { chacha20poly1305 } from "@noble/ciphers/chacha.js";
 import { blake2b } from "@noble/hashes/blake2.js";
 import { randomBytes } from "@noble/hashes/utils.js";
 import { getPublicKey, secretFromSeed, sign } from "@scure/sr25519";
-import { Bytes, Struct, Vector, u64 } from "scale-ts";
+import { Bytes, Enum, Struct, Vector, u64 } from "scale-ts";
 import WebSocket from "ws";
 
 import { bytesToHex, hexToBytes } from "./bytes.mjs";
@@ -31,6 +36,25 @@ export const HOP_FRAME_MAX_BYTES = 4_500_000;
 
 const textEncoder = new TextEncoder();
 const UploadedFile = Struct({ totalSize: u64, chunks: Vector(Bytes()) });
+const VersionedUploadedFile = Enum({ V1: Enum({ Inline: Bytes(), Chunked: UploadedFile }) });
+/** iOS HandoffFileLoadConfig.inlineMargin: the envelope and the AEAD's 28 bytes. */
+const INLINE_MARGIN = 64;
+// A codec reads a root only if it reads it to the very end.
+const readsAll = (codec, bytes) => {
+  try {
+    const value = codec.dec(bytes);
+    return codec.enc(value).length === bytes.length ? value : null;
+  } catch { return null; }
+};
+/** The root as { inline } or { totalSize, chunks }: exactly one layout must read it. */
+export const decodeRoot = (bytes) => {
+  const versioned = bytes[0] === 0 ? readsAll(VersionedUploadedFile, bytes) : null;
+  const plain = readsAll(UploadedFile, bytes);
+  if (versioned && plain) throw new Error("ambiguous HOP root entry");
+  if (versioned) return versioned.value.tag === "Inline" ? { inline: versioned.value.value } : versioned.value.value;
+  if (plain) return plain;
+  throw new Error("unreadable HOP root entry");
+};
 
 const concat = (...parts) => {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
@@ -130,7 +154,7 @@ export const openHop = (url, { timeoutMs = 30_000, maxFrameBytes = HOP_FRAME_MAX
  * metadata entry whose hash becomes the identifier.
  * @returns {{ identifier: Uint8Array, claimTicket: Uint8Array, chunks: Uint8Array[] }}
  */
-export async function uploadFile({ url, bytes, signer, chunkSize = HOP_CHUNK_BYTES, timeoutMs = 30_000 }) {
+export async function uploadFile({ url, bytes, signer, chunkSize = HOP_CHUNK_BYTES, timeoutMs = 30_000, layout = "versioned" }) {
   const ticket = randomBytes(32);
   const keys = ticketKeys(ticket);
   const recipient = bytesToHex(sr25519Multi(keys.publicKey));
@@ -143,8 +167,14 @@ export async function uploadFile({ url, bytes, signer, chunkSize = HOP_CHUNK_BYT
       return hash256(blob);
     };
     const chunks = [];
+    if (layout === "versioned" && bytes.length <= chunkSize - INLINE_MARGIN) {
+      const root = VersionedUploadedFile.enc({ tag: "V1", value: { tag: "Inline", value: bytes } });
+      return { identifier: await submit(encrypt(keys.encryptionKey, root)), claimTicket: ticket, chunks };
+    }
     for (let at = 0; at < bytes.length; at += chunkSize) chunks.push(await submit(encrypt(keys.encryptionKey, bytes.subarray(at, at + chunkSize))));
-    const identifier = await submit(encrypt(keys.encryptionKey, UploadedFile.enc({ totalSize: BigInt(bytes.length), chunks })));
+    const file = { totalSize: BigInt(bytes.length), chunks };
+    const root = layout === "versioned" ? VersionedUploadedFile.enc({ tag: "V1", value: { tag: "Chunked", value: file } }) : UploadedFile.enc(file);
+    const identifier = await submit(encrypt(keys.encryptionKey, root));
     return { identifier, claimTicket: ticket, chunks };
   } finally {
     rpc.close();
@@ -171,7 +201,14 @@ export async function downloadFile({ url, identifier, claimTicket, maxBytes, tim
     // An ack that fails is not a failed download (the entry may already be gone).
     const ack = (hash) => rpc.call("hop_ack", [bytesToHex(hash), signed(hash, payloads.ack)]).catch(() => undefined);
 
-    const meta = UploadedFile.dec(decrypt(keys.encryptionKey, await claim(identifier)));
+    const root = decodeRoot(decrypt(keys.encryptionKey, await claim(identifier)));
+    if (root.inline) {
+      if (root.inline.length > maxBytes) throw new Error(`attachment larger than the ${maxBytes}-byte cap (${root.inline.length} bytes)`);
+      onChunks([]);
+      await ack(identifier);
+      return root.inline;
+    }
+    const meta = root;
     if (meta.totalSize > BigInt(maxBytes)) throw new Error(`attachment larger than the ${maxBytes}-byte cap (${meta.totalSize} bytes)`);
     onChunks(meta.chunks);
     await ack(identifier);

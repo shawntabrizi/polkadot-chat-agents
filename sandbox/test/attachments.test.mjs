@@ -47,7 +47,7 @@ test("alice sends a photo to bob (2 devices): one claim, one placeholder, bytes 
   const [ref] = sent.content.attachments;
   assert.deepEqual([ref.kind, ref.mimeType, ref.fileSize, ref.width, ref.height, ref.status, ref.wssUrl], ["image", "image/png", PNG.length, 1, 1, "sent", daemon.hopUrl]);
   assert.match(ref.identifier, /^0x[0-9a-f]{64}$/);
-  assert.equal(ref.chunks.length, 1);
+  assert.equal(ref.chunks.length, 0, "the phones' envelope: a small file sits inline in the root entry");
   assert.equal(ref.mediaId, ref.identifier.slice(2));
   assert.ok(!JSON.stringify(sent).match(/ticket/i), "no claim ticket in the API's row");
   await assert.rejects(post("/personas/alice/rooms/bob/messages", { file: "photo.png" }), /absolute path/);
@@ -79,15 +79,13 @@ test("alice sends a photo to bob (2 devices): one claim, one placeholder, bytes 
   assert.equal((await fetch(`${daemon.url}/api/personas/bob/media/${"ab".repeat(32)}`)).status, 404);
   assert.equal((await fetch(`${daemon.url}/api/personas/bob/media/../../daemon.json`)).status, 404, "the id regex is the path guard");
 
-  // The pool: two entries (chunk, metadata) signed by alice, claimed once, acked, gone; labelled by role and conversation.
+  // The pool: one root entry with the photo inline (the phones' envelope) signed by alice, claimed once, acked, gone; labelled by role and conversation.
   const pool = await get("/hop");
-  assert.equal(pool.entries.length, 2);
+  assert.equal(pool.entries.length, 1);
   assert.deepEqual(pool.entries.map((e) => [e.signerLabel, e.role, e.owner, e.claims, e.acked, e.available]), [
-    ["alice", "chunk 1/1", "alice ⇄ bob", 1, true, false],
-    ["alice", "metadata", "alice ⇄ bob", 1, true, false],
+    ["alice", "inline file", "alice ⇄ bob", 1, true, false],
   ]);
-  assert.equal(pool.entries[1].hash, ref.identifier);
-  assert.equal(pool.entries[0].hash, ref.chunks[0]);
+  assert.equal(pool.entries[0].hash, ref.identifier);
   assert.ok(pool.entries.every((e) => e.messageId === sent.messageId));
 
   // The wire: the rich text decodes to its caption and the attachment's metadata, no ticket anywhere.

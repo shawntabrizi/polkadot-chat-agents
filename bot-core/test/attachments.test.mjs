@@ -140,3 +140,33 @@ test("png: the generated image carries the dimensions the echo brain reads back"
   assert.deepEqual(pngDimensions(png), { width: 40, height: 30 });
   assert.equal(pngDimensions(new Uint8Array(40)), null);
 });
+
+// Devnet //Eve refuses a 64 MiB grant since 2026-09-24
+// (InsufficientAuthorizerBudget); the bot's own dev grant goes in 8 MiB steps.
+test("dev grant: an upload short of 20 MiB gets three 8 MiB authorize_account steps, never one large grant", async () => {
+  const grants = [];
+  const api = {
+    query: {
+      TransactionStorage: { Authorizations: { getValue: async () => null } },
+      System: { Number: { getValue: async () => 100 } },
+    },
+    tx: {
+      TransactionStorage: {
+        authorize_account: (args) => {
+          grants.push(args);
+          return { signSubmitAndWatch: () => ({ subscribe: ({ next }) => { queueMicrotask(() => next({ type: "txBestBlocksState", found: true, ok: true, block: { number: 101 }, txHash: "0x01" })); return { unsubscribe() {} }; } }) };
+        },
+      },
+    },
+  };
+  const bulletin = createBulletin({
+    endpoint: "wss://bulletin.invalid",
+    genesis: GENESIS,
+    authorizer: "//Eve",
+    signerPair: { publicKey: new Uint8Array(32).fill(7), sign: () => new Uint8Array(64) },
+    makeClient: () => ({ getChainSpecData: async () => ({ genesisHash: GENESIS }), getUnsafeApi: () => api, destroy() {} }),
+  });
+  await bulletin.ensureAuthorized({ transactions: 3, bytes: 20 * 1024 * 1024 });
+  assert.equal(grants.length, 3);
+  assert.ok(grants.every((g) => g.bytes === 8n * 1024n * 1024n && g.transactions === 10), JSON.stringify(grants, (_k, v) => (typeof v === "bigint" ? String(v) : v)));
+});

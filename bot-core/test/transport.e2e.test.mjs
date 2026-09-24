@@ -24,6 +24,7 @@ import {
   encodeAccountEcdhKey,
   encodeOpaqueBotInfoMessage,
   encodeOpaqueButtonPressMessage,
+  encodeOpaqueCapabilitiesMessage,
   encodeOpaqueDeletedMessage,
   encodeOpaqueEditedMessage,
   encodeOpaqueGroupInfoMessage,
@@ -211,6 +212,17 @@ async function startPersona(node, { name = "alice", devices = 1 } = {}) {
     delivered: (messageId, { timeoutMs = 20_000 } = {}) => waitFor(async () => (await messages()).find((m) => m.messageId === messageId)?.status === "delivered", { timeoutMs, label: `the bot's ACK of ${messageId}` }),
     /** The row by id (any direction). */
     row: async (messageId) => (await messages()).find((m) => m.messageId === messageId) ?? null,
+    /**
+     * Spec 0013: the persona's device sends its capabilities (the desktop's
+     * set by default), as a capable client does after the chat starts. Until
+     * then the bot treats it as a baseline client (a phone). Resolves once the
+     * bot stored the set.
+     */
+    async advertise(bot, capabilities = DESKTOP_CAPS, { device = 1 } = {}) {
+      const before = bot.events.filter((e) => e.event === "BOT_RECEIVED_CAPABILITIES").length;
+      await post({ raw: `0x${bytesToHex(remoteMessage(encodeOpaqueCapabilitiesMessage(capabilities)))}`, device });
+      await waitFor(() => bot.events.filter((e) => e.event === "BOT_RECEIVED_CAPABILITIES").length > before, { label: "the bot stored the capabilities" });
+    },
     /** The persona never ACKs the bot again: the node drops every ACK its device would send (a peer that never fetches). */
     async neverAck() {
       for (const channel of [`session ${name}#1→${BOT_USERNAME} /response`, `identity ${name}→${BOT_USERNAME} /response`]) {
@@ -223,6 +235,13 @@ async function startPersona(node, { name = "alice", devices = 1 } = {}) {
 // The codec's opaque form is SCALE bytes (compact length + remote message);
 // sendRaw takes the remote message itself, as the SDK adds the length.
 const remoteMessage = (opaque) => opaque.subarray([1, 2, 4][opaque[0] & 3]);
+// A capable client's set (spec 0013): every base kind, every extension kind
+// 240-252, both FileVariants and dialects, both feature bits.
+const range = (from, to) => Array.from({ length: to - from + 1 }, (_, i) => from + i);
+const DESKTOP_CAPS = Object.freeze({
+  kinds: [0, 1, 2, 3, 4, 5, ...range(7, 18), 20, 21, ...range(240, 252)],
+  fileVariants: [0, 1], hopDialects: [0, 1], features: 3,
+});
 
 const tmpState = () => fs.mkdtempSync(path.join(os.tmpdir(), "pca-e2e-"));
 const tmpFile = (dir, name, bytes) => { const file = path.join(dir, name); fs.writeFileSync(file, bytes); return file; };
@@ -844,7 +863,9 @@ describe("transport e2e", { concurrency: 8 }, () => {
       assert.match(sent.message_id, /^[0-9A-F-]{36}$/);
       await bot.waitFor((event) => event.event === "BOT_SENT_FILE", { label: "BOT_SENT_FILE" });
       const hop = node.daemon.hop;
-      assert.equal(hop.submissions.length, 2, "small file upload should submit one encrypted chunk and metadata");
+      // A baseline peer (a phone): HOP in the phones' dialect, where a small
+      // file sits inline in the root entry.
+      assert.equal(hop.submissions.length, 1, "a small file is one entry: the phones' envelope holds it inline");
       assert.ok(hop.submissions.every((submission) => submission.signer === `0x${BOT_BULLETIN_ACCOUNT}`), "outbound HOP upload used the wrong signer");
 
       // The persona receives the rich text with the caption, claims the
@@ -857,6 +878,8 @@ describe("transport e2e", { concurrency: 8 }, () => {
       const held = Buffer.from(await fetch(`${node.apiUrl}/api/personas/alice/media/${a.mediaId}`).then((r) => r.arrayBuffer()));
       assert.equal(Buffer.compare(held, payload), 0, "the persona holds the vault file byte-exact");
       assert.ok(hop.list().every((e) => e.claims === 1 && e.acked), "each pool entry claimed once and acked");
+      const sentFile = bot.events.find((e) => e.event === "BOT_SENT_FILE");
+      assert.equal(sentFile.rail, "hop");
     } finally {
       await bot.stop();
       await node.close();
@@ -1027,6 +1050,8 @@ describe("transport e2e", { concurrency: 8 }, () => {
     try {
       const alice = await startPersona(node);
       await alice.open("silent question");
+      // Spec 0013: a deletion goes only to a peer that listed kind 21.
+      await alice.advertise(bot);
       await alice.neverAck();
       await alice.send("still here");
       const fallback = await bot.waitFor((e) => e.event === "BOT_LIVE_FALLBACK", { label: "BOT_LIVE_FALLBACK", timeoutMs: 40_000 });
@@ -1212,7 +1237,9 @@ describe("transport e2e", { concurrency: 8 }, () => {
       stateDir,
       extraEnv: {
         BOT_SUBSCRIBE: "0", BOT_BRAIN: "claude", BOT_AI_CMD: "sh",
-        BOT_AI_ARGS: JSON.stringify(["-c", "sleep 2; printf '{\"type\":\"result\",\"result\":\"typed answer\"}\\n'"]),
+        // The opener is answered at once (the persona is still baseline
+        // then); every later turn takes 2 s.
+        BOT_AI_ARGS: JSON.stringify(["-c", "case \"$1\" in *typing\\ opener*) ;; *) sleep 2;; esac; printf '{\"type\":\"result\",\"result\":\"typed answer\"}\\n'", "sh", "__PROMPT__"]),
         // Without botinfo (and typing) this would post a placeholder after 1 s.
         BOT_THINKING_TEXT: "⏳ thinking…", BOT_THINKING_AFTER_MS: "1000",
         BOT_LOG_LEVEL: "debug",
@@ -1223,6 +1250,10 @@ describe("transport e2e", { concurrency: 8 }, () => {
       const alice = await startPersona(node);
       await alice.open("typing opener");
       await alice.reply(isAnswer, { label: "the first answer" });
+      // Spec 0013: seen and botInfo (the client's working state) only once
+      // the peer listed them; a baseline peer gets neither.
+      assert.equal(bot.events.filter((e) => e.event === "BOT_SENT_SEEN").length, 0, "no seen to a baseline peer");
+      await alice.advertise(bot);
       const second = await alice.send("second question");
       const seen = await bot.waitFor((e) => e.event === "BOT_SENT_SEEN" && e.upTo === second.messageId, { label: "the seen for the second question" });
       assert.equal(seen.to, alice.accountHex);
@@ -1265,17 +1296,22 @@ describe("transport e2e", { concurrency: 8 }, () => {
       stateDir,
       extraEnv: {
         BOT_SUBSCRIBE: "0", BOT_BRAIN: "claude", BOT_AI_CMD: "sh",
-        BOT_AI_ARGS: JSON.stringify(["-c", "sleep 23; printf '{\"type\":\"result\",\"result\":\"slow typed answer\"}\\n'"]),
+        // Only the question with "slow" takes 23 s; the opener is answered at once.
+        BOT_AI_ARGS: JSON.stringify(["-c", "case \"$1\" in *slow*) sleep 23;; esac; printf '{\"type\":\"result\",\"result\":\"slow typed answer\"}\\n'", "sh", "__PROMPT__"]),
         BOT_THINKING_TEXT: "⏳ thinking…", BOT_THINKING_AFTER_MS: "1000",
       },
     });
     try {
       const alice = await startPersona(node);
+      await alice.open("hello");
+      await alice.reply((m) => textOf(m).startsWith("slow typed answer"), { label: "the opener's answer" });
+      // Spec 0013: the client knows the bot (botInfo) only after it listed botInfo.
+      await alice.advertise(bot);
       const started = Date.now();
-      await alice.open("slow typing question");
+      await alice.send("slow typing question");
       const placeholder = await bot.waitFor((e) => e.event === "BOT_LIVE_PLACEHOLDER", { label: "BOT_LIVE_PLACEHOLDER", timeoutMs: 40_000 });
       assert.ok(Date.now() - started >= 19_000, "the placeholder waited for the 20 s mark");
-      await alice.reply((m) => textOf(m).startsWith("slow typed answer"), { label: "the answer", timeoutMs: 40_000 });
+      await waitFor(async () => (await alice.incoming()).filter((m) => textOf(m).startsWith("slow typed answer")).length === 2, { label: "the answer", timeoutMs: 40_000 });
       const frames = versions(await alice.row(placeholder.messageId));
       assert.match(frames[0], /^⏳ working · 2\ds/, `the first frame is the status: ${JSON.stringify(frames)}`);
       assert.ok(!frames.includes("⏳ thinking…"), "no thinking text while the client's working state shows");
@@ -1495,6 +1531,59 @@ describe("transport e2e", { concurrency: 8 }, () => {
     { label: "Colour", action: { callback: "base64:AQI=" } },
   ]] }) + "\n```";
 
+  // Spec 0013: the bot's own set rides the accept (zero extra submissions)
+  // and goes once per chat; a file goes on the rail every device of the peer
+  // reads (0014 "Sending"), and a peer with no common rail is refused.
+  test("capabilities: sent once with the accept, never again; the file rail follows the peer's set", async () => {
+    const node = await startSandbox();
+    const stateDir = tmpState();
+    const bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: { BOT_SUBSCRIBE: "0", BOT_HOP_UPLOAD_NODE: node.hopUrl } });
+    const base = `http://127.0.0.1:${bot.bridgePort}`;
+    const authHeaders = { authorization: `Bearer ${bot.bridgeToken}` };
+    try {
+      const alice = await startPersona(node);
+      await alice.open("caps opener");
+      await alice.reply((m) => textOf(m) === "Echo: caps opener");
+      const sentCaps = await bot.waitFor((e) => e.event === "BOT_SENT_CAPABILITIES", { label: "the bot's capabilities" });
+      assert.equal(sentCaps.to, alice.accountHex);
+      const firstBatch = bot.events.find((e) => e.event === "BOT_OUTBOUND_SUBMITTED" && e.to === alice.accountHex);
+      assert.equal(firstBatch.messages, 2, "the accept and the capabilities in one statement");
+      for (const text of ["one", "two"]) {
+        await alice.send(text);
+        await alice.reply((m) => textOf(m) === `Echo: ${text}`);
+      }
+      assert.equal(bot.events.filter((e) => e.event === "BOT_SENT_CAPABILITIES").length, 1, "once per chat");
+
+      const sendFile = async (name) => {
+        const put = await fetch(`${base}/files/${alice.accountHex}/${name}`, { method: "PUT", headers: { ...authHeaders, "content-type": "text/plain" }, body: Buffer.from(`${name}\n`) });
+        assert.equal(put.status, 201);
+        const res = await fetch(`${base}/send`, { method: "POST", headers: { ...authHeaders, "content-type": "application/json" }, body: JSON.stringify({ chat_id: alice.accountHex, file_path: name }) });
+        return res.json();
+      };
+      // A capable peer that lists Bulletin, to a bot without Bulletin: HOP.
+      await alice.advertise(bot);
+      assert.equal((await sendFile("capable.txt")).success, true);
+      const hop = await bot.waitFor((e) => e.event === "BOT_SENT_FILE", { label: "the HOP file" });
+      assert.equal(hop.rail, "hop");
+      // A peer whose device reads only Bulletin: no common rail, refused.
+      await alice.advertise(bot, { ...DESKTOP_CAPS, fileVariants: [1], hopDialects: [] });
+      const refused = await sendFile("bulletin-only.txt");
+      assert.equal(refused.success, false);
+      await bot.waitFor((e) => e.event === "BOT_FILE_REFUSED" && /cannot receive files from this app/.test(e.reason), { label: "the refusal" });
+      assert.equal(bot.events.filter((e) => e.event === "BOT_SENT_FILE").length, 1);
+
+      await bot.stop();
+      const state = JSON.parse(fs.readFileSync(path.join(stateDir, "session-state.json"), "utf8"));
+      const peer = state.peers.find((p) => p.peerHex === alice.accountHex);
+      assert.ok(peer.cs, "the set sent to the peer persists (cs)");
+      assert.deepEqual(peer.pc.map((d) => d.c.fileVariants), [[1]], "the device's latest set persists (pc)");
+    } finally {
+      await bot.stop();
+      await node.close();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
   test("buttons: with the extension off, the reply is the fallback text", async () => {
     const node = await startSandbox();
     const stateDir = tmpState();
@@ -1506,6 +1595,8 @@ describe("transport e2e", { concurrency: 8 }, () => {
       await alice.send(buttonsBlock);
       await alice.reply((m) => textOf(m) === "Echo: Pick one\n\n1. Echo\n2. Colour", { label: "the fallback list" });
       assert.equal(bot.events.filter((e) => e.event === "BOT_SENT_BUTTONS").length, 0);
+      // "none" makes the bot a baseline client itself: it sends no capabilities.
+      assert.equal(bot.events.filter((e) => e.event === "BOT_SENT_CAPABILITIES").length, 0);
     } finally {
       await bot.stop();
       await node.close();
@@ -1513,7 +1604,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
     }
   });
 
-  test("buttons: kind 242 by default, press runs a turn, foreign press ignored", async () => {
+  test("buttons: kind 242 to a peer that listed it, press runs a turn, foreign press ignored", async () => {
     const node = await startSandbox();
     const stateDir = tmpState();
     const bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: { BOT_SUBSCRIBE: "0" } });
@@ -1530,7 +1621,9 @@ describe("transport e2e", { concurrency: 8 }, () => {
       const observed = await bot.waitFor((e) => e.event === "BOT_PROTOCOL_EXTENSION_OBSERVED", { label: "the extension logged" });
       assert.deepEqual([observed.peer, observed.kind], [alice.accountHex, "buttonPress"]);
 
-      // No evidence needed: ONE kind-242 message carries the text and the rows.
+      // Spec 0013: after the peer listed kind 242, ONE kind-242 message
+      // carries the text and the rows.
+      await alice.advertise(bot);
       await alice.send(block);
       const sent = await bot.waitFor((e) => e.event === "BOT_SENT_BUTTONS", { label: "the buttons message" });
       assert.deepEqual([sent.buttons, sent.oneShot], [2, false]);
@@ -1550,6 +1643,13 @@ describe("transport e2e", { concurrency: 8 }, () => {
       await bob.send("bob still here");
       await bob.reply((m) => textOf(m) === "Echo: bob still here");
       assert.deepEqual((await bob.incoming()).map(textOf).filter((t) => t.startsWith("Echo:")), ["Echo: bob opener", "Echo: bob still here"]);
+      // Bob never listed buttons: he gets the menu as numbered text, and a
+      // reply of a number is that button's press.
+      await bob.send(block);
+      await bob.reply((m) => textOf(m) === "Echo: Pick one\n\n1. Echo\n2. Colour", { label: "bob's fallback menu" });
+      await bob.send("2");
+      await bob.reply((m) => textOf(m) === "Echo: [button] Colour (payload: 0102)", { label: "bob's press by number" });
+      assert.equal(bot.events.filter((e) => e.event === "BOT_SENT_BUTTONS").length, 1, "only alice got kind 242");
 
       await bot.stop();
       const state = JSON.parse(fs.readFileSync(path.join(stateDir, "session-state.json"), "utf8"));
@@ -1562,10 +1662,12 @@ describe("transport e2e", { concurrency: 8 }, () => {
     }
   });
 
-  // Spec 0008: botInfo goes out with the accept and on /start (then the
-  // greeting as a text); an edit of botinfo.json raises the version; a
-  // peer's botInfo is stored and never answered (two bots must not loop).
-  test("bot info: sent on accept and on /start, a peer's botInfo stored and never answered", async () => {
+  // Spec 0008: botInfo goes out on /start (then the greeting as a text) and
+  // with the first reply after the peer listed it (spec 0013: never to a
+  // baseline peer, so not with the accept of a new chat); an edit of
+  // botinfo.json raises the version; a peer's botInfo is stored and never
+  // answered (two bots must not loop).
+  test("bot info: sent after the peer listed it and on /start, a peer's botInfo stored and never answered", async () => {
     const node = await startSandbox();
     const stateDir = tmpState();
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "pca-e2e-ws-"));
@@ -1577,9 +1679,15 @@ describe("transport e2e", { concurrency: 8 }, () => {
       assert.deepEqual([startup.kind, startup.version, startup.commands], [0, 1, 0], "echo brain: kind 0, no commands");
       const alice = await startPersona(node);
       await alice.open("info opener");
-      const onAccept = await bot.waitFor((e) => e.event === "BOT_SENT_BOTINFO", { label: "botInfo on accept" });
-      assert.deepEqual([onAccept.to, onAccept.version, onAccept.on], [alice.accountHex, 1, "accept"]);
       await alice.reply((m) => textOf(m) === "Echo: info opener");
+      assert.equal(bot.events.filter((e) => e.event === "BOT_SENT_BOTINFO").length, 0, "a baseline peer gets no botInfo");
+      await alice.send("/start");
+      await alice.reply((m) => textOf(m) === "Echo: /start", { label: "/start is plain input for a baseline peer" });
+      await alice.advertise(bot);
+      await alice.send("listed");
+      await alice.reply((m) => textOf(m) === "Echo: listed");
+      const onReply = await bot.waitFor((e) => e.event === "BOT_SENT_BOTINFO", { label: "botInfo with the first reply after the capabilities" });
+      assert.deepEqual([onReply.to, onReply.version, onReply.on], [alice.accountHex, 1, "catch-up"]);
 
       // The operator edits the file: the next send carries version 2.
       fs.writeFileSync(botInfoFile, JSON.stringify({ name: "Guide", greeting: "Hi again!" }));
@@ -1587,7 +1695,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
       const onStart = await bot.waitFor((e) => e.event === "BOT_SENT_BOTINFO" && e.on === "start", { label: "botInfo on /start" });
       assert.deepEqual([onStart.to, onStart.version], [alice.accountHex, 2]);
       await alice.reply((m) => textOf(m) === "Hi again!", { label: "the greeting" });
-      assert.equal((await alice.incoming()).some((m) => textOf(m) === "Echo: /start"), false, "/start is not brain input");
+      assert.equal((await alice.incoming()).filter((m) => textOf(m) === "Echo: /start").length, 1, "/start after the capabilities is not brain input");
 
       // Another bot's botInfo: stored and logged, never answered.
       await alice.sendRaw(remoteMessage(encodeOpaqueBotInfoMessage({ kind: 1, name: "Peer bot", commands: [{ name: "help", description: "list commands" }], version: 3 })));
@@ -1598,8 +1706,8 @@ describe("transport e2e", { concurrency: 8 }, () => {
       await alice.send("after info");
       await alice.reply((m) => textOf(m) === "Echo: after info");
       assert.equal(
-        bot.events.filter((e) => e.event === "BOT_RECEIVED_TEXT").length, 2,
-        "/start and one text (the opener logs BOT_RECEIVED_OPENER); a botInfo never runs a turn",
+        bot.events.filter((e) => e.event === "BOT_RECEIVED_TEXT").length, 4,
+        "two /start, two texts (the opener logs BOT_RECEIVED_OPENER); a botInfo never runs a turn",
       );
       assert.equal(bot.events.filter((e) => e.event === "BOT_SENT_BOTINFO").length, 2, "a received botInfo is not answered with ours");
       assert.equal(bot.events.filter((e) => e.event === "BOT_UNSUPPORTED_CONTENT").length, 0);
@@ -1664,6 +1772,7 @@ describe("transport e2e", { concurrency: 8 }, () => {
 
       bot = await startBot({ endpoint: node.url, apiUrl: node.apiUrl, stateDir, extraEnv: env });
       const catchUps = () => bot.events.filter((e) => e.event === "BOT_SENT_BOTINFO");
+      await alice.advertise(bot);
       await alice.send("first");
       await alice.reply((m) => textOf(m) === "Echo: first");
       const first = await bot.waitFor((e) => e.event === "BOT_SENT_BOTINFO", { label: "the catch-up botInfo" });

@@ -20,18 +20,38 @@ import {
 import { withTimeout } from "../vendor/lib/async-utils.mjs";
 import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
 
+// Match Playground CLI's automatic testnet allocation. This clears bot-core's
+// 50 MiB file cap with room for HOP encryption and metadata overhead.
+export const TESTNET_FILE_ALLOWANCE_TRANSACTIONS = 1_000;
+export const TESTNET_FILE_ALLOWANCE_BYTES = 100_000_000n;
+export const TESTNET_FILE_ALLOWANCE_MIN_TRANSACTIONS = 32;
+export const TESTNET_FILE_ALLOWANCE_MIN_BYTES = 64n * 1024n * 1024n;
+// Products Devnet: since 2026-09-24 the //Eve authorizer refuses a 64 MiB
+// grant (InsufficientAuthorizerBudget); a 10-transaction / 8 MiB grant still
+// lands (polkadot-chat-desktop docs/decisions.md "HOP receive"). The devnet
+// grants that step and tops up with another step whenever the remainder
+// falls below half of it (authorize_account adds to an active grant).
+export const DEVNET_FILE_ALLOWANCE_STEP = Object.freeze({ transactions: 10, bytes: 8n * 1024n * 1024n });
+export const DEVNET_FILE_ALLOWANCE_MIN = Object.freeze({ transactions: 5, bytes: 4n * 1024n * 1024n });
+const DEFAULT_GRANT = Object.freeze({
+  step: Object.freeze({ transactions: TESTNET_FILE_ALLOWANCE_TRANSACTIONS, bytes: TESTNET_FILE_ALLOWANCE_BYTES }),
+  min: Object.freeze({ transactions: TESTNET_FILE_ALLOWANCE_MIN_TRANSACTIONS, bytes: TESTNET_FILE_ALLOWANCE_MIN_BYTES }),
+});
+const DEVNET_GRANT = Object.freeze({ step: DEVNET_FILE_ALLOWANCE_STEP, min: DEVNET_FILE_ALLOWANCE_MIN });
 const ALLOWANCE_NETWORKS = Object.freeze({
   [PRODUCTS_DEVNET.id]: Object.freeze({
     id: PRODUCTS_DEVNET.id,
     name: PRODUCTS_DEVNET.bulletin.name,
     rpcEndpoint: PRODUCTS_DEVNET.bulletin.rpcEndpoint,
     descriptor: productsDevnetBulletin,
+    grant: DEVNET_GRANT,
   }),
   [PASEO.id]: Object.freeze({
     id: PASEO.id,
     name: PASEO.bulletin.name,
     rpcEndpoint: PASEO.bulletin.rpcEndpoint,
     descriptor: bulletinPaseoNextV2,
+    grant: DEFAULT_GRANT,
   }),
 });
 
@@ -40,12 +60,6 @@ export function testnetFileAllowanceNetwork(profileId = DEFAULT_NETWORK_PROFILE)
   if (!network) throw new Error(`No managed testnet file allowance is configured for network profile "${String(profileId)}"`);
   return network;
 }
-// Match Playground CLI's automatic testnet allocation. This clears bot-core's
-// 50 MiB file cap with room for HOP encryption and metadata overhead.
-export const TESTNET_FILE_ALLOWANCE_TRANSACTIONS = 1_000;
-export const TESTNET_FILE_ALLOWANCE_BYTES = 100_000_000n;
-export const TESTNET_FILE_ALLOWANCE_MIN_TRANSACTIONS = 32;
-export const TESTNET_FILE_ALLOWANCE_MIN_BYTES = 64n * 1024n * 1024n;
 // Do not call an active authorization healthy when it is about to expire. The
 // Bulletin pallet keeps the old expiry on an unexpired authorize_account call.
 export const TESTNET_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS = 256;
@@ -105,11 +119,13 @@ export function describeTestnetFileAllowance(authorization, currentBlock) {
   };
 }
 
+// A status read for a named network carries that network's `minimum`.
 function hasSufficientTestnetFileAllowanceQuota(status) {
+  const min = status.minimum ?? DEFAULT_GRANT.min;
   return status.remainingTransactions != null
-    && status.remainingTransactions >= TESTNET_FILE_ALLOWANCE_MIN_TRANSACTIONS
+    && status.remainingTransactions >= min.transactions
     && status.remainingBytes != null
-    && status.remainingBytes >= TESTNET_FILE_ALLOWANCE_MIN_BYTES;
+    && status.remainingBytes >= min.bytes;
 }
 
 export function hasSufficientTestnetFileAllowance(status) {
@@ -157,12 +173,12 @@ async function assertTestnetBulletinGenesis(client, network, timeoutMs) {
   }
 }
 
-async function readAllowance(api, address, networkName, timeoutMs) {
+async function readAllowance(api, address, network, timeoutMs) {
   const [authorization, block] = await withTimeout(Promise.all([
     api.query.TransactionStorage.Authorizations.getValue(Enum("Account", address), AT_BEST),
     api.query.System.Number.getValue(AT_BEST),
-  ]), timeoutMs, `${networkName} allowance query`);
-  return describeTestnetFileAllowance(authorization, block);
+  ]), timeoutMs, `${network.name} allowance query`);
+  return { ...describeTestnetFileAllowance(authorization, block), minimum: network.grant.min };
 }
 
 function pendingAllowanceStatus() {
@@ -241,7 +257,7 @@ async function provisionTestnetFileAllowance({
     // obtaining a typed API or constructing a transaction with it.
     await assertTestnetBulletinGenesis(client, network, timeoutMs);
     const api = client.getTypedApi(network.descriptor);
-    const before = await readAllowance(api, address, network.name, timeoutMs);
+    const before = await readAllowance(api, address, network, timeoutMs);
     if (hasSufficientTestnetFileAllowance(before)) {
       return { action: "already-authorized", ...before };
     }
@@ -270,10 +286,11 @@ async function provisionTestnetFileAllowance({
           provisioningKey,
           networkName: network.name,
           operation: "authorize",
+          // One step; a later check adds another when the remainder is low.
           transaction: api.tx.TransactionStorage.authorize_account({
             who: address,
-            transactions: TESTNET_FILE_ALLOWANCE_TRANSACTIONS,
-            bytes: TESTNET_FILE_ALLOWANCE_BYTES,
+            transactions: network.grant.step.transactions,
+            bytes: network.grant.step.bytes,
           }),
           signer,
           timeoutMs,
@@ -290,7 +307,7 @@ async function provisionTestnetFileAllowance({
     // status output useful. Do not fall back to the pre-grant status: it would
     // incorrectly display a finalized grant as "not authorized".
     try {
-      const after = await readAllowance(api, address, network.name, timeoutMs);
+      const after = await readAllowance(api, address, network, timeoutMs);
       return {
         action,
         ...after,
@@ -359,7 +376,7 @@ export async function getTestnetFileAllowanceStatus({
     const status = await readAllowance(
       client.getTypedApi(network.descriptor),
       target,
-      network.name,
+      network,
       timeoutMs,
     );
     if (hasSufficientTestnetFileAllowance(status)) unresolvedProvisioning.delete(provisioningKey);

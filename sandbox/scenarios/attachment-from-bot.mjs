@@ -36,7 +36,9 @@ export async function run({ sandbox, openChat, bot: bots, log }) {
     // /file get: the bot uploads the vault file and sends the reference.
     const get = await sandbox.post("/personas/alice/rooms/echobot/messages", { text: "/file get notes.txt", device: 2 });
     const uploaded = await bot.waitFor((e) => e.event === "HOP_UPLOADED", { label: "HOP_UPLOADED" });
-    assert.deepEqual([uploaded.bytes, uploaded.chunks], [TEXT.length, 1]);
+    // HOP in the phones' dialect (alice is a baseline client): the small
+    // file sits inline in the root entry of the V1 envelope.
+    assert.deepEqual([uploaded.bytes, uploaded.chunks, uploaded.layout], [TEXT.length, 0, "versioned"]);
     const delivered = await bot.waitFor((e) => e.event === "BOT_FILE_DELIVERED", { label: "BOT_FILE_DELIVERED" });
     assert.equal(delivered.path, "notes.txt");
     await chat.delivered(get.messageId);
@@ -63,12 +65,12 @@ export async function run({ sandbox, openChat, bot: bots, log }) {
     const bytes = await (await fetch(`${sandbox.url}/api/personas/alice/media/${a.mediaId}`)).text();
     assert.equal(bytes, TEXT, "the bytes alice holds are the file she saved");
 
-    // The pool: the bot's two entries, signed by its Bulletin account, claimed exactly once (one device), acked, gone.
+    // The pool: the bot's one entry, signed by its Bulletin account, claimed exactly once (one device), acked, gone.
     const pool = await sandbox.get("/hop");
     const botEntries = pool.entries.filter((e) => e.signer === cfg.bulletinAccount);
-    assert.equal(botEntries.length, 2, "one chunk and the metadata from the bot");
+    assert.equal(botEntries.length, 1, "one root entry with the file inline");
     assert.ok(botEntries.every((e) => e.signerLabel === "echobot" && e.claims === 1 && e.acked && !e.available), `claimed once and acked: ${JSON.stringify(botEntries)}`);
-    assert.deepEqual(botEntries.map((e) => e.role).sort(), ["chunk 1/1", "metadata"], "the claiming device learned the roles");
+    assert.deepEqual(botEntries.map((e) => e.role), ["inline file"], "the claiming device learned the role");
     assert.ok(botEntries.every((e) => e.owner === "alice ⇄ echobot"));
 
     // The wire: the bot's rich text on its device session, wrapped for both alice devices, metadata only.

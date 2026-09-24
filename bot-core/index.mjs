@@ -83,6 +83,7 @@ import { commandCatalog, resolveModelPolicy } from "./lib/commands.mjs";
 import { splitMessageText } from "./lib/chunk.mjs";
 import { createOutboundLanes } from "./lib/outbound-lanes.mjs";
 import { createDeletionLedger, createExtensionObserver, createMessageDeleter, parseProtocolExtensions } from "./lib/message-deletion.mjs";
+import { EXTENSION_KINDS, capabilitiesKey, chooseAttachmentRail, createCapabilitiesSent, createPeerCapabilities, ownCapabilities } from "./lib/capabilities.mjs";
 import { TYPING_MIN_INTERVAL_MS, TYPING_PLACEHOLDER_AFTER_MS, TYPING_TTL_MS, createTypingAndSeen } from "./lib/typing-seen.mjs";
 import { buttonsFallbackText, extractButtonsBlock } from "./lib/buttons-block.mjs";
 import { buttonPressText, createSentButtons } from "./lib/button-presses.mjs";
@@ -157,7 +158,8 @@ import {
   encodeOpaqueChatAcceptedMessage,
   encodeOpaqueDeviceChatAcceptedMessage,
   encodeOpaqueGroupControlMessage,
-  encodeOpaqueAttachmentMessage,
+  encodeOpaqueCapabilitiesMessage,
+  CAPABILITY_FEATURES,
   ATTACHMENT_LIMITS,
   encodeSessionRequestPayload,
   encodeSessionResponsePayload,
@@ -533,16 +535,23 @@ const bulletinItemOf = (a) => ({
   store: { kind: "bulletin", genesis: hexToBytes(a.bulletin.genesis), mirror: a.bulletin.mirror ?? null },
   expiresAt: a.bulletin.expiresAt,
 });
-// Both attachment rails of one decoded message: base-spec richText (HOP) and
-// kind 250 (Bulletin). Kind 250's caption is the message text.
+// Every attachment rail of one decoded message: richText FileVariant 0 (HOP)
+// and 1 (Bulletin, spec 0014), and kind 250 (Bulletin, read only). Kind 250's
+// caption is the message text. A variant-1 item decodes to the 0012 item
+// shape, so both Bulletin forms share one path.
+const richTextAttachments = (attachments) => (attachments ?? []).flatMap((a) => (a.kind === "p2pMixnetFile"
+  ? [toAttachmentMeta(a)]
+  : a.kind === "bulletinFile" ? [toBulletinAttachmentMeta(a)] : []));
+const bulletinItemsOf = (m) => (m.kind === "attachment" ? m.items : (m.richText?.attachments ?? []).filter((a) => a.kind === "bulletinFile"));
 const attachmentsOf = (m) => (m.kind === "attachment"
   ? m.items.map(toBulletinAttachmentMeta)
-  : (m.richText?.attachments ?? []).filter((a) => a.kind === "p2pMixnetFile").map(toAttachmentMeta));
+  : richTextAttachments(m.richText?.attachments));
 const logAttachmentReceived = (from, m, extra = {}) => {
-  if (m.kind !== "attachment") return;
+  const items = bulletinItemsOf(m);
+  if (!items.length) return;
   log("BOT_ATTACHMENT_RECEIVED", {
-    from, messageId: m.messageId, ...extra,
-    items: m.items.map((i) => ({ mime: i.mime, size: i.size, media: i.media.kind, chunks: i.chunks.length, ...(i.media.width != null ? { width: i.media.width, height: i.media.height } : {}) })),
+    from, messageId: m.messageId, form: m.kind === "attachment" ? "kind250" : "variant1", ...extra,
+    items: items.map((i) => ({ mime: i.mime, size: i.size, media: i.media.kind, chunks: i.chunks.length, ...(i.media.width != null ? { width: i.media.width, height: i.media.height } : {}) })),
   });
 };
 // Every consumer of a message expects non-empty text, so caption-less
@@ -1065,8 +1074,11 @@ const disarmThinking = (peerHex) => {
 // placeholder then appears only for a turn longer than
 // TYPING_PLACEHOLDER_AFTER_MS, and its first frame is the progress status, not
 // the "thinking" text. With neither, it follows BOT_THINKING_AFTER_MS.
-const clientShowsWorking = () => extensionOn("botinfo") || extensionOn("typing");
-const placeholderAfterMs = () => (clientShowsWorking() ? Math.max(thinkingAfterMs, TYPING_PLACEHOLDER_AFTER_MS) : thinkingAfterMs);
+// Per peer since spec 0013: only a peer that listed botInfo or typing gets them.
+const clientShowsWorking = (peerHex = null) => (peerHex == null
+  ? extensionOn("botinfo") || extensionOn("typing")
+  : peerGets(peerHex, "botinfo") || peerGets(peerHex, "typing"));
+const placeholderAfterMs = (peerHex = null) => (clientShowsWorking(peerHex) ? Math.max(thinkingAfterMs, TYPING_PLACEHOLDER_AFTER_MS) : thinkingAfterMs);
 const armThinking = (peerHex) => {
   const k = norm(peerHex);
   if (!thinkingText || !(thinkingAfterMs > 0) || thinkingTimers.has(k)) return;
@@ -1080,7 +1092,7 @@ const armThinking = (peerHex) => {
     // The placeholder is a LIVE message: it is edited through progress frames
     // and finally collapses to a short status receipt for the turn.
     livePlaceholders.set(k, (async () => {
-      const handle = await liveReplies.begin(k, clientShowsWorking() ? progressTrackerFor(k).render() : thinkingText);
+      const handle = await liveReplies.begin(k, clientShowsWorking(k) ? progressTrackerFor(k).render() : thinkingText);
       // Already counting since turn start; attaching lets any pre-placeholder
       // work show up in the first visible frame.
       const tracker = progressTrackerFor(k);
@@ -1106,7 +1118,7 @@ const armThinking = (peerHex) => {
       log("BOT_THINKING_FAILED", { error: String(e?.message ?? e) });
       return null;
     }));
-  }, placeholderAfterMs()));
+  }, placeholderAfterMs(k)));
 };
 
 // ---------- outbound lanes (one statement per peer channel slot) ----------
@@ -1143,16 +1155,52 @@ const outbound = createOutboundLanes({
   log,
 });
 
-// ---------- protocol extensions (RFC-0003, specs 0005, 0006 and 0008) ----------
-// Receiving every extension kind is always on. SENDING follows the desktop
-// spec set's development-mode rule: every client is in development, so the
-// bot sends each enabled extension to every peer, with no per-peer evidence.
+// ---------- protocol extensions (RFC-0003, specs 0005, 0006, 0008, 0013) ----------
+// Receiving every extension kind is always on. SENDING needs two things: the
+// extension is enabled here, and (spec 0013, owner ruling 2026-09-24) every
+// known device of the peer listed the kind in its `capabilities`. A peer that
+// never sent one is a baseline client (the phone apps): base-spec content only.
 // BOT_PROTOCOL_EXTENSIONS: unset = all but typing (deleted, buttons, seen, botinfo, txref, groups),
-// "none" = none, or a comma list (only a list can add typing). See docs/explanation/protocol.md.
+// "none" = none, which also makes the bot itself a baseline client: it sends
+// no capabilities (the desktop e2e uses that to act as a phone), or a comma
+// list (only a list can add typing). See docs/explanation/protocol.md.
 const protocolExtensions = parseProtocolExtensions(env.BOT_PROTOCOL_EXTENSIONS);
 const extensionOn = (name) => protocolExtensions.enabled.has(name);
 if (protocolExtensions.unknown.length) log("BOT_PROTOCOL_EXTENSIONS_UNKNOWN", { names: protocolExtensions.unknown });
 log("BOT_PROTOCOL_EXTENSIONS", { enabled: [...protocolExtensions.enabled] });
+// Spec 0013: the bot's own set, sent once per chat (with the accept, or the
+// first message to a peer) and again when it changes; null = send none.
+const ownCaps = ownCapabilities({
+  extensions: protocolExtensions.enabled,
+  hopReceive: hopAllowedNodes.length > 0 || hopAllowInsecure,
+  bulletin: Boolean(bulletin),
+});
+const ownCapsKey = capabilitiesKey(ownCaps);
+if (ownCaps) log("BOT_CAPABILITIES", { kinds: ownCaps.kinds.length, fileVariants: ownCaps.fileVariants, hopDialects: ownCaps.hopDialects, features: ownCaps.features });
+const peerCaps = createPeerCapabilities();
+const capsSent = createCapabilitiesSent();
+// A peer's roster: the statement accounts of its known devices, or none (the
+// identity account stands in until a device is known).
+const rosterOf = (peerHex) => (sessions.get(norm(peerHex))?.session.peerDevices ?? []).map((d) => norm(bytesToHex(d.statementAccountId)));
+const effectiveFor = (peerHex) => peerCaps.effective(norm(peerHex), rosterOf(peerHex));
+// The extension is on here AND every device of the peer listed its kind.
+const peerGets = (peerHex, extension) => extensionOn(extension) && effectiveFor(peerHex).kinds.has(EXTENSION_KINDS[extension]);
+// Queue our set for the peer when it has not received this one. The caller
+// enqueues its real message in the same tick, so the set rides that
+// statement: zero extra submissions. Marked before the send, so two
+// concurrent replies never both carry it; a failed send reverts.
+const catchUpCapabilities = (peerHex, { forceIdentity = false } = {}) => {
+  const k = norm(peerHex);
+  if (!ownCaps || !capsSent.needs(k, ownCapsKey)) return;
+  const previous = capsSent.mark(k, ownCapsKey);
+  outbound.enqueue(k, encodeOpaqueCapabilitiesMessage({ timestamp: stamp(k), ...ownCaps }), { forceIdentity }).submitted.then(() => {
+    log("BOT_SENT_CAPABILITIES", { to: k });
+    persist();
+  }, (error) => {
+    capsSent.revert(k, ownCapsKey, previous);
+    log("BOT_CAPABILITIES_SEND_FAILED", { to: k, error: String(error?.message ?? error) });
+  });
+};
 // Which peers sent an extension kind: logged once per peer, gates nothing.
 const extensionObserver = createExtensionObserver();
 const observeExtension = (peerHex, kind) => {
@@ -1169,8 +1217,8 @@ const logDebug = env.BOT_LOG_LEVEL === "debug" ? (event, extra = {}) => log(even
 // replyGoingOut just before its enqueue), so a reply costs one submission,
 // however long the brain turn takes: handleInbound and a running turn hold it.
 const typingAndSeen = createTypingAndSeen({
-  typing: extensionOn("typing"),
-  seen: extensionOn("seen"),
+  typing: (peerHex) => peerGets(peerHex, "typing"),
+  seen: (peerHex) => peerGets(peerHex, "seen"),
   enqueue: (peerHex, opaque, options) => outbound.enqueue(norm(peerHex), opaque, options),
   encodeTyping: encodeOpaqueTypingMessage,
   encodeSeen: encodeOpaqueSeenMessage,
@@ -1185,7 +1233,7 @@ const typingAndSeen = createTypingAndSeen({
 const deletions = createDeletionLedger();
 const retractOwn = createMessageDeleter({
   outbound,
-  enabled: extensionOn("deleted"),
+  enabled: (peerHex) => peerGets(peerHex, "deleted"),
   encode: encodeOpaqueDeletedMessage,
   makeId: makeAppUuid,
   stamp,
@@ -1213,6 +1261,49 @@ const deleteMessage = async (peerHex, messageId) => {
 // sentButtons remembers the bot's own buttons messages, so a buttonPress is
 // accepted only for one of them, from the peer it went to.
 const sentButtons = createSentButtons();
+// Spec 0013 fallback for buttons: the menu as numbered text. The last menu
+// sent to each DM peer is kept (in memory), so a reply of its number or its
+// label reaches the brain as the press would have ("[button] <label>").
+const fallbackMenus = new Map(); // peerHex -> [{ label, action }]
+const buttonsFallback = (peerHex, text, rows) => {
+  const k = norm(peerHex);
+  if (sessions.has(k)) {
+    fallbackMenus.delete(k);
+    fallbackMenus.set(k, rows.flat());
+    trimMap(fallbackMenus, SEEN_CAP);
+  }
+  return buttonsFallbackText(text, rows);
+};
+// A peer's text that picks an item of the last fallback menu: its press text, or null.
+const fallbackPress = (peerHex, text) => {
+  const k = norm(peerHex);
+  const menu = fallbackMenus.get(k);
+  const answer = String(text ?? "").trim();
+  if (!menu || !answer) return null;
+  const n = /^\d{1,2}$/.test(answer) ? Number(answer) : 0;
+  const button = n >= 1 ? menu[n - 1] : menu.find((b) => b.label.toLowerCase() === answer.toLowerCase());
+  if (!button) return null;
+  fallbackMenus.delete(k);
+  return buttonPressText(button.label, button.action?.callback ?? null);
+};
+// DM buttons: kind 242 needs the peer to list it; `tx` actions also need
+// feature bit 1 (the client runs transaction intents), else they are left
+// out (the text names the amount and the recipient). A group key has no
+// device list: v1/v2 group rules apply there.
+const gateButtons = (peerHex, text, buttons) => {
+  const k = norm(peerHex);
+  if (!sessions.has(k)) return { text, buttons };
+  const eff = effectiveFor(k);
+  if (!extensionOn("buttons") || !eff.kinds.has(EXTENSION_KINDS.buttons)) {
+    log("BOT_BUTTONS_FALLBACK", { to: k, buttons: buttons.rows.flat().length, reason: extensionOn("buttons") ? "peer did not list buttons" : "buttons extension off" });
+    return { text: buttonsFallback(k, text, buttons.rows), buttons: null };
+  }
+  if (eff.features & CAPABILITY_FEATURES.txIntents) return { text, buttons };
+  const rows = buttons.rows.map((row) => row.filter((b) => !b.action?.tx)).filter((row) => row.length > 0);
+  if (rows.flat().length === buttons.rows.flat().length) return { text, buttons };
+  log("BOT_BUTTONS_TX_DROPPED", { to: k, dropped: buttons.rows.flat().length - rows.flat().length });
+  return { text, buttons: rows.length ? { ...buttons, rows } : null };
+};
 const prepareReply = (peerHex, text, { allowButtons = true } = {}) => {
   const parsed = extractButtonsBlock(text);
   if (!parsed) return { text, buttons: null };
@@ -1220,10 +1311,10 @@ const prepareReply = (peerHex, text, { allowButtons = true } = {}) => {
   if (!parsed.rows) return { text: parsed.text, buttons: null };
   if (parsed.shortened > 0) log("BOT_BUTTONS_SHORTENED", { to: peerHex, count: parsed.shortened });
   if (allowButtons && extensionOn("buttons")) {
-    return { text: parsed.text, buttons: { rows: parsed.rows, oneShot: parsed.oneShot } };
+    return gateButtons(peerHex, parsed.text, { rows: parsed.rows, oneShot: parsed.oneShot });
   }
   log("BOT_BUTTONS_FALLBACK", { to: peerHex, buttons: parsed.rows.flat().length });
-  return { text: buttonsFallbackText(parsed.text, parsed.rows), buttons: null };
+  return { text: buttonsFallback(peerHex, parsed.text, parsed.rows), buttons: null };
 };
 
 // ---------- spec 0008 bot info ----------
@@ -1267,6 +1358,11 @@ const encodeBotInfo = (peerHex, info, pending = meter?.pendingHint(norm(peerHex)
 // hint-carrying botInfo goes out even at the same version, with that pending.
 const catchUpBotInfo = (peerHex, pending = null) => {
   const k = norm(peerHex);
+  // Spec 0013: our set first, in the same statement as the reply.
+  catchUpCapabilities(k);
+  // Only to a peer whose every device listed botInfo; a baseline peer gets
+  // the greeting as text only.
+  if (!peerGets(k, "botinfo")) return;
   const info = currentBotInfo();
   const withPending = pending != null && info?.balance != null;
   if (!info || (!withPending && !botInfoSent.needs(k, info.version))) return;
@@ -1298,6 +1394,7 @@ const START_RE = /^\s*\/start\s*$/i;
 const submitMessage = async (peerHex, { text, replyTo = null, editOf = null, supersedes = [], ephemeral = false, buttons = null }) => {
   const k = norm(peerHex);
   if (sessions.get(k) == null) throw new Error("no active session for peer");
+  if (buttons) ({ text, buttons } = gateButtons(k, text, buttons));
   const messageId = makeAppUuid();
   const timestamp = stamp(k);
   const opaque = buttons
@@ -1828,8 +1925,10 @@ const peerTxRefs = new Map(); // peerHex -> the peer's last references, oldest f
 // reference's statement.
 const sendTransactionReference = async (peerHex, ref, { pending = null } = {}) => {
   const k = norm(peerHex);
-  if (!extensionOn("txref")) {
-    log("BOT_TX_REFERENCE_SKIPPED", { to: k, reason: "txref extension off", hash: ref.hash });
+  if (!peerGets(k, "txref")) {
+    // Spec 0013 fallback: base `send` (kind 2) is for a plain transfer the
+    // bot does not make; for its contract calls there is nothing to send.
+    log("BOT_TX_REFERENCE_SKIPPED", { to: k, reason: extensionOn("txref") ? "peer did not list transactionReference" : "txref extension off", hash: ref.hash });
     return null;
   }
   if (sessions.get(k) == null) throw new Error("no active session for peer");
@@ -1843,10 +1942,8 @@ const sendTransactionReference = async (peerHex, ref, { pending = null } = {}) =
   return messageId;
 };
 // A buttons message the bot builds itself (not a brain's fenced block);
-// without the `buttons` extension it goes out as the spec 0006 fallback text.
-const sendOwnButtons = (peerHex, text, rows) => (extensionOn("buttons")
-  ? sendMessage(peerHex, { text, buttons: { rows, oneShot: false } })
-  : sendMessage(peerHex, { text: buttonsFallbackText(text, rows) }));
+// submitMessage sends the spec 0006 fallback text to a peer without buttons.
+const sendOwnButtons = (peerHex, text, rows) => sendMessage(peerHex, { text, buttons: { rows, oneShot: false } });
 const txSend = { text: (peerHex, text) => sendText(peerHex, text), buttons: sendOwnButtons, reference: sendTransactionReference };
 const featureConfigError = (name, error) => {
   console.error(`${name}: ${error instanceof Error ? error.message : String(error)}`);
@@ -1945,70 +2042,31 @@ if (env.BOT_DAO_CONTRACT) {
   } catch (error) { featureConfigError("BOT_DAO_*", error); }
 }
 
-// Spec 0012: encrypt, store on Bulletin (ceil(size / 2 MB) feeless
-// transactions, Stored in a best block), then ONE kind-250 message on the
-// normal outbound lane: no extra statement. The message carries the key; it
-// is journaled like any answer (0600 state file) and never logged.
-const sendBulletinAttachment = async (peerHex, { bytes, mime, name = null, media = null, caption = null }) => {
+// Spec 0012 storage, spec 0014 wire: encrypt, store on Bulletin (ceil(size /
+// 2 MB) feeless transactions, Stored in a best block), then ONE RichText with
+// FileVariant 1 on the normal outbound lane: no extra statement. Kind 250 is
+// no longer sent (0014 Transition). The message carries the key; it is
+// journaled like any answer (0600 state file) and never logged.
+const sendBulletinFile = async (peerHex, { bytes, mime, name = null, media = null, caption = null }) => {
   const k = norm(peerHex);
-  if (sessions.get(k) == null) throw new Error("no active session for peer");
   if (!bulletin) throw new Error("Bulletin attachments are not configured on this bot");
   if (bytes.length < 1 || bytes.length > ATTACHMENT_LIMITS.size) throw new Error(`an attachment is 1 byte to ${ATTACHMENT_LIMITS.size} bytes`);
   const dims = mime === "image/png" ? pngDimensions(bytes) : null;
   const up = await bulletin.upload(bytes, { mime, name, media: media ?? (dims ? { kind: "image", ...dims } : { kind: "file" }) });
   const messageId = makeAppUuid();
-  const opaque = encodeOpaqueAttachmentMessage({ messageId, timestamp: stamp(k), items: [up.item], caption });
-  await journalAnswer(k, { messageId, opaque, supersedes: [] });
-  catchUpBotInfo(k);
-  const { submitted, delivered } = outbound.enqueue(k, opaque, { messageId, supersedes: typingAndSeen.replyGoingOut(k) });
-  await submitted;
-  disarmThinking(peerHex);
-  log("BOT_ATTACHMENT_SENT", { to: k, messageId, mime, bytes: bytes.length, transactions: up.transactions, ciphertextBytes: up.ciphertextBytes, uploadMs: up.ms, statements: 1 });
-  return { messageId, delivered };
+  const opaque = encodeOpaqueRichTextMessage({ messageId, timestamp: stamp(k), text: caption, attachments: [{ kind: "bulletinFile", ...up.item }] });
+  const sent = await enqueueFileMessage(k, messageId, opaque);
+  log("BOT_ATTACHMENT_SENT", { to: k, messageId, rail: "bulletin", mime, bytes: bytes.length, transactions: up.transactions, ciphertextBytes: up.ciphertextBytes, uploadMs: up.ms, statements: 1 });
+  return sent;
 };
-
-// Colour swatches (lib/color.mjs): BOT_COLOR_SWATCH=1 turns them on (the
-// pcdcolor demo bot). A DM with a hex code or an image is answered with a
-// generated swatch and never reaches the brain; a brain answer that names a
-// hex code goes out as a swatch whose caption carries the answer. One
-// message either way: the kind-250 attachment, or the text when Bulletin is
-// unavailable. Group turns are unchanged.
-const colorSwatch = env.BOT_COLOR_SWATCH === "1" ? createColorSwatch({
-  sendImage: async (peerHex, { bytes, mime, caption }) => {
-    if (!bulletin) throw new Error("Bulletin attachments are not configured on this bot");
-    // A live placeholder cannot carry an attachment: close it with the status
-    // line, as deliverToChat does when it edits one.
-    const lp = await takeLivePlaceholder(peerHex);
-    if (lp) {
-      const status = renderTurnStats({ elapsed: lp.tracker.elapsed(), steps: lp.tracker.step });
-      await lp.handle.finalize(status, {}).catch((e) => log("BOT_LIVE_FINALIZE_FAILED", { to: peerHex, error: String(e?.message ?? e) }));
-    }
-    await sendBulletinAttachment(peerHex, { bytes, mime, caption });
-  },
-  sendText: (peerHex, text) => sendText(peerHex, text),
-  readFile: (filePath) => new Uint8Array(fs.readFileSync(filePath)),
-  log,
-}) : null;
-if (colorSwatch) log("BOT_COLOR_SWATCH_ENABLED", { bulletin: Boolean(bulletin) });
-
-// HOP accepts the dedicated Bulletin allowance signer, not the bot's chat
-// wallet. The uploaded ticket is only embedded into the encrypted RichText
-// envelope; it is never logged or written to the durable vault.
-const sendAttachment = async (peerHex, { filePath, mime, size, text = null }) => {
+// Base spec HOP in the phones' `legacy` dialect (ChaCha20-Poly1305, the V1
+// root envelope). HOP accepts the dedicated Bulletin allowance signer, not the
+// bot's chat wallet. The ticket is only embedded into the encrypted RichText;
+// it is never logged or written to the durable vault.
+const sendHopFile = async (peerHex, { filePath = null, bytes = null, mime, size, caption = null }) => {
   const k = norm(peerHex);
-  if (sessions.get(k) == null) throw new Error("no active session for peer");
-  if (bulletin && (bulletinPeers.has(k) || !hopUploadNode)) {
-    const bytes = new Uint8Array(fs.readFileSync(filePath));
-    if (bytes.length !== size) throw new Error("saved file changed before delivery");
-    return sendBulletinAttachment(peerHex, { bytes, mime, name: path.basename(filePath), caption: text });
-  }
-  if (!hopUploadNode) {
-    throw new Error("file delivery is not configured; the operator must set BOT_HOP_UPLOAD_NODE and provision the bot's Bulletin allowance");
-  }
-  const stat = fs.lstatSync(filePath);
-  if (!stat.isFile() || stat.size !== size) throw new Error("saved file changed before delivery");
   const uploaded = await uploadP2PFile({
-    filePath,
+    ...(bytes ? { bytes } : { filePath }),
     wssUrl: hopUploadNode,
     sender: hopUploadPair,
     maxBytes: fileMaxBytes,
@@ -2016,32 +2074,86 @@ const sendAttachment = async (peerHex, { filePath, mime, size, text = null }) =>
     maxRpcFrameBytes: hopRpcFrameMaxBytes,
     allowInsecure: hopAllowInsecure,
     allowedNodes: hopAllowedNodes.length ? hopAllowedNodes : null,
+    layout: "versioned",
     log,
   });
+  const dims = bytes && mime === "image/png" ? pngDimensions(bytes) : null;
   const messageId = makeAppUuid();
   const opaque = encodeOpaqueRichTextMessage({
     messageId,
     timestamp: stamp(k),
-    text,
+    text: caption,
     attachments: [{
       identifier: uploaded.identifier,
       claimTicket: uploaded.claimTicket,
       wssUrl: uploaded.wssUrl,
       mime,
       size,
-      fileKind: "general",
+      ...(dims ? { fileKind: "image", ...dims } : { fileKind: "general" }),
     }],
   });
-  // The envelope holds the claim ticket; journaled, it lands in the 0600
-  // state file like an inbound attachment's ticket does (see snapshotState).
+  const sent = await enqueueFileMessage(k, messageId, opaque);
+  log("BOT_SENT_FILE", { to: k, rail: "hop", mime, bytes: size });
+  return sent;
+};
+// The envelope holds the key or the claim ticket; journaled, it lands in the
+// 0600 state file like an inbound attachment's ticket does (see snapshotState).
+const enqueueFileMessage = async (k, messageId, opaque) => {
   await journalAnswer(k, { messageId, opaque, supersedes: [] });
   catchUpBotInfo(k);
   const { submitted, delivered } = outbound.enqueue(k, opaque, { messageId, supersedes: typingAndSeen.replyGoingOut(k) });
   await submitted;
-  disarmThinking(peerHex);
-  log("BOT_SENT_FILE", { to: peerHex, mime, bytes: size });
+  disarmThinking(k);
   return { messageId, delivered };
 };
+// One file to a DM peer, on the rail every device of the peer reads (spec
+// 0013 effective set, 0014 "Sending"): Bulletin variant 1, else HOP; else
+// refused. `bytes` (a generated image) or `filePath` (a vault file).
+const sendFile = async (peerHex, { bytes = null, filePath = null, mime, size = null, name = null, caption = null }) => {
+  const k = norm(peerHex);
+  if (sessions.get(k) == null) throw new Error("no active session for peer");
+  const rail = chooseAttachmentRail(effectiveFor(k), { bulletin: Boolean(bulletin), hop: Boolean(hopUploadNode) });
+  if (rail.refused) {
+    log("BOT_FILE_REFUSED", { to: k, reason: rail.refused });
+    throw new Error(rail.refused);
+  }
+  if (rail === "bulletin") {
+    const data = bytes ?? new Uint8Array(fs.readFileSync(filePath));
+    if (size != null && data.length !== size) throw new Error("saved file changed before delivery");
+    return sendBulletinFile(k, { bytes: data, mime, name: name ?? (filePath ? path.basename(filePath) : null), caption });
+  }
+  if (filePath) {
+    const stat = fs.lstatSync(filePath);
+    if (!stat.isFile() || stat.size !== size) throw new Error("saved file changed before delivery");
+  }
+  return sendHopFile(k, { bytes, filePath, mime, size: bytes ? bytes.length : size, caption });
+};
+
+// Colour swatches (lib/color.mjs): BOT_COLOR_SWATCH=1 turns them on (the
+// pcdcolor demo bot). A DM with a hex code or an image is answered with a
+// generated swatch and never reaches the brain; a brain answer that names a
+// hex code goes out as a swatch whose caption carries the answer. One
+// message either way: the image on the peer's rail (sendFile), or the text
+// when no rail reaches the peer. Group turns are unchanged.
+const colorSwatch = env.BOT_COLOR_SWATCH === "1" ? createColorSwatch({
+  sendImage: async (peerHex, { bytes, mime, caption }) => {
+    // A live placeholder cannot carry an attachment: close it with the status
+    // line, as deliverToChat does when it edits one.
+    const lp = await takeLivePlaceholder(peerHex);
+    if (lp) {
+      const status = renderTurnStats({ elapsed: lp.tracker.elapsed(), steps: lp.tracker.step });
+      await lp.handle.finalize(status, {}).catch((e) => log("BOT_LIVE_FINALIZE_FAILED", { to: peerHex, error: String(e?.message ?? e) }));
+    }
+    await sendFile(peerHex, { bytes, mime, caption });
+  },
+  sendText: (peerHex, text) => sendText(peerHex, text),
+  readFile: (filePath) => new Uint8Array(fs.readFileSync(filePath)),
+  log,
+}) : null;
+if (colorSwatch) log("BOT_COLOR_SWATCH_ENABLED", { bulletin: Boolean(bulletin), hop: Boolean(hopUploadNode) });
+
+// A vault file (the file commands, POST /send-file): the rail per peer.
+const sendAttachment = (peerHex, { filePath, mime, size, text = null }) => sendFile(peerHex, { filePath, mime, size, caption: text });
 
 // ---------- live replies (one evolving message per slow turn) ----------
 const liveReplies = createLiveReplies({
@@ -2335,8 +2447,9 @@ const handleDirectInbound = async (peerHex, msg, owedId, { reservedBridge = fals
   }
   // Spec 0008: /start gets the botInfo document, then the greeting as a
   // normal message, for every brain (a harness never sees it). With the
-  // extension off or an invalid botinfo.json, /start is ordinary input.
-  const startInfo = msg.kind === "text" && START_RE.test(msg.text ?? "") ? currentBotInfo() : null;
+  // extension off, a peer that did not list botInfo (spec 0013) or an invalid
+  // botinfo.json, /start is ordinary input.
+  const startInfo = msg.kind === "text" && START_RE.test(msg.text ?? "") && peerGets(peerHex, "botinfo") ? currentBotInfo() : null;
   if (startInfo) {
     try {
       await outbound.enqueue(norm(peerHex), encodeBotInfo(peerHex, startInfo)).submitted;
@@ -2409,7 +2522,7 @@ const handleDirectInbound = async (peerHex, msg, owedId, { reservedBridge = fals
     const caption = `Echo: ${[msg.text, ...notes].filter(Boolean).join(" ")}`;
     const png = makePng(32, 32, (x, y) => [x * 8, y * 8, 160]);
     // No Bulletin authorization (a public bot): the description still goes out as text.
-    const delivered = await sendBulletinAttachment(peerHex, { bytes: png, mime: "image/png", caption })
+    const delivered = await sendFile(peerHex, { bytes: png, mime: "image/png", caption })
       .catch((e) => {
         log("BOT_ATTACHMENT_SEND_FAILED", { to: norm(peerHex), error: String(e?.message ?? e) });
         return deliverToChat(peerHex, caption);
@@ -2528,10 +2641,6 @@ const messageDedupId = (peerHex, requestId, text, messageId) =>
 // downloaded bytes (RFC-0003). In memory only; the media cache TTL covers
 // a restart.
 const receivedAttachments = new Map();
-// Peers that sent a kind-250 attachment: their client reads 0012, so a file
-// for them goes through Bulletin even when HOP is configured (phone apps
-// read only HOP). In memory: a restart falls back to HOP until they send one.
-const bulletinPeers = new Set();
 
 // RFC-0003: drop every copy the bot still holds of a message the peer
 // deleted. An owed entry that is queued is skipped by its work item; one not
@@ -2687,6 +2796,9 @@ const snapshotState = () => ({
     ...(peerBotInfo.snapshot(norm(peerHex)) ? { bi: peerBotInfo.snapshot(norm(peerHex)) } : {}),
     // Spec 0008: the version of our own botInfo last sent to this peer (bs).
     ...(botInfoSent.snapshot(norm(peerHex)) ? { bs: botInfoSent.snapshot(norm(peerHex)) } : {}),
+    // Spec 0013: the peer's device sets (pc) and our set last sent (cs).
+    ...(peerCaps.snapshot(norm(peerHex)) ? { pc: peerCaps.snapshot(norm(peerHex)) } : {}),
+    ...(capsSent.snapshot(norm(peerHex)) ? { cs: capsSent.snapshot(norm(peerHex)) } : {}),
     // Spec 0007 meter: the replies not yet charged (md).
     ...(meter?.snapshot(norm(peerHex)) ? { md: meter.snapshot(norm(peerHex)) } : {}),
   })),
@@ -2846,8 +2958,7 @@ const handleOpener = async (data) => {
   ingress?.resubscribe(); // watch this peer's session topics by push, not just sweep
   // The opener's welcome message is a RichText and can carry attachments
   // (e.g. a photo as the very first message) — route them like session ones.
-  const openerAttachments = (decoded.welcomeMessage?.attachments ?? [])
-    .filter((a) => a.kind === "p2pMixnetFile").map(toAttachmentMeta);
+  const openerAttachments = richTextAttachments(decoded.welcomeMessage?.attachments);
   const openerMsg = {
     text: decoded.text ?? "",
     messageId: decoded.messageId,
@@ -2884,13 +2995,20 @@ const handleOpener = async (data) => {
         encryptionPublicKey: deviceKeypair.publicKey,
       })
     : encodeOpaqueChatAcceptedMessage({ timestamp: stamp(senderHex), acceptedRequestId: decoded.messageId });
-  const botInfo = currentBotInfo();
+  // Spec 0013: a peer that never listed botInfo (every peer at its first
+  // request, unless it is a bot we know) gets it later, with the first reply
+  // after its capabilities arrive (catch-up).
+  const botInfo = peerGets(senderHex, "botinfo") ? currentBotInfo() : null;
   try {
     // Same-tick enqueues ride one statement: [accept, welcome] on first
     // contact. An empty BOT_ACK_TEXT sends the accept alone — an empty text
     // message is an empty bubble on the phone, not "no welcome".
     const a = outbound.enqueue(senderHex, accept, { forceIdentity: true });
     const w = ackText ? outbound.enqueue(senderHex, encodeOpaqueTextMessage({ timestamp: stamp(senderHex), text: ackText }), { forceIdentity: true }) : null;
+    // Spec 0013: our capabilities once per chat, in the same statement (the
+    // bot's statement account is its identity account, so the identity
+    // session names the sending device).
+    catchUpCapabilities(senderHex, { forceIdentity: true });
     // Spec 0008: botInfo right after the accept, in the same statement.
     const b = botInfo ? outbound.enqueue(senderHex, encodeBotInfo(senderHex, botInfo), { forceIdentity: true }) : null;
     await Promise.all([a.submitted, w?.submitted, b?.submitted]);
@@ -3029,6 +3147,12 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
   const deletedNow = []; // RFC-0003 targets deleted by this batch
   let stateChanged = false;
   let undecodable = 0;
+  // Spec 0013: which device sent this batch. A device session names it (its
+  // statement account); the identity session does not, so there a device the
+  // same batch accepted with stands in, else the identity account.
+  const senderHex = norm(bytesToHex(senderAccountId));
+  const acceptedDevice = (decoded.messages ?? []).find((x) => x.kind === "deviceChatAccepted" && x.statementAccountId)?.statementAccountId;
+  const sendingDevice = senderHex !== norm(peerHex) ? senderHex : acceptedDevice ? norm(bytesToHex(acceptedDevice)) : norm(peerHex);
   for (let m of decoded.messages ?? []) {
     peerClock.observe(norm(peerHex), m.timestamp);
     // Initiator side of an outgoing greeting: the peer's accept can advertise
@@ -3036,12 +3160,17 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
     // its topics) or the peer's device-channel replies would go unseen.
     if ((m.kind === "deviceChatAccepted" || m.kind === "deviceAdded") && m.encryptionPublicKey) {
       const entry = sessions.get(norm(peerHex));
+      const known = rosterOf(peerHex).includes(norm(bytesToHex(m.statementAccountId)));
       if (entry) {
         buildSession(peerHex, entry.identifierKeyHex, [{ statementAccountId: m.statementAccountId, encryptionPublicKey: m.encryptionPublicKey }]);
         ingress?.resubscribe();
         stateChanged = true;
         log("BOT_PEER_DEVICE_ADDED", { from: peerHex, device: norm(bytesToHex(m.encryptionPublicKey)).slice(0, 16) });
       }
+      // Spec 0013: a new device has not seen our set; it rides the next
+      // message. Until the device sends its own, it counts as baseline. (A
+      // phone fans out deviceAdded for devices the bot already knows.)
+      if (m.kind === "deviceAdded" && !known) capsSent.forget(norm(peerHex));
       continue;
     }
     // deviceRemoved (18): the peer unpaired a device (Android's fan-out sends
@@ -3059,6 +3188,20 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
           log("BOT_PEER_DEVICE_REMOVED", { from: peerHex, device: removed.slice(0, 16), remaining: kept.length });
         }
       }
+      if (removed) peerCaps.removeDevice(norm(peerHex), removed);
+      continue;
+    }
+    // Spec 0013: a device's capabilities. Stored per device (a later
+    // message timestamp wins); never answered, never a message, never deduped
+    // (a resend only stores the same set again).
+    if (m.kind === "capabilities") {
+      const outcome = peerCaps.record(norm(peerHex), sendingDevice, m.capabilities, m.timestamp);
+      if (outcome === "stored") stateChanged = true;
+      log("BOT_RECEIVED_CAPABILITIES", {
+        from: peerHex, device: sendingDevice.slice(0, 16), kinds: m.capabilities.kinds.length,
+        fileVariants: m.capabilities.fileVariants, hopDialects: m.capabilities.hopDialects, features: m.capabilities.features,
+        ...(outcome === "stale" ? { stale: true } : {}),
+      });
       continue;
     }
     if (m.kind === "undecodable") {
@@ -3103,6 +3246,8 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
     // Spec 0008: a peer's botInfo (another bot) is stored, latest version
     // wins, and never answered: two bots must not loop on each other.
     if (m.kind === "botInfo") {
+      // Owner ruling (0013): a bot advertises botInfo by sending it.
+      peerCaps.noteBot(norm(peerHex), sendingDevice);
       const outcome = peerBotInfo.record(norm(peerHex), m);
       if (outcome === "stored") stateChanged = true;
       log("BOT_RECEIVED_BOTINFO", { from: peerHex, kind: m.botKind, name: m.name, version: m.version, commands: m.commands.length, ...(outcome === "stale" ? { stale: true } : {}) });
@@ -3157,10 +3302,16 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
     // content (a caption-less photo). A buttons message from a peer reaches
     // the brain as its fallback text (the brain cannot press buttons).
     if (m.kind === "buttons") m = { ...m, kind: "text", text: buttonsFallbackText(m.text, m.rows) };
-    if (m.kind === "attachment") {
-      bulletinPeers.add(norm(peerHex));
-      m = { ...m, text: m.caption ?? "" };
+    // Spec 0013 buttons fallback: a number or a label of the last menu sent
+    // as text is that button's press.
+    if (m.kind === "text") {
+      const press = fallbackPress(peerHex, m.text);
+      if (press) {
+        log("BOT_RECEIVED_BUTTON_PRESS", { from: peerHex, messageId: m.messageId ?? null, fallback: true });
+        m = { ...m, text: press };
+      }
     }
+    if (m.kind === "attachment") m = { ...m, text: m.caption ?? "" };
     const attachments = attachmentsOf(m);
     const isBrainKind = (m.kind === "text" || m.kind === "richText" || m.kind === "reply" || m.kind === "edited" || m.kind === "attachment")
       && typeof m.text === "string" && (m.text.length > 0 || attachments.length > 0);
@@ -4038,6 +4189,8 @@ for (const p of restored?.peers ?? []) {
     sentButtons.restore(norm(p.peerHex), p.bp);
     peerBotInfo.restore(norm(p.peerHex), p.bi);
     botInfoSent.restore(norm(p.peerHex), p.bs);
+    peerCaps.restore(norm(p.peerHex), p.pc);
+    capsSent.restore(norm(p.peerHex), p.cs);
     meter?.restore(norm(p.peerHex), p.md);
     flip?.remember(p.peerHex);
     restoredPeers += 1;
@@ -4084,6 +4237,10 @@ for (const o of restored?.owed ?? []) {
   } catch (e) { log("BOT_STATE_OWED_SKIPPED", { error: String(e?.message ?? e) }); }
 }
 pumpOwed();
+// Signals are handled from here: the first await below (a durable write, slow
+// under load) must not open a window where SIGTERM kills the process without
+// the exit hook that releases the pidfile.
+for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { void gracefulShutdown(0); });
 // The device private key is random rather than seed-derived. Make its first
 // snapshot durable before polling; losing it would orphan every device session
 // learned during this process on the next restart.
@@ -4097,7 +4254,6 @@ if (restored) log("BOT_STATE_RESTORED", {
   owed: restoredOwed,
   ...(restoredUnauthorized.size ? { unauthorized: restoredUnauthorized.size } : {}),
 });
-for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { void gracefulShutdown(0); });
 
 // ---------- subscription ingress (push) ----------
 // Statements arrive by subscription; the poll loop drops to a slow

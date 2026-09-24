@@ -222,6 +222,8 @@ export const createT3amsMedia = ({
       allowInsecure,
       allowedNodes: [new URL(rpcUrl).hostname],
       dialect: "t3ams",
+      // T3ams reads the base-spec root, not the phone apps' envelope.
+      layout: "plain",
       log,
     });
     const after = regularFile(filePath, "upload source");

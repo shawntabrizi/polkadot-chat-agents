@@ -37,7 +37,8 @@ test("upload then download: three chunks and the metadata, byte-exact, every ent
 test("download refuses what it cannot trust: a wrong ticket, a corrupt chunk, a size over the cap", async (t) => {
   const node = await withNode(t);
   const signer = mintBulletinSigner();
-  const bytes = new Uint8Array(crypto.randomBytes(100_000));
+  // Over one chunk, so the root is the phones' Chunked envelope, not Inline.
+  const bytes = new Uint8Array(crypto.randomBytes(2_100_000));
   const sent = await uploadFile({ url: node.url, bytes, signer });
   await assert.rejects(downloadFile({ url: node.url, identifier: sent.identifier, claimTicket: new Uint8Array(crypto.randomBytes(32)), maxBytes: bytes.length }), /1008/, "another ticket is not a recipient");
   await assert.rejects(downloadFile({ url: node.url, identifier: sent.identifier, claimTicket: sent.claimTicket, maxBytes: 10 }), /larger than the 10-byte cap/);
@@ -47,7 +48,20 @@ test("download refuses what it cannot trust: a wrong ticket, a corrupt chunk, a 
   // leaves the root entry gone: a retry needs a fresh upload (RFC-0001's
   // on-chain fallback is what a real client would reach for).
   await assert.rejects(downloadFile({ url: node.url, identifier: sent.identifier, claimTicket: sent.claimTicket, maxBytes: bytes.length }), /1004/);
-  assert.deepEqual(node.list().map((e) => [e.acked, e.available]), [[false, true], [true, false]], "the chunk was never acked, the metadata was");
+  assert.deepEqual(node.list().map((e) => [e.acked, e.available]), [[false, true], [false, true], [true, false]], "the chunks were never acked, the metadata was");
+});
+
+test("the phones' envelope: a small file sits inline in the root entry; a plain root still reads", async (t) => {
+  const node = await withNode(t);
+  const signer = mintBulletinSigner();
+  const small = new Uint8Array(crypto.randomBytes(5_000));
+  const inline = await uploadFile({ url: node.url, bytes: small, signer });
+  assert.equal(inline.chunks.length, 0);
+  assert.equal(node.list().length, 1, "one entry: the root holds the file");
+  assert.equal(Buffer.compare(await downloadFile({ url: node.url, identifier: inline.identifier, claimTicket: inline.claimTicket, maxBytes: small.length }), small), 0);
+  const plain = await uploadFile({ url: node.url, bytes: small, signer, layout: "plain" });
+  assert.equal(plain.chunks.length, 1);
+  assert.equal(Buffer.compare(await downloadFile({ url: node.url, identifier: plain.identifier, claimTicket: plain.claimTicket, maxBytes: small.length }), small), 0);
 });
 
 test("ticket derivation matches the spec: keyed blake2b for the AEAD key and the signer seed", () => {

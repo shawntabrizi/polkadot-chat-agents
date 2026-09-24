@@ -7,12 +7,18 @@
 // the 32-byte claim ticket embedded in the message:
 //   AEAD key     = blake2b_256(key=ticket, data="encryption")   (ChaCha20-Poly1305)
 //   claim keypair= sr25519 from seed blake2b_256(key=ticket, data="signer")
-// Claiming `identifier` yields an encrypted metadata blob that SCALE-decodes to
-// UploadedFile { totalSize u64, chunks Vec<Vec<u8>> }; each chunk hash is then
-// claimed, decrypted and concatenated. Uploads generate a new ticket, encrypt
-// chunks and metadata with it, then sign each hop_submit with a dedicated
-// Bulletin allowance account. Layouts are confirmed against the mobile app's
-// Packages/HandoffService (HandoffFileLoader / FileEncryptor / RPCModels).
+// Claiming `identifier` yields the encrypted root entry. Two root layouts are
+// live (polkadot-chat-desktop docs/decisions.md "HOP receive (2026-09-24)"):
+//  - "versioned": the phone apps' chat RFC 0001 envelope
+//      VersionedUploadedFile::V1(Inline(Vec<u8>) = 0 | Chunked { totalSize: u64,
+//      chunks: Vec<Vec<u8>> } = 1), bytes 00 00 | 00 01; a file of at most
+//      chunkSize - 64 bytes sits inline in the root (iOS HandoffFileLoadConfig
+//      inlineMargin, FileLoaderModels.swift);
+//  - "plain": the base-spec text and t3ams, UploadedFile { totalSize, chunks }.
+// Each chunk hash is then claimed, decrypted and concatenated. Uploads
+// generate a new ticket, encrypt chunks and root with it, then sign each
+// hop_submit with a dedicated Bulletin allowance account. Chat sends use the
+// phones' layout (spec 0013 HopDialect `legacy`); t3ams keeps the plain one.
 //
 // The claimTicket is key material: never log it (or anything derived from it).
 
@@ -39,6 +45,15 @@ const CONTENT_HASH_ALGORITHMS = new Set(["sha256", "blake2b-256"]);
 // PoolFull (1002) and RateLimited (1020). Everything else a node refuses
 // (NotFound, InvalidSignature, NotRecipient, NotAuthorized) is final.
 const HOP_RETRY_LATER_CODES = new Set([1002, 1020]);
+const HOP_LAYOUTS = new Set(["versioned", "plain"]);
+// iOS HandoffFileLoadConfig.inlineMargin: envelope bytes plus the AEAD's 28.
+const INLINE_MARGIN = 64;
+// A claim answers an entry as 0x-hex inside JSON. The devnet node sent a
+// 2 MB entry in 33 s (about 60 KB/s of file bytes, 2026-09-24), so a fixed
+// 30 s timeout failed on every full chunk. Timeouts scale with the bytes at a
+// quarter of that rate: 2 MB -> 125 s per claim.
+export const HOP_MIN_RATE_BYTES_PER_SEC = 16_000;
+export const hopTimeoutFor = (bytes, floorMs) => Math.max(floorMs, Math.ceil((bytes / HOP_MIN_RATE_BYTES_PER_SEC) * 1000));
 
 const toHex = (bytes) => `0x${Buffer.from(bytes).toString("hex")}`;
 const fromHex = (hex) => {
@@ -94,6 +109,8 @@ const encodeUploadedFile = (totalSize, chunkHashes) => concatBytes(
   compactLength(chunkHashes.length),
   ...chunkHashes.map(scaleEncodeBytes),
 );
+const VERSIONED_INLINE = Uint8Array.of(0, 0);
+const VERSIONED_CHUNKED = Uint8Array.of(0, 1);
 
 const chacha20Poly1305Decrypt = (rawKey, combined) => {
   if (combined.length < 12 + 16) throw new Error("ciphertext too short");
@@ -129,26 +146,52 @@ const compactAt = (bytes, offset) => {
   }
   throw new Error("metadata length too large");
 };
-const decodeUploadedFile = (bytes, maxBytes) => {
-  if (bytes.length < 8) throw new Error("truncated metadata");
+const UNREADABLE = "unreadable HOP root entry";
+// `{ totalSize: u64, chunks: Vec<[u8; 32]> }` from `offset` to the very end:
+// { value } or { error }. The size and count bounds come first, before any
+// allocation: a hostile node can encrypt any root under the peer's ticket.
+const chunkedAt = (bytes, offset, maxBytes) => {
+  if (offset + 9 > bytes.length) return { error: UNREADABLE };
   let totalSize = 0n;
-  for (let i = 0; i < 8; i += 1) totalSize |= BigInt(bytes[i]) << BigInt(8 * i);
-  if (totalSize > BigInt(maxBytes)) throw new Error(`attachment larger than cap (${totalSize} bytes)`);
-  let { value: count, offset } = compactAt(bytes, 8);
-  // Check the declared count before allocating or walking it. A hostile HOP
-  // server can encrypt arbitrary metadata under the peer-provided ticket.
+  for (let i = 0; i < 8; i += 1) totalSize |= BigInt(bytes[offset + i]) << BigInt(8 * i);
+  if (totalSize > BigInt(maxBytes)) return { error: `attachment larger than cap (${totalSize} bytes)` };
+  let count;
+  try { count = compactAt(bytes, offset + 8); } catch { return { error: UNREADABLE }; }
   const maxChunks = maxChunksFor(Number(totalSize));
-  if (count > maxChunks) throw new Error(`attachment chunk list exceeds limit (${maxChunks})`);
-  const chunkHashes = new Array(count);
-  for (let i = 0; i < count; i += 1) {
-    const len = compactAt(bytes, offset);
-    if (len.value !== HASH_BYTES) throw new Error("invalid metadata chunk hash");
-    const end = len.offset + len.value;
-    if (end > bytes.length) throw new Error("truncated metadata");
-    chunkHashes[i] = bytes.slice(len.offset, end);
-    offset = end;
+  if (count.value > maxChunks) return { error: `attachment chunk list exceeds limit (${maxChunks})` };
+  // Each item is compact(32) = 0x80 and 32 bytes, to the very end.
+  const item = HASH_BYTES + 1;
+  if (bytes.length - count.offset !== count.value * item) return { error: UNREADABLE };
+  // A chunk list must be able to hold its size.
+  if (totalSize > BigInt(count.value) * BigInt(MAX_CHUNK_CIPHERTEXT)) return { error: UNREADABLE };
+  const chunkHashes = new Array(count.value);
+  for (let i = 0; i < count.value; i += 1) {
+    const at = count.offset + i * item;
+    if (bytes[at] !== HASH_BYTES << 2) return { error: "invalid metadata chunk hash" };
+    chunkHashes[i] = bytes.slice(at + 1, at + item);
   }
-  return { totalSize, chunkHashes };
+  return { value: { totalSize, chunkHashes } };
+};
+const inlineAt = (bytes, maxBytes) => {
+  let len;
+  try { len = compactAt(bytes, 2); } catch { return { error: UNREADABLE }; }
+  if (len.offset + len.value !== bytes.length) return { error: UNREADABLE };
+  if (len.value > maxBytes) return { error: `attachment larger than cap (${len.value} bytes)` };
+  return { value: { inline: bytes.slice(len.offset) } };
+};
+// The decrypted root: the phones' envelope or the plain UploadedFile,
+// whichever reads to the very end. Below 32 MiB both cannot read at once; if
+// they ever do, the root is refused, not guessed. With no reading, the more
+// specific error wins (a size over the cap, a chunk list over the limit).
+const decodeRoot = (bytes, maxBytes) => {
+  const versioned = bytes[0] !== 0 ? { error: UNREADABLE }
+    : bytes[1] === 0 ? inlineAt(bytes, maxBytes)
+      : bytes[1] === 1 ? chunkedAt(bytes, 2, maxBytes) : { error: UNREADABLE };
+  const plain = chunkedAt(bytes, 0, maxBytes);
+  if (versioned.value && plain.value) throw new Error(UNREADABLE);
+  if (versioned.value) return { layout: "versioned", ...versioned.value };
+  if (plain.value) return { layout: "plain", ...plain.value };
+  throw new Error([plain.error, versioned.error].find((e) => e !== UNREADABLE) ?? UNREADABLE);
 };
 
 const maxChunksFor = (maxBytes) => Math.min(
@@ -308,7 +351,9 @@ const readExact = async (handle, bytes, position) => {
 // dedicated Bulletin allowance keypair; the returned ticket is recipient key
 // material and must only ever go inside the encrypted chat attachment.
 export async function uploadP2PFile({
-  filePath,
+  filePath = null,
+  // In-memory bytes instead of a file (a generated image).
+  bytes = null,
   wssUrl,
   sender,
   maxBytes = 50 * 1024 * 1024,
@@ -321,16 +366,20 @@ export async function uploadP2PFile({
   // T3ams' Bulletin relay exposes the same crypto protocol but uses
   // positional JSON-RPC parameters; legacy PCA HOP nodes use by-name params.
   dialect = "legacy",
+  // "versioned" (the phone apps' envelope, what chat peers read) or "plain".
+  layout = "versioned",
   log = () => {},
 }) {
   requireDialect(dialect);
+  if (!HOP_LAYOUTS.has(layout)) throw new Error("unsupported HOP root layout");
   const url = validateHopUrl(wssUrl, { allowInsecure, allowedNodes });
-  if (typeof filePath !== "string" || !filePath) throw new Error("upload file path is required");
+  if (bytes != null && !(bytes instanceof Uint8Array)) throw new Error("upload bytes must be a Uint8Array");
+  if (bytes == null && (typeof filePath !== "string" || !filePath)) throw new Error("upload file path is required");
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new Error("maxBytes must be a non-negative safe integer");
   if (!Number.isSafeInteger(maxRpcFrameBytes) || maxRpcFrameBytes < 1024) throw new Error("maxRpcFrameBytes must be a safe integer of at least 1024");
   if (!validSender(sender)) throw new Error("HOP upload sender must be an sr25519 keypair");
-  const stat = await fs.lstat(filePath);
-  if (!stat.isFile()) throw new Error("HOP upload source must be a regular file");
+  const stat = bytes != null ? { size: bytes.length } : await fs.lstat(filePath);
+  if (bytes == null && !stat.isFile()) throw new Error("HOP upload source must be a regular file");
   if (!Number.isSafeInteger(stat.size) || stat.size > maxBytes) throw new Error(`file exceeds upload cap (${maxBytes} bytes)`);
 
   const chunkSize = uploadChunkSize(maxRpcFrameBytes);
@@ -351,7 +400,13 @@ export async function uploadP2PFile({
     return { dataHash, signature };
   };
 
-  const handle = await fs.open(filePath, "r");
+  const handle = bytes != null
+    ? { read: null, stat: async () => ({ size: bytes.length }), close: async () => {} }
+    : await fs.open(filePath, "r");
+  const readPart = (size, position) => (bytes != null
+    ? bytes.slice(position, position + size)
+    : readExact(handle, size, position));
+  const started = Date.now();
   let rpc = null;
   try {
     rpc = makeRpc(await openSocket(url, connectTimeoutMs), rpcTimeoutMs, maxRpcFrameBytes);
@@ -371,17 +426,26 @@ export async function uploadP2PFile({
     };
 
     const hashes = [];
-    for (let position = 0; position < stat.size; position += chunkSize) {
-      const plain = await readExact(handle, Math.min(chunkSize, stat.size - position), position);
-      const encrypted = chacha20Poly1305Encrypt(encryptionKey, plain);
-      if (encrypted.length > MAX_CHUNK_CIPHERTEXT) throw new Error("HOP upload chunk exceeds protocol limit");
-      hashes.push(await submit(encrypted));
+    let root;
+    if (layout === "versioned" && stat.size <= chunkSize - INLINE_MARGIN) {
+      // The phones put a small file inline in the root: one entry.
+      root = concatBytes(VERSIONED_INLINE, scaleEncodeBytes(await readPart(stat.size, 0)));
+    } else {
+      for (let position = 0; position < stat.size; position += chunkSize) {
+        const plain = await readPart(Math.min(chunkSize, stat.size - position), position);
+        const encrypted = chacha20Poly1305Encrypt(encryptionKey, plain);
+        if (encrypted.length > MAX_CHUNK_CIPHERTEXT) throw new Error("HOP upload chunk exceeds protocol limit");
+        hashes.push(await submit(encrypted));
+      }
+      const chunked = encodeUploadedFile(stat.size, hashes);
+      root = layout === "versioned" ? concatBytes(VERSIONED_CHUNKED, chunked) : chunked;
     }
-    const metadata = encodeUploadedFile(stat.size, hashes);
-    const identifier = await submit(chacha20Poly1305Encrypt(encryptionKey, metadata));
+    const encryptedRoot = chacha20Poly1305Encrypt(encryptionKey, root);
+    if (encryptedRoot.length > MAX_CHUNK_CIPHERTEXT) throw new Error("HOP upload root exceeds protocol limit");
+    const identifier = await submit(encryptedRoot);
     const after = await handle.stat();
     if (after.size !== stat.size) throw new Error("source file changed while it was being uploaded");
-    log("HOP_UPLOADED", { host: url.hostname, id: toHex(identifier).slice(0, 18), bytes: stat.size, chunks: hashes.length });
+    log("HOP_UPLOADED", { host: url.hostname, id: toHex(identifier).slice(0, 18), bytes: stat.size, chunks: hashes.length, layout, ms: Date.now() - started });
     return { identifier, claimTicket: ticket, wssUrl: url.toString() };
   } finally {
     rpc?.close();
@@ -398,6 +462,7 @@ export async function downloadP2PFile({
   claimTicket,
   maxBytes = 32 * 1024 * 1024,
   maxRpcFrameBytes = 4_500_000,
+  // Floors: the effective timeouts scale with the bytes (hopTimeoutFor).
   rpcTimeoutMs = 30_000,
   deadlineMs = 120_000,
   connectTimeoutMs = 10_000,
@@ -427,7 +492,11 @@ export async function downloadP2PFile({
   const proofFor = (rawHash, context) =>
     toHex(new Uint8Array([1, ...sr25519Sign(secret, blake2b32(new Uint8Array([...context, ...rawHash])))]));
 
-  const deadline = Date.now() + deadlineMs;
+  // One claim returns at most one entry (<= 2 MB + 64); the whole download
+  // at most maxBytes plus the root. Both timeouts scale with those bytes.
+  const claimTimeoutMs = hopTimeoutFor(Math.min(MAX_CHUNK_CIPHERTEXT, maxBytes + INLINE_MARGIN), rpcTimeoutMs);
+  const started = Date.now();
+  const deadline = started + hopTimeoutFor(maxBytes + MAX_CHUNK_CIPHERTEXT, deadlineMs);
   const checkDeadline = () => { if (Date.now() > deadline) throw new Error("HOP download deadline exceeded"); };
 
   // State survives the single reconnect-and-resume retry below.
@@ -437,7 +506,7 @@ export async function downloadP2PFile({
   let chunkIndex = 0;
 
   const runAttempt = async () => {
-    const rpc = makeRpc(await openSocket(url, connectTimeoutMs), rpcTimeoutMs, maxRpcFrameBytes);
+    const rpc = makeRpc(await openSocket(url, connectTimeoutMs), claimTimeoutMs, maxRpcFrameBytes);
     const claimBlob = async (rawHash) => {
       checkDeadline();
       if (rawHash?.length !== HASH_BYTES) throw new Error("invalid HOP blob hash");
@@ -463,7 +532,14 @@ export async function downloadP2PFile({
       if (meta == null) {
         const encryptedMetadata = await claimBlob(identifier);
         if (Buffer.compare(blake2b32(encryptedMetadata), identifier) !== 0) throw new Error("HOP metadata hash mismatch");
-        meta = decodeUploadedFile(chacha20Poly1305Decrypt(encryptionKey, encryptedMetadata), maxBytes);
+        const root = decodeRoot(chacha20Poly1305Decrypt(encryptionKey, encryptedMetadata), maxBytes);
+        meta = root.inline
+          ? { layout: root.layout, totalSize: BigInt(root.inline.length), chunkHashes: [] }
+          : { layout: root.layout, totalSize: root.totalSize, chunkHashes: root.chunkHashes };
+        if (root.inline) {
+          parts.push(root.inline);
+          received = root.inline.length;
+        }
         await ackBlob(identifier);
       }
       for (; chunkIndex < meta.chunkHashes.length; chunkIndex += 1) {
@@ -504,6 +580,10 @@ export async function downloadP2PFile({
     const actual = contentHash(bytes, contentHashAlgorithm);
     if (Buffer.compare(actual, expectedContentHash) !== 0) throw new Error("attachment content hash mismatch");
   }
-  log("HOP_DOWNLOADED", { host: url.hostname, id: toHex(identifier).slice(0, 18), bytes: bytes.length, chunks: meta.chunkHashes.length });
+  const ms = Date.now() - started;
+  log("HOP_DOWNLOADED", {
+    host: url.hostname, id: toHex(identifier).slice(0, 18), bytes: bytes.length, chunks: meta.chunkHashes.length, layout: meta.layout,
+    ms, bytesPerSec: Math.round(bytes.length / Math.max(ms / 1000, 0.001)),
+  });
   return bytes;
 }

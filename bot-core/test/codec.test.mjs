@@ -1227,3 +1227,93 @@ test("0012 bounds: both sides refuse what does not fit the 4 KB message", () => 
   assert.equal(decodeOne(badStore).kind, "undecodable");
   assert.equal(ATTACHMENT_CONTENT_KIND, 250);
 });
+
+// ---------- spec 0013 capabilities and spec 0014 FileVariant 1: the pinned vectors ----------
+// The bytes are in polkadot-chat-desktop docs/spec/0013-capabilities.md
+// ("Test vector") and docs/spec/vectors-0014.md (A and B). Both were computed
+// by a Python SCALE encoder and scale-ts; a difference here is a wire bug.
+import {
+  CAPABILITIES_CONTENT_KIND,
+  FILE_VARIANTS,
+  HOP_DIALECTS,
+  encodeOpaqueCapabilitiesMessage,
+} from "../vendor/app-chat-codec.mjs";
+
+const range = (from, to) => Array.from({ length: to - from + 1 }, (_, i) => from + i);
+const CAP_1_HEX = "ec144341502d310030fd779001000000fc01b7ff37000000000000000000000000000000000000000000000000000000ff1f08000108000103000000";
+const CAP_1 = {
+  messageId: "CAP-1", timestamp: 1720000000000, version: 1,
+  kinds: [0, 1, 2, 4, 5, ...range(7, 18), 20, 21, ...range(240, 252)],
+  fileVariants: [FILE_VARIANTS.p2pMixnet, FILE_VARIANTS.bulletin],
+  hopDialects: [HOP_DIALECTS.legacy, HOP_DIALECTS.aesGcm],
+  features: 3,
+};
+
+test("0013 vector: capabilities encode to the pinned 60 bytes and decode back", () => {
+  const bytes = encodeOpaqueCapabilitiesMessage(CAP_1);
+  assert.equal(bytes.length, 60);
+  assert.equal(hexOf(bytes), CAP_1_HEX);
+  const d = decodeOne(hex(CAP_1_HEX));
+  assert.equal(d.kind, "capabilities");
+  assert.equal(d.messageId, "CAP-1");
+  assert.deepEqual(d.capabilities, { version: 1, kinds: CAP_1.kinds, fileVariants: [0, 1], hopDialects: [0, 1], features: 3 });
+  assert.equal(CAPABILITIES_CONTENT_KIND, 252);
+});
+
+test("0013 forward rule: bytes after features are ignored; unknown bits and values survive", () => {
+  // A later version appends a field: the opaque length grows, the known fields still read.
+  const content = hex(CAP_1_HEX).subarray(1);
+  const longer = new Uint8Array([...content, 0xaa, 0xbb]);
+  const framed = new Uint8Array([longer.length << 2, ...longer]); // 61 bytes: one-byte compact length
+  const d = decodeOne(framed);
+  assert.equal(d.kind, "capabilities");
+  assert.deepEqual(d.capabilities.fileVariants, [0, 1]);
+  assert.equal(d.capabilities.features, 3);
+  const odd = decodeOne(encodeOpaqueCapabilitiesMessage({ ...CAP_1, kinds: [255], fileVariants: [7], hopDialects: [9], features: 0x8000_0000 }));
+  assert.deepEqual([odd.capabilities.kinds, odd.capabilities.fileVariants, odd.capabilities.hopDialects, odd.capabilities.features], [[255], [7], [9], 0x8000_0000]);
+});
+
+const v14 = (() => {
+  const toVariant = (item) => ({ kind: "bulletinFile", ...item });
+  return {
+    A: { messageId: "ATT-1", timestamp: 1720000000000, text: "Our cat", attachments: v12.A.items.map(toVariant) },
+    B: { messageId: "ATT-2", timestamp: 1720000000000, text: null, attachments: v12.B.items.map(toVariant) },
+    hexA: "0103144154542d310030fd7790010000000f011c4f7572206361740104010128696d6167652f6a7065670f00000080020000e001000001304c454856366e574232796b38000000111111111111111111111111111111111111111111111111111111111111111122222222222222222222222280841e0004d47b2b87847e22939dd7b1f54541fffbb4afefc09c582fbae8892d0682fc8a8a00e101f0fa4627d29a257645e02be86d80378fea1a2bf8fa6a918d150ebc760a5900003816c090010000",
+    hexB: "4904144154542d320030fd7790010000000f000104010058617564696f2f6f67673b20636f646563733d6f7075730d0000000000016810000010004080ff11111111111111111111111111111111111111111111111111111111111111112222222222222222222222220800000008f2413e6849beeed0945f57c6e2ad2123ff1fb177fa95f711eb0685786b434bb47e79076d84989135f84e2f00d739f3d071485f143ea485ede4cd2033f1ebb0a800e101f0fa4627d29a257645e02be86d80378fea1a2bf8fa6a918d150ebc760a5901e868747470733a2f2f6465766e65742d697066732e6170692e706f6c6b61646f74636f6d6d756e6974792e666f756e646174696f6e2f697066732f003816c090010000",
+  };
+})();
+
+test("0014 vector A: an image as RichText + bulletin encodes to the pinned 194 bytes and maps to its kind-250 twin", () => {
+  const bytes = encodeOpaqueRichTextMessage(v14.A);
+  assert.equal(bytes.length, 194);
+  assert.equal(hexOf(bytes), v14.hexA);
+  const d = decodeOne(hex(v14.hexA));
+  assert.equal(d.kind, "richText");
+  assert.equal(d.text, "Our cat");
+  const [item] = d.richText.attachments;
+  assert.equal(item.kind, "bulletinFile");
+  // Same fields as the decoded kind-250 item of 0012 vector A: one receive path.
+  const twin = decodeOne(hex(v12.hexA)).items[0];
+  assert.deepEqual({ ...item, kind: undefined }, { ...twin, kind: undefined });
+  assert.equal(hexOf(encodeOpaqueRichTextMessage({ ...v14.A, attachments: d.richText.attachments })), v14.hexA);
+});
+
+test("0014 vector B: a voice note as RichText + bulletin encodes to the pinned 276 bytes and decodes back", () => {
+  const bytes = encodeOpaqueRichTextMessage(v14.B);
+  assert.equal(bytes.length, 276);
+  assert.equal(hexOf(bytes), v14.hexB);
+  const d = decodeOne(hex(v14.hexB));
+  const [item] = d.richText.attachments;
+  assert.deepEqual(item.media, { kind: "voice", durationMs: 4200, waveform: [0, 64, 128, 255] });
+  assert.equal(item.store.mirror, "https://devnet-ipfs.api.polkadotcommunity.foundation/ipfs/");
+  assert.equal(d.richText.text, null);
+  assert.equal(hexOf(encodeOpaqueRichTextMessage({ ...v14.B, attachments: d.richText.attachments })), v14.hexB);
+});
+
+test("0014 rules: a RichText never mixes rails; an unknown FileVariant index makes only that message undecodable", () => {
+  const hop = { identifier: new Uint8Array(32), claimTicket: new Uint8Array(32), wssUrl: "wss://hop.example", mimeType: "image/png", fileSize: 3 };
+  assert.throws(() => encodeOpaqueRichTextMessage({ text: null, attachments: [hop, v14.A.attachments[0]] }), /never mixes/);
+  const bad = hex(v14.hexA);
+  bad[v14.hexA.indexOf("0104010128") / 2 + 2] = 2; // FileVariant index 2
+  assert.equal(decodeOne(bad).kind, "undecodable");
+});

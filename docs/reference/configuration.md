@@ -575,7 +575,7 @@ The `pcdmeter` hint, for example:
 | `BOT_LIVE_TTL_MS` | 600000 | A placeholder never finalized resolves to a timeout note. |
 | `BOT_LIVE_TIMEOUT_TEXT` | auto | That timeout note's text. |
 | `BOT_OUTBOUND_ACK_GRACE_MS` | 60000 | How long an un-ACKed statement holds the channel slot before a queued one takes over. |
-| `BOT_PROTOCOL_EXTENSIONS` | all but `typing` | Protocol extensions the bot sends, to every peer, with no per-peer gating: `deleted` (RFC-0003), `buttons` (spec 0006), `typing` and `seen` (spec 0005), `botinfo` (spec 0008), `txref` (spec 0007 transaction references), `groups` (spec 0009 fan-out groups; off = every group kind is ignored). Unset = every one except `typing` (a bot does not send typing: each signal is one Statement Store submission, and the client shows a local "working" state for a known bot); `none` = none; a comma list = only those named (the only way to turn `typing` on). With `buttons` off, buttons go out as a numbered text list. Receiving every extension is always on. |
+| `BOT_PROTOCOL_EXTENSIONS` | all but `typing` | Protocol extensions the bot may send; each goes only to a peer whose every device listed its kind in `capabilities` (spec 0013): `deleted` (RFC-0003), `buttons` (spec 0006), `typing` and `seen` (spec 0005), `botinfo` (spec 0008), `txref` (spec 0007 transaction references), `groups` (spec 0009 fan-out groups; off = every group kind is ignored). Unset = every one except `typing` (a bot does not send typing: each signal is one Statement Store submission, and the client shows a local "working" state for a known bot); `none` = none, and the bot sends no capabilities (a baseline client, as a phone); a comma list = only those named (the only way to turn `typing` on). With `buttons` off, or to a peer that did not list buttons, buttons go out as a numbered text list. Receiving every extension is always on. |
 | `BOT_LOG_LEVEL` | unset | `debug` also prints debug events (`BOT_RECEIVED_TYPING`, `BOT_RECEIVED_SEEN`), marked `level: "debug"`. |
 
 T3ams uses the same placeholder, progress, final-wait, timeout, and chunk
@@ -597,7 +597,7 @@ peer-ACK gate.
 | `BOT_MEDIA_MAX_CONCURRENT_DOWNLOADS` | 2 | Concurrent HOP downloads. |
 | `BOT_MEDIA_DOWNLOAD_QUEUE_CAP` | 100 | Download queue depth. |
 | `BOT_MEDIA_MAX_INFLIGHT_BYTES` | max(2 x single-file cap + 4 MiB, 64 MiB) | Reserved in-memory budget across attachment downloads. |
-| `BOT_HOP_TIMEOUT_MS` | 120000 | Per-download deadline. |
+| `BOT_HOP_TIMEOUT_MS` | 120000 | Per-download deadline floor. The deadline and each claim's timeout grow with the bytes at 16 KB/s (a 2 MB entry gets 125 s); `HOP_DOWNLOADED` logs the effective rate. |
 | `BOT_HOP_RPC_FRAME_MAX_BYTES` | 4.5 MB | Max HOP RPC frame. |
 | `BOT_HOP_ALLOW_INSECURE` | `0` | Tests only: permit `ws://` and IP-literal hosts. The `sandbox` profile permits them by itself (its HOP node is on loopback). |
 | `BOT_HOP_UPLOAD_NODE` | `""` | Operator-pinned HOP endpoint for returning files. It must match `BOT_HOP_ALLOWED_NODES` in production and needs an active Bulletin allowance. |

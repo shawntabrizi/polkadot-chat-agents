@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { downloadP2PFile, uploadP2PFile, validateHopUrl } from "../lib/hop-client.mjs";
+import { HOP_MIN_RATE_BYTES_PER_SEC, downloadP2PFile, hopTimeoutFor, uploadP2PFile, validateHopUrl } from "../lib/hop-client.mjs";
 import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
 import { startHopNode } from "../../sandbox/lib/hop-node.mjs";
 
@@ -199,4 +199,71 @@ test("a rate-limited claim is retried once; a second refusal or a final refusal 
   node.faults.drop({ count: 1 });
   await assert.rejects(() => download(node, third), /HOP 1004/, "NotFound is final: no retry");
   assert.equal(node.faults.list().length, 0, "the drop fault was hit exactly once");
+});
+
+// Spec 0013 HopDialect `legacy` is the phone apps' format: ChaCha20-Poly1305
+// and the chat RFC 0001 root envelope V1(Inline | Chunked). A phone decodes
+// only that envelope, so a chat send must use it; t3ams keeps the plain root.
+const rootEvents = () => {
+  const events = [];
+  return { events, log: (event, data) => events.push({ event, ...data }) };
+};
+
+test("upload: a small file sits inline in the phones' envelope, one entry; a large one is chunked in it", async () => {
+  const node = await startNode();
+  const small = new Uint8Array(crypto.randomBytes(1_500_000));
+  const up = await uploadP2PFile({ bytes: small, wssUrl: node.url, sender: uploadSender, allowInsecure: true });
+  assert.equal(node.submissions.length, 1, "inline: the root entry is the whole file");
+  const seen = rootEvents();
+  assert.equal(Buffer.compare(await download(node, up, { log: seen.log }), small), 0);
+  assert.equal(seen.events.find((e) => e.event === "HOP_DOWNLOADED").layout, "versioned");
+
+  const large = new Uint8Array(crypto.randomBytes(2_500_000));
+  const up2 = await uploadP2PFile({ bytes: large, wssUrl: node.url, sender: uploadSender, allowInsecure: true });
+  assert.equal(node.submissions.length, 1 + 3, "two chunks and the root");
+  const seen2 = rootEvents();
+  assert.equal(Buffer.compare(await download(node, up2, { log: seen2.log }), large), 0);
+  assert.equal(seen2.events.find((e) => e.event === "HOP_DOWNLOADED").layout, "versioned");
+});
+
+test("upload: layout plain keeps the base-spec root (t3ams)", async () => {
+  const node = await startNode();
+  const bytes = new Uint8Array(crypto.randomBytes(10_000));
+  const up = await uploadP2PFile({ bytes, wssUrl: node.url, sender: uploadSender, allowInsecure: true, layout: "plain" });
+  assert.equal(node.submissions.length, 2, "one chunk and the root: plain has no inline form");
+  const seen = rootEvents();
+  assert.equal(Buffer.compare(await download(node, up, { log: seen.log }), bytes), 0);
+  assert.equal(seen.events.find((e) => e.event === "HOP_DOWNLOADED").layout, "plain");
+});
+
+test("download: a phone's inline root (00 00 + bytes) decodes; an envelope over the cap is refused before any chunk", async () => {
+  const node = await startNode();
+  const photo = new Uint8Array(crypto.randomBytes(300));
+  const inline = node.putFile(new Uint8Array(0), { metadataOverride: concat(Uint8Array.of(0, 0), compactLength(photo.length), photo) });
+  assert.equal(Buffer.compare(await download(node, inline), photo), 0);
+  const tooBig = node.putFile(new Uint8Array(0), { metadataOverride: concat(Uint8Array.of(0, 1), u64le(64 * 1024 * 1024), compactLength(0)) });
+  await assert.rejects(() => download(node, tooBig), /larger than cap/);
+});
+
+test("download timeouts scale with the bytes: 2 MB at the devnet node's rate is not a timeout", async () => {
+  // decisions.md "HOP receive": bullet.sik.rocks sent 2 MB in 33 s; the old
+  // fixed 30 s claim timeout failed there on every full chunk.
+  assert.ok(hopTimeoutFor(2_000_000, 30_000) >= 120_000);
+  assert.ok(2_000_000 / 60_000 * 1000 < hopTimeoutFor(2_000_000, 30_000), "the measured 60 KB/s fits");
+  assert.equal(hopTimeoutFor(1_000, 30_000), 30_000, "the floor holds for small entries");
+  assert.equal(HOP_MIN_RATE_BYTES_PER_SEC, 16_000);
+  // Live: a claim slower than the floor passes when the bytes allow it...
+  const node = await startNode();
+  const bytes = new Uint8Array(crypto.randomBytes(40_000));
+  const file = node.putFile(bytes);
+  node.faults.delay({ ms: 1_200, method: "claim", count: 1 });
+  const seen = rootEvents();
+  const got = await download(node, file, { rpcTimeoutMs: 500, maxBytes: 40_000, log: seen.log });
+  assert.equal(Buffer.compare(got, bytes), 0);
+  const done = seen.events.find((e) => e.event === "HOP_DOWNLOADED");
+  assert.ok(done.ms >= 1_200 && done.bytesPerSec > 0, "the effective rate is logged");
+  // ...and a tiny file still gets only the floor.
+  const tiny = node.putFile(new Uint8Array(16));
+  node.faults.delay({ ms: 1_200, method: "claim", count: 2 });
+  await assert.rejects(() => download(node, tiny, { rpcTimeoutMs: 500, maxBytes: 16 }), /timeout/);
 });

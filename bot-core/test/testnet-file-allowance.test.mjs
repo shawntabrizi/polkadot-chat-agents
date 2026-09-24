@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  DEVNET_FILE_ALLOWANCE_MIN,
+  DEVNET_FILE_ALLOWANCE_STEP,
   TESTNET_FILE_ALLOWANCE_BYTES,
   TESTNET_FILE_ALLOWANCE_MIN_BYTES,
   TESTNET_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS,
@@ -229,14 +231,37 @@ test("Products Devnet allowance provisioning grants a missing or depleted author
   assert.equal(result.active, true);
   assert.equal(fixture.calls.grants.length, 1);
   assert.equal(fixture.calls.refreshes.length, 0);
+  // The devnet //Eve authorizer refuses 64 MiB (InsufficientAuthorizerBudget):
+  // one 8 MiB step, never the 100 MB Paseo grant.
   assert.deepEqual(fixture.calls.grants[0], {
     who: ADDRESS,
-    transactions: TESTNET_FILE_ALLOWANCE_TRANSACTIONS,
-    bytes: TESTNET_FILE_ALLOWANCE_BYTES,
+    transactions: DEVNET_FILE_ALLOWANCE_STEP.transactions,
+    bytes: DEVNET_FILE_ALLOWANCE_STEP.bytes,
   });
+  assert.equal(DEVNET_FILE_ALLOWANCE_STEP.bytes, 8n * 1024n * 1024n);
   assert.deepEqual(fixture.calls.signers, ["faucet-signer"]);
   assert.equal(fixture.calls.authorization.length, 2, "re-reads status after finalization");
   assert.equal(fixture.destroyed(), 1);
+});
+
+test("Products Devnet tops up in 8 MiB steps: a remainder at or above the minimum is enough, below it adds one step", async () => {
+  const expiration = 100 + TESTNET_FILE_ALLOWANCE_MIN_REMAINING_BLOCKS + 100;
+  const step = DEVNET_FILE_ALLOWANCE_STEP;
+  const enough = fakeAllowanceClient({ current: authorization({
+    expiration, transactionsAllowance: step.transactions, bytesAllowance: step.bytes,
+    transactions: step.transactions - DEVNET_FILE_ALLOWANCE_MIN.transactions, bytes: step.bytes - DEVNET_FILE_ALLOWANCE_MIN.bytes,
+  }) });
+  const kept = await ensureTestnetFileAllowance({ address: ADDRESS, networkProfile: "devnet", createClient: () => enough.client, createSigner: () => "faucet-signer" });
+  assert.equal(kept.action, "already-authorized", "one step, half used, needs nothing");
+  assert.equal(enough.calls.grants.length, 0);
+
+  const low = fakeAllowanceClient({ current: authorization({
+    expiration, transactionsAllowance: step.transactions, bytesAllowance: step.bytes,
+    transactions: step.transactions - 1, bytes: step.bytes - 1n,
+  }) });
+  const topped = await ensureTestnetFileAllowance({ address: "5DevnetTopUp", networkProfile: "devnet", createClient: () => low.client, createSigner: () => "faucet-signer" });
+  assert.equal(topped.action, "authorized");
+  assert.deepEqual(low.calls.grants, [{ who: "5DevnetTopUp", transactions: step.transactions, bytes: step.bytes }], "exactly one more step");
 });
 
 test("Products Devnet allowance provisioning refreshes a funded authorization near expiry", async () => {

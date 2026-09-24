@@ -417,3 +417,17 @@ test("a bridge turn that never ends holds the seen at most maxTurnMs", async () 
   await l.settle();
   assert.deepEqual(l.kinds(), [["seen"]]);
 });
+
+// Spec 0013: a seen goes only to a peer whose every device listed kind 241.
+// The gate is per peer: a baseline peer (a phone) never gets one, a capable
+// peer still gets it riding the reply.
+test("seen per peer: none to a baseline peer, the reply-riding seen to a capable one", () => {
+  const capable = new Set(["carol"]);
+  const s = makeSignals({ extensions: "seen", seen: (peerHex) => capable.has(peerHex) });
+  s.signals.consumed("bob", "M-BOB")();
+  s.signals.consumed("carol", "M-CAROL");
+  s.signals.replyGoingOut("bob");
+  s.signals.replyGoingOut("carol");
+  s.clock.advance(60_000);
+  assert.deepEqual(s.sent.map((e) => [e.peerHex, e.m.kind, e.m.upTo]), [["carol", "seen", "M-CAROL"]]);
+});

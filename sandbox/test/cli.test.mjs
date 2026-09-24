@@ -111,8 +111,8 @@ test("pcs: user add/list, request, requests, accept, send, inbox --device, react
   }, { attempts: 400, everyMs: 25 });
   assert.equal(claimed.content.attachments[0].mediaId, attached.content.attachments[0].identifier.slice(2));
   const pool = await pcs("hop");
-  assert.equal(pool.entries.length, 2);
-  assert.deepEqual(pool.entries.map((e) => [e.signerLabel, e.role, e.acked]), [["alice", "chunk 1/1", true], ["alice", "metadata", true]]);
+  assert.equal(pool.entries.length, 1, "the phones' envelope: the small photo sits inline in the root entry");
+  assert.deepEqual(pool.entries.map((e) => [e.signerLabel, e.role, e.acked]), [["alice", "inline file", true]]);
   assert.ok(!JSON.stringify([attached, claimed, pool]).match(/ticket/i), "no claim ticket in any pcs output");
   const hopFault = await pcs("hop", "fault", "drop", "--count", "2");
   assert.deepEqual([hopFault.kind, hopFault.method, hopFault.count], ["drop", "claim", 2]);

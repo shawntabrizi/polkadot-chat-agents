@@ -206,20 +206,33 @@ time") gives 21. `DELETED_CONTENT_KIND` is the only place to change it.
   (`false` with `duplicate: true` for a repeat), and
   `BOT_DELETED_MESSAGE_DROPPED` when a message or edit is dropped for it.
 
-**Sending extensions is not gated.** The desktop spec set's development-mode
-rule (owner decision, 2026-09-23; `polkadot-chat-desktop/docs/spec/README.md`)
-holds: every client is in development, so the bot sends every enabled
-extension kind (deleted, buttons, typing, seen, botinfo, txref, groups) to every peer. There is no
-per-peer evidence and no advertisement. A client that does not know a kind
-shows the base spec's unsupported-message row, and that is accepted while the
-kinds iterate. `BOT_PROTOCOL_EXTENSIONS` is the operator's switch: unset means
-all except `typing` (see [Typing and seen](#typing-and-seen-spec-0005)),
-`none` means none, a comma list keeps only the named ones. When a peer
-sends an extension kind, the bot logs `BOT_PROTOCOL_EXTENSION_OBSERVED
-{ peer, kind }` once per peer. That is a log only; it enables nothing and is
-not persisted. (An earlier version of this page described a "send only after
-evidence" gate. The spec set keeps that rule as an option for the upstream
-submission, when legacy clients exist.)
+**Sending extensions is gated by capabilities (spec 0013).** Each device
+sends its peers a `capabilities` message (kind 252): the kinds it reads, the
+file variants it fetches (0 HOP, 1 Bulletin), the HOP dialects it decrypts
+and feature bits. Owner ruling (2026-09-24): the phone apps show one
+"unsupported" bubble for it, once per chat, and no other extension kind goes
+to a device that did not list it. So the bot:
+
+- sends its own set once per chat, in the accept's statement (or with the
+  first message to a peer), and again when the set changes or the peer adds a
+  device: zero extra submissions (`BOT_SENT_CAPABILITIES`);
+- stores each peer device's set by the device's statement account (the
+  topic of the device session it came on; on the identity session, the
+  device the same batch accepted with), persisted as `pc`, newest message
+  timestamp wins, dropped on `deviceRemoved` (`BOT_RECEIVED_CAPABILITIES`);
+- sends an extension kind only when it is enabled here and every known
+  device of the peer listed it. A device without a set is a baseline client
+  (base spec only): no seen, typing, botInfo, deletion or transaction
+  reference; buttons go as the numbered menu text, and a reply of a number or
+  a label is that button's press; `tx` buttons are left out without feature
+  bit 1. A peer that sent botInfo counts as listing botInfo.
+
+`BOT_PROTOCOL_EXTENSIONS` is the operator's switch: unset means all except
+`typing` (see [Typing and seen](#typing-and-seen-spec-0005)), `none` makes the
+bot a baseline client (it sends no capabilities and no extension kind), a
+comma list keeps only the named ones. When a peer sends an extension kind,
+the bot logs `BOT_PROTOCOL_EXTENSION_OBSERVED { peer, kind }` once per peer (a
+log only).
 
 `deleteMessage(peerHex, messageId)` follows the RFC's sender cases on top of
 the outbound lane: a message still queued and never submitted is removed with

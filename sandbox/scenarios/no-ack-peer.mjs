@@ -15,10 +15,9 @@ export const description = "a peer that never ACKs: one un-ACKed statement curre
 
 const GRACE_MS = 3000;
 const MAX_EXTENSIONS = 8; // lib/outbound-lanes.mjs default
-// Every answer carries the seen of its question in the same statement (M12c
-// piggyback), and each seen supersedes the previous un-ACKed one, so the slot
-// holds the answers plus ONE seen. The sandbox codec does not know the seen
-// extension (it decodes as undecodable), so answers are counted by their text.
+// alice is a baseline client (spec 0013: she never sent capabilities, as a
+// phone does not), so the bot sends her no seen: the slot holds the answers
+// only. Answers are counted by their text.
 const echoes = (statement) => statement.decoded.messages.filter((m) => m.content?.text?.startsWith("Echo: "));
 
 export async function run({ sandbox, openChat, log, sleep }) {
@@ -40,10 +39,10 @@ export async function run({ sandbox, openChat, log, sleep }) {
   const currentAt = Date.parse(chat.events("BOT_SENT_TEXT").at(-1).time);
   const extensions = chat.events("BOT_OUTBOUND_EXTENDED");
   assert.equal(extensions.length, MAX_EXTENSIONS, "every answer after the first extended the un-ACKed statement");
-  assert.equal(extensions.at(-1).messages, MAX_EXTENSIONS + 2, "every answer plus the latest seen");
+  assert.equal(extensions.at(-1).messages, MAX_EXTENSIONS + 1, "every answer, and no seen to a baseline peer");
   let slot = await chat.slot(REQUEST);
   assert.equal(echoes(slot).length, MAX_EXTENSIONS + 1, "ONE statement carries every un-ACKed answer");
-  assert.equal(slot.decoded.messages.length, MAX_EXTENSIONS + 2, "and one seen, not one per answer");
+  assert.equal(slot.decoded.messages.length, MAX_EXTENSIONS + 1, "and nothing else");
   assert.deepEqual(slot.acks.filter((a) => a.live), [], "no ACK from alice on the wire");
   const versions = (await chat.history(REQUEST)).filter((h) => h.decoded?.messages);
   for (let i = 1; i < versions.length; i += 1) {
@@ -66,8 +65,8 @@ export async function run({ sandbox, openChat, log, sleep }) {
   const takeover = await bot.waitFor((e) => e.event === "BOT_OUTBOUND_TAKEOVER", { label: "BOT_OUTBOUND_TAKEOVER", timeoutMs: GRACE_MS + 10_000 });
   const waited = Date.parse(takeover.time) - currentAt;
   assert.ok(waited >= GRACE_MS, `the takeover came ${waited}ms after the current statement, before the ${GRACE_MS}ms grace`);
-  // Dropped: the answers and their seen. Queued: q10's seen and its answer.
-  assert.deepEqual([takeover.dropped, takeover.queued], [MAX_EXTENSIONS + 2, 2]);
+  // Dropped: the answers. Queued: q10's answer.
+  assert.deepEqual([takeover.dropped, takeover.queued], [MAX_EXTENSIONS + 1, 1]);
   await sandbox.waitFor(() => chat.events("BOT_SENT_TEXT").length === MAX_EXTENSIONS + 2, { label: "the queued answer submitted" });
   slot = await chat.slot(REQUEST);
   assert.deepEqual(echoes(slot).map((m) => m.content.text), ["Echo: q10"], "the queued batch took the slot over");

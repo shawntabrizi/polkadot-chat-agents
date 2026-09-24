@@ -824,7 +824,7 @@ function decodeAttachmentsAt(bytes, offset, budget) {
   return scaleDecodeArrayAt(
     bytes,
     offset,
-    decodeFileVariantAt,
+    (data, itemOffset) => decodeFileVariantAt(data, itemOffset, budget),
     MAX_ATTACHMENTS_PER_MESSAGE,
     "attachments",
     budget,
@@ -832,11 +832,13 @@ function decodeAttachmentsAt(bytes, offset, budget) {
 }
 
 // Attachment layout mirrors the mobile app's FileVariant (ChatRichRemoteContent
-// .swift). Unknown enum tags throw on purpose: the per-message try/catch in
-// decodeOpaqueMessageAt turns the message undecodable without hurting the batch.
-function decodeFileVariantAt(bytes, offset) {
+// .swift), plus spec 0014's `bulletin` (index 1). Unknown enum tags throw on
+// purpose: the per-message try/catch in decodeOpaqueMessageAt turns the
+// message undecodable without hurting the batch.
+function decodeFileVariantAt(bytes, offset, budget) {
   const variantTag = bytes[offset];
-  if (variantTag !== 0) {
+  if (variantTag === FILE_VARIANTS.bulletin) return decodeBulletinFileAt(bytes, offset + 1, budget);
+  if (variantTag !== FILE_VARIANTS.p2pMixnet) {
     throw new Error(`Unsupported FileVariant tag ${variantTag} at ${offset}`);
   }
   const identifier = scaleDecodeBytesAt(bytes, offset + 1, 32, "attachment identifier");
@@ -927,6 +929,7 @@ export function encodeOpaqueTextMessage({ messageId = makeAppUuid(), timestamp =
 // this encoder strict: a malformed outgoing attachment would be encrypted and
 // accepted by the statement store but become unreadable to the recipient.
 function encodeFileVariant(attachment) {
+  if (attachment?.kind === "bulletinFile") return concatBytes(Uint8Array.of(FILE_VARIANTS.bulletin), encodeBulletinFile(attachment));
   const identifier = attachment?.identifier;
   const claimTicket = attachment?.claimTicket;
   if (!(identifier instanceof Uint8Array) || identifier.length !== 32) {
@@ -990,10 +993,22 @@ function encodeRichText(text, attachments = null) {
   if (attachments != null && (!Array.isArray(attachments) || attachments.length > MAX_ATTACHMENTS_PER_MESSAGE)) {
     throw new Error("outgoing attachments exceed maximum");
   }
-  return concatBytes(
+  // Spec 0014: the whole message must decode on every receiving device, so
+  // one RichText never mixes the HOP and Bulletin rails.
+  const bulletinItems = (attachments ?? []).filter((a) => a?.kind === "bulletinFile").length;
+  if (bulletinItems > 0 && bulletinItems !== attachments.length) throw new Error("a rich text never mixes p2pMixnet and bulletin files");
+  if (bulletinItems > ATTACHMENT_LIMITS.items) throw new Error(`a rich text carries at most ${ATTACHMENT_LIMITS.items} bulletin files`);
+  if (bulletinItems > 0 && text != null && textEncoder.encode(text).length > ATTACHMENT_LIMITS.captionBytes) {
+    throw new Error(`a bulletin file caption is at most ${ATTACHMENT_LIMITS.captionBytes} bytes`);
+  }
+  const encoded = concatBytes(
     scaleEncodeOption(text == null ? null : scaleEncodeString(text)),
     scaleEncodeOption(attachments == null ? null : scaleEncodeArray(attachments.map(encodeFileVariant))),
   );
+  if (bulletinItems > 0 && encoded.length > ATTACHMENT_LIMITS.contentBytes) {
+    throw new Error(`rich text content is ${encoded.length} bytes; the limit is ${ATTACHMENT_LIMITS.contentBytes}`);
+  }
+  return encoded;
 }
 
 export function encodeOpaqueRichTextMessage({
@@ -1893,6 +1908,158 @@ function decodeAttachmentItemAt(bytes, offset, budget) {
   };
 }
 
+// Spec 0014 (polkadot-chat-desktop docs/spec/0014-bulletin-file-variant.md,
+// bytes in vectors-0014.md): the 0012 Bulletin file as RichText FileVariant 1.
+//   BulletinFile = { meta: FileMeta, name: Option<String>, preview: Option<Vec<u8>>,
+//     voice: Option<VoiceMeta { durationMs: u32, waveform: Vec<u8> }>, key: [u8; 32],
+//     nonce: [u8; 12], chunkSize: u32, chunks: Vec<[u8; 32]>, store: Store, expiresAt: u64 }
+// In JS both directions use the 0012 item shape (mime, name, size, media,
+// blurhash, thumbnail, key, ...) plus kind: "bulletinFile", so a variant-1
+// file and its kind-250 twin reach the same receive path. The mapping is
+// 0014's table: the blurhash rides FileMeta.thumbnail as UTF-8, the 0012
+// thumbnail is `preview`, a voice note is `general` + `voice`, and a video's
+// duration is whole seconds (the base VideoFileMeta has no width or height).
+export const FILE_VARIANTS = Object.freeze({ p2pMixnet: 0, bulletin: 1 });
+const encodeBulletinFile = (a) => {
+  const size = Number(assertU64(a.size, "attachment size"));
+  if (size < 1 || size > 0xffff_ffff) throw new Error("a bulletin file size must fit a u32");
+  const media = a.media ?? { kind: "file" };
+  const general = concatBytes(boundedString(a.mime, ATTACHMENT_LIMITS.mimeBytes, "attachment mime"), scaleEncodeUInt32(size));
+  const blurhash = optionalString(a.blurhash, ATTACHMENT_LIMITS.blurhashBytes, "attachment blurhash");
+  let meta;
+  if (media.kind === "file" || media.kind === "voice") meta = concatBytes(Uint8Array.of(0), general);
+  else if (media.kind === "image") meta = concatBytes(Uint8Array.of(1), general, scaleEncodeUInt32(media.width), scaleEncodeUInt32(media.height), blurhash);
+  else if (media.kind === "video") meta = concatBytes(Uint8Array.of(2), general, scaleEncodeUInt32(Math.ceil(media.durationMs / 1000)), blurhash);
+  else throw new Error("attachment media must be file, image, video or voice");
+  let voice = Uint8Array.of(0);
+  if (media.kind === "voice") {
+    const waveform = Uint8Array.from(media.waveform ?? []);
+    if (waveform.length > ATTACHMENT_LIMITS.waveform) throw new Error(`a waveform has at most ${ATTACHMENT_LIMITS.waveform} samples`);
+    voice = scaleEncodeOption(concatBytes(scaleEncodeUInt32(media.durationMs), scaleEncodeBytes(waveform)));
+  }
+  // The rest is the 0012 item from `key` on: the same checks, the same bytes.
+  const item = encodeAttachmentItem(a);
+  const tail = item.subarray(item.length - bulletinTailLength(a));
+  return concatBytes(
+    meta,
+    optionalString(a.name, ATTACHMENT_LIMITS.nameBytes, "attachment name"),
+    scaleEncodeOption(a.thumbnail == null ? null : scaleEncodeBytes(a.thumbnail)),
+    voice,
+    tail,
+  );
+};
+// Bytes of key, nonce, chunkSize, chunks, store and expiresAt in an encoded 0012 item.
+const bulletinTailLength = (a) => 32 + 12 + 4 + scaleEncodeArray(a.chunks.map(() => new Uint8Array(32))).length
+  + 1 + 32 + optionalString(a.store.mirror, MAX_URL_BYTES, "attachment mirror").length + 8;
+function decodeBulletinFileAt(bytes, offset, budget) {
+  const metaTag = bytes[offset];
+  if (metaTag !== 0 && metaTag !== 1 && metaTag !== 2) throw new Error(`Unsupported FileMeta tag ${metaTag} at ${offset}`);
+  const mime = scaleDecodeStringAt(bytes, offset + 1, ATTACHMENT_LIMITS.mimeBytes, "attachment mime");
+  const size = scaleDecodeUInt32At(bytes, mime.offset);
+  if (size.value < 1) throw new Error("attachment size out of range");
+  let at = size.offset;
+  let media = { kind: "file" };
+  let blurhash = null;
+  const readBlurhash = () => {
+    const thumb = scaleDecodeOptionAt(bytes, at, (b, o) => scaleDecodeStringAt(b, o, ATTACHMENT_LIMITS.blurhashBytes, "attachment blurhash"));
+    blurhash = thumb.value;
+    at = thumb.offset;
+  };
+  if (metaTag === 1) {
+    const width = scaleDecodeUInt32At(bytes, at);
+    const height = scaleDecodeUInt32At(bytes, width.offset);
+    at = height.offset;
+    readBlurhash();
+    media = { kind: "image", width: width.value, height: height.value };
+  } else if (metaTag === 2) {
+    const duration = scaleDecodeUInt32At(bytes, at);
+    at = duration.offset;
+    readBlurhash();
+    media = { kind: "video", width: 0, height: 0, durationMs: duration.value * 1000 };
+  }
+  const name = scaleDecodeOptionAt(bytes, at, (b, o) => scaleDecodeStringAt(b, o, ATTACHMENT_LIMITS.nameBytes, "attachment name"));
+  const preview = scaleDecodeOptionAt(bytes, name.offset, (b, o) => scaleDecodeBytesAt(b, o, ATTACHMENT_LIMITS.thumbnailBytes, "attachment preview"));
+  const voice = scaleDecodeOptionAt(bytes, preview.offset, (b, o) => {
+    const durationMs = scaleDecodeUInt32At(b, o);
+    const waveform = scaleDecodeBytesAt(b, durationMs.offset, ATTACHMENT_LIMITS.waveform, "attachment waveform");
+    return { value: { durationMs: durationMs.value, waveform: Array.from(waveform.value) }, offset: waveform.offset };
+  });
+  if (voice.value != null) {
+    if (metaTag !== 0) throw new Error("a voice note has general FileMeta");
+    media = { kind: "voice", ...voice.value };
+  }
+  const key = fixedBytesAt(bytes, voice.offset, 32, "attachment key");
+  const nonce = fixedBytesAt(bytes, key.offset, 12, "attachment nonce");
+  const chunkSize = scaleDecodeUInt32At(bytes, nonce.offset);
+  if (chunkSize.value < 1 || chunkSize.value > ATTACHMENT_LIMITS.chunkSize) throw new Error("attachment chunkSize out of range");
+  const chunks = scaleDecodeArrayAt(bytes, chunkSize.offset, (b, o) => fixedBytesAt(b, o, 32, "attachment chunk hash"), ATTACHMENT_LIMITS.chunks, "attachment chunks", budget);
+  if (chunks.value.length < 1) throw new Error("an attachment has at least one chunk");
+  const storeTag = bytes[chunks.offset];
+  if (storeTag !== 0) throw new Error(`unknown attachment store ${storeTag}`);
+  const genesis = fixedBytesAt(bytes, chunks.offset + 1, 32, "attachment store genesis");
+  const mirror = scaleDecodeOptionAt(bytes, genesis.offset, (b, o) => scaleDecodeStringAt(b, o, MAX_URL_BYTES, "attachment mirror"));
+  const expiresAt = scaleDecodeUInt64At(bytes, mirror.offset);
+  return {
+    value: {
+      kind: "bulletinFile",
+      mime: mime.value, name: name.value, size: size.value, media,
+      blurhash, thumbnail: preview.value, key: key.value, nonce: nonce.value,
+      chunkSize: chunkSize.value, chunks: chunks.value,
+      store: { kind: "bulletin", genesis: genesis.value, mirror: mirror.value },
+      expiresAt: Number(expiresAt.value),
+    },
+    offset: expiresAt.offset,
+  };
+}
+
+// Spec 0013 capabilities (polkadot-chat-desktop docs/spec/0013-capabilities.md).
+// Provisional kind:
+//   capabilities(Capabilities) -> 252
+// Capabilities = { version: u8 (1), kinds: [u8; 32] (bit k = byte k/8, bit
+//   k%8, LSB first), fileVariants: Vec<u8>, hopDialects: Vec<HopDialect>,
+//   features: u32 }
+// HopDialect = enum { legacy = 0 (ChaCha20-Poly1305 + the V1 pool-entry
+//   envelope, the phone apps), aesGcm = 1 (AES-256-GCM, the base-spec text) }
+// Forward rule: a decoder reads the fields it knows and ignores bytes after
+// `features`. In JS kinds, fileVariants and hopDialects are sorted number arrays.
+export const CAPABILITIES_CONTENT_KIND = 252;
+export const CAPABILITIES_VERSION = 1;
+export const HOP_DIALECTS = Object.freeze({ legacy: 0, aesGcm: 1 });
+export const CAPABILITY_FEATURES = Object.freeze({ groupsV2: 1 << 0, txIntents: 1 << 1 });
+const CAPABILITY_LIST_MAX = 64;
+const byteList = (values, name) => {
+  const list = [...new Set(values ?? [])].sort((a, b) => a - b);
+  if (list.length > CAPABILITY_LIST_MAX || list.some((v) => !Number.isInteger(v) || v < 0 || v > 255)) throw new Error(`capabilities ${name} must be up to ${CAPABILITY_LIST_MAX} values 0..=255`);
+  return scaleEncodeBytes(Uint8Array.from(list));
+};
+export function encodeCapabilitiesContent({ version = CAPABILITIES_VERSION, kinds, fileVariants = [], hopDialects = [], features = 0 }) {
+  if (!Number.isInteger(version) || version < 1 || version > 255) throw new Error("capabilities version must be 1..=255");
+  const bitmap = new Uint8Array(32);
+  for (const k of kinds ?? []) {
+    if (!Number.isInteger(k) || k < 0 || k > 255) throw new Error("a capabilities kind must be 0..=255");
+    bitmap[k >> 3] |= 1 << (k & 7);
+  }
+  if (!Number.isInteger(features) || features < 0 || features > 0xffff_ffff) throw new Error("capabilities features must be a u32");
+  return concatBytes(Uint8Array.of(version), bitmap, byteList(fileVariants, "fileVariants"), byteList(hopDialects, "hopDialects"), scaleEncodeUInt32(features));
+}
+export function encodeOpaqueCapabilitiesMessage({ messageId = makeAppUuid(), timestamp = chatTimestampNow(), ...capabilities }) {
+  return encodeOpaqueRemoteMessage({ messageId, timestamp, content: concatBytes(Uint8Array.of(CAPABILITIES_CONTENT_KIND), encodeCapabilitiesContent(capabilities)) });
+}
+function decodeCapabilitiesAt(bytes, offset) {
+  const version = fixedBytesAt(bytes, offset, 1, "capabilities version");
+  if (version.value[0] < 1) throw new Error("capabilities version 0 is not defined");
+  const bitmap = fixedBytesAt(bytes, version.offset, 32, "capabilities kinds");
+  const kinds = [];
+  for (let k = 0; k < 256; k += 1) if (bitmap.value[k >> 3] & (1 << (k & 7))) kinds.push(k);
+  const fileVariants = scaleDecodeBytesAt(bytes, bitmap.offset, CAPABILITY_LIST_MAX, "capabilities fileVariants");
+  const hopDialects = scaleDecodeBytesAt(bytes, fileVariants.offset, CAPABILITY_LIST_MAX, "capabilities hopDialects");
+  const features = scaleDecodeUInt32At(bytes, hopDialects.offset);
+  return {
+    value: { version: version.value[0], kinds, fileVariants: Array.from(fileVariants.value), hopDialects: Array.from(hopDialects.value), features: features.value },
+    offset: features.offset,
+  };
+}
+
 export function encodeOpaqueDataChannelClosedMessage({
   messageId = makeAppUuid(),
   timestamp = chatTimestampNow(),
@@ -2648,6 +2815,16 @@ function decodeRemoteMessage(bytes, budget) {
       items: items.value,
       caption: caption.value,
       offset: caption.offset,
+    };
+  }
+  if (contentKind === CAPABILITIES_CONTENT_KIND) {
+    const caps = decodeCapabilitiesAt(bytes, offset);
+    return {
+      messageId: messageId.value,
+      timestamp: Number(timestamp.value),
+      kind: "capabilities",
+      capabilities: caps.value,
+      offset: caps.offset,
     };
   }
   if (contentKind === 13) {

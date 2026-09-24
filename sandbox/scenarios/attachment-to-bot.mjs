@@ -42,14 +42,14 @@ export async function run({ sandbox, openChat, bot: bots, log }) {
     assert.equal(chat.events("HOP_RETRY").length, 0);
     assert.ok(!JSON.stringify(bot.events).match(/ticket/i), "the claim ticket never reaches the bot's log");
 
-    // The HOP node: one chunk and the metadata, signed by alice, each claimed once and acked, the bytes gone.
+    // The HOP node: one root entry with the photo inline (the phones'
+    // envelope), signed by alice, claimed once and acked, the bytes gone.
     if (sandbox.mock) {
       const pool = await sandbox.get("/hop");
       assert.deepEqual(pool.entries.map((e) => [e.signerLabel, e.role, e.owner, e.claims, e.acked, e.available]), [
-        ["alice", "chunk 1/1", "alice ⇄ echobot", 1, true, false],
-        ["alice", "metadata", "alice ⇄ echobot", 1, true, false],
+        ["alice", "inline file", "alice ⇄ echobot", 1, true, false],
       ]);
-      assert.equal(pool.entries[1].hash, ref.identifier);
+      assert.equal(pool.entries[0].hash, ref.identifier);
       log(`pool: ${pool.entries.length} entries, each claimed once by the bot and acked`);
     } else {
       await assert.rejects(sandbox.get("/hop"), /mock network only/, "no pool view on a real network");

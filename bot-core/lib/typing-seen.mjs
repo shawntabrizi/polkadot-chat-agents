@@ -53,6 +53,8 @@ const defaultTimers = {
 
 // enqueue(peerHex, opaque, { messageId, supersedes }) -> { submitted, delivered }
 //   (the outbound lane). encodeTyping / encodeSeen: the codec encoders.
+// typing / seen: a boolean, or (peerHex) => boolean for a per-peer gate
+//   (spec 0013: only to a peer whose every device listed the kind).
 // stamp(peerHex) -> envelope timestamp. maxTurnMs: a turn that never ends
 // (a bridge harness that never answers) stops refreshing after this long.
 export const createTypingAndSeen = ({
@@ -69,6 +71,8 @@ export const createTypingAndSeen = ({
   maxPeers = 10_000,
   log = () => {},
 }) => {
+  const typingOn = typeof typing === "function" ? typing : () => typing;
+  const seenOn = typeof seen === "function" ? seen : () => seen;
   const peers = new Map(); // peerHex -> state
   const stateFor = (peerHex) => {
     let s = peers.get(peerHex);
@@ -189,11 +193,12 @@ export const createTypingAndSeen = ({
     // A brain turn for peerHex starts. It holds the pending seen until the
     // reply (typing or not); with typing on, it also sends the hints.
     turnStarted(peerHex) {
-      if (!typing && !seen) return;
+      const withTyping = typingOn(peerHex);
+      if (!withTyping && !seenOn(peerHex)) return;
       const s = stateFor(peerHex);
       clearTyping(s); // also cancels a pending `stopped` of the previous turn
       s.turn = { startedAt: now(), sent: false, logged: false };
-      if (typing) tick(peerHex, s);
+      if (withTyping) tick(peerHex, s);
     },
     // A real message to peerHex is about to enter the lane (the caller
     // enqueues it synchronously after this call). A pending seen enters the
@@ -218,7 +223,7 @@ export const createTypingAndSeen = ({
     // then holds the seen). Without a reply or a turn, the seen goes alone
     // at SEEN_INTERVAL_MS after this call or at the release, if later.
     consumed(peerHex, messageId) {
-      if (!seen || !messageId) return () => {};
+      if (!messageId || !seenOn(peerHex)) return () => {};
       const s = stateFor(peerHex);
       s.seenUpTo = messageId;
       s.holds += 1;
@@ -234,6 +239,6 @@ export const createTypingAndSeen = ({
       return release;
     },
     // Introspection for tests.
-    typingActive: (peerHex) => typing && Boolean(peers.get(peerHex)?.turn),
+    typingActive: (peerHex) => typingOn(peerHex) && Boolean(peers.get(peerHex)?.turn),
   };
 };
