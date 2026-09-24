@@ -1648,6 +1648,121 @@ export function encodeOpaqueGroupLeaveMessage({
   });
 }
 
+// Spec 0011 private groups v2, pairwise control (desktop docs/spec/0011-groups-v2.md):
+//   groupControl(GroupControl) -> 249
+// GroupControl = enum {
+//   welcome { groupId: String, epoch: u32, epochKey: [u8; 32], stateVersion: u32, stateHash: [u8; 32] } = 0
+//   joinRequest { groupId: String, inviteId: [u8; 16], proof: [u8; 32], note: String (<= 140 chars) } = 1
+//   joinDecision { groupId: String, inviteId: [u8; 16], status: u8 (0 pending, 1 rejected) } = 2
+//   history { groupId: String, items: Vec<{ from: [u8; 32], message: opaque message }>, last: bool } = 3
+//   keyRequest { groupId: String, haveEpoch: u32 } = 4
+//   historyRequest { groupId: String, since: enum { messageId(String) = 0, timestamp(u64) = 1 }, limit: u8 } = 5
+// }
+// historyRequest is pca's proposal for the reviewer's "history on request"
+// (0011 names the request but its layout has no variant for it yet).
+// Group kinds (246-249) never ride inside a group carrier; that rule lives
+// in lib/groups-v2.mjs, which decodes the carrier.
+export const GROUP_CONTROL_CONTENT_KIND = 249;
+export const GROUP_CONTROL = Object.freeze({ welcome: 0, joinRequest: 1, joinDecision: 2, history: 3, keyRequest: 4, historyRequest: 5 });
+export const GROUP_CONTROL_LIMITS = Object.freeze({ noteBytes: 560, historyItems: 100, historyLimit: 100 });
+const fixedLength = (value, length, name) => {
+  const bytes = typeof value === "string" ? hexToBytes(normalizeHex(value)) : value;
+  if (!(bytes instanceof Uint8Array) || bytes.length !== length) throw new Error(`${name} must be ${length} bytes`);
+  return bytes;
+};
+const encodeGroupControlBody = (control) => {
+  const [variant] = Object.keys(control ?? {});
+  const c = control?.[variant];
+  const tag = GROUP_CONTROL[variant];
+  if (tag == null || c == null) throw new Error("groupControl needs one known variant");
+  const groupId = groupIdString(c.groupId);
+  let body;
+  if (variant === "welcome") {
+    body = concatBytes(groupId, scaleEncodeUInt32(c.epoch), fixedLength(c.epochKey, 32, "epochKey"),
+      scaleEncodeUInt32(c.stateVersion), fixedLength(c.stateHash, 32, "stateHash"));
+  } else if (variant === "joinRequest") {
+    const note = textEncoder.encode(c.note ?? "");
+    if (note.length > GROUP_CONTROL_LIMITS.noteBytes) throw new Error("join note is too long");
+    body = concatBytes(groupId, fixedLength(c.inviteId, 16, "inviteId"), fixedLength(c.proof, 32, "proof"), scaleEncodeBytes(note));
+  } else if (variant === "joinDecision") {
+    if (c.status !== 0 && c.status !== 1) throw new Error("join decision status must be 0 or 1");
+    body = concatBytes(groupId, fixedLength(c.inviteId, 16, "inviteId"), Uint8Array.of(c.status));
+  } else if (variant === "history") {
+    if (!Array.isArray(c.items) || c.items.length > GROUP_CONTROL_LIMITS.historyItems) throw new Error("history carries at most 100 items");
+    body = concatBytes(groupId, scaleEncodeArray(c.items.map((item) => {
+      if (!(item.message instanceof Uint8Array)) throw new Error("a history item needs an opaque message");
+      return concatBytes(accountIdBytes(item.from, "history item from"), item.message);
+    })), Uint8Array.of(c.last ? 1 : 0));
+  } else if (variant === "keyRequest") {
+    body = concatBytes(groupId, scaleEncodeUInt32(c.haveEpoch));
+  } else {
+    const since = c.since?.messageId != null
+      ? concatBytes(Uint8Array.of(0), scaleEncodeString(c.since.messageId))
+      : concatBytes(Uint8Array.of(1), scaleEncodeUInt64(assertU64(c.since?.timestamp ?? 0, "history since")));
+    const limit = c.limit ?? GROUP_CONTROL_LIMITS.historyLimit;
+    if (!Number.isInteger(limit) || limit < 1 || limit > GROUP_CONTROL_LIMITS.historyLimit) throw new Error("history limit must be 1..=100");
+    body = concatBytes(groupId, since, Uint8Array.of(limit));
+  }
+  return concatBytes(Uint8Array.of(GROUP_CONTROL_CONTENT_KIND, tag), body);
+};
+export function encodeOpaqueGroupControlMessage({ messageId = makeAppUuid(), timestamp = chatTimestampNow(), control }) {
+  return encodeOpaqueRemoteMessage({ messageId, timestamp, content: encodeGroupControlBody(control) });
+}
+function decodeGroupControlAt(bytes, offset) {
+  const tag = bytes[offset];
+  const groupId = decodeIdAt(bytes, offset + 1, "group id");
+  let at = groupId.offset;
+  let value;
+  if (tag === GROUP_CONTROL.welcome) {
+    const epoch = scaleDecodeUInt32At(bytes, at);
+    const epochKey = fixedBytesAt(bytes, epoch.offset, 32, "epochKey");
+    const stateVersion = scaleDecodeUInt32At(bytes, epochKey.offset);
+    const stateHash = fixedBytesAt(bytes, stateVersion.offset, 32, "stateHash");
+    value = { welcome: { groupId: groupId.value, epoch: epoch.value, epochKey: epochKey.value, stateVersion: stateVersion.value, stateHash: stateHash.value } };
+    at = stateHash.offset;
+  } else if (tag === GROUP_CONTROL.joinRequest) {
+    const inviteId = fixedBytesAt(bytes, at, 16, "inviteId");
+    const proof = fixedBytesAt(bytes, inviteId.offset, 32, "proof");
+    const note = scaleDecodeStringAt(bytes, proof.offset, GROUP_CONTROL_LIMITS.noteBytes, "join note");
+    value = { joinRequest: { groupId: groupId.value, inviteId: inviteId.value, proof: proof.value, note: note.value } };
+    at = note.offset;
+  } else if (tag === GROUP_CONTROL.joinDecision) {
+    const inviteId = fixedBytesAt(bytes, at, 16, "inviteId");
+    const status = bytes[inviteId.offset];
+    if (status !== 0 && status !== 1) throw new Error(`unknown join decision status ${status}`);
+    value = { joinDecision: { groupId: groupId.value, inviteId: inviteId.value, status } };
+    at = inviteId.offset + 1;
+  } else if (tag === GROUP_CONTROL.history) {
+    const items = scaleDecodeArrayAt(bytes, at, (b, o) => {
+      const from = fixedBytesAt(b, o, 32, "history item from");
+      const message = scaleDecodeBytesAt(b, from.offset, MAX_OPAQUE_MESSAGE_BYTES, "history item message");
+      return { value: { from: from.value, fromHex: normalizeHex(bytesToHex(from.value)), message: b.slice(from.offset, message.offset) }, offset: message.offset };
+    }, GROUP_CONTROL_LIMITS.historyItems, "history items");
+    const last = bytes[items.offset];
+    if (last !== 0 && last !== 1) throw new Error("history last must be a bool");
+    value = { history: { groupId: groupId.value, items: items.value, last: last === 1 } };
+    at = items.offset + 1;
+  } else if (tag === GROUP_CONTROL.keyRequest) {
+    const haveEpoch = scaleDecodeUInt32At(bytes, at);
+    value = { keyRequest: { groupId: groupId.value, haveEpoch: haveEpoch.value } };
+    at = haveEpoch.offset;
+  } else if (tag === GROUP_CONTROL.historyRequest) {
+    const sinceTag = bytes[at];
+    let since;
+    if (sinceTag === 0) { const id = decodeIdAt(bytes, at + 1, "history since id"); since = { messageId: id.value }; at = id.offset; }
+    else if (sinceTag === 1) { const ts = scaleDecodeUInt64At(bytes, at + 1); since = { timestamp: Number(ts.value) }; at = ts.offset; }
+    else throw new Error(`unknown history since ${sinceTag}`);
+    const limit = bytes[at];
+    if (!(limit >= 1 && limit <= GROUP_CONTROL_LIMITS.historyLimit)) throw new Error("history limit must be 1..=100");
+    value = { historyRequest: { groupId: groupId.value, since, limit } };
+    at += 1;
+  } else {
+    throw new Error(`unknown groupControl variant ${tag}`);
+  }
+  if (at > bytes.length) throw new Error("groupControl exceeds buffer");
+  return { value, offset: at };
+}
+
 export function encodeOpaqueDataChannelClosedMessage({
   messageId = makeAppUuid(),
   timestamp = chatTimestampNow(),
@@ -2381,6 +2496,17 @@ function decodeRemoteMessage(bytes, budget) {
       offset: groupId.offset,
     };
   }
+  if (contentKind === GROUP_CONTROL_CONTENT_KIND) {
+    const control = decodeGroupControlAt(bytes, offset);
+    if (control.offset !== bytes.length) throw new Error("groupControl has trailing bytes");
+    return {
+      messageId: messageId.value,
+      timestamp: Number(timestamp.value),
+      kind: "groupControl",
+      control: control.value,
+      offset: control.offset,
+    };
+  }
   if (contentKind === 13) {
     return {
       messageId: messageId.value,
@@ -2398,7 +2524,7 @@ function decodeRemoteMessage(bytes, budget) {
   };
 }
 
-function encodeAppStatement({ walletPair, channel, topics, expiry, scaleEncodedPayload }) {
+export function encodeAppStatement({ walletPair, channel, topics, expiry, scaleEncodedPayload }) {
   const unsignedFields = [
     encodeStatementField(2, scaleEncodeUInt64(BigInt(expiry))),
     encodeStatementField(3, channel),

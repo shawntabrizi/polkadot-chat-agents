@@ -767,6 +767,87 @@ to it and rejects its messages (`reason: "removed"`) until a higher version
 lists it again. `BOT_PROTOCOL_EXTENSIONS` without `groups` ignores every
 group kind (`BOT_GROUP_IGNORED`).
 
+### Private groups v2 (spec 0011)
+
+Spec 0011 (`polkadot-chat-desktop/docs/spec/0011-groups-v2.md`) replaces the
+fan-out for new groups: a group is an epoch key `K_e`, and a group message is
+**one statement** on a secret per-epoch topic, with no ACK. v1 rooms (above)
+keep working until their admin migrates them.
+
+**The Statement Store path (M16 check, 2026-09-24).** No new adapter was
+needed. bot-core submits every statement through the vendored
+`submitAppStatement` (`statement_submit` over the lazy client's request
+function), which already takes any `channel`, up to 4 `topics` and an
+`expiryFactory`; subscriptions go through the vendored raw page subscriber
+(`statement_subscribeStatement` with a `matchAny` filter) and sweeps through
+the SDK adapter's `queryStatements({ matchAny })`. A decoded statement carries
+its topics, channel, expiry, data and `proof.value.signer` (as `0x` hex
+strings on the raw path). `scripts/probe-group-statement.mjs` proves it on the
+devnet People chain RPC: a statement with a random `topic1`, a chosen
+`channel` and the group expiry comes back by subscription and by query with
+every field intact, and a second one on the same channel replaces it
+(`PROBE_OK`). The SDK is not forked.
+
+**Keys and wire** (`lib/group-keys.mjs`, `lib/group-codec.mjs`, vectors in
+`test/codec.test.mjs` = `vectors-0011.md`). `Topic_e`, `MsgKey_e` and the
+channels `ChMsgs_e`, `ChState_e`, `ChRekey_e` are keyed BLAKE2b-256 of `K_e`.
+Statement data is `GroupData = enum { messages(Sealed), state(Sealed),
+rekey(Rekey) }`; `Sealed` is AES-256-GCM with AAD `b"grp" : signer : e :
+variant`. `K(A, B)`, which wraps each member's copy of the next epoch key, is
+the raw X25519 agreement of the two identity chat keys (the value that keys
+`SessionId`), so every device of a member opens its entry. Group statements
+use the base spec's Expiry with `ExpirationTime` = now + 14 days (lower than a
+DM's `u32.max`, so a full account loses group statements first).
+
+**Pairwise control, kind 249** (`encodeOpaqueGroupControlMessage`):
+`welcome` 0, `joinRequest` 1, `joinDecision` 2, `history` 3, `keyRequest` 4,
+and `historyRequest` 5 (pca's proposal for the reviewer's "history on
+request": `{ groupId, since: enum { messageId(String), timestamp(u64) },
+limit: u8 }`). Controls ride the peer's outbound lane and run after the ACK.
+
+**The bot as a member** (`lib/groups-v2.mjs`). A `welcome` is accepted from a
+peer the bot allows (the v1 admission rule), or from an admin of a group it is
+already in (`BOT_GROUP2_WELCOME`); the bot then reads the topic at once and
+applies the state only if its hash matches the welcome (`BOT_GROUP2_JOINED`).
+A carrier counts only when its signer is `from` or one of `from`'s posting
+accounts, `from` holds `post` (a `groupLeave` always passes) and, for role 0
+under slow mode, it did not arrive sooner than `slowModeSecs` after the
+previous one. Messages dedup by id; a text becomes one turn under
+`group:<groupId>`, as in v1 (the sender shows as an account prefix: v2 states
+carry no usernames). Carried messages older than the bot's join are history,
+never turns. The answer is ONE statement on the bot's `ChMsgs_e`: the new
+parts plus its own messages of the last 24 h in this epoch, newest first,
+within 4096 bytes (`BOT_GROUP2_SENT { messages, carried, bytes }`). At most
+one statement per second, and for a role-0 bot one per `slowModeSecs`: a send
+that must wait is merged with what queues meanwhile (`BOT_GROUP2_SEND_WAIT`).
+No typing and no seen in v2 groups.
+
+**Epochs.** A rekey out of the current epoch from an admin: the bot opens its
+entry with `K(admin, bot)`, switches epoch, subscribes to the new topic and
+keeps the old key 14 days (`BOT_GROUP2_REKEYED`). No entry while still listed
+sends a `keyRequest` to that admin (`BOT_GROUP2_KEY_REQUESTED`). Two rekeys
+out of one epoch: the lower signer wins, the other key stays 24 h.
+
+**History provider.** Any member may send `historyRequest`; the bot answers
+with `history` pages of at most 4 KB each, newest first, at most 100
+messages, `last` on the final page (`BOT_GROUP2_HISTORY_SENT`). With
+`historyShare` 0 it never shares messages older than the asker's join. The bot
+keeps the last 200 messages per group in memory (100 persist).
+
+**The bot as an admin** (when the state gives it role ≥ 1 and the flag): it
+answers a listed member's `keyRequest` with a `welcome`; it accepts a
+"Join request: <name> [grp:<inviteId>:<proof>]" chat request from a stranger
+when the proof matches one of its groups' invites, then admits the
+`joinRequest` (policy 2: new state + `welcome`; policy 1: `joinDecision`
+pending; anything invalid: rejected); it removes a member that posted
+`groupLeave` (rekey on the old topic + state on the new one, two statements,
+`BOT_GROUP2_EPOCH_OPENED`); and it rotates the epoch after 7 days (plus up
+to an hour of jitter). The cap for v2 is 256 members.
+
+**Live proof.** `scripts/e2e-groups-v2.mjs` (two registered test identities
+and a local bot): `CHAT_OK V2_CREATED ONE_SUBMISSION BOT_REPLY_OK REMOVED
+REMOVED_LOCKED_OUT BOT_EPOCH2_OK GROUP2_LIVE_OK`.
+
 ### Attachments (photos/videos/files)
 
 The chat message carries only a reference —

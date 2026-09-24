@@ -954,3 +954,191 @@ test("group kinds refuse nesting and out-of-range fields on both sides", () => {
   const fromHex = encodeOpaqueGroupInfoMessage({ ...base, admin: `0x${"01".repeat(32)}`, members: [{ account: "02".repeat(32), username: "bob.02", joinedAt: 1 }] });
   assert.equal(decodeOne(fromHex).members[0].accountHex, "02".repeat(32));
 });
+
+// ---------- spec 0011 private groups v2: the pinned vectors ----------
+// Every byte string below is in polkadot-chat-desktop docs/spec/vectors-0011.md.
+// The desktop codec must reproduce the same bytes; a change here is a wire
+// change for both clients, never a test fix.
+import * as G from "../lib/group-codec.mjs";
+import * as GK from "../lib/group-keys.mjs";
+import {
+  encodeAppStatement,
+  encodeOpaqueGroupControlMessage,
+} from "../vendor/app-chat-codec.mjs";
+import { deriveSr25519PairFromSeed } from "../vendor/lib/wallet-keys.mjs";
+import { verify as sr25519Verify } from "@scure/sr25519";
+
+const v11 = (() => {
+  const f = (x, n) => new Uint8Array(n).fill(x);
+  const hx = (b) => Buffer.from(b).toString("hex");
+  const state = {
+    groupId: "GRP-2", epoch: 1, version: 1, name: "Test group", avatar: null, defaultPermissions: 1, slowModeSecs: 0, joinPolicy: 1, historyShare: 100,
+    members: [
+      { account: "01".repeat(32), role: 2, permissions: 0xff, posting: [], joinedAt: 1720000000000 },
+      { account: "02".repeat(32), role: 0, permissions: 1, posting: [], joinedAt: 1720000001000 },
+    ],
+    invites: [{ inviteId: "33".repeat(16), secret: "44".repeat(16), createdBy: "01".repeat(32), expiresAt: 0, maxUses: 0, uses: 0 }],
+    pinned: [], topics: null, createdAt: 1720000000000,
+  };
+  return { f, hx, state, K1: f(0x11, 32), K2: f(0x66, 32), A: f(1, 32), B: f(2, 32), msg: encodeOpaqueTextMessage({ messageId: "GM-1", timestamp: 1720000002000, text: "hello all" }) };
+})();
+
+test("0011 (a): epoch-1 topic, message key and channels", () => {
+  const d = GK.deriveEpoch(v11.K1, "GRP-2", 1);
+  assert.equal(v11.hx(d.topic), "1050ae1226c62b347cb32a7ee60a8dee9b183987090b7ca075346d38fb466c78");
+  assert.equal(v11.hx(d.msgKey), "8934a29c1ff0f0abca5fff48cf5eb15e9acfa1e4be0fbd8593f790fb23145267");
+  assert.equal(v11.hx(d.channels.msgs), "4ed5fab5021a794bd7159322654353d2b5736ebc8cc93196cf0c26f1395c7450");
+  assert.equal(v11.hx(d.channels.state), "e1be9084dc06e458f7caece2db5d292dac751f558d9d94b346079a774401f9a6");
+  assert.equal(v11.hx(d.channels.rekey), "5b7884e5795aaf767f27d9325455c20c4f8f22bb1215547041eb97e7bd98ce68");
+});
+
+test("0011 (b): a messages carrier seals, encodes and opens byte for byte", () => {
+  const d = GK.deriveEpoch(v11.K1, "GRP-2", 1);
+  assert.equal(v11.hx(v11.msg), "6410474d2d31d037fd779001000000002468656c6c6f20616c6c");
+  const plaintext = G.encodeGroupMessages({ from: v11.A, messages: [v11.msg] });
+  assert.equal(v11.hx(plaintext), `${"01".repeat(32)}0004${v11.hx(v11.msg)}`);
+  assert.equal(v11.hx(GK.sealAad(v11.A, 1, 0)), `677270${"01".repeat(32)}0100000000`);
+  const data = G.encodeGroupData({ messages: GK.seal(d.msgKey, { signer: v11.A, epoch: 1, variant: 0, plaintext, nonce: v11.f(0x22, 12) }) });
+  const pinned = "002222222222222222222222223101518aa1d987c3ea031a7f5dfbbd628c3b24df6ceb1d68d3f221124b081a8a13f4bc10f3e660ffffb80f63986e753af4a14a6cb2b6907021b02005049ca426a27af4b8387496497accf455808c";
+  assert.equal(v11.hx(data), pinned);
+  const decoded = G.decodeGroupData(Buffer.from(pinned, "hex"));
+  assert.equal(decoded.kind, "messages");
+  const opened = GK.open(d.msgKey, { signer: v11.A, epoch: 1, variant: 0, sealed: decoded.sealed });
+  assert.deepEqual(G.decodeGroupMessages(opened), { from: "01".repeat(32), messages: [v11.msg] });
+  // The AAD binds signer and variant: another signer, or the state variant, cannot open it.
+  assert.throws(() => GK.open(d.msgKey, { signer: v11.B, epoch: 1, variant: 0, sealed: decoded.sealed }));
+  assert.throws(() => GK.open(d.msgKey, { signer: v11.A, epoch: 1, variant: 1, sealed: decoded.sealed }));
+});
+
+const STATE_HEX = "144752502d32010000000100000028546573742067726f757000010000000000016408010101010101010101010101010101010101010101010101010101010101010102ff00000030fd7790010000020202020202020202020202020202020202020202020202020202020202020200010000e833fd779001000004333333333333333333333333333333334444444444444444444444444444444401010101010101010101010101010101010101010101010101010101010101010000000000000000000000000000000000000030fd7790010000";
+
+test("0011 (c): GroupState round-trips; stateHash; the sealed state statement", () => {
+  const bytes = G.encodeGroupState(v11.state);
+  assert.equal(bytes.length, 214);
+  assert.equal(v11.hx(bytes), STATE_HEX);
+  assert.deepEqual(G.decodeGroupState(bytes), { ...v11.state });
+  assert.equal(v11.hx(GK.hash256(bytes)), "71cdf88d55888efd322a22deb910897cbfb109fda0ee53eb5fc6860176101d35");
+  const d = GK.deriveEpoch(v11.K1, "GRP-2", 1);
+  const sealed = GK.seal(d.msgKey, { signer: v11.A, epoch: 1, variant: 1, plaintext: bytes, nonce: v11.f(0x23, 12) });
+  const pinned = "012323232323232323232323239903123e6e97e44666b0255a664e8591e892283d70e77f62004ad60790d61c648caa5c5a7b5bffb73587cc5090001c58fb1e5525272ed171093f2a02a5a5b16bfd7f04067005123e351149441cdc0cb5e5ad47873dd0f63a43e6af6f6713b8a985073af067857637472b08de6b2d0fe240d1170ebcf12ed226d59f13bd374c5f2a6404a468304517b19ad17ed442e145aae68934f09c6cb514d61654f41c62b8753f341d3ae3e5a6c79e38863465961da9479baf2993e8bf5c57b9c5b78144b3a980b3c28d848e7609d635619824de6f2f3485505d9159959701c8deaadc4039bc3d496fa4c22a21";
+  assert.equal(v11.hx(G.encodeGroupData({ state: sealed })), pinned);
+  const back = G.decodeGroupData(Buffer.from(pinned, "hex"));
+  assert.equal(v11.hx(GK.open(d.msgKey, { signer: v11.A, epoch: 1, variant: 1, sealed: back.sealed })), STATE_HEX);
+});
+
+test("0011 decoder bounds: topics Some, no owner, trailing bytes and 1025 members are refused", () => {
+  const bytes = Buffer.from(STATE_HEX, "hex");
+  const withTopics = Buffer.concat([bytes.subarray(0, bytes.length - 9), Buffer.from("010400", "hex"), bytes.subarray(bytes.length - 8)]);
+  assert.throws(() => G.decodeGroupState(withTopics), /topics must be None/);
+  assert.throws(() => G.decodeGroupState(Buffer.concat([bytes, Buffer.from("00", "hex")])), /trailing/);
+  assert.throws(() => G.encodeGroupState({ ...v11.state, members: v11.state.members.map((m) => ({ ...m, role: 0 })) }) && G.decodeGroupState(G.encodeGroupState({ ...v11.state, members: v11.state.members.map((m) => ({ ...m, role: 0 })) })), /exactly one owner/);
+  const many = Array.from({ length: 1025 }, (_, i) => ({ account: i.toString(16).padStart(64, "0"), role: i === 0 ? 2 : 0, permissions: 1, posting: [], joinedAt: 0 }));
+  assert.throws(() => G.encodeGroupState({ ...v11.state, members: many }), /1\.\.=1024/);
+  const carrier = G.encodeGroupMessages({ from: v11.A, messages: [v11.msg] });
+  carrier[32] = 1; // topic: Some(...)
+  assert.throws(() => G.decodeGroupMessages(Buffer.concat([carrier.subarray(0, 33), Buffer.from("00000000", "hex"), carrier.subarray(33)])), /topic must be None/);
+});
+
+test("0011 (d)(e): welcome and joinRequest, kind 249", () => {
+  const welcome = encodeOpaqueGroupControlMessage({
+    messageId: "GW-1", timestamp: 1720000003000,
+    control: { welcome: { groupId: "GRP-2", epoch: 1, epochKey: v11.K1, stateVersion: 1, stateHash: GK.hash256(Buffer.from(STATE_HEX, "hex")) } },
+  });
+  assert.equal(v11.hx(welcome), "79011047572d31b83bfd779001000000f900144752502d320100000011111111111111111111111111111111111111111111111111111111111111110100000071cdf88d55888efd322a22deb910897cbfb109fda0ee53eb5fc6860176101d35");
+  const w = decodeOpaqueMessageAt(welcome, 0).value;
+  assert.equal(w.kind, "groupControl");
+  assert.equal(w.control.welcome.epoch, 1);
+  assert.equal(v11.hx(w.control.welcome.epochKey), "11".repeat(32));
+  const proof = GK.joinProof(v11.f(0x44, 16), v11.B);
+  assert.equal(v11.hx(proof), "eba5b4f507de6b1f6405fafdfe30c0da870c1ba104d36e9cb9a5f6a61ece560f");
+  const join = encodeOpaqueGroupControlMessage({ messageId: "GJ-1", timestamp: 1720000004000, control: { joinRequest: { groupId: "GRP-2", inviteId: v11.f(0x33, 16), proof, note: "hi" } } });
+  assert.equal(v11.hx(join), "250110474a2d31a03ffd779001000000f901144752502d3233333333333333333333333333333333eba5b4f507de6b1f6405fafdfe30c0da870c1ba104d36e9cb9a5f6a61ece560f086869");
+  assert.equal(decodeOpaqueMessageAt(join, 0).value.control.joinRequest.note, "hi");
+});
+
+test("0011 (h): history, joinDecision, keyRequest and the historyRequest proposal", () => {
+  const cases = [
+    [{ messageId: "GH-1", timestamp: 1720000005000, control: { history: { groupId: "GRP-2", items: [{ from: v11.A, message: v11.msg }], last: true } } },
+      "49011047482d318843fd779001000000f903144752502d320401010101010101010101010101010101010101010101010101010101010101016410474d2d31d037fd779001000000002468656c6c6f20616c6c01"],
+    [{ messageId: "GD-1", timestamp: 1720000006000, control: { joinDecision: { groupId: "GRP-2", inviteId: v11.f(0x33, 16), status: 0 } } },
+      "9c1047442d317047fd779001000000f902144752502d323333333333333333333333333333333300"],
+    [{ messageId: "GK-1", timestamp: 1720000007000, control: { keyRequest: { groupId: "GRP-2", haveEpoch: 1 } } },
+      "6810474b2d31584bfd779001000000f904144752502d3201000000"],
+    [{ messageId: "GQ-1", timestamp: 1720000008000, control: { historyRequest: { groupId: "GRP-2", since: { messageId: "GM-1" }, limit: 100 } } },
+      "741047512d31404ffd779001000000f905144752502d320010474d2d3164"],
+    [{ messageId: "GQ-2", timestamp: 1720000008000, control: { historyRequest: { groupId: "GRP-2", since: { timestamp: 1720000000000 }, limit: 50 } } },
+      "801047512d32404ffd779001000000f905144752502d32010030fd779001000032"],
+  ];
+  for (const [input, pinned] of cases) {
+    const bytes = encodeOpaqueGroupControlMessage(input);
+    assert.equal(v11.hx(bytes), pinned);
+    const m = decodeOpaqueMessageAt(Buffer.from(pinned, "hex"), 0).value;
+    assert.equal(m.kind, "groupControl");
+    const [variant] = Object.keys(input.control);
+    assert.equal(v11.hx(encodeOpaqueGroupControlMessage({ messageId: m.messageId, timestamp: m.timestamp, control: { [variant]: m.control[variant] } })), pinned);
+  }
+});
+
+test("0011 (f): rekey entry with the stand-in K(A, B)", () => {
+  const kab = v11.f(0x55, 32);
+  const wrap = GK.wrapKey(kab, "GRP-2", 2);
+  assert.equal(v11.hx(wrap), "a235cd89db89439c9653c8c57b87270814dee0f85bd96269118c6f8eb1507422");
+  assert.equal(v11.hx(GK.entryHint(wrap)), "e88435e61ddfce6b");
+  const entry = GK.makeRekeyEntry(kab, { groupId: "GRP-2", newEpoch: 2, newKey: v11.K2, nonce: v11.f(0x77, 12) });
+  assert.equal(v11.hx(entry.box), "15a235403c6ceca6c1243940b92fc447b3f19cddef5f65f531d7808e482be8a0e7293d5f70648b5dab4a0c43a1bf80c6");
+});
+
+test("0011 (i): a real K(A, B) from two X25519 identity keys and a full rekey with 3 entries", () => {
+  const priv = { A: v11.f(0x0a, 32), B: v11.f(0x0b, 32), C: v11.f(0x0c, 32) };
+  const pub = Object.fromEntries(Object.entries(priv).map(([k, v]) => [k, x25519PublicKeyFromPrivateKey(v)]));
+  assert.equal(v11.hx(pub.A), "f77ff4b10788bfdca62ca0bb160d427cf5762d85f2b5cad6807ec9c3febbde09");
+  assert.equal(v11.hx(pub.B), "73b2d8b76aa9b53660032bc8f5d8bee3a3ae4e3b3a7fd49ade81f7347a34aa68");
+  assert.equal(v11.hx(pub.C), "97c3b10b4d6c133a78ea5dcc1cf6421d3f81ae37b1f628ce14ca6fce7730f333");
+  const kab = GK.pairwiseSecret(priv.A, pub.B);
+  assert.equal(v11.hx(kab), "c09d8a17f54f06a53f844eacbc6273017581b9bc53b5f31f3d338cc3ffd7b86b");
+  assert.equal(v11.hx(GK.pairwiseSecret(priv.B, pub.A)), v11.hx(kab), "both sides derive K(A, B)");
+  const kaa = GK.pairwiseSecret(priv.A, pub.A);
+  const kac = GK.pairwiseSecret(priv.A, pub.C);
+  assert.equal(v11.hx(kaa), "064b7cec534810674268cef049e065e9bd363d131a4a09a42be2059a9fb8ab61");
+  assert.equal(v11.hx(kac), "cf41b439fa7668d5fe9909b55584224eb2d94140dd93fb300232a881cebd2317");
+  const entries = [[kaa, 0x77], [kab, 0x78], [kac, 0x79]].map(([k, n]) => GK.makeRekeyEntry(k, { groupId: "GRP-2", newEpoch: 2, newKey: v11.K2, nonce: v11.f(n, 12) }));
+  const data = G.encodeGroupData({ rekey: { newEpoch: 2, entries } });
+  const pinned = "02020000000cb15f17a0bfb8af0b777777777777777777777777dbd8cd740c9be5aab7e6491eb762d54cbafd76ba4e16172d4e39314bc80732091243fc23c759246c06ee2d11dc7ad59dc4308e7ad84cbaf7797979797979797979797979ef6aa68e222cbad29059038d624cb81b494e7174997965653bb378e63dcc1645d5adf5f8b63e8d1e3d412ba949d6ce22efe9e3c7fbfce4f5787878787878787878787878ee0eee9d9efd1676595fdb40359409c67530e199c596ae7edcfad16406b2c74731552a15be72a6aa22e5affed6d32862";
+  assert.equal(v11.hx(data), pinned);
+  const { rekey } = G.decodeGroupData(Buffer.from(pinned, "hex"));
+  // B finds its entry with K(B, A); C with K(C, A); a stranger finds none.
+  assert.equal(v11.hx(GK.openRekeyEntry(GK.pairwiseSecret(priv.B, pub.A), { groupId: "GRP-2", rekey })), "66".repeat(32));
+  assert.equal(v11.hx(GK.openRekeyEntry(GK.pairwiseSecret(priv.C, pub.A), { groupId: "GRP-2", rekey })), "66".repeat(32));
+  assert.equal(GK.openRekeyEntry(GK.pairwiseSecret(v11.f(0x0d, 32), pub.A), { groupId: "GRP-2", rekey }), null);
+});
+
+test("0011 (g): invite link", () => {
+  const link = G.encodeInviteLink({ groupId: "GRP-2", name: "Test group", admins: [v11.A], inviteId: v11.f(0x33, 16), secret: v11.f(0x44, 16) });
+  assert.equal(G.inviteLinkToBase64Url(link), "FEdSUC0yKFRlc3QgZ3JvdXAEAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEzMzMzMzMzMzMzMzMzMzMzRERERERERERERERERERERA");
+  assert.deepEqual(G.decodeInviteLink(link), { groupId: "GRP-2", name: "Test group", admins: ["01".repeat(32)], inviteId: "33".repeat(16), secret: "44".repeat(16) });
+});
+
+test("0011 (j): a full signed GroupStatement (Sr25519 proof)", () => {
+  const pair = deriveSr25519PairFromSeed(v11.f(0x01, 32), "//wallet");
+  assert.equal(v11.hx(pair.publicKey), "a83e8af1ed0f17a66fbf999cde3e95b2afb987e1eed2f762716d86d731263550");
+  const d = GK.deriveEpoch(v11.K1, "GRP-2", 1);
+  const plaintext = G.encodeGroupMessages({ from: pair.publicKey, messages: [v11.msg] });
+  const data = G.encodeGroupData({ messages: GK.seal(d.msgKey, { signer: pair.publicKey, epoch: 1, variant: 0, plaintext, nonce: v11.f(0x22, 12) }) });
+  const now = 1_790_000_000;
+  const expiry = GK.groupExpiryFactory({ now: () => now * 1000 })();
+  assert.equal(expiry.toString(16), "6ac3b08001997900", "ExpirationTime now + 14 d, sequence now - 1_763_164_800");
+  const statement = encodeAppStatement({ walletPair: pair, channel: d.channels.msgs, topics: [d.topic], expiry, scaleEncodedPayload: scaleEncodeBytes(data) });
+  const material = "020079990180b0c36a034ed5fab5021a794bd7159322654353d2b5736ebc8cc93196cf0c26f1395c7450041050ae1226c62b347cb32a7ee60a8dee9b183987090b7ca075346d38fb466c78086d01002222222222222222222222223101f8b52a296bcdfca474c1c566625d18888a67ea0bf2bb2591517eccde2aad27a5bc10f3e660ffffb80f63986e753af4a14a6cb2b6907021b02005049c7bc7441d8decf3a59fa0041c117ae7ec";
+  // Vec of 5 fields; proof = field 0, Sr25519 variant 0, signature, signer; then the signed fields.
+  assert.equal(v11.hx(statement.subarray(0, 3)), "140000");
+  assert.equal(v11.hx(statement.subarray(67, 99)), v11.hx(pair.publicKey));
+  assert.equal(v11.hx(statement.subarray(99)), material);
+  assert.ok(sr25519Verify(Buffer.from(material, "hex"), statement.subarray(3, 67), pair.publicKey));
+});
+
+test("0011 group expiry: rises with every submission, even within one second", () => {
+  const next = GK.groupExpiryFactory({ now: () => 1_790_000_000_000 });
+  const a = next(); const b = next(); const c = next();
+  assert.ok(a < b && b < c);
+  assert.equal(a >> 32n, BigInt(1_790_000_000 + 14 * 86_400));
+});

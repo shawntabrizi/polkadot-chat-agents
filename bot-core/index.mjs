@@ -83,6 +83,8 @@ import { buttonsFallbackText, extractButtonsBlock } from "./lib/buttons-block.mj
 import { buttonPressText, createSentButtons } from "./lib/button-presses.mjs";
 import { createBotInfoSent, createPeerBotInfo, defaultBotInfo, loadBotInfo } from "./lib/bot-info.mjs";
 import { createGroups, groupSessionKey } from "./lib/groups.mjs";
+import { createGroupsV2 } from "./lib/groups-v2.mjs";
+import { groupExpiryFactory, pairwiseSecret } from "./lib/group-keys.mjs";
 import { createWorkspaces } from "./lib/workspaces.mjs";
 import { downloadP2PFile, uploadP2PFile, validateHopUrl } from "./lib/hop-client.mjs";
 import { createMediaStore } from "./lib/media-store.mjs";
@@ -143,6 +145,7 @@ import {
   encodeOpaqueDataChannelClosedMessage,
   encodeOpaqueChatAcceptedMessage,
   encodeOpaqueDeviceChatAcceptedMessage,
+  encodeOpaqueGroupControlMessage,
   encodeSessionRequestPayload,
   encodeSessionResponsePayload,
   submitAppStatement,
@@ -1330,7 +1333,195 @@ const groups = createGroups({
 });
 // An allowlisted bot also serves the members of a group whose admin it
 // allows, for group kinds only.
-const groupAdmitted = (peerHex) => extensionOn("groups") && !isAllowed(peerHex) && groups.admits(norm(peerHex), isAllowed);
+const groupAdmitted = (peerHex) => extensionOn("groups") && !isAllowed(peerHex)
+  && (groups.admits(norm(peerHex), isAllowed) || groupsV2.admits(norm(peerHex), isAllowed));
+
+// ---------- spec 0011 private groups v2 ----------
+// The bot is a member of a group whose epoch key reached it in a `welcome`
+// (kind 249) over the DM session; lib/groups-v2.mjs holds every rule. The
+// wire here: group statements go straight to the store on the group topic
+// (they are not session messages, so no outbound lane: each member owns one
+// carrier slot per group and replaces it), with the base spec's Expiry at
+// now + 14 days; kind-249 controls ride the peer's outbound lane.
+const groupExpiry = groupExpiryFactory();
+const sendGroupControl = async (peerHex, control) => {
+  const k = norm(peerHex);
+  await ensureGroupSession(k);
+  const messageId = makeAppUuid();
+  await outbound.enqueue(k, encodeOpaqueGroupControlMessage({ messageId, timestamp: stamp(k), control }), { messageId }).submitted;
+};
+const groupsV2 = createGroupsV2({
+  selfHex: accountIdHex,
+  isAllowed: (peerHex) => isAllowed(peerHex),
+  // K(bot, peer): the raw X25519 agreement of the two identity chat keys.
+  pairwiseKey: async (peerHex) => {
+    const key = await resolveIdentifierKey(peerHex);
+    return key ? pairwiseSecret(identityPrivateKey, hexToBytes(key)) : null;
+  },
+  submit: ({ topic, channel, data }) => submitBounded({
+    walletPair: wallet, channel, topics: [topic], scaleEncodedPayload: scaleEncodeBytes(data), expiryFactory: groupExpiry,
+  }),
+  sendControl: sendGroupControl,
+  log,
+});
+// The session key a group turn runs under: v1 and v2 share the scheme.
+const groupV2ByKey = (groupIdOrKey) => {
+  const key = String(groupIdOrKey ?? "").toLowerCase();
+  return groupsV2.list().find((g) => g.groupId === groupIdOrKey || groupSessionKey(g.groupId) === key) ?? null;
+};
+const groupContextFor = (groupIdOrKey) => {
+  const v2 = groupV2ByKey(groupIdOrKey);
+  return v2 ? groupsV2.contextFor(v2.groupId) : groups.contextFor(groupIdOrKey);
+};
+// Outgoing v2 messages merge per group: a send the group refuses for now
+// (one statement per second; slow mode for a role-0 bot) waits and goes
+// out with whatever else queued meanwhile, as ONE statement.
+const v2Outbox = new Map(); // groupId -> { opaques, waiters, timer }
+const flushGroupV2 = async (groupId) => {
+  const box = v2Outbox.get(groupId);
+  if (!box) return;
+  box.timer = null;
+  let opaques = box.opaques.splice(0);
+  let waiters = box.waiters.splice(0);
+  try {
+    let result = await groupsV2.send(groupId, opaques);
+    // Several parts that do not fit one 4 KB carrier: the first half now,
+    // the rest in the next statement.
+    if (!result.ok && result.reason === "too-large" && opaques.length > 1) {
+      const half = Math.ceil(opaques.length / 2);
+      box.opaques.unshift(...opaques.slice(half));
+      box.waiters.unshift(...waiters);
+      waiters = [];
+      opaques = opaques.slice(0, half);
+      result = await groupsV2.send(groupId, opaques);
+      if (!box.timer) box.timer = setTimeout(() => flushGroupV2(groupId), 1000);
+    }
+    if (!result.ok && result.retryInMs != null) {
+      box.opaques.unshift(...opaques);
+      box.waiters.unshift(...waiters);
+      log("BOT_GROUP2_SEND_WAIT", { group: groupId, reason: result.reason, retryInMs: result.retryInMs });
+      if (!box.timer) box.timer = setTimeout(() => flushGroupV2(groupId), result.retryInMs);
+      return;
+    }
+    if (!result.ok) throw new Error(`group send refused: ${result.reason}`);
+    persist();
+    for (const w of waiters) w.resolve(result);
+  } catch (error) {
+    log("BOT_GROUP2_SEND_FAILED", { group: groupId, error: String(error?.message ?? error) });
+    for (const w of waiters) w.reject(error);
+  }
+};
+const sendToGroupV2 = (groupId, opaques) => new Promise((resolve, reject) => {
+  let box = v2Outbox.get(groupId);
+  if (!box) { box = { opaques: [], waiters: [], timer: null }; v2Outbox.set(groupId, box); }
+  box.opaques.push(...opaques);
+  box.waiters.push({ resolve, reject });
+  if (!box.timer) box.timer = setTimeout(() => flushGroupV2(groupId), 0);
+});
+// A carrier holds 4096 bytes of plaintext; parts stay well under it.
+const GROUP_V2_PART_BYTES = 3000;
+const deliverToGroupV2 = async (groupId, reply) => {
+  const key = groupSessionKey(groupId);
+  const { text, buttons } = prepareReply(key, reply);
+  const parts = splitMessageText(text, Math.min(replyChunkBytes, GROUP_V2_PART_BYTES));
+  const opaques = parts.map((part, i) => {
+    const withButtons = buttons && i === parts.length - 1;
+    const messageId = makeAppUuid();
+    const timestamp = Date.now() + i; // one statement, in order
+    if (withButtons) sentButtons.record(key, messageId, buttons.rows);
+    return {
+      messageId,
+      opaque: withButtons
+        ? encodeOpaqueButtonsMessage({ messageId, timestamp, text: part, rows: buttons.rows, oneShot: buttons.oneShot })
+        : encodeOpaqueTextMessage({ messageId, timestamp, text: part }),
+    };
+  });
+  await sendToGroupV2(groupId, opaques.map((o) => o.opaque));
+  return opaques[0]?.messageId ?? null;
+};
+// A statement on a group topic (subscription or sweep).
+const handleGroupStatement = async (st) => {
+  if (!extensionOn("groups")) return;
+  const data = typeof st.data === "string" ? hexToBytes(st.data) : st.data;
+  const topic = (st.topics ?? []).map(topicHex).find((t) => groupsV2.hasTopic(t));
+  if (!topic) return;
+  const res = await groupsV2.receive({
+    topicHex: topic,
+    channelHex: st.channel == null ? "" : topicHex(st.channel),
+    signerHex: st.proof?.value?.signer == null ? "" : topicHex(st.proof.value.signer),
+    data,
+  });
+  await actOnGroupResults([res, ...(res.drained ?? [])]);
+};
+const actOnGroupResults = async (results) => {
+  let changed = false;
+  for (const r of results) {
+    if (r.outcome === "own" || r.outcome === "unknown-topic") continue;
+    const quiet = r.outcome === "held" || r.outcome === "duplicate" || r.outcome === "stale";
+    (quiet ? logDebug : log)("BOT_GROUP2_STATEMENT", { group: r.groupId, epoch: r.epoch, outcome: r.outcome, ...(r.from ? { from: r.from, messages: r.messages?.length ?? 0 } : {}), ...(r.error ? { error: r.error } : {}) });
+    if (r.gap) log("BOT_GROUP2_GAP", { group: r.groupId, from: r.from });
+    if (r.outcome === "applied" || r.outcome === "rekeyed" || r.outcome === "fork" || r.outcome === "accepted") changed = true;
+    if (r.outcome !== "accepted") continue;
+    for (const f of r.messages) {
+      if (!f.answerable) continue;
+      const turn = groupTurnFrom(r.groupId, f.from, f.from.slice(0, 8), f.message);
+      if (!turn) continue;
+      const id = `g2:${r.groupId}:${f.from}:${f.message.messageId}`;
+      if (seenRequests.has(id)) continue;
+      if (!reserveAdmission(f.from)) { log("BOT_GROUP2_TURN_DROPPED", { group: r.groupId, from: f.from, reason: "busy" }); continue; }
+      if (!oweReply(id, f.from, turn, null)) { releaseBridgeReservation(); log("BOT_GROUP2_TURN_DROPPED", { group: r.groupId, from: f.from, reason: "owed-full" }); continue; }
+      seenRequests.add(id);
+      trimSet(seenRequests, SEEN_CAP);
+      await persistCritical();
+      log("BOT_GROUP2_RECEIVED", { group: r.groupId, from: f.from, messageId: f.message.messageId, kind: f.message.kind });
+      enqueueOwed(f.from, id, turn, null, { reservedBridge: usesBridgeQueue });
+    }
+  }
+  if (changed) { ingress?.resubscribe(); persist(); }
+};
+// Read the group topics now (after a welcome or a rekey), not at the next sweep.
+const fetchGroupTopics = async () => {
+  const topics = groupsV2.topics();
+  for (let i = 0; i < topics.length; i += TOPIC_BATCH) {
+    const statements = await queryTopics(topics.slice(i, i + TOPIC_BATCH));
+    for (const st of statements ?? []) {
+      const key = fp(typeof st.data === "string" ? hexToBytes(st.data) : st.data);
+      if (seenStatements.has(key)) continue;
+      await handleGroupStatement(st);
+      noteSeenStatement(key);
+    }
+  }
+};
+// One kind-249 control from `peerHex` over its DM session.
+const handleGroupControl = async (peerHex, m) => {
+  const from = norm(peerHex);
+  const [variant] = Object.keys(m.control);
+  const c = m.control[variant];
+  try {
+    if (variant === "welcome") {
+      const outcome = groupsV2.welcome(from, c);
+      log("BOT_GROUP2_WELCOME_RECEIVED", { from, group: c.groupId, epoch: c.epoch, outcome });
+      if (outcome === "welcomed" || outcome === "rekeyed") {
+        persist();
+        ingress?.resubscribe();
+        await fetchGroupTopics();
+      }
+    } else if (variant === "keyRequest") {
+      log("BOT_GROUP2_KEY_REQUEST", { from, group: c.groupId, haveEpoch: c.haveEpoch, outcome: await groupsV2.keyRequest(from, c) });
+    } else if (variant === "historyRequest") {
+      const pages = groupsV2.historyPages(from, c);
+      for (const page of pages) await sendGroupControl(from, page);
+      log("BOT_GROUP2_HISTORY_SENT", { from, group: c.groupId, pages: pages.length, items: pages.reduce((n, p) => n + p.history.items.length, 0) });
+    } else if (variant === "joinRequest") {
+      log("BOT_GROUP2_JOIN_REQUEST", { from, group: c.groupId, outcome: await groupsV2.joinRequest(from, c) });
+      persist();
+    } else {
+      log("BOT_GROUP2_CONTROL_IGNORED", { from, group: c.groupId, variant });
+    }
+  } catch (error) {
+    log("BOT_GROUP2_CONTROL_FAILED", { from, group: c?.groupId, variant, error: String(error?.message ?? error) });
+  }
+};
 // Fan one inner content out. One timestamp for every copy, never below what
 // any member last sent (lib/peer-clock.mjs).
 const sendToGroup = async (groupId, inner, { kind, ephemeral = false, messageId } = {}) => {
@@ -1347,6 +1538,7 @@ const sendToGroup = async (groupId, inner, { kind, ephemeral = false, messageId 
 // A brain answer to the group: chunked, with a trailing ```buttons block on
 // the last part (spec 0006), as in deliverToChat. Resolves the first id.
 const deliverToGroup = async (groupId, reply) => {
+  if (groupsV2.get(groupId)) return deliverToGroupV2(groupId, reply);
   const key = groupSessionKey(groupId);
   const { text, buttons } = prepareReply(key, reply);
   const parts = splitMessageText(text, replyChunkBytes);
@@ -1371,7 +1563,8 @@ const sendGroupTyping = (groupId, kind) => {
   sendToGroup(groupId, inner, { kind: "typing", ephemeral: true }).catch((e) => log("BOT_GROUP_TYPING_FAILED", { group: groupId, error: String(e?.message ?? e) }));
 };
 const beginGroupTurn = (groupId) => {
-  if (!extensionOn("typing") || groupTyping.has(groupId)) return () => {};
+  // 0011: typing is not sent in v2 groups.
+  if (!extensionOn("typing") || groupTyping.has(groupId) || groupsV2.get(groupId)) return () => {};
   sendGroupTyping(groupId, TYPING_KINDS.working);
   const started = Date.now();
   const timer = setInterval(() => {
@@ -1425,11 +1618,16 @@ const receiveGroupContent = (peerHex, m) => {
     return null;
   }
   log("BOT_GROUP_RECEIVED", { from, group: m.groupId, messageId: m.messageId, seq: m.seq, kind: c.kind });
-  const base = { messageId: m.messageId, kind: "text", group: { id: m.groupId, sender: accepted.sender.username || from.slice(0, 8) } };
+  return groupTurnFrom(m.groupId, from, accepted.sender.username || from.slice(0, 8), { ...c, messageId: m.messageId });
+};
+// The brain message for one group content (v1 unwrapped, or a v2 carrier
+// item), or null for contents that are never answered.
+const groupTurnFrom = (groupId, from, sender, c) => {
+  const base = { messageId: c.messageId, kind: "text", group: { id: groupId, sender } };
   if (c.kind === "buttonPress") {
-    const label = sentButtons.label(groupSessionKey(m.groupId), c.targetMessageId, c.row, c.index);
+    const label = sentButtons.label(groupSessionKey(groupId), c.targetMessageId, c.row, c.index);
     if (label == null) {
-      log("BOT_BUTTON_PRESS_IGNORED", { from, group: m.groupId, messageId: c.targetMessageId, reason: "not a button this bot sent to this group" });
+      log("BOT_BUTTON_PRESS_IGNORED", { from, group: groupId, messageId: c.targetMessageId, reason: "not a button this bot sent to this group" });
       return null;
     }
     return { ...base, text: buttonPressText(label, c.payload) };
@@ -1446,8 +1644,9 @@ const receiveGroupContent = (peerHex, m) => {
 // group's own session key, and every reply goes to the whole group.
 const handleGroupInbound = async (peerHex, msg, owedId, { reservedBridge = false } = {}) => {
   const groupId = msg.group.id;
-  const group = groups.get(groupId);
-  if (!group || groups.targets(groupId).length === 0) {
+  const v2 = groupsV2.get(groupId);
+  const group = v2 ? (v2.status === "member" ? { name: v2.state.name } : null) : groups.get(groupId);
+  if (!group || (!v2 && groups.targets(groupId).length === 0)) {
     log("BOT_GROUP_TURN_SKIPPED", { from: norm(peerHex), group: groupId, reason: group ? "not sending to this group" : "unknown-group" });
     if (reservedBridge) releaseBridgeReservation();
     if (usesBridgeQueue && owedId) settleOwed(owedId);
@@ -1474,7 +1673,7 @@ const handleGroupInbound = async (peerHex, msg, owedId, { reservedBridge = false
   }
   // bridge: the harness answers with POST /send { group_id, text }.
   try {
-    const hint = groups.contextFor(groupId);
+    const hint = groupContextFor(groupId);
     enqueueInbound({
       chat_id: peerHex,
       group_id: groupId,
@@ -1808,7 +2007,7 @@ const agentRuntime = engine ? createAgentRuntime({
     // Spec 0006: the ```buttons hint only when buttons go out as kind 242.
     buttons: () => extensionOn("buttons"),
     // Spec 0009: the one-line hint for a turn from a group.
-    group: (sessionKey) => groups.contextFor(sessionKey),
+    group: (sessionKey) => groupContextFor(sessionKey),
   },
   // A group turn carries deliveryContext { groupId }: its replies fan out.
   chat: {
@@ -2255,6 +2454,7 @@ const snapshotState = () => ({
   intro: agentRuntime?.introducedList() ?? [],
   // Spec 0009: the rosters, own seq and recent envelope ids per group.
   groups: groups.snapshot(),
+  groups2: groupsV2.snapshot(),
 });
 const greetedPeers = new Set(); // peers we've sent a first-contact greeting (once ever)
 const persist = () => { if (stateStore) stateStore.save(snapshotState()); };
@@ -2306,7 +2506,11 @@ const handleOpener = async (data) => {
   catch (e) { log("BOT_OPENER_DECODE_FAILED", { error: String(e?.message ?? e) }); return; }
   const senderHex = norm(decoded.peerAccountIdHex);
   const groupOnly = !isAllowed(senderHex);
-  if (groupOnly && !groupAdmitted(senderHex)) { log("BOT_REJECTED_UNLISTED", { from: senderHex }); return; }
+  // 0011: "Join request: <name> [grp:<inviteId>:<proof>]" to an admin bot is
+  // accepted silently when the proof matches one of its groups' invites; the
+  // joinRequest follows on the session.
+  const joinOpener = extensionOn("groups") && groupsV2.acceptsJoinOpener(senderHex, decoded.text);
+  if (groupOnly && !joinOpener && !groupAdmitted(senderHex)) { log("BOT_REJECTED_UNLISTED", { from: senderHex }); return; }
   // A held request waits for its retry; one whose window closed is dropped.
   const waitKey = fp(data);
   const held = identifierWait.status(waitKey);
@@ -2321,7 +2525,7 @@ const handleOpener = async (data) => {
   if (!verifyChatRequestIdentityProof(decoded, identityPrivateKey, hexToBytes(identifierKeyHex))) {
     log("BOT_OPENER_BAD_PROOF", { from: senderHex }); return;
   }
-  if (groupOnly) return acceptGroupMember(decoded, senderHex, identifierKeyHex);
+  if (groupOnly || joinOpener) return acceptGroupMember(decoded, senderHex, identifierKeyHex);
   // App UUIDs are normally globally unique, but they are peer-controlled
   // input. Namespace opener dedup/owed records so one malicious peer cannot
   // suppress another peer's welcome by reusing its message id.
@@ -2527,6 +2731,7 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
   if (decoded?.kind !== "request") return "handled";
   const fresh = [];   // messages that run the brain (journaled + owed)
   const declines = []; // call offers to auto-decline after the ACK
+  const groupControls = []; // spec 0011 kind-249 controls, handled after the ACK
   const stops = [];
   const newlySeen = [];
   const batchSeen = new Set();
@@ -2569,7 +2774,7 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
       undecodable += 1;
       continue;
     }
-    const groupKind = m.kind === "groupInfo" || m.kind === "groupMessage" || m.kind === "groupLeave";
+    const groupKind = m.kind === "groupInfo" || m.kind === "groupMessage" || m.kind === "groupLeave" || m.kind === "groupControl";
     if (groupOnly && !groupKind) {
       if (m.kind !== "chatAccepted" && m.kind !== "typing" && m.kind !== "seen") log("BOT_GROUP_ONLY_DROPPED", { from: peerHex, kind: m.kind });
       continue;
@@ -2615,7 +2820,8 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
     if (groupKind) {
       observeExtension(peerHex, m.kind);
       if (!m.messageId) continue;
-      const id = messageDedupId(peerHex, decoded.requestId, `${m.kind}:${m.groupId}`, m.messageId);
+      const groupRef = m.groupId ?? Object.values(m.control ?? {})[0]?.groupId;
+      const id = messageDedupId(peerHex, decoded.requestId, `${m.kind}:${groupRef}`, m.messageId);
       if (seenRequests.has(id) || batchSeen.has(id)) continue;
       batchSeen.add(id); newlySeen.push(id);
       if (!extensionOn("groups")) {
@@ -2623,6 +2829,8 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
         continue;
       }
       stateChanged = true;
+      // Spec 0011 controls run after the ACK (a welcome reads the topic).
+      if (m.kind === "groupControl") { groupControls.push(m); continue; }
       const turn = receiveGroupContent(peerHex, m);
       if (turn) fresh.push({ id, msg: turn });
       continue;
@@ -2799,6 +3007,7 @@ const handleSessionStatement = async (data, peerHex, session, senderAccountId = 
       else await sendText(peerHex, stopped ? "⏹ Stopped." : "Nothing to stop right now.").catch(() => {});
     })();
   }
+  for (const m of groupControls) enqueueWork(peerHex, () => handleGroupControl(peerHex, m));
   for (const offerId of declines) {
     enqueueWork(peerHex, async () => {
       try {
@@ -2893,6 +3102,7 @@ const buildWatch = () => {
   pruneSessions();
   const watch = new Map(); // bare-hex topic -> {kind:"opener"} | {kind:"session", peerHex, session, sender}
   for (const topic of requestDayTopics()) watch.set(topicHex(topic), { kind: "opener", topic });
+  for (const topic of groupsV2.topics()) watch.set(topicHex(topic), { kind: "group", topic });
   for (const peerHex of watchedSessionPeers) {
     const entry = sessions.get(peerHex);
     if (entry == null) continue;
@@ -2932,6 +3142,8 @@ const dispatchStatement = async (st, watch, target = null) => {
   let outcome;
   if (route.kind === "opener") {
     outcome = await handleOpener(data);
+  } else if (route.kind === "group") {
+    outcome = await handleGroupStatement(st);
   } else {
     outcome = await handleSessionStatement(data, route.peerHex, route.session, route.sender);
   }
@@ -2967,7 +3179,8 @@ const queueStatement = (st, watch) => {
   // New openers need a decrypt before their peer is known, so they share one
   // short ordered lane. Established sessions are keyed by peer and run in
   // parallel within the global cap.
-  const routeKey = target.kind === "session" ? `session:${norm(target.peerHex)}` : "openers";
+  // Group statements share one ordered lane (a state before the carriers it admits).
+  const routeKey = target.kind === "session" ? `session:${norm(target.peerHex)}` : target.kind === "group" ? "groups" : "openers";
   const task = statementDispatcher.run(routeKey, () => dispatchStatement(st, watch, target));
   if (task) return task.catch((error) => log("BOT_DISPATCH_FAILED", { error: String(error?.message ?? error) }));
   tickDeferred += 1;
@@ -3235,7 +3448,7 @@ const startBridge = () => {
         const hasText = typeof text === "string" && text.length > 0;
         // Spec 0009: an answer to a group turn fans out to the group.
         if (groupId != null) {
-          if (typeof groupId !== "string" || !groups.get(groupId)) return json(404, { success: false, error: "unknown group_id" });
+          if (typeof groupId !== "string" || (!groups.get(groupId) && !groupsV2.get(groupId))) return json(404, { success: false, error: "unknown group_id" });
           if (!hasText) return json(400, { success: false, error: "text required for a group" });
           if (Buffer.byteLength(text) > BRIDGE_TEXT_MAX_BYTES) return json(413, { success: false, error: "text too large" });
           const messageId = await deliverToGroup(groupId, text);
@@ -3467,6 +3680,7 @@ const normalizeRestoredState = (raw) => {
     greeted: keysValid ? array(raw.greeted, MAX_SESSIONS) : [],
     intro: array(raw.intro, MAX_SESSIONS),
     groups: array(raw.groups, 200),
+    groups2: array(raw.groups2, 200),
   };
 };
 const restored = normalizeRestoredState(rawStoredState);
@@ -3475,6 +3689,7 @@ const restored = normalizeRestoredState(rawStoredState);
 agentRuntime?.noteRestoredAgent(restored?.agent ?? null);
 // Groups first: an allowlisted bot admits a group member's session by them.
 groups.restore(restored?.groups);
+groupsV2.restore(restored?.groups2);
 let restoredPeers = 0;
 // Peers refused by the current allowlist: a session and its owed entries
 // are one refused peer, not one refusal per record.
@@ -3619,9 +3834,14 @@ if ((env.BOT_SUBSCRIBE ?? "1") !== "0") {
     for (let i = 0; i < openerTopics.length; i += TOPIC_BATCH) {
       desired.set(`openers-${i / TOPIC_BATCH}`, openerTopics.slice(i, i + TOPIC_BATCH));
     }
-    const sessionTopics = [...buildWatch().values()].filter((w) => w.kind === "session").map((w) => w.topic);
+    const watchNow = [...buildWatch().values()];
+    const sessionTopics = watchNow.filter((w) => w.kind === "session").map((w) => w.topic);
     for (let i = 0; i < sessionTopics.length; i += TOPIC_BATCH) {
       desired.set(`sessions-${i / TOPIC_BATCH}`, sessionTopics.slice(i, i + TOPIC_BATCH));
+    }
+    const groupTopics = watchNow.filter((w) => w.kind === "group").map((w) => w.topic);
+    for (let i = 0; i < groupTopics.length; i += TOPIC_BATCH) {
+      desired.set(`groups2-${i / TOPIC_BATCH}`, groupTopics.slice(i, i + TOPIC_BATCH));
     }
     for (const id of [...groupKeys.keys()]) {
       if (!desired.has(id)) { supervisor.unsubscribeGroup(id); groupKeys.delete(id); }
@@ -3695,6 +3915,8 @@ const ingressHealthy = () => {
 
 for (;;) {
   try { await pollOnce(); } catch (error) { log("BOT_POLL_ERROR", { error: error instanceof Error ? error.message : String(error) }); }
+  // 0011 timers: old keys erased after 14 days; an admin bot rotates at 7.
+  try { await groupsV2.tick(); } catch (error) { log("BOT_GROUP2_TICK_FAILED", { error: String(error?.message ?? error) }); }
   ingress?.resubscribe(); // day rollover / watch-set changes
   // Back off on a sustained outage so we don't hammer a recovering node with the
   // full topic fan-out every tick; normal cadence resumes on the first success.
