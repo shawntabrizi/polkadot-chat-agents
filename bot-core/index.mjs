@@ -79,7 +79,7 @@ import { splitMessageText } from "./lib/chunk.mjs";
 import { createOutboundLanes } from "./lib/outbound-lanes.mjs";
 import { createDeletionLedger, createExtensionObserver, createMessageDeleter, parseProtocolExtensions } from "./lib/message-deletion.mjs";
 import { TYPING_MIN_INTERVAL_MS, TYPING_PLACEHOLDER_AFTER_MS, TYPING_TTL_MS, createTypingAndSeen } from "./lib/typing-seen.mjs";
-import { buttonsFallbackText, parseButtonsBlock } from "./lib/buttons-block.mjs";
+import { buttonsFallbackText, extractButtonsBlock } from "./lib/buttons-block.mjs";
 import { buttonPressText, createSentButtons } from "./lib/button-presses.mjs";
 import { createBotInfoSent, createPeerBotInfo, defaultBotInfo, loadBotInfo } from "./lib/bot-info.mjs";
 import { createGroups, groupSessionKey } from "./lib/groups.mjs";
@@ -1106,7 +1106,8 @@ const deleteMessage = async (peerHex, messageId) => {
 };
 
 // ---------- spec 0006 buttons ----------
-// A brain ends its reply with a ```buttons block (lib/buttons-block.mjs). A
+// A brain puts a buttons block in its reply (lib/buttons-block.mjs,
+// extractButtonsBlock: lenient fence tag, shape and place). A
 // peer with the extension gets ONE kind-242 message; any other peer gets the
 // spec's fallback (the text, then the labels as a numbered list). Kind 242
 // goes out whenever the `buttons` extension is on (the default).
@@ -1114,8 +1115,10 @@ const deleteMessage = async (peerHex, messageId) => {
 // accepted only for one of them, from the peer it went to.
 const sentButtons = createSentButtons();
 const prepareReply = (peerHex, text, { allowButtons = true } = {}) => {
-  const parsed = parseButtonsBlock(text);
+  const parsed = extractButtonsBlock(text);
   if (!parsed) return { text, buttons: null };
+  if (parsed.invalid.length > 0) log("BOT_BUTTONS_INVALID", { to: peerHex, reason: parsed.invalid.join("; ") });
+  if (!parsed.rows) return { text: parsed.text, buttons: null };
   if (allowButtons && extensionOn("buttons")) {
     return { text: parsed.text, buttons: { rows: parsed.rows, oneShot: parsed.oneShot } };
   }

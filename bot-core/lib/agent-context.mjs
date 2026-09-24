@@ -19,7 +19,8 @@ export const BUTTONS_HINT = "Buttons: the chat app renders a trailing fenced ```
   + "When the user asks for buttons, or should pick from a few choices, you MUST end the reply with exactly one block holding JSON "
   + "{\"rows\":[[{\"label\":\"Yes\",\"action\":{\"command\":\"yes\"}}]],\"oneShot\":false}; "
   + "an action is {\"command\":text sent back to you as the user's next message}, {\"callback\":string echoed back to you as \"[button] <label> (payload: <hex>)\"} "
-  + "or {\"url\":\"https://...\"}; at most 8 rows of 4 buttons, labels up to 40 characters; put nothing after the block.";
+  + "or {\"url\":\"https://...\"}; at most 8 rows of 4 buttons, labels up to 40 characters; put nothing after the block. "
+  + "Exact form, no other: a line ```buttons (not ``` or ```json), then the {\"rows\":[[...]]} object (never a bare array), then a line ```, and the reply ends there.";
 
 // Spec 0009: one line when the turn comes from a group room. The message
 // itself arrives as "[group <name>] <sender>: <text>". In v1 a bot SHOULD NOT

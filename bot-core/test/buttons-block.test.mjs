@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buttonsFallbackText, parseButtonsBlock, toTxIntent, validateButtons } from "../lib/buttons-block.mjs";
+import { buttonsFallbackText, extractButtonsBlock, parseButtonsBlock, toTxIntent, validateButtons } from "../lib/buttons-block.mjs";
 import { decodeOpaqueMessageAt, decodeTxIntent, encodeOpaqueButtonsMessage } from "../vendor/app-chat-codec.mjs";
 import { buttonPressText, createSentButtons } from "../lib/button-presses.mjs";
 
@@ -123,4 +123,75 @@ test("a tx action that breaks a spec 0007 rule leaves the block as text", () => 
   assert.equal(call({ kind: 0, gasRefTime: 1 }), null, "gas fields are for Revive calls only");
   assert.ok(call({ kind: 0, to: undefined, data: "0x0a03" }), "a raw call needs no to");
   assert.equal(toTxIntent({ ...specTx, calls: [{ ...specTx.calls[0], gasRefTime: "5", storageDepositLimit: 7 }] }).calls[0].gasRefTime, 5n);
+});
+
+// Spec 0006 host leniency (2026-09-24): small models get the fence tag, the
+// shape or the place wrong. The person must see buttons, or at worst clean
+// text, never raw JSON. Ordinary code must never be eaten.
+const fence = (tag, json) => `\`\`\`${tag}\n${typeof json === "string" ? json : JSON.stringify(json)}\n\`\`\``;
+const one = [{ label: "Yes", action: { command: "yes" } }];
+
+test("lenient: the owner's reply (bare fence, flat array, tip after) gives text and one Got it row", () => {
+  const reply = "I'm Claude Haiku 4.5, the model behind this bot.\n\n```\n[{\"label\":\"Got it\",\"action\":{\"command\":\"ok\"}}]\n```\n\n(Tip: send /help to see my commands.)";
+  assert.equal(parseButtonsBlock(reply), null, "the strict parser refused this reply: the bug");
+  const parsed = extractButtonsBlock(reply);
+  assert.equal(parsed.text, "I'm Claude Haiku 4.5, the model behind this bot.\n\n(Tip: send /help to see my commands.)");
+  assert.deepEqual(parsed.rows, [[{ label: "Got it", action: { command: "ok" } }]]);
+  assert.deepEqual(parsed.invalid, []);
+  assert.equal(parsed.text.includes("label"), false, "no raw JSON reaches the person");
+});
+
+test("lenient: buttons, json or untagged fence; rows object or flat array", () => {
+  for (const tag of ["buttons", "json", ""]) {
+    for (const spec of [{ rows: [one] }, one]) {
+      const parsed = extractButtonsBlock(`Pick\n${fence(tag, spec)}`);
+      assert.equal(parsed.text, "Pick", `tag "${tag}"`);
+      assert.deepEqual(parsed.rows, [[{ label: "Yes", action: { command: "yes" } }]], `tag "${tag}", ${Array.isArray(spec) ? "flat array" : "rows object"}`);
+    }
+  }
+  assert.equal(extractButtonsBlock(fence("json", { rows: [one], oneShot: true })).oneShot, true);
+  const flat = extractButtonsBlock(fence("", [...one, { label: "No", action: { command: "no" } }]));
+  assert.equal(flat.rows.length, 1, "a flat array is ONE row");
+  assert.equal(flat.rows[0].length, 2);
+});
+
+test("lenient: the block anywhere; text before and after joined with a blank line", () => {
+  const parsed = extractButtonsBlock(`  Before.\n${fence("buttons", { rows: [one] })}\nAfter.  `);
+  assert.equal(parsed.text, "Before.\n\nAfter.");
+  assert.equal(extractButtonsBlock(`${fence("buttons", { rows: [one] })}\nOnly after.`).text, "Only after.");
+  assert.equal(extractButtonsBlock(fence("buttons", { rows: [one] })).text, "");
+});
+
+test("lenient: with several button fences the last valid one wins, all are stripped", () => {
+  const first = [{ label: "First", action: { command: "1" } }];
+  const last = [{ label: "Last", action: { command: "2" } }];
+  const broken = [{ label: "Broken", action: { url: "http://insecure.example" } }];
+  const parsed = extractButtonsBlock(`A\n${fence("", first)}\nB\n${fence("json", last)}\nC\n${fence("", broken)}`);
+  assert.equal(parsed.rows[0][0].label, "Last", "the last fence that validates, not the last fence");
+  assert.equal(parsed.text, "A\n\nB\n\nC");
+  assert.equal(parsed.invalid.length, 1);
+});
+
+test("lenient: ordinary code fences stay text, untouched", () => {
+  const code = "Here:\n```js\nconst a = [{ label: 1 }];\n```\nand\n```\nnpm test\n```\nand\n```json\n{\"name\":\"x\",\"list\":[1,2]}\n```\nand\n```\n[1, 2, 3]\n```";
+  assert.equal(extractButtonsBlock(code), null, "no fence looks like buttons: the reply is not touched");
+  const mixed = extractButtonsBlock(`\`\`\`python\nprint([{"label": "x"}])\n\`\`\`\n${fence("", one)}`);
+  assert.equal(mixed.text, "```python\nprint([{\"label\": \"x\"}])\n```", "the code fence survives byte for byte next to a real block");
+  assert.equal(mixed.rows[0][0].label, "Yes");
+});
+
+test("lenient: a buttons-like fence that breaks the content rules is stripped, with a reason", () => {
+  const check = (json, reason) => {
+    const parsed = extractButtonsBlock(`Text\n${fence("", json)}\nMore`);
+    assert.equal(parsed.rows, null);
+    assert.equal(parsed.text, "Text\n\nMore", "the JSON never reaches the person");
+    assert.match(parsed.invalid[0], reason);
+  };
+  check(Array.from({ length: 5 }, (_, i) => ({ label: `B${i}`, action: { command: "x" } })), /row 1 has 5 buttons/);
+  check({ rows: Array.from({ length: 9 }, () => one) }, /9 rows/);
+  check([{ label: "x".repeat(41), action: { command: "x" } }], /row 1 button 1/);
+  check([{ label: "Go", action: { url: "http://insecure.example" } }], /row 1 button 1/);
+  check({ rows: [one], oneShot: "yes" }, /oneShot/);
+  const notJson = extractButtonsBlock(`Text\n${fence("buttons", "{not json")}`);
+  assert.deepEqual([notJson.text, notJson.rows, notJson.invalid], ["Text", null, ["not JSON"]], "a ```buttons fence is meant as buttons even when its JSON breaks");
 });

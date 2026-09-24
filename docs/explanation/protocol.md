@@ -271,8 +271,16 @@ Pick one
 
 The bot strips the block and sends the rest of the text plus the rows as ONE
 kind-242 message (a long text is chunked; the last part carries the rows).
-An invalid block (bad JSON, a broken limit, a block that does not end the
-reply) is left as plain text. A quoted bridge reply (`reply_to`) cannot be a
+Parsing is lenient (spec 0006 "Host parsing leniency", revision 2026-09-24;
+`extractButtonsBlock`), because small models get the form wrong: the fence
+can be tagged `buttons`, `json` or nothing; the JSON can be the rows object or
+a flat array of buttons (one row); the block can be anywhere, and the text
+before and after it is kept, joined with a blank line. With several such
+fences, the last one that validates gives the rows. A fence that looks like
+buttons (tagged `buttons`, or JSON with `label` keys) but breaks a limit or an
+action rule is stripped, and `BOT_BUTTONS_INVALID` logs the reason, so a person
+never sees the raw JSON. Any other fence is ordinary code and stays in the
+text. The brain's hint still asks for the canonical form above. A quoted bridge reply (`reply_to`) cannot be a
 buttons message, so it gets the fallback.
 
 **Sending** follows the extension switch above: with `buttons` on (the
@@ -514,7 +522,8 @@ its own wallet key (a meter charge, a faucet transfer) it reports with a
 `"action": { "tx": { "chainId", "calls", "display", "expiresAt", "dryRunRequired"? } }`,
 with `to` and `data` as 0x hex and `value` as a decimal string (u128).
 `dryRunRequired` defaults to true; false, an unknown key, or any value out of
-range leaves the whole block as text (`lib/buttons-block.mjs`, `toTxIntent`).
+range makes the whole block invalid: it is stripped and logged as
+`BOT_BUTTONS_INVALID` (`lib/buttons-block.mjs`, `toTxIntent`).
 
 **Sending references.** `BOT_PROTOCOL_EXTENSIONS` without `txref` stops them
 (`BOT_TX_REFERENCE_SKIPPED`). Log: `BOT_SENT_TX_REFERENCE { to, messageId,
