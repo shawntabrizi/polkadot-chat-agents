@@ -203,6 +203,13 @@ PCA_BOTS_DIR=/tmp/pca-e2e BOT_BULLETIN_AUTHORIZER=//Eve node cli.mjs run <bot>  
 node scripts/e2e-attachments.mjs --sender /tmp/pca-e2e/<tester> --bot /tmp/pca-e2e/<bot>
 ```
 
+**Colour swatches** (`BOT_COLOR_SWATCH=1`, the pcdcolor bot) send generated
+PNG swatches on the same path. `bot-core/scripts/e2e-color.mjs` proves it
+against an echo bot started with `BOT_COLOR_SWATCH=1`: the text `#ff8800`
+comes back as a 512×512 swatch (`COLOR_OK`), and a generated two-colour PNG
+comes back as a swatch of its dominant colour (`COLOR_IMAGE_OK`). Same flags
+as above.
+
 ### Devnet facts (measured 2026-09-24)
 
 Gating check for spec 0012 on `wss://bullet.sik.rocks` ("Bulletin Paseo",

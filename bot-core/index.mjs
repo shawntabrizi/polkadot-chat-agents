@@ -107,6 +107,7 @@ import { createMeter, DEFAULT_METER_PRICE, METER_BATCH_MS, METER_BATCH_REPLIES, 
 import { createFaucet, DEFAULT_FAUCET_AMOUNT, faucetPairFromPath } from "./lib/faucet.mjs";
 import { createFlip } from "./lib/flip.mjs";
 import { createDao, DEFAULT_DAO_VOTING_SECS } from "./lib/dao.mjs";
+import { createColorSwatch } from "./lib/color.mjs";
 import { createClient as createPapiClient } from "polkadot-api";
 import { getWsProvider, WsEvent } from "polkadot-api/ws";
 import { paseoPeopleNext, productsDevnetPeople } from "./lib/descriptors.mjs";
@@ -1964,6 +1965,30 @@ const sendBulletinAttachment = async (peerHex, { bytes, mime, name = null, media
   return { messageId, delivered };
 };
 
+// Colour swatches (lib/color.mjs): BOT_COLOR_SWATCH=1 turns them on (the
+// pcdcolor demo bot). A DM with a hex code or an image is answered with a
+// generated swatch and never reaches the brain; a brain answer that names a
+// hex code goes out as a swatch whose caption carries the answer. One
+// message either way: the kind-250 attachment, or the text when Bulletin is
+// unavailable. Group turns are unchanged.
+const colorSwatch = env.BOT_COLOR_SWATCH === "1" ? createColorSwatch({
+  sendImage: async (peerHex, { bytes, mime, caption }) => {
+    if (!bulletin) throw new Error("Bulletin attachments are not configured on this bot");
+    // A live placeholder cannot carry an attachment: close it with the status
+    // line, as deliverToChat does when it edits one.
+    const lp = await takeLivePlaceholder(peerHex);
+    if (lp) {
+      const status = renderTurnStats({ elapsed: lp.tracker.elapsed(), steps: lp.tracker.step });
+      await lp.handle.finalize(status, {}).catch((e) => log("BOT_LIVE_FINALIZE_FAILED", { to: peerHex, error: String(e?.message ?? e) }));
+    }
+    await sendBulletinAttachment(peerHex, { bytes, mime, caption });
+  },
+  sendText: (peerHex, text) => sendText(peerHex, text),
+  readFile: (filePath) => new Uint8Array(fs.readFileSync(filePath)),
+  log,
+}) : null;
+if (colorSwatch) log("BOT_COLOR_SWATCH_ENABLED", { bulletin: Boolean(bulletin) });
+
 // HOP accepts the dedicated Bulletin allowance signer, not the bot's chat
 // wallet. The uploaded ticket is only embedded into the encrypted RichText
 // envelope; it is never logged or written to the durable vault.
@@ -2186,7 +2211,11 @@ const agentRuntime = engine ? createAgentRuntime({
   // A group turn carries deliveryContext { groupId }: its replies fan out.
   chat: {
     sendText: (peerHex, text, context) => (context?.groupId ? deliverToGroup(context.groupId, text) : sendText(peerHex, text)),
-    deliver: (peerHex, reply, context, turnStats) => (context?.groupId ? deliverToGroup(context.groupId, reply) : deliverToChat(peerHex, reply, context, turnStats)),
+    deliver: (peerHex, reply, context, turnStats) => (context?.groupId
+      ? deliverToGroup(context.groupId, reply)
+      : colorSwatch
+        ? colorSwatch.deliverReply(peerHex, reply, (text) => deliverToChat(peerHex, text, context, turnStats))
+        : deliverToChat(peerHex, reply, context, turnStats)),
     beginTurn: (peerHex, context) => (context?.groupId ? beginGroupTurn(context.groupId) : beginTurnProgress(peerHex)),
   },
   username,
@@ -2310,6 +2339,12 @@ const handleDirectInbound = async (peerHex, msg, owedId, { reservedBridge = fals
   }
   // Coin flip: every message gets the stake button, never a brain turn.
   if (flip && await flip.handle(peerHex, msg)) {
+    if (reservedBridge) releaseBridgeReservation();
+    if (usesBridgeQueue && owedId) settleOwed(owedId);
+    return;
+  }
+  // Colour swatches: a hex code or an image is answered without the brain.
+  if (colorSwatch && await colorSwatch.handleInbound(peerHex, msg).catch((e) => { log("BOT_REPLY_FAILED", { to: peerHex, error: String(e?.message ?? e) }); return true; })) {
     if (reservedBridge) releaseBridgeReservation();
     if (usesBridgeQueue && owedId) settleOwed(owedId);
     return;
