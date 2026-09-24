@@ -100,6 +100,21 @@ test("a tx action in the block becomes a TxIntent that encodes as Action tag 3",
   assert.equal(back.expiresAt, 1_720_000_000_000n);
 });
 
+// Spec 0007 "Non-expiring intents": a fixed call (a top-up) never goes
+// stale, so expiresAt 0 (or none) means never and must not be refused.
+test("a tx with expiresAt 0 or no expiresAt is a never-expiring intent that round-trips", () => {
+  for (const tx of [{ ...specTx, expiresAt: 0 }, { ...specTx, expiresAt: undefined }]) {
+    const parsed = parseButtonsBlock(block({ rows: [[{ label: "Top up", action: { tx } }]] }));
+    assert.ok(parsed, "a never-expiring intent is a valid block");
+    assert.equal(parsed.rows[0][0].action.tx.expiresAt, 0n);
+    const m = decodeOpaqueMessageAt(encodeOpaqueButtonsMessage({ text: parsed.text, rows: parsed.rows }), 0).value;
+    assert.equal(decodeTxIntent(m.rows[0][0].action.tx).expiresAt, 0n, "0 goes on the wire as is");
+  }
+  const bad = (expiresAt) => toTxIntent({ ...specTx, expiresAt });
+  assert.equal(bad(-1), null);
+  assert.equal(bad((1n << 64n).toString()), null, "expiresAt is a u64");
+});
+
 // A malformed intent must stay text: a half-valid intent is a button that
 // signs something other than what the brain meant.
 test("a tx action that breaks a spec 0007 rule leaves the block as text", () => {
@@ -108,7 +123,6 @@ test("a tx action that breaks a spec 0007 rule leaves the block as text", () => 
   assert.ok(toTxIntent(specTx));
   assert.equal(bad({ dryRunRequired: false }), null, "no signing without a dry-run");
   assert.equal(bad({ chainId: "0x1234" }), null, "chainId is a 32-byte genesis hash");
-  assert.equal(bad({ expiresAt: 0 }), null);
   assert.equal(bad({ calls: [] }), null);
   assert.equal(bad({ calls: Array.from({ length: 9 }, () => specTx.calls[0]) }), null);
   assert.equal(bad({ extra: 1 }), null, "unknown keys are refused");

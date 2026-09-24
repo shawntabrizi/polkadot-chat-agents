@@ -74,7 +74,7 @@ test("any message is answered with a Stake 0.5 PAS tx button", async () => {
   assert.equal(intent.chainId, GENESIS);
   assert.deepEqual(intent.calls, [{ kind: 1, to: CONTRACT, data: selector("stake()"), value: 5_000_000_000n, ...reviveIntentLimits(FLIP_STAKE_WORST) }]);
   assert.deepEqual([intent.display.amount, intent.display.asset], ["0.5", "PAS"]);
-  assert.equal(intent.expiresAt, 1_720_000_000_000 + 10 * 60_000);
+  assert.equal(intent.expiresAt, 1_720_000_000_000 + 10 * 60_000, "a stake depends on state (the open round): it keeps a finite expiry, never 0");
   assert.deepEqual(logs.filter((l) => l.event === "BOT_FLIP_OFFERED").map((l) => l.on), ["message", "command"]);
   // It encodes as a buttons message whose tx payload decodes back to the call.
   const opaque = encodeOpaqueButtonsMessage({ text: offer.text, rows: offer.rows });

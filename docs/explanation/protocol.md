@@ -525,7 +525,7 @@ Spec 0007 (`polkadot-chat-desktop/docs/spec/0007-transactions.md`) fills the
 Action::tx(Bytes)   -> 3      // Bytes = SCALE(TxIntent)
 TxIntent = { version: u8 (1), chainId: String /* genesis hash, 0x hex */,
              calls: Vec<Call> /* 1..8 */, display: Display,
-             dryRunRequired: bool /* true in v1 */, expiresAt: u64 /* unix ms */ }
+             dryRunRequired: bool /* true in v1 */, expiresAt: u64 /* unix ms, 0 = never */ }
 Call     = { kind: u8 /* 0 raw call, 1 Revive */, to: Option<Bytes>, data: Bytes /* <= 16 KiB */,
              value: u128, gasRefTime: Option<u64>, gasProofSize: Option<u64>,
              storageDepositLimit: Option<u128> }
@@ -580,8 +580,10 @@ uses. The client must sign with, per field, the larger of the intent's value
 and its own estimate plus margin.
 
 **From a brain.** The fenced ```buttons block (spec 0006) accepts
-`"action": { "tx": { "chainId", "calls", "display", "expiresAt", "dryRunRequired"? } }`,
+`"action": { "tx": { "chainId", "calls", "display", "expiresAt"?, "dryRunRequired"? } }`,
 with `to` and `data` as 0x hex and `value` as a decimal string (u128).
+`expiresAt` 0 or missing means the intent never expires; set a time only when
+the call depends on state.
 `dryRunRequired` defaults to true; false, an unknown key, or any value out of
 range makes the whole block invalid: it is stripped and logged as
 `BOT_BUTTONS_INVALID` (`lib/buttons-block.mjs`, `toTxIntent`).

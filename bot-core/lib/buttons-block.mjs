@@ -13,7 +13,7 @@
 // Actions: { "command": string } (the client sends it as the user's text),
 // { "callback": string } (UTF-8 bytes echoed in a buttonPress; a
 // "base64:" prefix gives raw bytes instead), { "url": string } (https:// or
-// polkadotapp:// only), { "tx": { chainId, calls, display, expiresAt,
+// polkadotapp:// only), { "tx": { chainId, calls, display, expiresAt?,
 // dryRunRequired? } } (spec 0007: a chain call the client dry-runs and signs;
 // see toTxIntent). A `tx` becomes the codec's TxIntent object (u64/u128 as
 // bigint, bytes as Uint8Array); the codec encodes it into Action tag 3.
@@ -66,8 +66,9 @@ export const toTxIntent = (tx) => {
   if (tx.version !== undefined && tx.version !== 1) return null;
   if (tx.dryRunRequired !== undefined && tx.dryRunRequired !== true) return null;
   if (!hexBytes(tx.chainId, { length: 32 })) return null;
-  const expiresAt = uint(tx.expiresAt, 64);
-  if (expiresAt == null || expiresAt === 0n) return null;
+  // Spec 0007 "Non-expiring intents": 0 (or no expiresAt) = never expires.
+  const expiresAt = tx.expiresAt === undefined ? 0n : uint(tx.expiresAt, 64);
+  if (expiresAt == null) return null;
   if (!Array.isArray(tx.calls) || tx.calls.length === 0 || tx.calls.length > MAX_TX_CALLS) return null;
   const calls = [];
   for (const call of tx.calls) {
