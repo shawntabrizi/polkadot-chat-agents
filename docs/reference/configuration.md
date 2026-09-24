@@ -893,6 +893,7 @@ received the operation. Reactions and typing are not model prompts.
 | `BOT_SWEEP_MS` | 30000 | Reconciliation sweep cadence while subscription is healthy. |
 | `BOT_HEARTBEAT_MS` | 30000 | Subscription liveness heartbeat interval. |
 | `BOT_QUERY_TIMEOUT_MS` | 15000 | Deadline for every chain query/submit. |
+| `BOT_IDENTIFIER_RETRY_MS` | 600000 | How long a chat request whose sender has no identifier key yet is held. The lookup is retried at 5 s, 10 s, 20 s, 40 s, 60 s, then every 60 s; the request is dropped (`BOT_OPENER_NO_IDENTIFIER`) when the window closes. |
 | `BOT_REQUEST_LOOKBACK_DAYS` / `BOT_REQUEST_FUTURE_DAYS` | 7 / 2 | Opener request-topic day window. |
 | `BOT_TOPIC_BATCH` | 16 | Topics per `matchAny` query batch. |
 | `BOT_DISPATCH_CONCURRENCY` | 4 | Global keyed-dispatcher worker budget. |

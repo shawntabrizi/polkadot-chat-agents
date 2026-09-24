@@ -31,6 +31,10 @@ import { ss58Address, ss58Decode } from "@polkadot-labs/hdkd-helpers";
 import { withTimeout } from "../vendor/lib/async-utils.mjs";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
+// Every read is at the best block, never the finalized one (papi's default):
+// a registration is visible seconds after it lands, and waiting on finality
+// made a fresh signup's chat requests miss its identifier key.
+const BEST = { at: "best" };
 
 const hexToBytes = (hex) => {
   const clean = String(hex).trim().replace(/^0x/i, "");
@@ -62,7 +66,7 @@ export function createChainDirectory(peopleApi, { timeoutMs = DEFAULT_TIMEOUT_MS
     kind: "chain",
     async consumerOf(accountHex) {
       const value = await withTimeout(
-        peopleApi.query.Resources.Consumers.getValue(ss58Address(hexToBytes(accountHex), 42)),
+        peopleApi.query.Resources.Consumers.getValue(ss58Address(hexToBytes(accountHex), 42), BEST),
         timeoutMs, "identifier lookup");
       return decodeConsumer(accountHex, value);
     },
@@ -71,7 +75,7 @@ export function createChainDirectory(peopleApi, { timeoutMs = DEFAULT_TIMEOUT_MS
     },
     async usernameOwner(name) {
       const owner = await withTimeout(
-        peopleApi.query.Resources.UsernameOwnerOf.getValue(Binary.fromText(String(name))),
+        peopleApi.query.Resources.UsernameOwnerOf.getValue(Binary.fromText(String(name)), BEST),
         timeoutMs, "username lookup");
       if (typeof owner !== "string" || owner === "") return null;
       return normHex(bytesToHex(ss58Decode(owner)[0]));

@@ -110,6 +110,7 @@ import {
 } from "./lib/network-config.mjs";
 import { metadataCache } from "./lib/chain-client.mjs";
 import { createChainDirectory, createSandboxDirectory } from "./lib/people-directory.mjs";
+import { DEFAULT_IDENTIFIER_RETRY_MS, createIdentifierWait } from "./lib/identifier-wait.mjs";
 import { createLazyClient, createPapiStatementStoreAdapter } from "@novasamatech/statement-store";
 import { deriveSr25519PairFromSeed } from "./vendor/lib/wallet-keys.mjs";
 import { withTimeout, runWithConcurrency } from "./vendor/lib/async-utils.mjs";
@@ -724,6 +725,22 @@ const resolveIdentifierKey = async (peerHex) => {
   if (value) { identifierKeyCache.set(key, value); trimMap(identifierKeyCache, IDENTIFIER_CACHE_CAP); }
   return value;
 };
+// A chat request whose sender has no identifier key yet (a fresh signup, its
+// registration not visible to this node yet) is held and the lookup retried
+// with backoff until BOT_IDENTIFIER_RETRY_MS (lib/identifier-wait.mjs).
+const identifierRetryMs = numberEnv("BOT_IDENTIFIER_RETRY_MS", DEFAULT_IDENTIFIER_RETRY_MS, { min: 1000, max: 86_400_000 });
+const identifierWait = createIdentifierWait({
+  lookup: resolveIdentifierKey,
+  maxMs: identifierRetryMs,
+  onFound: ({ sender, data, attempts, since }) => {
+    log("BOT_OPENER_IDENTIFIER_FOUND", { from: sender, attempts, waitedMs: Date.now() - since });
+    // Process the request again on the openers lane; the key is cached now.
+    // A full dispatcher leaves it to the next sweep.
+    const task = statementDispatcher.run("openers", () => dispatchStatement({ data }, null, { kind: "opener" }));
+    task?.catch((error) => log("BOT_DISPATCH_FAILED", { error: String(error?.message ?? error) }));
+  },
+  onExpired: ({ sender, attempts }) => log("BOT_OPENER_NO_IDENTIFIER", { from: sender, attempts, windowMs: identifierRetryMs }),
+});
 
 // ---------- statement priority (monotonic, timestamp-based) ----------
 const PRIORITY_OFFSET = 1_763_164_800n;
@@ -2290,8 +2307,17 @@ const handleOpener = async (data) => {
   const senderHex = norm(decoded.peerAccountIdHex);
   const groupOnly = !isAllowed(senderHex);
   if (groupOnly && !groupAdmitted(senderHex)) { log("BOT_REJECTED_UNLISTED", { from: senderHex }); return; }
+  // A held request waits for its retry; one whose window closed is dropped.
+  const waitKey = fp(data);
+  const held = identifierWait.status(waitKey);
+  if (held === "waiting") return "waiting";
+  if (held === "expired") return;
   const identifierKeyHex = await resolveIdentifierKey(senderHex);
-  if (!identifierKeyHex) { log("BOT_OPENER_NO_IDENTIFIER", { from: senderHex }); return; }
+  if (!identifierKeyHex) {
+    if (!identifierWait.hold(waitKey, senderHex, data)) return "deferred";
+    log("BOT_OPENER_WAITING_IDENTIFIER", { from: senderHex, windowMs: identifierRetryMs });
+    return "waiting";
+  }
   if (!verifyChatRequestIdentityProof(decoded, identityPrivateKey, hexToBytes(identifierKeyHex))) {
     log("BOT_OPENER_BAD_PROOF", { from: senderHex }); return;
   }
@@ -2915,6 +2941,10 @@ const dispatchStatement = async (st, watch, target = null) => {
     tickDeferred += 1;
     return;
   }
+  // An opener held for its sender's identifier key: not seen, not
+  // backpressure. The identifier wait replays it (or a sweep drops it once
+  // the window closed).
+  if (outcome === "waiting") return;
   // Only dedup after a handler has either completed or deliberately rejected
   // the statement. Transport ACK failures return "deferred" above so retries
   // still reach the ACK path instead of being silently ignored.
@@ -3329,6 +3359,7 @@ let shuttingDown = false;
 const gracefulShutdown = async (code = 0) => {
   if (shuttingDown) return;
   shuttingDown = true;
+  identifierWait.stop(); // no held opener is replayed into a closing process
   try { bridgeServer?.close(); } catch { /* already closed */ }
   try {
     await Promise.race([

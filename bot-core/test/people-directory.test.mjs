@@ -44,6 +44,25 @@ test("the chain directory answers consumerOf, identifierKeyFor and usernameOwner
   assert.throws(() => createChainDirectory({}), /needs a People typed api/);
 });
 
+test("the chain directory reads at the best block, not the finalized one", async () => {
+  // papi reads the finalized block unless told otherwise; a fresh signup's
+  // identifier key is on the best block seconds before it is final, and its
+  // chat requests arrive in that gap.
+  const ats = [];
+  const directory = createChainDirectory({
+    query: {
+      Resources: {
+        Consumers: { getValue: async (_addr, options) => { ats.push(options?.at); return undefined; } },
+        UsernameOwnerOf: { getValue: async (_name, options) => { ats.push(options?.at); return undefined; } },
+      },
+    },
+  });
+  await directory.identifierKeyFor(ACCOUNT);
+  await directory.consumerOf(ACCOUNT);
+  await directory.usernameOwner("macbot.19");
+  assert.deepEqual(ats, ["best", "best", "best"]);
+});
+
 test("the sandbox directory reads the same contract over HTTP, credibility included", async (t) => {
   const server = http.createServer((req, res) => {
     const reply = (status, body) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };

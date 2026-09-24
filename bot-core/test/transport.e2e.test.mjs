@@ -10,6 +10,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -468,6 +469,74 @@ describe("transport e2e", { concurrency: 8 }, () => {
       assert.deepEqual(migrated.owed, []);
     } finally {
       await bot.stop();
+      await node.close();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  // Live 2026-09-24: a fresh signup's chat requests reached every bot before
+  // its identifier key was visible, and every bot dropped them for good. A
+  // directory proxy hides the persona's key for its first `hideFor` lookups
+  // (a registration not yet visible to the bot's node).
+  const hidingDirectory = async (apiUrl, account, hideFor) => {
+    let lookups = 0;
+    const server = http.createServer(async (req, res) => {
+      if (req.url === `/api/consumers/${account}` && ++lookups <= hideFor) {
+        res.writeHead(404, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ error: "not visible yet" }));
+      }
+      const upstream = await fetch(`${apiUrl}${req.url}`, { method: req.method });
+      res.writeHead(upstream.status, { "content-type": upstream.headers.get("content-type") ?? "application/json" });
+      res.end(Buffer.from(await upstream.arrayBuffer()));
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    return { url: `http://127.0.0.1:${server.address().port}`, lookups: () => lookups, close: () => new Promise((resolve) => server.close(resolve)) };
+  };
+
+  test("a request whose sender's key appears after two retries is accepted and answered", async () => {
+    const node = await startSandbox();
+    const stateDir = tmpState();
+    const alice = await startPersona(node);
+    // The first lookup and two retries (5 s, 10 s later) miss; the third finds it.
+    const proxy = await hidingDirectory(node.apiUrl, alice.account, 3);
+    const bot = await startBot({ endpoint: node.url, apiUrl: proxy.url, stateDir, extraEnv: { BOT_SUBSCRIBE: "0" } });
+    try {
+      await alice.api("POST", `/personas/${alice.name}/requests`, { to: BOT_USERNAME, welcome: "hello late key" });
+      const waiting = await bot.waitFor((e) => e.event === "BOT_OPENER_WAITING_IDENTIFIER", { label: "BOT_OPENER_WAITING_IDENTIFIER" });
+      assert.equal(waiting.from, alice.accountHex);
+      const found = await bot.waitFor((e) => e.event === "BOT_OPENER_IDENTIFIER_FOUND", { timeoutMs: 60_000, label: "BOT_OPENER_IDENTIFIER_FOUND" });
+      assert.equal(found.attempts, 3);
+      await alice.reply((m) => textOf(m) === "Echo: hello late key", { timeoutMs: 30_000, label: "the answer to the held request" });
+      assert.equal(bot.events.filter((e) => e.event === "BOT_OPENER_WAITING_IDENTIFIER").length, 1, "the wait is logged once, not on every sweep");
+      assert.ok(!bot.events.some((e) => e.event === "BOT_OPENER_NO_IDENTIFIER"), "never dropped");
+    } finally {
+      await bot.stop();
+      await proxy.close();
+      await node.close();
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  test("a request whose sender's key never appears is dropped when the window closes", async () => {
+    const node = await startSandbox();
+    const stateDir = tmpState();
+    const alice = await startPersona(node);
+    const proxy = await hidingDirectory(node.apiUrl, alice.account, Infinity);
+    const bot = await startBot({ endpoint: node.url, apiUrl: proxy.url, stateDir, extraEnv: { BOT_SUBSCRIBE: "0", BOT_IDENTIFIER_RETRY_MS: "6000" } });
+    try {
+      await alice.api("POST", `/personas/${alice.name}/requests`, { to: BOT_USERNAME, welcome: "never registered" });
+      await bot.waitFor((e) => e.event === "BOT_OPENER_WAITING_IDENTIFIER", { label: "BOT_OPENER_WAITING_IDENTIFIER" });
+      const dropped = await bot.waitFor((e) => e.event === "BOT_OPENER_NO_IDENTIFIER", { timeoutMs: 20_000, label: "BOT_OPENER_NO_IDENTIFIER" });
+      assert.equal(dropped.from, alice.accountHex);
+      assert.equal(dropped.attempts, 2, "a retry at 5 s and a last one when the 6 s window closes");
+      const lookupsAtDrop = proxy.lookups();
+      await sleep(2_000); // a few sweeps: the dropped request is not looked up again
+      assert.equal(proxy.lookups(), lookupsAtDrop);
+      assert.equal(bot.events.filter((e) => e.event === "BOT_OPENER_NO_IDENTIFIER").length, 1);
+      assert.deepEqual(await alice.incoming(), [], "no reply to a sender without a key");
+    } finally {
+      await bot.stop();
+      await proxy.close();
       await node.close();
       fs.rmSync(stateDir, { recursive: true, force: true });
     }
