@@ -344,7 +344,8 @@ names `typing` in the list gets the spec's opt-in behavior:
 **Seen (the bot sends read receipts) rides the reply.** When the brain
 consumes a peer's message (its turn starts), the bot holds `seen{upTo: <that
 message id>, at}` for up to 5 s. If a real message to that peer goes out in
-the window (the reply, a meter or faucet answer, a greeting), the `seen`
+the window (the reply, a meter or faucet answer, a transaction reference,
+a greeting), the `seen`
 enters the lane in the same tick, so both ride one request statement: one
 submission. Otherwise the `seen` goes out alone at the end of the window (for
 example a message the brain does not answer, or a turn longer than 5 s).

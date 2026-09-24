@@ -1481,7 +1481,9 @@ const sendTransactionReference = async (peerHex, ref) => {
   }
   if (sessions.get(k) == null) throw new Error("no active session for peer");
   const messageId = makeAppUuid();
-  await outbound.enqueue(k, encodeOpaqueTransactionReferenceMessage({ messageId, timestamp: stamp(k), ...ref })).submitted;
+  // A reference can be the whole answer (a /drip): a pending seen rides with it.
+  const supersedes = typingAndSeen.replyGoingOut(k);
+  await outbound.enqueue(k, encodeOpaqueTransactionReferenceMessage({ messageId, timestamp: stamp(k), ...ref }), { messageId, supersedes }).submitted;
   log("BOT_SENT_TX_REFERENCE", { to: k, messageId, status: ref.status, block: ref.block ?? null, hash: ref.hash, note: ref.note });
   return messageId;
 };
