@@ -1217,6 +1217,7 @@ const prepareReply = (peerHex, text, { allowButtons = true } = {}) => {
   if (!parsed) return { text, buttons: null };
   if (parsed.invalid.length > 0) log("BOT_BUTTONS_INVALID", { to: peerHex, reason: parsed.invalid.join("; ") });
   if (!parsed.rows) return { text: parsed.text, buttons: null };
+  if (parsed.shortened > 0) log("BOT_BUTTONS_SHORTENED", { to: peerHex, count: parsed.shortened });
   if (allowButtons && extensionOn("buttons")) {
     return { text: parsed.text, buttons: { rows: parsed.rows, oneShot: parsed.oneShot } };
   }

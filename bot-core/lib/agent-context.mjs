@@ -20,6 +20,7 @@ export const BUTTONS_HINT = "Buttons: the chat app renders a trailing fenced ```
   + "{\"rows\":[[{\"label\":\"Yes\",\"action\":{\"command\":\"yes\"}}]],\"oneShot\":false}; "
   + "an action is {\"command\":text sent back to you as the user's next message}, {\"callback\":string echoed back to you as \"[button] <label> (payload: <hex>)\"} "
   + "or {\"url\":\"https://...\"}; at most 8 rows of 4 buttons, labels up to 40 characters; put nothing after the block. "
+  + "Labels are at most 40 characters: a few words, never a sentence; put the full text of an answer in the message and use short labels like A, B, C or the key words. "
   + "Exact form, no other: a line ```buttons (not ``` or ```json), then the {\"rows\":[[...]]} object (never a bare array), then a line ```, and the reply ends there.";
 
 // Spec 0009: one line when the turn comes from a group room. The message

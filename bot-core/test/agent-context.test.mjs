@@ -64,4 +64,5 @@ test("the buttons hint appears only when the peer can render buttons", () => {
   const withButtons = build({ buttons: true });
   assert.ok(withButtons.includes(BUTTONS_HINT));
   assert.match(withButtons, /MUST end the reply with exactly one block/);
+  assert.match(withButtons, /a few words, never a sentence/, "long quiz answers go in the message, not the labels (spec 0006 Long labels)");
 });

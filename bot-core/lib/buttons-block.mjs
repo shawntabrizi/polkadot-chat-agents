@@ -170,7 +170,8 @@ export const parseButtonsBlock = (reply) => {
 // reason goes in `invalid`, so a person never sees the raw JSON. Any other
 // fence (ordinary code) stays in the text.
 // -> null when no fence looks like buttons, else
-//    { text, rows, oneShot, invalid: [reason] } (rows null when none validated).
+//    { text, rows, oneShot, invalid: [reason], shortened } (rows null when
+//    none validated).
 const FENCE = /(^|\n)[ \t]*```([^\n`]*)\n([\s\S]*?)\n?[ \t]*```[ \t]*(?=\n|$)/g;
 const LENIENT_TAGS = new Set(["buttons", "json", ""]);
 const hasLabel = (v) => isObject(v) && "label" in v;
@@ -194,6 +195,34 @@ const invalidReason = (spec) => {
   return "invalid";
 };
 
+// Spec 0006 "Long labels": a host SHOULD shorten a label over 40 characters
+// to 39 characters plus "…" rather than reject the keyboard. An empty label
+// becomes "Option N" (N counts buttons in row order). Only labels change;
+// every other rule stays validateButtons' rule. -> { spec, shortened }.
+const shortenLabels = (spec) => {
+  if (!isObject(spec) || !Array.isArray(spec.rows)) return { spec, shortened: 0 };
+  let shortened = 0;
+  let n = 0;
+  const rows = spec.rows.map((row) => (!Array.isArray(row) ? row : row.map((button) => {
+    n += 1;
+    if (!isObject(button)) return button;
+    const raw = button.label;
+    if (raw != null && typeof raw !== "string") return button;
+    const label = (raw ?? "").trim();
+    if (label.length === 0) {
+      shortened += 1;
+      return { ...button, label: `Option ${n}` };
+    }
+    const chars = [...label];
+    if (chars.length <= MAX_LABEL_CHARS) return button;
+    shortened += 1;
+    return { ...button, label: `${chars.slice(0, MAX_LABEL_CHARS - 1).join("").trimEnd()}…` };
+  })));
+  return { spec: { ...spec, rows }, shortened };
+};
+
+// The lenient path shortens labels (shortenLabels); `shortened` counts the
+// labels changed in the fence that gave the rows.
 export const extractButtonsBlock = (reply) => {
   if (typeof reply !== "string") return null;
   const pieces = [];
@@ -211,15 +240,15 @@ export const extractButtonsBlock = (reply) => {
     const start = match.index + match[1].length;
     pieces.push(reply.slice(last, start));
     last = match.index + match[0].length;
-    const shaped = Array.isArray(spec) ? { rows: [spec] } : spec;
+    const { spec: shaped, shortened } = shortenLabels(Array.isArray(spec) ? { rows: [spec] } : spec);
     const buttons = spec === undefined ? null : validateButtons(shaped);
-    if (buttons) best = buttons;
+    if (buttons) best = { ...buttons, shortened };
     else invalid.push(spec === undefined ? "not JSON" : invalidReason(shaped));
   }
   if (!found) return null;
   pieces.push(reply.slice(last));
   const text = pieces.map((p) => p.trim()).filter(Boolean).join("\n\n");
-  return { text, rows: best?.rows ?? null, oneShot: best?.oneShot ?? false, invalid };
+  return { text, rows: best?.rows ?? null, oneShot: best?.oneShot ?? false, invalid, shortened: best?.shortened ?? 0 };
 };
 
 // Spec 0006 fallback for a peer without the extension: the text, then the

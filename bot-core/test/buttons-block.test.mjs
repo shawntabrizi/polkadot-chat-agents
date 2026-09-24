@@ -189,9 +189,50 @@ test("lenient: a buttons-like fence that breaks the content rules is stripped, w
   };
   check(Array.from({ length: 5 }, (_, i) => ({ label: `B${i}`, action: { command: "x" } })), /row 1 has 5 buttons/);
   check({ rows: Array.from({ length: 9 }, () => one) }, /9 rows/);
-  check([{ label: "x".repeat(41), action: { command: "x" } }], /row 1 button 1/);
   check([{ label: "Go", action: { url: "http://insecure.example" } }], /row 1 button 1/);
   check({ rows: [one], oneShot: "yes" }, /oneShot/);
   const notJson = extractButtonsBlock(`Text\n${fence("buttons", "{not json")}`);
   assert.deepEqual([notJson.text, notJson.rows, notJson.invalid], ["Text", null, ["not JSON"]], "a ```buttons fence is meant as buttons even when its JSON breaks");
+});
+
+// Spec 0006 "Long labels" (live bug 2026-09-24): pcdmeter put whole quiz
+// answers in the labels; the keyboard was dropped and the person saw "Here's
+// the question again with clearer buttons:" and no buttons. A long label must
+// cost a few characters, never the whole keyboard.
+test("lenient: sentence-long quiz labels are shortened to 39 + an ellipsis; the keyboard stays", () => {
+  const answers = [
+    "A parachain that leases a slot on the relay chain for two years",
+    "A smart contract deployed on Asset Hub with the Revive pallet",
+    "A standalone chain that bridges to Polkadot through Snowbridge",
+    "An off-chain worker that submits results to the relay chain",
+  ];
+  const rows = [answers.map((label, i) => ({ label, action: { command: "ABCD"[i] } }))];
+  const reply = `Question 3: what is a rollup?\n\n${fence("buttons", { rows })}`;
+  assert.equal(parseButtonsBlock(reply), null, "the strict parser still refuses labels over 40 characters");
+  const parsed = extractButtonsBlock(reply);
+  assert.deepEqual(parsed.invalid, [], "no BOT_BUTTONS_INVALID: the keyboard is not dropped");
+  assert.equal(parsed.shortened, 4);
+  assert.equal(parsed.rows.length, 1);
+  assert.equal(parsed.rows[0].length, 4);
+  for (const [i, button] of parsed.rows[0].entries()) {
+    assert.ok([...button.label].length <= 40, "the wire limit stays 40");
+    assert.ok(button.label.endsWith("…"));
+    assert.ok(answers[i].startsWith(button.label.slice(0, -1)), "the label is the answer's start");
+    assert.deepEqual(button.action, { command: "ABCD"[i] }, "the action is unchanged");
+  }
+  assert.equal(parsed.rows[0][0].label, `${answers[0].slice(0, 39)}…`);
+});
+
+test("lenient: shortening counts code points; empty labels become Option N; normal keyboards are untouched", () => {
+  const emoji = "\u{1F680}".repeat(45);
+  const [label] = extractButtonsBlock(fence("", [{ label: emoji, action: { command: "x" } }])).rows[0];
+  assert.equal(label.label, `${"\u{1F680}".repeat(39)}…`, "39 code points, not 39 UTF-16 units");
+  const empty = extractButtonsBlock(fence("", [{ label: "Yes", action: { command: "y" } }, { label: "  ", action: { command: "n" } }]));
+  assert.deepEqual(empty.rows[0].map((b) => b.label), ["Yes", "Option 2"]);
+  assert.equal(empty.shortened, 1);
+  const exact = "x".repeat(40);
+  const normal = { rows: [[{ label: exact, action: { command: "a" } }, ...one], [{ label: "Docs", action: { url: "https://polkadot.com" } }]], oneShot: true };
+  const parsed = extractButtonsBlock(`Pick\n${fence("buttons", normal)}`);
+  assert.deepEqual(parsed, { ...parseButtonsBlock(`Pick\n${fence("buttons", normal)}`), invalid: [], shortened: 0 }, "same result as the strict parser");
+  assert.equal(parsed.rows[0][0].label, exact, "a 40-character label is not shortened");
 });
