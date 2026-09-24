@@ -34,7 +34,7 @@ import { withTimeout } from "../vendor/lib/async-utils.mjs";
 
 export const DEFAULT_METER_PRICE = PLANCKS_PER_PAS / 10n; // 0.1 PAS
 export const METER_TOPUP_PLANCKS = PLANCKS_PER_PAS; // the Top up button adds 1 PAS
-export const METER_INTENT_TTL_MS = 10 * 60_000;
+export const METER_INTENT_TTL_MS = 7 * 86_400_000; // a top-up is a fixed call: a week (owner: 10 min read as "expired" in the room)
 /**
  * topUp()'s worst case (ReviveApi_call on devnet Asset Hub, 2026-09-24): a
  * user with no balance gets a new slot, 26 400 000 plancks and the most

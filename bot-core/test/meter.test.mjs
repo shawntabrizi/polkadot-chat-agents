@@ -130,7 +130,7 @@ test("below the price: no brain turn, and a Top up button with a valid spec 0007
   assert.ok(intent.calls[0].storageDepositLimit >= 26_400_000n + PAS / 10n, "0.1 PAS over a new slot's deposit");
   assert.ok(intent.calls[0].gasRefTime >= (453_538_335n * 3n) / 2n && intent.calls[0].gasProofSize >= (45_218n * 3n) / 2n, "1.5x a new slot's weight");
   assert.equal(intent.dryRunRequired, true);
-  assert.equal(intent.expiresAt, 1_720_000_000_000n + 600_000n);
+  assert.equal(intent.expiresAt, 1_720_000_000_000n + 604_800_000n); // a top-up intent lives 7 days (a fixed call)
   assert.deepEqual(intent.display, { title: "Top up", description: "Adds 1 PAS to your prepaid balance with Meter", amount: "1", asset: "PAS" });
   assert.equal(chain.state.calls.length, 0, "nothing is charged");
 });
