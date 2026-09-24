@@ -15,6 +15,11 @@ export const description = "a peer that never ACKs: one un-ACKed statement curre
 
 const GRACE_MS = 3000;
 const MAX_EXTENSIONS = 8; // lib/outbound-lanes.mjs default
+// Every answer carries the seen of its question in the same statement (M12c
+// piggyback), and each seen supersedes the previous un-ACKed one, so the slot
+// holds the answers plus ONE seen. The sandbox codec does not know the seen
+// extension (it decodes as undecodable), so answers are counted by their text.
+const echoes = (statement) => statement.decoded.messages.filter((m) => m.content?.text?.startsWith("Echo: "));
 
 export async function run({ sandbox, openChat, log, sleep }) {
   const chat = await openChat({ devices: 1, env: { BOT_OUTBOUND_ACK_GRACE_MS: String(GRACE_MS) } });
@@ -35,17 +40,19 @@ export async function run({ sandbox, openChat, log, sleep }) {
   const currentAt = Date.parse(chat.events("BOT_SENT_TEXT").at(-1).time);
   const extensions = chat.events("BOT_OUTBOUND_EXTENDED");
   assert.equal(extensions.length, MAX_EXTENSIONS, "every answer after the first extended the un-ACKed statement");
-  assert.equal(extensions.at(-1).messages, MAX_EXTENSIONS + 1);
+  assert.equal(extensions.at(-1).messages, MAX_EXTENSIONS + 2, "every answer plus the latest seen");
   let slot = await chat.slot(REQUEST);
-  assert.equal(slot.decoded.messages.length, MAX_EXTENSIONS + 1, "ONE statement carries every un-ACKed answer");
+  assert.equal(echoes(slot).length, MAX_EXTENSIONS + 1, "ONE statement carries every un-ACKed answer");
+  assert.equal(slot.decoded.messages.length, MAX_EXTENSIONS + 2, "and one seen, not one per answer");
   assert.deepEqual(slot.acks.filter((a) => a.live), [], "no ACK from alice on the wire");
   const versions = (await chat.history(REQUEST)).filter((h) => h.decoded?.messages);
   for (let i = 1; i < versions.length; i += 1) {
     // The opener's echo (before the fault) was ACKed and freed the slot; every
     // version after it must carry its un-ACKed predecessor whole.
     if (versions[i - 1].acks?.some((a) => a.by === "alice#1")) continue;
-    const previous = versions[i - 1].decoded.messages.map((m) => m.messageId);
-    assert.ok(previous.every((id) => versions[i].decoded.messages.some((m) => m.messageId === id)), `version ${i} dropped a message of version ${i - 1}`);
+    // A superseded seen may go; an answer may not.
+    const previous = echoes(versions[i - 1]).map((m) => m.messageId);
+    assert.ok(previous.every((id) => echoes(versions[i]).some((m) => m.messageId === id)), `version ${i} dropped an answer of version ${i - 1}`);
   }
   log(`${MAX_EXTENSIONS + 1} answers, ${extensions.length} extensions, one statement in the slot, lossless replacement history`);
 
@@ -55,15 +62,16 @@ export async function run({ sandbox, openChat, log, sleep }) {
   await bot.waitFor((e) => e.event === "BOT_RECEIVED_TEXT" && e.chars === 3, { label: "q10 received" });
   await sleep(500);
   assert.equal(chat.events("BOT_SENT_TEXT").length, MAX_EXTENSIONS + 1, "the 10th answer is queued, not submitted");
-  assert.equal((await chat.slot(REQUEST)).decoded.messages.length, MAX_EXTENSIONS + 1, "the slot is unchanged while the answer queues");
+  assert.equal(echoes(await chat.slot(REQUEST)).length, MAX_EXTENSIONS + 1, "the slot is unchanged while the answer queues");
   const takeover = await bot.waitFor((e) => e.event === "BOT_OUTBOUND_TAKEOVER", { label: "BOT_OUTBOUND_TAKEOVER", timeoutMs: GRACE_MS + 10_000 });
   const waited = Date.parse(takeover.time) - currentAt;
   assert.ok(waited >= GRACE_MS, `the takeover came ${waited}ms after the current statement, before the ${GRACE_MS}ms grace`);
-  assert.deepEqual([takeover.dropped, takeover.queued], [MAX_EXTENSIONS + 1, 1]);
+  // Dropped: the answers and their seen. Queued: q10's seen and its answer.
+  assert.deepEqual([takeover.dropped, takeover.queued], [MAX_EXTENSIONS + 2, 2]);
   await sandbox.waitFor(() => chat.events("BOT_SENT_TEXT").length === MAX_EXTENSIONS + 2, { label: "the queued answer submitted" });
   slot = await chat.slot(REQUEST);
-  assert.deepEqual(slot.decoded.messages.map((m) => m.content.text), ["Echo: q10"], "the queued batch took the slot over");
-  assert.ok((await chat.history(REQUEST)).some((h) => h.reason === "replaced" && h.decoded.messages.length === MAX_EXTENSIONS + 1), "the un-ACKed statement is history");
+  assert.deepEqual(echoes(slot).map((m) => m.content.text), ["Echo: q10"], "the queued batch took the slot over");
+  assert.ok((await chat.history(REQUEST)).some((h) => h.reason === "replaced" && h.decoded?.messages && echoes(h).length === MAX_EXTENSIONS + 1), "the un-ACKed statement is history");
   log(`takeover after ${waited}ms: dropped ${takeover.dropped}, queued ${takeover.queued}`);
 
   // With nothing queued the un-ACKed statement waits: q11 extends it and no
@@ -72,7 +80,7 @@ export async function run({ sandbox, openChat, log, sleep }) {
   await sandbox.waitFor(() => chat.events("BOT_SENT_TEXT").length === MAX_EXTENSIONS + 3, { label: "answer 11 submitted" });
   await sleep(GRACE_MS + 1000);
   assert.equal(chat.events("BOT_OUTBOUND_TAKEOVER").length, 1, "no takeover while nothing is queued");
-  assert.deepEqual((await chat.slot(REQUEST)).decoded.messages.map((m) => m.content.text), ["Echo: q10", "Echo: q11"]);
+  assert.deepEqual(echoes(await chat.slot(REQUEST)).map((m) => m.content.text), ["Echo: q10", "Echo: q11"]);
 
   // alice fetched every version live, so every answer reached her once.
   const answers = await chat.answers();

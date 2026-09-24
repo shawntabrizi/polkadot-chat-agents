@@ -38,7 +38,9 @@ export async function run({ sandbox, openChat, pcs, bot: bots, log }) {
   await chat.answered("Echo: after the removal", [1]);
   await chat.delivered(after.messageId);
   const answer = await chat.slot(ANSWERS);
-  assert.ok(answer.decoded.messages.some((m) => m.content.text === "Echo: after the removal"));
+  // The seen of the question rides the answer's statement (M12c); the
+  // sandbox codec does not know the seen extension, so it decodes without content.
+  assert.ok(answer.decoded.messages.some((m) => m.content?.text === "Echo: after the removal"));
   assert.deepEqual(answer.decoded.recipients.map((r) => r.label), ["alice#1"], "the envelope no longer names device 2");
   assert.deepEqual(answer.acks.filter((a) => a.live).map((a) => a.by), ["alice#1"]);
   const device2 = await chat.wire(`signer=${persona.devices[1].account}`);
