@@ -263,6 +263,20 @@ test("opencode parseEvent: sessionID capture, tool, text, step_finish", () => {
   assert.equal(out.answer, "hi there");
 });
 
+test("opencode parseEvent: 1.19 nests text/tool/reason under `part`", () => {
+  // opencode 1.19 moved the payload into `part`; reading only the top level
+  // dropped every reply and the bot answered "(no output)".
+  const out = drive(RUNNERS.opencode, [
+    { type: "step_start", sessionID: "ses_3", part: { type: "step-start" } },
+    { type: "tool_use", sessionID: "ses_3", part: { type: "tool", tool: "read", state: { input: { file_path: "x.ts" } } } },
+    { type: "text", sessionID: "ses_3", part: { type: "text", text: "Washington, D.C." } },
+    { type: "step_finish", sessionID: "ses_3", part: { type: "step-finish", reason: "stop" } },
+  ]);
+  assert.equal(out.sessionId, "ses_3");
+  assert.deepEqual(out.actions, ["reading x.ts"]);
+  assert.equal(out.answer, "Washington, D.C.");
+});
+
 test("opencode parseEvent: error event", () => {
   const out = drive(RUNNERS.opencode, [
     { type: "error", sessionID: "ses_2", error: { name: "APIError", data: { message: "model not found" } } },
