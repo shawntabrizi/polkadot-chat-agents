@@ -444,9 +444,13 @@ const opencode = {
   parseEvent(obj) {
     const out = [];
     if (obj?.sessionID) out.push({ kind: "started", sessionId: obj.sessionID });
-    if (obj?.type === "tool_use") out.push({ kind: "action", title: toolActionTitle(obj.tool ?? obj.name, obj.input ?? obj.args ?? {}) });
-    else if (obj?.type === "text" && obj.text) out.push({ kind: "text", text: String(obj.text) });
-    else if (obj?.type === "step_finish" && obj.reason === "stop") out.push({ kind: "result", text: "", ok: true });
+    // opencode 1.19 nests the payload under `part` ({type:"text", part:{text}});
+    // older builds put it at the top level. Read both.
+    const part = obj?.part && typeof obj.part === "object" ? obj.part : {};
+    const text = obj?.text ?? part.text;
+    if (obj?.type === "tool_use") out.push({ kind: "action", title: toolActionTitle(obj.tool ?? obj.name ?? part.tool, obj.input ?? obj.args ?? part.state?.input ?? {}) });
+    else if (obj?.type === "text" && text) out.push({ kind: "text", text: String(text) });
+    else if (obj?.type === "step_finish" && (obj.reason ?? part.reason) === "stop") out.push({ kind: "result", text: "", ok: true });
     else if (obj?.type === "error") out.push({ kind: "error", message: String(obj.error?.data?.message ?? obj.error?.message ?? "opencode error") });
     return out;
   },
