@@ -9,279 +9,86 @@ next:
 
 # Run a bot in T3ams
 
-T3ams is a first-class chat transport for the same direct brains and bridge
-frameworks. People discover the bot by its registered DotNS username, DM it,
-or invite it into a workspace/channel — or the bot greets its owner first
-(`--greet`). The bot uses the normal T3ams encryption
-and membership flows; it does not bypass a private channel's key grants.
-It supports DMs and workspace channels, including threads, live replies, media,
-and files. Native ad-hoc T3ams groups are not supported yet; use a workspace
-channel for a shared bot conversation.
+T3ams encrypts every conversation with OpenMLS: DMs, group chats, public and
+private workspace channels. A T3ams bot is an ordinary member with an MLS
+device of its own. It runs the T3ams app's messaging stack headless, built from
+a T3ams checkout, so it speaks exactly the protocol that checkout's app speaks.
+Everything it sends and receives travels over the Statement Store, signed by
+the bot's account.
 
-Use `--transport t3ams` when you create the bot. Every current bot config
-records its chosen transport explicitly.
+In a workspace the bot is an **agent**: an admin adds it under Workspace
+settings → Agents, picks what it may do and which channels it sits in, and the
+workspace's agent rules apply to it like to any agent:
+
+- it reads every message in the channels it was added to;
+- it answers only when @mentioned, and always in the mention's thread;
+- it reacts 👀 to a mention when it may react;
+- it answers direct messages only once an admin turns on Direct messages for it;
+- it stays silent while paused or while agents are off, and does not answer
+  what was posted before it was added or resumed.
 
 ## Quick start
 
 One extra prerequisite beyond the [normal quick start](/guide/first-bot): a
-local checkout of the T3ams SPA, because its `@t3ams/bcts` SDK is not on
-public npm.
+local checkout of the T3ams SPA with its dependencies installed.
 
 ```bash
-pca t3ams setup <path-to-t3ams-spa>    # once: build + install the T3ams SDK
+pca t3ams setup <path-to-t3ams-spa>    # once: builds the T3ams agent runtime
 
 pca create teamhelper --transport t3ams --t3ams-namespace <namespace> \
   --brain claude --owner yourname.42
-pca run teamhelper --greet
+pca run teamhelper
 ```
+
+Then, in T3ams: Workspace settings → Agents → turn agents on → **Add agent**
+with the bot's username, choose what it can do and its starting channels. The
+bot accepts the invite by itself (an allowlisted bot accepts invites from its
+owners; an open bot only with `BOT_T3AMS_AUTO_ACCEPT_WORKSPACES=1`), joins the
+channels' MLS groups, and answers the first @mention a few seconds later.
 
 **The topic namespace is not optional.** The T3ams app scopes every
-statement-store topic to its deployment's namespace — the first label of the
-host it is served from (`app.example.dot` → `app`; also shown in the app under
-Settings → Debug → topic context). A bot without the matching
-namespace derives unscoped topics and is silently deaf: healthy logs, zero
-messages. `pca create` saves the namespace and emits it for both local runs and
-deployments.
+Statement Store topic to its deployment's namespace (`app` for the public app;
+Settings → Debug → topic context shows it). A bot with another namespace is
+silently deaf.
 
-`--greet` makes the bot message you first: your T3ams client pairs with it
-automatically and the conversation appears with a greeting — no need to search
-for the bot. The greeting text itself arrives right after your app's accept
-completes the pairing (it cannot be encrypted before your app shares its key).
-(Without `--greet`, find the bot by its username in T3ams and DM it instead.)
+Re-run `pca t3ams setup` after updating the T3ams checkout: the runtime is that
+checkout's messaging code, compiled.
 
-Either way, first contact needs one approval before the bot answers: the bot
-parks the signing key your account presented and logs it. Compare it with the
-key your own T3ams app shows, then approve:
+## What the bot needs on chain
 
-```bash
-pca trust teamhelper                        # list the pending key
-pca trust teamhelper yourname.42 <the-key>  # approve it
-```
+- **A username**, so admins can add it. `pca create` registers one.
+- **Statement allowance** on the bot's account, to publish anything at all
+  (`noAllowance` in the logs means it has none).
+- **A key attestation on the T3ams registry.** Peers treat an account as
+  MLS-capable only once its keys are attested there, and the bot publishes its
+  own at start (`T3AMS_IDENTITY_PUBLISHED`). The write is an Asset Hub
+  transaction paid by the bot's account, so that account needs a little PAS on
+  Asset Hub. Set `BOT_T3AMS_PUBLISH_IDENTITY=0` to skip it.
 
-Restart the bot and the parked handshake replays: the bot answers from then
-on.
+## State
 
-## Create a bot
+`BOT_STATE_DIR` holds everything the app would keep in a browser: the session,
+workspaces, message history (sealed) and the MLS keystore, one file per key
+under `t3ams-kv/`. Losing it is like wiping a device: the bot comes back as a
+new MLS device and has to be re-admitted to its conversations. Keep it private
+and persistent, and treat backups as secrets.
 
-People discover the bot by its registered DotNS username, so create it with
-`pca create` and wait for `pca info <bot>` to show that registration is
-complete.
+## Not supported yet
 
-A private bot accepts a person's first contact only against a verified T3ams
-signing public-key pin. There are two ways to establish it:
+- `--brain bridge` (the HTTP harness): use a direct engine, `BOT_AI_CMD`, or `echo`.
+- Attachments, live progress edits and generated-file returns.
+- Native group chats (use a channel).
+- `pca trust`: key verification now comes from the registry attestation, as in
+  the app.
 
-- **Deferred (the quick start above):** create without pins. The bot parks
-  each allowlisted account's first contact — their DM request, or the accept
-  that answers the bot's `--greet` — until you approve the presented key with
-  `pca trust`, comparing it out of band against that person's own device. The
-  parked account cannot get anything accepted or answered until then — this is
-  deferred verification, not trust-on-first-use.
-- **Up front:** obtain the tagged-CBOR key out of band (see
-  [signing-key pins](/reference/configuration#signing-key-pins)) and pass it
-  at create time — first contact then completes with no approval step, and
-  `--greet` becomes fully automatic (the bot messages its owner and pairing
-  finishes without any command):
+## Configuration
 
-```bash
-pca create teamhelper --transport t3ams --brain claude \
-  --owner <your-polkadot-account-or-username> \
-  --t3ams-peer-key '<same-account-or-username>=<tagged-cbor-signing-key-hex>' \
-  --username teamhelper
-```
-
-Use `--t3ams-display-name` when the name shown in T3ams should differ from the
-registered username. A public bot is possible, but gives arbitrary people a
-route to spend model, Statement Store, and media capacity; start private unless
-you have set tight model, file, and queue limits.
-
-## Join a DM or workspace
-
-1. Search for the bot's username in T3ams and send a DM. A private bot verifies
-   the configured signing-key pin before it accepts first contact; a verified,
-   allowed DM pair is then accepted automatically, with no manual accept step
-   from the operator. An allowlisted account with no pin yet is parked for a
-   one-time `pca trust` approval instead (see the quick start above). For a public bot, this first pairing is also required
-   before it will accept that person's workspace invitation, so the invite
-   carries a verified signing key rather than relying on unauthenticated first
-   contact.
-2. Invite it to a workspace through T3ams. For a private bot, the inviter's
-   outer request must verify against that account's configured signing-key
-   pin — this is not trust-on-first-use. A public bot does not automatically
-   accept arbitrary workspace invitations unless you explicitly enable that
-   policy. On accept, the bot announces itself as a member (and maintains
-   presence while running) and waits for the workspace owner to publish the
-   updated state document that includes it before subscribing to channel
-   traffic.
-3. Mention the bot in a channel. Channel messages remain mention-gated, so the
-   bot does not turn ordinary room traffic into model work.
-4. For a private channel, grant the bot the channel key through T3ams's normal
-   key-grant flow. Workspace membership alone is not enough to decrypt it.
-   Rotate keys through the normal T3ams flow whenever access changes.
-
-One T3ams DM and each workspace channel have independent conversation sessions.
-Top-level channel prompts use that channel session, while every reply thread has
-its own isolated native session; replies preserve their thread root. An optional
-bounded channel-context cache can give a later explicit mention the recent
-authenticated text without making the bot listen or reply to every room message.
-
-## A live, collaborative chat experience
-
-For a slow direct-brain turn, the bot emits a native typing signal and then a
-thinking message. Tool/activity progress edits that same message in place, and
-when the turn finishes it collapses to a short status receipt:
-
-```
-✓ Answered in 42s · 3 steps
-claude-opus-5 · Context 30.4k tokens · reply 5k · ~$0.0123
-```
-
-The answer follows as a new message (long answers as ordered parts). The
-receipt keeps the scrollback compact while the new message raises the phone
-notification an edit never would. Line 2 is dropped entirely when the engine
-reports no usage, so a bridge harness or an `opencode`/`kimi` brain simply shows line
-one. "Context" is everything sent to the model — system prompt, history, and the
-user's message — which is why it dwarfs the reply even on a short question.
-
-Bridge frameworks receive the same lifecycle. They can use `POST /send` with
-`edit_of` for coalesced streaming edits, `POST /react` for real T3ams emoji
-reactions, and `POST /typing` for a native typing signal. The authenticated
-bridge's `GET /health.live` describes the current support. See
-[Agent frameworks](/guide/harnesses#t3ams-bridge-behavior).
-
-For `BOT_BRAIN=bridge`, a framework also includes the leased
-`delivery_id` and `lease_id` on each outbound `POST /send`, `POST /react`, and
-`POST /typing`. Editing or deleting a prompt revokes that claim, so a stale
-worker cannot publish an answer or live activity for old text.
-
-For an explicit framework-originated action with no inbound turn (for example
-an OpenClaw attached result), configure a distinct
-`BOT_BRIDGE_PROACTIVE_TOKEN`. The request still needs ordinary bridge
-authentication and must also send that secret in `x-bridge-proactive-token`.
-It permits only an entirely unleased `/send`, `/react`, or `/typing`; it never
-turns a supplied stale lease into a valid one. Leave this capability unset when
-proactive output is not needed.
-
-Edits and deletes are authenticated retained operations (workspace channels
-carry them on a dedicated ops route; DM operations share the DM channel).
-bot-core reconciles them before queued work is dispatched: an edit updates the
-pending prompt/context and a deletion removes pending work or stops an active
-direct-agent turn. It cannot retract a reply already published before the bot
-received the deletion. Reactions, typing, calls, and other non-message events
-never become prompts.
-
-In a channel, normal mentioned prompts and `/stop` are available to members.
-Top-level prompts share a channel session, while each reply thread has its own
-native session. By default, only workspace owners/admins may change the current
-channel/thread session with `/reset`, `/model`, `/reasoning`, or `/project`;
-tune the threshold with `BOT_T3AMS_CHANNEL_CONTROL_ROLE`.
-
-## Photos, documents, audio, video, and other files
-
-T3ams uses encrypted Bulletin/HOP attachments. By default, a rich-text message
-can carry up to eight valid MIME-typed attachments of 25 MiB each — photos,
-documents, audio, video, and application files.
-
-Attachments are authenticated before anything touches them:
-
-- The bot validates the encrypted reference, size, hash, metadata, and MIME
-  policy before fetching.
-- An attachment is never treated as an arbitrary URL.
-- Neither a direct brain nor a bridge framework ever receives the decryption
-  ticket.
-
-What a brain can do with a fetched attachment depends on its capabilities. A
-direct brain with the portable `read` capability can inspect a temporary staged
-copy for the turn; the default no-tools policy cannot. A bridge gets an opaque,
-authenticated `/media/<id>` URL that can materialize the bytes on demand.
-
-Operators tune the inbound policy with two settings:
-
-- `BOT_T3AMS_ATTACHMENT_MIME_TYPES` narrows accepted types with exact MIME
-  types or `type/*` patterns; `*/*` is the broad default.
-- `BOT_T3AMS_ATTACHMENT_MAX_DURATION_MS` bounds declared duration metadata,
-  seven days by default.
-
-Image dimensions and audio/video duration are available as safe metadata when
-present.
-
-### Returning generated files
-
-A direct turn with the portable `write` capability can also return files it
-creates. The bot gives that turn a private `PCA_OUTPUT_DIR`; files written
-directly at its top level are uploaded as native attachments and then removed
-locally. Nested files and symlinks are ignored, and the default no-tools
-policy cannot produce those files.
-
-Limits and delivery guarantees:
-
-- `BOT_T3AMS_AGENT_OUTPUT_MAX_ARTIFACTS` caps the file count (the
-  attachment-count limit by default), and
-  `BOT_T3AMS_AGENT_OUTPUT_MAX_TOTAL_BYTES` caps the total batch. The normal
-  outbound size and MIME policy still applies.
-- Before upload, accepted files are copied into a private durable turn outbox
-  together with the final reply chunks, so a transient delivery retry reuses
-  the same immutable answer and bytes rather than rerunning the agent. The
-  independent `BOT_T3AMS_AGENT_OUTBOX_*` and `BOT_T3AMS_REPLY_OUTBOX_*`
-  budgets bound that retained state.
-- If Bulletin upload or generic-file MIME delivery is unavailable,
-  `PCA_OUTPUT_DIR` is withheld and the bot still returns text normally.
-
-Use `/file put <path>` with one successfully fetched attachment to retain it in
-that T3ams conversation's vault, and `/file get <path>` to return it as a fresh
-encrypted attachment. A DM has its own vault; a channel intentionally shares a
-vault among its members. Frameworks can manage that same vault through the
-bridge, but can send only a saved `file_path`, never an arbitrary host path.
-Read [Files & storage](/guide/files#t3ams-photos-media-and-documents) for the
-full flow.
-
-## Capacity and deployment checklist
-
-- Keep the bot's `BOT_STATE_DIR` private and persistent. It holds T3ams session
-  state, durable ingress work, short-lived attachment capability material, and
-  the brain's conversation state. The transport creates it with mode `0700`;
-  keep it on a private encrypted volume, never mount it into the agent
-  workspace, and treat backups as secrets.
-- T3ams media needs a trusted `BOT_T3AMS_BULLETIN_RPC`. Setting it empty leaves
-  the bot in metadata-only mode: no encrypted media download or file return.
-- Text, placeholders, edits, typing, and reactions consume Statement Store
-  publishing capacity. Media upload needs a separate T3ams Bulletin allowance.
-  The normal `pca storage` flow for the default transport does not provision it.
-  A full submit queue or an exhausted allowance leaves the prompt in the
-  durable journal and retries with backoff; restore publishing allowance to
-  resume those replies.
-- Restrict a public bot's attachment count/size/MIME policy, media cache, vault,
-  and model/agent capacity before inviting untrusted users.
-- An open direct engine defaults to two active turns and 20 queued turns; its
-  authenticated `GET /health` response includes `direct.queue` so the operator
-  can observe active and queued work plus the configured caps.
-
-The [configuration reference](/reference/configuration#t3ams-media-and-file-vault)
-lists the transport-specific limits, cache controls, and channel settings.
-
-## Troubleshooting
-
-Run the doctor while the bot is running locally or deployed:
-
-```bash
-pca t3ams doctor teamhelper
-```
-
-It checks the installed BCTS SDK contract, the saved topic namespace, and a
-direct engine's current login/model access. Its loopback proof then creates a
-throwaway T3ams identity, publishes a signed first-contact request to the bot's
-personal inbox, and waits up to 90 seconds for the bot's signed `dmAccept` with
-its agreement key. That proves the configured endpoint and namespace lead to a
-live, protocol-compatible bot subscription.
-
-An allowlisted bot rejects the throwaway identity by design. Probe it with a
-32-byte seed whose derived account and T3ams signing key are already
-allowlisted and pinned:
-
-```bash
-pca t3ams doctor teamhelper --as <account-seed-hex>
-```
-
-The doctor does not fund its identity. If Statement Store rejects the request
-for missing allowance, use a funded seed with `--as` (the equivalent
-`--seed-hex` spelling is also accepted). Treat either form as a secret-bearing
-command and keep it out of shared shell history.
+| Variable | Meaning |
+| --- | --- |
+| `BOT_T3AMS_TOPIC_NAMESPACE` | The T3ams deployment's namespace. |
+| `BOT_ALLOWED_PEERS` | Comma-separated account ids allowed to DM the bot or bring it into a workspace. Empty: open. |
+| `BOT_T3AMS_AUTO_ACCEPT_WORKSPACES` | `1`: accept agent invites (an allowlisted bot does by default). |
+| `BOT_T3AMS_DISPLAY_NAME` | Name shown in T3ams; defaults to the username. |
+| `BOT_T3AMS_PUBLISH_IDENTITY` | `0` skips publishing the key attestation at start. |
+| `BOT_T3AMS_RUNTIME` | A runtime bundle other than the one `pca t3ams setup` built. |
+| `BOT_REPLY_CHUNK_BYTES` | Longest single message; longer answers are split. |

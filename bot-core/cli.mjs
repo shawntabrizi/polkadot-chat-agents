@@ -69,6 +69,7 @@ import {
 import { assertT3amsSdkContract } from "./transports/t3ams/t3ams-sdk-contract.mjs";
 import { runT3amsLoopbackProbe } from "./transports/t3ams/t3ams-doctor.mjs";
 import { deriveT3amsIdentityFromSeed } from "./transports/t3ams/t3ams-identity.mjs";
+import { T3AMS_DEFAULT_REGISTRY_ADDRESS, buildT3amsAgentRuntime, typecheckT3amsAgentRuntime } from "./transports/t3ams/runtime/build.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const BOT_CORE_VERSION = JSON.parse(fs.readFileSync(path.join(HERE, "package.json"), "utf8")).version;
@@ -2788,6 +2789,20 @@ async function cmdT3ams(args, flags = {}) {
     }
   } finally {
     fs.rmSync(packDir, { recursive: true, force: true });
+  }
+
+  step("Building the T3ams agent runtime (the app's MLS messaging stack, headless)…");
+  try {
+    typecheckT3amsAgentRuntime({ spaRoot: wsRoot });
+    await buildT3amsAgentRuntime({
+      spaRoot: wsRoot,
+      // Outside node_modules: npm prunes anything it did not install there.
+      outDir: path.join(HERE, ".t3ams-runtime"),
+      registryAddress: process.env.T3AMS_REGISTRY_ADDRESS?.trim() || T3AMS_DEFAULT_REGISTRY_ADDRESS,
+      network: process.env.T3AMS_NETWORK?.trim() || "paseo-next-v2",
+    });
+  } catch (error) {
+    fail(`The T3ams agent runtime build failed: ${String(error?.message ?? error).split("\n").slice(0, 12).join("\n  ")}`);
   }
 
   // Importing is the real requirement (same check deploy uses): a packed SDK
