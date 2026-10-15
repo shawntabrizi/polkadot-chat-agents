@@ -1,3 +1,4 @@
 #!/usr/bin/env node
 // Stable executable entrypoint for the T3ams transport.
-import "./transports/t3ams/index.mjs";
+// OpenMLS transport: the T3ams app's own messaging stack, run headless.
+import "./transports/t3ams/mls.mjs";
